@@ -25,7 +25,7 @@ register, and we just leverage 'Number of bytes' to guide it accordingly.
 #define _REGISTERHANDLER_h
 
 #if defined(ARDUINO) && ARDUINO >= 100
-	#include "arduino.h"
+	#include "Arduino.h"
 #else
 	#include "WProgram.h"
 #endif

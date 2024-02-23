@@ -14,7 +14,7 @@ Handles Modbus requests and responses in a tidy class separate from main program
 #define _RS485Handler_h
 
 #if defined(ARDUINO) && ARDUINO >= 100
-	#include "arduino.h"
+	#include "Arduino.h"
 #else
 	#include "WProgram.h"
 #endif

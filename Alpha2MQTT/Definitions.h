@@ -15,7 +15,7 @@ Customise these options as per README.txt.  Please read README.txt before contin
 #define _Definitions_h
 
 #if defined(ARDUINO) && ARDUINO >= 100
-	#include "arduino.h"
+	#include "Arduino.h"
 #else
 	#include "WProgram.h"
 #endif
@@ -34,7 +34,7 @@ Customise these options as per README.txt.  Please read README.txt before contin
 
 // Update these to match your inverter
 //#define INVERTER_SMILE_B3				// Uncomment for SMILE-B3
-//#define INVERTER_SMILE5				// Uncomment for SMILE5
+#define INVERTER_SMILE5				// Uncomment for SMILE5
 //#define INVERTER_SMILE_T10			// Uncomment for SMILE-T10
 //#define INVERTER_STORION_T30			// Uncomment for STORION T30
 
@@ -43,18 +43,20 @@ Customise these options as per README.txt.  Please read README.txt before contin
 #define LEGACY_CALCULATIONS false
 
 // Update with your Wifi details
-#define WIFI_SSID		"Stardust"
-#define WIFI_PASSWORD	""
+#define WIFI_SSID	"mikeynet"
+#define WIFI_PASSWORD	"***REMOVED***"
 
 // Update with your MQTT Broker details
-#define MQTT_SERVER	"192.168.1.135"
+#define MQTT_SERVER	"192.168.11.5"
 #define MQTT_PORT	1883
-#define MQTT_USERNAME	"Alpha"			// Empty string for none.
-#define MQTT_PASSWORD	"Inverter1"
+#define MQTT_USERNAME	"mosquitto"			// Empty string for none.
+#define MQTT_PASSWORD	"***REMOVED***"
 
 // The device name is used as the MQTT base topic and presence on the network.
 // If you need more than one Alpha2MQTT on your network, give them unique names.
+#ifndef DEVICE_NAME
 #define DEVICE_NAME "Alpha2MQTT"
+#endif
 
 // If your OLED doesn't have an RST pin, set this to true.
 // An OLED Shield compatible with an ESP8266 does have a RESET pin and it is linked to GPIO0 if using an ESP8266.
@@ -86,8 +88,8 @@ Customise these options as per README.txt.  Please read README.txt before contin
 // A user informed me that their router leverages leases on network connections which can't be disabled.
 // I.e. when lease expires, WiFi doesn't drop but data stops.
 // If FORCE_RESTART is defined, then the system will auto-reboot every X many hours as configured in FORCE_RESTART_HOURS
-//#define FORCE_RESTART
-#define FORCE_RESTART_HOURS 49
+#define FORCE_RESTART
+#define FORCE_RESTART_HOURS 23
 
 
 //#if (!defined INVERTER_SMILE_B3) && (!defined INVERTER_SMILE5) && (!defined INVERTER_SMILE_T10) && (!defined INVERTER_STORION_T30)
@@ -979,7 +981,7 @@ struct mqttState
 
 
 
-#define DEBUG
+//#define DEBUG
 //#define DEBUG_LEVEL2 // For serial flooding action
 //#define DEBUG_OUTPUT_TX_RX
 #endif
