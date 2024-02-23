@@ -15,7 +15,7 @@ Customise these options as per README.txt.  Please read README.txt before contin
 #define _Definitions_h
 
 #if defined(ARDUINO) && ARDUINO >= 100
-	#include "Arduino.h"
+	#include "arduino.h"
 #else
 	#include "WProgram.h"
 #endif
@@ -37,10 +37,25 @@ Customise these options as per README.txt.  Please read README.txt before contin
 #define INVERTER_SMILE5				// Uncomment for SMILE5
 //#define INVERTER_SMILE_T10			// Uncomment for SMILE-T10
 //#define INVERTER_STORION_T30			// Uncomment for STORION T30
+// If values for some registers such as voltage or temperatures appear to be out by a decimal place or two, try the following:
+// Documentation declares 1V - However Presume 0.1 as result appears to reflect this.  I.e. my voltage reading was 2421, * 0.1 for 242.1
+#define GRID_VOLTAGE_MULTIPLIER 0.1
+// Documentation declares 0.001V - My min cell voltage is reading as 334, so * 0.001 = 0.334V.  I consider the document wrong, think it should be 0.01
+#define CELL_VOLTAGE_MULTIPLIER 0.01
+// Documentation declares 0.1D - Mine returns 2720, so assuming actually multiplied by 0.01 to bring to something realistic
+#define INVERTER_TEMP_MULTIPLIER 0.01
+// Documentation declares 0.1kWh - My value was 308695, and according to web interface my total PV is 3086kWh, so multiplier seems wrong
+#define TOTAL_ENERGY_MUTLIPLIER 0.01
 
-// If values for some registers such as voltage or temperatures appear to be out by a decimal place or two, set this to true
-// to use legacy calcuations
-#define LEGACY_CALCULATIONS false
+
+// After some liaison with a user of Alpha2MQTT on a 115200 baud rate, this fixed inconsistent retrieval
+// such as sporadic NO-RESP.  It works by introducing a delay between requests sent to the inverter meaning it
+// has time to 'breathe'
+// 80ms is a default starting point which is 1/12 of a second.  If it corrects the issue try reducing the delay to 60, 40, etc until you find a happy place.
+// If you want to make use of it, uncomment the next line and change 80 as necessary
+//#define REQUIRE_DELAY_DUE_TO_INCONSISTENT_RETRIEVAL
+#define REQUIRED_DELAY_DUE_TO_INCONSISTENT_RETRIEVAL 80
+
 
 // Update with your Wifi details
 #define WIFI_SSID	"mikeynet"

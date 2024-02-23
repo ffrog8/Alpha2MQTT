@@ -1,6 +1,6 @@
 /*
 Name:		RS485Handler.cpp
-Created:	8/24/2022
+Created:	24/Aug/2022
 Author:		Daniel Young
 
 This file is part of Alpha2MQTT (A2M) which is released under GNU GENERAL PUBLIC LICENSE.
@@ -102,6 +102,11 @@ modbusRequestAndResponseStatusValues RS485Handler::sendModbus(uint8_t frame[], b
 {
 	//Calculate the CRC and overwrite the last two bytes.
 	calcCRC(frame, actualFrameSize);
+
+	// After some liaison with a user of Alpha2MQTT on a 115200 baud rate, this fixed inconsistent retrieval
+#ifdef REQUIRE_DELAY_DUE_TO_INCONSISTENT_RETRIEVAL
+	delay(REQUIRED_DELAY_DUE_TO_INCONSISTENT_RETRIEVAL);
+#endif
 
 	// Make sure there are no spurious characters in the in/out buffer.
 	flushRS485();
