@@ -39,7 +39,7 @@ Customise these options as per README.txt.  Please read README.txt before contin
 //#define INVERTER_STORION_T30			// Uncomment for STORION T30
 // If values for some registers such as voltage or temperatures appear to be out by a decimal place or two, try the following:
 // Documentation declares 1V - However Presume 0.1 as result appears to reflect this.  I.e. my voltage reading was 2421, * 0.1 for 242.1
-#define GRID_VOLTAGE_MULTIPLIER 0.1
+#define GRID_VOLTAGE_MULTIPLIER 1
 // Documentation declares 0.001V - My min cell voltage is reading as 334, so * 0.001 = 0.334V.  I consider the document wrong, think it should be 0.01
 #define CELL_VOLTAGE_MULTIPLIER 0.01
 // Documentation declares 0.1D - Mine returns 2720, so assuming actually multiplied by 0.01 to bring to something realistic

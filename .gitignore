@@ -361,3 +361,10 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+Alpha2MQTT-54.bin
+Alpha2MQTT-63.bin
+NodeMCU-PyFlasher.exe
+Pics/Thumbs.db
+Pics/@eaDir/Thumbs.db@SynoEAStream
+Alpha2MQTT/build/esp8266.esp8266.nodemcuv2/Alpha2MQTT.ino.map
+Alpha2MQTT/build/esp8266.esp8266.nodemcuv2/Alpha2MQTT.ino.elf
