@@ -52,15 +52,28 @@ Customise these options as per README.txt.  Please read README.txt before contin
 #define REQUIRED_DELAY_DUE_TO_INCONSISTENT_RETRIEVAL 80
 
 
-// Update with your Wifi details
-#define WIFI_SSID	"mikeynet"
-#define WIFI_PASSWORD	"***REMOVED***"
+// Credentials are loaded from Secrets.h so they are not committed to source control.
+#include "Secrets.h"
+
+// Update with your Wifi details (see Secrets.h).
+#ifndef WIFI_SSID
+#define WIFI_SSID	""
+#endif
+#ifndef WIFI_PASSWORD
+#define WIFI_PASSWORD	""
+#endif
 
 // Update with your MQTT Broker details
-#define MQTT_SERVER	"192.168.11.5"
+#ifndef MQTT_SERVER
+#define MQTT_SERVER	""
+#endif
 #define MQTT_PORT	1883
-#define MQTT_USERNAME	"mosquitto"			// Empty string for none.
-#define MQTT_PASSWORD	"***REMOVED***"
+#ifndef MQTT_USERNAME
+#define MQTT_USERNAME	""			// Empty string for none.
+#endif
+#ifndef MQTT_PASSWORD
+#define MQTT_PASSWORD	""
+#endif
 
 // The device name is used as the MQTT base topic and presence on the network.
 // If you need more than one Alpha2MQTT on your network, give them unique names.
