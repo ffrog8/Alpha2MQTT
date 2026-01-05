@@ -15,3 +15,6 @@
 
 ## 2025-01-05
 - Add Arduino header shims so CI builds find the moved headers.
+
+## 2025-01-05
+- Surface Arduino CLI compile failures in PR comments and upload compile logs as artifacts.

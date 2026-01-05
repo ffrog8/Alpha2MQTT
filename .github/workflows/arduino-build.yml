@@ -26,5 +26,75 @@ jobs:
 
       - name: Compile Alpha2MQTT (ESP8266)
         run: |
-          arduino-cli compile -e --build-property build.extra_flags="-DESP8266 -DDEVICE_NAME=\"Alpha2MQTT-63\"" --fqbn esp8266:esp8266:nodemcuv2 Alpha2MQTT
-          arduino-cli compile -e --build-property build.extra_flags="-DESP8266 -DDEVICE_NAME=\"Alpha2MQTT-54\"" --fqbn esp8266:esp8266:nodemcuv2 Alpha2MQTT
+          mkdir -p logs
+          fail=0
+          arduino-cli compile -e --build-property build.extra_flags="-DESP8266 -DDEVICE_NAME=\"Alpha2MQTT-63\"" --fqbn esp8266:esp8266:nodemcuv2 Alpha2MQTT 2>&1 | tee logs/compile-63.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            fail=1
+          fi
+          arduino-cli compile -e --build-property build.extra_flags="-DESP8266 -DDEVICE_NAME=\"Alpha2MQTT-54\"" --fqbn esp8266:esp8266:nodemcuv2 Alpha2MQTT 2>&1 | tee logs/compile-54.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            fail=1
+          fi
+          exit "$fail"
+
+      - name: Upload compile logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arduino-compile-logs
+          path: logs
+
+      - name: Comment compile failure on PR
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- ARDUINO-COMPILE-FAILURE -->';
+            const logFiles = [
+              { label: 'Alpha2MQTT-63', path: 'logs/compile-63.log' },
+              { label: 'Alpha2MQTT-54', path: 'logs/compile-54.log' },
+            ];
+            const readExcerpt = (path) => {
+              if (!fs.existsSync(path)) return null;
+              const content = fs.readFileSync(path, 'utf8');
+              const lines = content.split(/\r?\n/);
+              const excerpt = lines.slice(0, 120).join('\n');
+              return excerpt.trim();
+            };
+            let body = `${marker}\n**Arduino CLI compile failure**\n`;
+            body += `Workflow: ${process.env.GITHUB_WORKFLOW} #${process.env.GITHUB_RUN_NUMBER}\n\n`;
+            for (const log of logFiles) {
+              const excerpt = readExcerpt(log.path);
+              if (excerpt) {
+                body += `**Target ${log.label}**\n\n`;
+                body += '```\n' + excerpt + '\n```\n\n';
+              }
+            }
+            body += 'Full logs in workflow artifact: `arduino-compile-logs`.\n';
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number,
+            });
+            const existing = comments.find((comment) => comment.body && comment.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body,
+              });
+            }
