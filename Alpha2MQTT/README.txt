@@ -38,12 +38,12 @@ Configuration:
 ==============
 Configure Alpha2MQTT by opening up Definitions.h and verifying/customising the following definitions for your need:
 - Set your inverter (delete the //) between lines 25-28 and ensure the rest are commented out by adding //.
-- Set your WiFi Access Point name on line 32.
-- Set your WiFi password on line 33.
+- Set your WiFi Access Point name in Secrets.h.
+- Set your WiFi password in Secrets.h.
 - Set your MQTT broker server on line 36.
 - Set your MQTT broker port on line 37.  (Default is 1883)
-- Set your MQTT username on line 38 if you use security (you should) or leave it blank.
-- Set your MQTT password on line 39 if you use security (again, you should) or leave it blank.
+- Set your MQTT username in Secrets.h if you use security (you should) or leave it blank.
+- Set your MQTT password in Secrets.h if you use security (again, you should) or leave it blank.
 - Set your Alpha2MQTT device name on line 43.  This is the device name presented on your network and is also how MQTT topics begin.  This document assumes Alpha2MQTT.
 - Set your AlphaESS inverter's slave id on line 46.  By default this is 0x55 and shouldn't need changing unless you've changed it via Modbus or via inverters which have an integrated display.  Don't change it.
 - Set your maximum payload size on line 54.  ESP8266's work well with 4096 bytes which is enough for 70 to 80 registers on any schedule or request.

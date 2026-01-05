@@ -15,7 +15,7 @@ Customise these options as per README.txt.  Please read README.txt before contin
 #define _Definitions_h
 
 #if defined(ARDUINO) && ARDUINO >= 100
-	#include "arduino.h"
+	#include "Arduino.h"
 #else
 	#include "WProgram.h"
 #endif
@@ -32,20 +32,15 @@ Customise these options as per README.txt.  Please read README.txt before contin
 #error You must only select one microprocessor from the list
 #endif
 
-// Update these to match your inverter
-//#define INVERTER_SMILE_B3				// Uncomment for SMILE-B3
-#define INVERTER_SMILE5				// Uncomment for SMILE5
-//#define INVERTER_SMILE_T10			// Uncomment for SMILE-T10
-//#define INVERTER_STORION_T30			// Uncomment for STORION T30
 // If values for some registers such as voltage or temperatures appear to be out by a decimal place or two, try the following:
 // Documentation declares 1V - However Presume 0.1 as result appears to reflect this.  I.e. my voltage reading was 2421, * 0.1 for 242.1
-#define GRID_VOLTAGE_MULTIPLIER 1
+#define GRID_VOLTAGE_MULTIPLIER 1.0
 // Documentation declares 0.001V - My min cell voltage is reading as 334, so * 0.001 = 0.334V.  I consider the document wrong, think it should be 0.01
-#define CELL_VOLTAGE_MULTIPLIER 0.01
+#define CELL_VOLTAGE_MULTIPLIER 0.001
 // Documentation declares 0.1D - Mine returns 2720, so assuming actually multiplied by 0.01 to bring to something realistic
-#define INVERTER_TEMP_MULTIPLIER 0.01
+#define INVERTER_TEMP_MULTIPLIER 0.1
 // Documentation declares 0.1kWh - My value was 308695, and according to web interface my total PV is 3086kWh, so multiplier seems wrong
-#define TOTAL_ENERGY_MUTLIPLIER 0.01
+#define TOTAL_ENERGY_MUTLIPLIER 0.1
 
 
 // After some liaison with a user of Alpha2MQTT on a 115200 baud rate, this fixed inconsistent retrieval
@@ -57,15 +52,28 @@ Customise these options as per README.txt.  Please read README.txt before contin
 #define REQUIRED_DELAY_DUE_TO_INCONSISTENT_RETRIEVAL 80
 
 
-// Update with your Wifi details
-#define WIFI_SSID	"mikeynet"
-#define WIFI_PASSWORD	"***REMOVED***"
+// Credentials are loaded from Secrets.h so they are not committed to source control.
+#include "Secrets.h"
+
+// Update with your Wifi details (see Secrets.h).
+#ifndef WIFI_SSID
+#define WIFI_SSID	""
+#endif
+#ifndef WIFI_PASSWORD
+#define WIFI_PASSWORD	""
+#endif
 
 // Update with your MQTT Broker details
-#define MQTT_SERVER	"192.168.11.5"
+#ifndef MQTT_SERVER
+#define MQTT_SERVER	""
+#endif
 #define MQTT_PORT	1883
-#define MQTT_USERNAME	"mosquitto"			// Empty string for none.
-#define MQTT_PASSWORD	"***REMOVED***"
+#ifndef MQTT_USERNAME
+#define MQTT_USERNAME	""			// Empty string for none.
+#endif
+#ifndef MQTT_PASSWORD
+#define MQTT_PASSWORD	""
+#endif
 
 // The device name is used as the MQTT base topic and presence on the network.
 // If you need more than one Alpha2MQTT on your network, give them unique names.
@@ -845,6 +853,7 @@ enum mqttSubscriptions
 
 
 #define MQTT_MES_STATE_SECOND_TEN "/state/second/ten"
+#define MQTT_MES_STATE_SECONDS "/state/second/seconds"
 #define MQTT_MES_STATE_MINUTE_ONE "/state/minute/one"
 #define MQTT_MES_STATE_MINUTE_FIVE "/state/minute/five"
 #define MQTT_MES_STATE_HOUR_ONE "/state/hour/one"

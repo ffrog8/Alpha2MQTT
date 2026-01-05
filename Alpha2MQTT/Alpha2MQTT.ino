@@ -63,55 +63,39 @@ char _debugOutput[100];
 
 
 // Schedules
+
 /*
 Add any number of handled registers in this list and they will be
-read and returned every 10 seconds.
+read and returned every n seconds.
 */
-static struct mqttState _mqttTenSecondStatusRegisters[] PROGMEM =
+static struct mqttState _mqttSecondStatusRegisters[] PROGMEM =
 {
-	{ REG_SYSTEM_CONFIG_RW_MODBUS_BAUD_RATE, "REG_SYSTEM_CONFIG_RW_MODBUS_BAUD_RATE"},
-	{ REG_SYSTEM_CONFIG_RW_MAX_FEED_INTO_GRID_PERCENT, "REG_SYSTEM_CONFIG_RW_MAX_FEED_INTO_GRID_PERCENT"},  // howmuch excess PV to feed into grid
-	// { REG_CUSTOM_LOAD, "REG_CUSTOM_LOAD" },																// Consumption
-	
-	{ REG_BATTERY_HOME_R_SOC, "REG_BATTERY_HOME_R_SOC" },												// State Of Charge
 	{ REG_BATTERY_HOME_R_BATTERY_POWER, "REG_BATTERY_HOME_R_BATTERY_POWER" },							// Battery Power
-	{ REG_BATTERY_HOME_R_VOLTAGE, "REG_BATTERY_HOME_R_VOLTAGE" },										// Battery Voltage
-	{ REG_BATTERY_HOME_R_CURRENT, "REG_BATTERY_HOME_R_CURRENT" },										// Battery Current
-	{ REG_BATTERY_HOME_R_MAX_CELL_TEMPERATURE, "REG_BATTERY_HOME_R_MAX_CELL_TEMPERATURE" },				// Highest Battery Temp
 	{ REG_GRID_METER_R_TOTAL_ACTIVE_POWER_1, "REG_GRID_METER_R_TOTAL_ACTIVE_POWER_1" },					// Total Grid Power (+/-)
-	// { REG_GRID_METER_R_TOTAL_REACTIVE_POWER_1, "REG_GRID_METER_R_TOTAL_REACTIVE_POWER_1" },				// Total Reactive Grid Power (+/-) - calculate PF
-	{ REG_GRID_METER_R_ACTIVE_POWER_OF_A_PHASE_1, "REG_GRID_METER_R_ACTIVE_POWER_OF_A_PHASE_1" },		// Phase A Grid Power (+/-)
-	{ REG_GRID_METER_R_ACTIVE_POWER_OF_B_PHASE_1, "REG_GRID_METER_R_ACTIVE_POWER_OF_B_PHASE_1" },		// Phase B Grid Power (+/-)
-	{ REG_GRID_METER_R_ACTIVE_POWER_OF_C_PHASE_1, "REG_GRID_METER_R_ACTIVE_POWER_OF_C_PHASE_1" },		// Phase C Grid Power (+/-)
-
-	{ REG_GRID_METER_R_VOLTAGE_OF_A_PHASE, "REG_GRID_METER_R_VOLTAGE_OF_A_PHASE" },		                // Phase A Grid Voltage
-	{ REG_GRID_METER_R_VOLTAGE_OF_B_PHASE, "REG_GRID_METER_R_VOLTAGE_OF_B_PHASE" },		                // Phase B Grid Voltage
-	{ REG_GRID_METER_R_VOLTAGE_OF_C_PHASE, "REG_GRID_METER_R_VOLTAGE_OF_C_PHASE" },		                // Phase C Grid Voltage
-
-
-
-	{ REG_PV_METER_R_TOTAL_ACTIVE_POWER_1, "REG_PV_METER_R_TOTAL_ACTIVE_POWER_1" },						// Total PV Power (+/-)
-
-	{ REG_INVERTER_HOME_R_INVERTER_TEMP, "REG_INVERTER_HOME_R_INVERTER_TEMP" },							// Inverter Temp
-
+	{ REG_INVERTER_HOME_R_PV1_POWER_1, "REG_INVERTER_HOME_R_PV1_POWER_1" },
+	{ REG_INVERTER_HOME_R_PV2_POWER_1, "REG_INVERTER_HOME_R_PV2_POWER_1" },
+	{ REG_INVERTER_HOME_R_BACKUP_POWER_L1_1, "REG_INVERTER_HOME_R_BACKUP_POWER_L1_1" },
+	// for dispatch status
 	{ REG_DISPATCH_RW_DISPATCH_START, "REG_DISPATCH_RW_DISPATCH_START" },
 	{ REG_DISPATCH_RW_DISPATCH_MODE, "REG_DISPATCH_RW_DISPATCH_MODE" },
 	{ REG_DISPATCH_RW_ACTIVE_POWER_1, "REG_DISPATCH_RW_ACTIVE_POWER_1" },
 	{ REG_DISPATCH_RW_DISPATCH_SOC, "REG_DISPATCH_RW_DISPATCH_SOC" },
 	{ REG_DISPATCH_RW_DISPATCH_TIME_1, "REG_DISPATCH_RW_DISPATCH_TIME_1" },
 
-	{ REG_SYSTEM_OP_R_SYSTEM_FAULT_1, "REG_SYSTEM_OP_R_SYSTEM_FAULT_1" },
-	{ REG_BATTERY_HOME_R_BATTERY_FAULT_1, "REG_BATTERY_HOME_R_BATTERY_FAULT_1" },
+	{ REG_GRID_METER_R_ACTIVE_POWER_OF_A_PHASE_1, "REG_GRID_METER_R_ACTIVE_POWER_OF_A_PHASE_1" },		// Phase A Grid Power (+/-)
+	{ REG_GRID_METER_R_ACTIVE_POWER_OF_B_PHASE_1, "REG_GRID_METER_R_ACTIVE_POWER_OF_B_PHASE_1" },		// Phase B Grid Power (+/-)
+	{ REG_GRID_METER_R_ACTIVE_POWER_OF_C_PHASE_1, "REG_GRID_METER_R_ACTIVE_POWER_OF_C_PHASE_1" },		// Phase C Grid Power (+/-)
+};
 
-
-	{ REG_INVERTER_HOME_R_PV1_POWER_1, "REG_INVERTER_HOME_R_PV1_POWER_1" },
-	{ REG_INVERTER_HOME_R_PV2_POWER_1, "REG_INVERTER_HOME_R_PV2_POWER_1" },
-	// { REG_INVERTER_HOME_R_PV3_POWER_1, "REG_INVERTER_HOME_R_PV3_POWER_1" },
-	// { REG_INVERTER_HOME_R_PV4_POWER_1, "REG_INVERTER_HOME_R_PV4_POWER_1" },
-	// { REG_INVERTER_HOME_R_PV5_POWER_1, "REG_INVERTER_HOME_R_PV5_POWER_1" },
-	// { REG_INVERTER_HOME_R_PV6_POWER_1, "REG_INVERTER_HOME_R_PV6_POWER_1" },
-
-//	{ REG_CUSTOM_TOTAL_SOLAR_POWER, "REG_CUSTOM_TOTAL_SOLAR_POWER" }
+/*
+Add any number of handled registers in this list and they will be
+read and returned every 10 seconds.
+*/
+static struct mqttState _mqttTenSecondStatusRegisters[] PROGMEM =
+{
+	{ REG_SYSTEM_CONFIG_RW_MAX_FEED_INTO_GRID_PERCENT, "REG_SYSTEM_CONFIG_RW_MAX_FEED_INTO_GRID_PERCENT"},  // howmuch excess PV to feed into grid
+	{ REG_BATTERY_HOME_R_SOC, "REG_BATTERY_HOME_R_SOC" },		
+	
 
 	/*
 	* 
@@ -130,7 +114,47 @@ Add any number of handled registers in this list and they will be
 read and returned every minute.
 */
 static struct mqttState _mqttOneMinuteStatusRegisters[] PROGMEM =
-{
+{ 
+	{ REG_SYSTEM_CONFIG_RW_MODBUS_BAUD_RATE, "REG_SYSTEM_CONFIG_RW_MODBUS_BAUD_RATE"},
+	
+	// { REG_CUSTOM_LOAD, "REG_CUSTOM_LOAD" },																// Consumption
+											// State Of Charge
+	{ REG_BATTERY_HOME_R_VOLTAGE, "REG_BATTERY_HOME_R_VOLTAGE" },										// Battery Voltage
+	{ REG_BATTERY_HOME_R_CURRENT, "REG_BATTERY_HOME_R_CURRENT" },										// Battery Current
+	{ REG_BATTERY_HOME_R_MAX_CELL_TEMPERATURE, "REG_BATTERY_HOME_R_MAX_CELL_TEMPERATURE" },				// Highest Battery Temp
+	// { REG_GRID_METER_R_TOTAL_REACTIVE_POWER_1, "REG_GRID_METER_R_TOTAL_REACTIVE_POWER_1" },				// Total Reactive Grid Power (+/-) - calculate PF
+
+	{ REG_GRID_METER_R_VOLTAGE_OF_A_PHASE, "REG_GRID_METER_R_VOLTAGE_OF_A_PHASE" },		                // Phase A Grid Voltage
+	{ REG_GRID_METER_R_VOLTAGE_OF_B_PHASE, "REG_GRID_METER_R_VOLTAGE_OF_B_PHASE" },		                // Phase B Grid Voltage
+	{ REG_GRID_METER_R_VOLTAGE_OF_C_PHASE, "REG_GRID_METER_R_VOLTAGE_OF_C_PHASE" },		                // Phase C Grid Voltage
+
+	// { REG_GRID_METER_R_ACTIVE_POWER_OF_A_PHASE_1, "REG_GRID_METER_R_ACTIVE_POWER_OF_A_PHASE_1" },		// Phase A Grid Power (+/-)
+	// { REG_GRID_METER_R_ACTIVE_POWER_OF_B_PHASE_1, "REG_GRID_METER_R_ACTIVE_POWER_OF_B_PHASE_1" },		// Phase B Grid Power (+/-)
+	// { REG_GRID_METER_R_ACTIVE_POWER_OF_C_PHASE_1, "REG_GRID_METER_R_ACTIVE_POWER_OF_C_PHASE_1" },		// Phase C Grid Power (+/-)
+
+
+
+	{ REG_PV_METER_R_TOTAL_ACTIVE_POWER_1, "REG_PV_METER_R_TOTAL_ACTIVE_POWER_1" },						// Total PV Power (+/-)
+
+	{ REG_INVERTER_HOME_R_INVERTER_TEMP, "REG_INVERTER_HOME_R_INVERTER_TEMP" },							// Inverter Temp
+
+	// { REG_DISPATCH_RW_DISPATCH_START, "REG_DISPATCH_RW_DISPATCH_START" },
+	// { REG_DISPATCH_RW_DISPATCH_MODE, "REG_DISPATCH_RW_DISPATCH_MODE" },
+	// { REG_DISPATCH_RW_ACTIVE_POWER_1, "REG_DISPATCH_RW_ACTIVE_POWER_1" },
+	// { REG_DISPATCH_RW_DISPATCH_SOC, "REG_DISPATCH_RW_DISPATCH_SOC" },
+	// { REG_DISPATCH_RW_DISPATCH_TIME_1, "REG_DISPATCH_RW_DISPATCH_TIME_1" },
+
+	{ REG_SYSTEM_OP_R_SYSTEM_FAULT_1, "REG_SYSTEM_OP_R_SYSTEM_FAULT_1" },
+	{ REG_BATTERY_HOME_R_BATTERY_FAULT_1, "REG_BATTERY_HOME_R_BATTERY_FAULT_1" },
+
+
+
+	// { REG_INVERTER_HOME_R_PV3_POWER_1, "REG_INVERTER_HOME_R_PV3_POWER_1" },
+	// { REG_INVERTER_HOME_R_PV4_POWER_1, "REG_INVERTER_HOME_R_PV4_POWER_1" },
+	// { REG_INVERTER_HOME_R_PV5_POWER_1, "REG_INVERTER_HOME_R_PV5_POWER_1" },
+	// { REG_INVERTER_HOME_R_PV6_POWER_1, "REG_INVERTER_HOME_R_PV6_POWER_1" },
+
+    //	{ REG_CUSTOM_TOTAL_SOLAR_POWER, "REG_CUSTOM_TOTAL_SOLAR_POWER" }
 	{ REG_GRID_METER_R_VOLTAGE_OF_A_PHASE, "REG_GRID_METER_R_VOLTAGE_OF_A_PHASE" },
 	{ REG_PV_METER_R_VOLTAGE_OF_A_PHASE, "REG_PV_METER_R_VOLTAGE_OF_A_PHASE" },
 	{ REG_INVERTER_HOME_R_VOLTAGE_L1, "REG_INVERTER_HOME_R_VOLTAGE_L1" },
@@ -391,6 +415,7 @@ static struct mqttState _mqttAllHandledRegisters[] PROGMEM =
 
 // These timers are used in the main loop.
 #define RUNSTATE_INTERVAL 5000
+#define STATUS_INTERVAL_SECONDS 3000
 #define STATUS_INTERVAL_TEN_SECONDS 10000
 #define STATUS_INTERVAL_ONE_MINUTE 60000
 #define STATUS_INTERVAL_FIVE_MINUTE 300000
@@ -1079,12 +1104,22 @@ Each time, the appropriate arrays are iterated, processed and added to the paylo
 */
 void sendData()
 {
+	static unsigned long lastRunSeconds = 0;
 	static unsigned long lastRunTenSeconds = 0;
 	static unsigned long lastRunOneMinute = 0;
 	static unsigned long lastRunFiveMinutes = 0;
 	static unsigned long lastRunOneHour = 0;
 	static unsigned long lastRunOneDay = 0;
 	int numberOfRegisters;
+
+
+	// Update all parameters and send to MQTT.
+	if (checkTimer(&lastRunSeconds, STATUS_INTERVAL_SECONDS))
+	{
+		numberOfRegisters = sizeof(_mqttSecondStatusRegisters) / sizeof(struct mqttState);
+		sendDataFromAppropriateArray(_mqttSecondStatusRegisters, numberOfRegisters, DEVICE_NAME MQTT_MES_STATE_SECONDS);
+	}
+
 	// Update all parameters and send to MQTT.
 	if (checkTimer(&lastRunTenSeconds, STATUS_INTERVAL_TEN_SECONDS))
 	{

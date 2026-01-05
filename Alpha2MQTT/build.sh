@@ -1,6 +1,7 @@
 #!/bin/bash 
 #  export GIT_BASE=/volume1/docker_cached/apps/vscode/git/Alpha2MQTT
 #  docker run -d --name arduino-cli-build -v  ${GIT_BASE}:/project --entrypoint tail solarbotics/arduino-cli:0.25.0-python3.7 -f /dev/null
+#  chmod -R a+rwX $GIT_BASE/Alpha2MQTT/build/
 #  docker exec -it arduino-cli-build /project/Alpha2MQTT/build.sh
 
 arduino-cli core update-index --additional-urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
