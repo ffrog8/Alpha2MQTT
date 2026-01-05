@@ -18,3 +18,6 @@
 
 ## 2025-01-05
 - Surface Arduino CLI compile failures in PR comments and upload compile logs as artifacts.
+
+## 2025-01-05
+- Add gh bootstrap helper for CI log polling.
