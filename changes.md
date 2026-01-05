@@ -12,3 +12,6 @@
 
 ## 2025-01-05
 - Remove binary assets added during upstream merge to keep change set text-only.
+
+## 2025-01-05
+- Add Arduino header shims so CI builds find the moved headers.
