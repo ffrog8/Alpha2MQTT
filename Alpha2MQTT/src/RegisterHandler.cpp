@@ -110,21 +110,18 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 	case REG_GRID_METER_RW_GRID_METER_CT_ENABLE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_GRID_METER_RW_GRID_METER_CT_ENABLE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_GRID_METER_RW_GRID_METER_CT_RATE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_GRID_METER_RW_GRID_METER_CT_RATE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_GRID_METER_R_TOTAL_ENERGY_FEED_TO_GRID_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_TOTAL_ENERGY_FEED_TO_GRID_1");
 		rs->registerCount = 2;
 		break;
 	}
@@ -132,7 +129,6 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 	case REG_GRID_METER_R_TOTAL_ENERGY_CONSUMED_FROM_GRID_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_TOTAL_ENERGY_CONSUMED_FROM_GRID_1");
 		rs->registerCount = 2;
 		break;
 	}
@@ -140,56 +136,48 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 	case REG_GRID_METER_R_VOLTAGE_OF_A_PHASE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_VOLTAGE_OF_A_PHASE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_GRID_METER_R_VOLTAGE_OF_B_PHASE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_VOLTAGE_OF_B_PHASE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_GRID_METER_R_VOLTAGE_OF_C_PHASE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_VOLTAGE_OF_C_PHASE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_GRID_METER_R_CURRENT_OF_A_PHASE:
 	{
 		rs->returnDataType = modbusReturnDataType::signedShort;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_CURRENT_OF_A_PHASE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_GRID_METER_R_CURRENT_OF_B_PHASE:
 	{
 		rs->returnDataType = modbusReturnDataType::signedShort;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_CURRENT_OF_B_PHASE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_GRID_METER_R_CURRENT_OF_C_PHASE:
 	{
 		rs->returnDataType = modbusReturnDataType::signedShort;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_CURRENT_OF_C_PHASE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_GRID_METER_R_FREQUENCY:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_FREQUENCY");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_GRID_METER_R_ACTIVE_POWER_OF_A_PHASE_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_ACTIVE_POWER_OF_A_PHASE_1");
 		rs->registerCount = 2;
 		break;
 	}
@@ -197,7 +185,6 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 	case REG_GRID_METER_R_ACTIVE_POWER_OF_B_PHASE_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_ACTIVE_POWER_OF_B_PHASE_1");
 		rs->registerCount = 2;
 		break;
 	}
@@ -205,7 +192,6 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 	case REG_GRID_METER_R_ACTIVE_POWER_OF_C_PHASE_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_ACTIVE_POWER_OF_C_PHASE_1");
 		rs->registerCount = 2;
 		break;
 	}
@@ -213,1468 +199,1345 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 	case REG_GRID_METER_R_TOTAL_ACTIVE_POWER_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_TOTAL_ACTIVE_POWER_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_GRID_METER_R_REACTIVE_POWER_OF_A_PHASE_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_REACTIVE_POWER_OF_A_PHASE_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_GRID_METER_R_REACTIVE_POWER_OF_B_PHASE_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_REACTIVE_POWER_OF_B_PHASE_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_GRID_METER_R_REACTIVE_POWER_OF_C_PHASE_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_REACTIVE_POWER_OF_C_PHASE_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_GRID_METER_R_TOTAL_REACTIVE_POWER_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_TOTAL_REACTIVE_POWER_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_GRID_METER_R_APPARENT_POWER_OF_A_PHASE_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_APPARENT_POWER_OF_A_PHASE_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_GRID_METER_R_APPARENT_POWER_OF_B_PHASE_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_APPARENT_POWER_OF_B_PHASE_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_GRID_METER_R_APPARENT_POWER_OF_C_PHASE_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_APPARENT_POWER_OF_C_PHASE_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_GRID_METER_R_TOTAL_APPARENT_POWER_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_TOTAL_APPARENT_POWER_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_GRID_METER_R_POWER_FACTOR_OF_A_PHASE:
 	{
 		rs->returnDataType = modbusReturnDataType::signedShort;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_POWER_FACTOR_OF_A_PHASE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_GRID_METER_R_POWER_FACTOR_OF_B_PHASE:
 	{
 		rs->returnDataType = modbusReturnDataType::signedShort;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_POWER_FACTOR_OF_B_PHASE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_GRID_METER_R_POWER_FACTOR_OF_C_PHASE:
 	{
 		rs->returnDataType = modbusReturnDataType::signedShort;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_POWER_FACTOR_OF_C_PHASE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_GRID_METER_R_TOTAL_POWER_FACTOR:
 	{
 		rs->returnDataType = modbusReturnDataType::signedShort;
-		strcpy(rs->mqttName, "REG_GRID_METER_R_TOTAL_POWER_FACTOR");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_PV_METER_RW_PV_METER_CT_ENABLE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_PV_METER_RW_PV_METER_CT_ENABLE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_PV_METER_RW_PV_METER_CT_RATE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_PV_METER_RW_PV_METER_CT_RATE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_PV_METER_R_TOTAL_ENERGY_FEED_TO_GRID_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_PV_METER_R_TOTAL_ENERGY_FEED_TO_GRID_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_PV_METER_R_TOTAL_ENERGY_CONSUMED_FROM_GRID_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_PV_METER_R_TOTAL_ENERGY_CONSUMED_FROM_GRID_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_PV_METER_R_VOLTAGE_OF_A_PHASE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_PV_METER_R_VOLTAGE_OF_A_PHASE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_PV_METER_R_VOLTAGE_OF_B_PHASE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_PV_METER_R_VOLTAGE_OF_B_PHASE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_PV_METER_R_VOLTAGE_OF_C_PHASE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_PV_METER_R_VOLTAGE_OF_C_PHASE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_PV_METER_R_CURRENT_OF_A_PHASE:
 	{
 		rs->returnDataType = modbusReturnDataType::signedShort;
-		strcpy(rs->mqttName, "REG_PV_METER_R_CURRENT_OF_A_PHASE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_PV_METER_R_CURRENT_OF_B_PHASE:
 	{
 		rs->returnDataType = modbusReturnDataType::signedShort;
-		strcpy(rs->mqttName, "REG_PV_METER_R_CURRENT_OF_B_PHASE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_PV_METER_R_CURRENT_OF_C_PHASE:
 	{
 		rs->returnDataType = modbusReturnDataType::signedShort;
-		strcpy(rs->mqttName, "REG_PV_METER_R_CURRENT_OF_C_PHASE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_PV_METER_R_FREQUENCY:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_PV_METER_R_FREQUENCY");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_PV_METER_R_ACTIVE_POWER_OF_A_PHASE_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_PV_METER_R_ACTIVE_POWER_OF_A_PHASE_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_PV_METER_R_ACTIVE_POWER_OF_B_PHASE_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_PV_METER_R_ACTIVE_POWER_OF_B_PHASE_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_PV_METER_R_ACTIVE_POWER_OF_C_PHASE_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_PV_METER_R_ACTIVE_POWER_OF_C_PHASE_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_PV_METER_R_TOTAL_ACTIVE_POWER_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_PV_METER_R_TOTAL_ACTIVE_POWER_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_PV_METER_R_REACTIVE_POWER_OF_A_PHASE_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_PV_METER_R_REACTIVE_POWER_OF_A_PHASE_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_PV_METER_R_REACTIVE_POWER_OF_B_PHASE_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_PV_METER_R_REACTIVE_POWER_OF_B_PHASE_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_PV_METER_R_REACTIVE_POWER_OF_C_PHASE_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_PV_METER_R_REACTIVE_POWER_OF_C_PHASE_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_PV_METER_R_TOTAL_REACTIVE_POWER_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_PV_METER_R_TOTAL_REACTIVE_POWER_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_PV_METER_R_APPARENT_POWER_OF_A_PHASE_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_PV_METER_R_APPARENT_POWER_OF_A_PHASE_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_PV_METER_R_APPARENT_POWER_OF_B_PHASE_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_PV_METER_R_APPARENT_POWER_OF_B_PHASE_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_PV_METER_R_APPARENT_POWER_OF_C_PHASE_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_PV_METER_R_APPARENT_POWER_OF_C_PHASE_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_PV_METER_R_TOTAL_APPARENT_POWER_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_PV_METER_R_TOTAL_APPARENT_POWER_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_PV_METER_R_POWER_FACTOR_OF_A_PHASE:
 	{
 		rs->returnDataType = modbusReturnDataType::signedShort;
-		strcpy(rs->mqttName, "REG_PV_METER_R_POWER_FACTOR_OF_A_PHASE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_PV_METER_R_POWER_FACTOR_OF_B_PHASE:
 	{
 		rs->returnDataType = modbusReturnDataType::signedShort;
-		strcpy(rs->mqttName, "REG_PV_METER_R_POWER_FACTOR_OF_B_PHASE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_PV_METER_R_POWER_FACTOR_OF_C_PHASE:
 	{
 		rs->returnDataType = modbusReturnDataType::signedShort;
-		strcpy(rs->mqttName, "REG_PV_METER_R_POWER_FACTOR_OF_C_PHASE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_PV_METER_R_TOTAL_POWER_FACTOR:
 	{
 		rs->returnDataType = modbusReturnDataType::signedShort;
-		strcpy(rs->mqttName, "REG_PV_METER_R_TOTAL_POWER_FACTOR");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_VOLTAGE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_VOLTAGE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_CURRENT:
 	{
 		rs->returnDataType = modbusReturnDataType::signedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_CURRENT");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_SOC:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_SOC");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_STATUS:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_STATUS");
 		rs->registerCount = 1;
-		rs->hasLookup = true;
+//		rs->hasLookup = true;
 		break;
 	}
 	case REG_BATTERY_HOME_R_RELAY_STATUS:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_RELAY_STATUS");
 		rs->registerCount = 1;
-		rs->hasLookup = true;
+//		rs->hasLookup = true;
 		break;
 	}
 	case REG_BATTERY_HOME_R_PACK_ID_OF_MIN_CELL_VOLTAGE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_PACK_ID_OF_MIN_CELL_VOLTAGE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_CELL_ID_OF_MIN_CELL_VOLTAGE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_CELL_ID_OF_MIN_CELL_VOLTAGE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_MIN_CELL_VOLTAGE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_MIN_CELL_VOLTAGE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_PACK_ID_OF_MAX_CELL_VOLTAGE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_PACK_ID_OF_MAX_CELL_VOLTAGE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_CELL_ID_OF_MAX_CELL_VOLTAGE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_CELL_ID_OF_MAX_CELL_VOLTAGE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_MAX_CELL_VOLTAGE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_MAX_CELL_VOLTAGE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_PACK_ID_OF_MIN_CELL_TEMPERATURE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_PACK_ID_OF_MIN_CELL_TEMPERATURE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_CELL_ID_OF_MIN_CELL_TEMPERATURE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_CELL_ID_OF_MIN_CELL_TEMPERATURE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_MIN_CELL_TEMPERATURE:
 	{
 		rs->returnDataType = modbusReturnDataType::signedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_MIN_CELL_TEMPERATURE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_PACK_ID_OF_MAX_CELL_TEMPERATURE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_PACK_ID_OF_MAX_CELL_TEMPERATURE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_CELL_ID_OF_MAX_CELL_TEMPERATURE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_CELL_ID_OF_MAX_CELL_TEMPERATURE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_MAX_CELL_TEMPERATURE:
 	{
 		rs->returnDataType = modbusReturnDataType::signedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_MAX_CELL_TEMPERATURE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_MAX_CHARGE_CURRENT:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_MAX_CHARGE_CURRENT");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_MAX_DISCHARGE_CURRENT:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_MAX_DISCHARGE_CURRENT");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_CHARGE_CUT_OFF_VOLTAGE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_CHARGE_CUT_OFF_VOLTAGE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_DISCHARGE_CUT_OFF_VOLTAGE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_DISCHARGE_CUT_OFF_VOLTAGE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_BMU_SOFTWARE_VERSION:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BMU_SOFTWARE_VERSION");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_LMU_SOFTWARE_VERSION:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_LMU_SOFTWARE_VERSION");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_ISO_SOFTWARE_VERSION:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_ISO_SOFTWARE_VERSION");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_BATTERY_NUMBER:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_NUMBER");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_BATTERY_CAPACITY:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_CAPACITY");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_BATTERY_TYPE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_TYPE");
 		rs->registerCount = 1;
-		rs->hasLookup = true;
+//		rs->hasLookup = true;
 		break;
 	}
 	case REG_BATTERY_HOME_R_BATTERY_SOH:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_SOH");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_BATTERY_WARNING_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_WARNING_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_BATTERY_HOME_R_BATTERY_FAULT_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_FAULT_1");
 		rs->registerCount = 2;
-		rs->hasLookup = true;
+//		rs->hasLookup = true;
 		break;
 	}
-
 	case REG_BATTERY_HOME_R_BATTERY_CHARGE_ENERGY_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_CHARGE_ENERGY_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_BATTERY_HOME_R_BATTERY_DISCHARGE_ENERGY_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_DISCHARGE_ENERGY_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_BATTERY_HOME_R_BATTERY_ENERGY_CHARGE_FROM_GRID_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_ENERGY_CHARGE_FROM_GRID_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_BATTERY_HOME_R_BATTERY_POWER:
 	{
 		rs->returnDataType = modbusReturnDataType::signedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_POWER");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_BATTERY_REMAINING_TIME:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_REMAINING_TIME");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_BATTERY_IMPLEMENTATION_CHARGE_SOC:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_IMPLEMENTATION_CHARGE_SOC");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_BATTERY_IMPLEMENTATION_DISCHARGE_SOC:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_IMPLEMENTATION_DISCHARGE_SOC");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_BATTERY_REMAINING_CHARGE_SOC:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_REMAINING_CHARGE_SOC");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_BATTERY_REMAINING_DISCHARGE_SOC:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_REMAINING_DISCHARGE_SOC");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_BATTERY_MAX_CHARGE_POWER:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_MAX_CHARGE_POWER");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_BATTERY_MAX_DISCHARGE_POWER:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_MAX_DISCHARGE_POWER");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_RW_BATTERY_MOS_CONTROL:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		rs->hasLookup = true;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_RW_BATTERY_MOS_CONTROL");
+//		rs->hasLookup = true;
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_BATTERY_SOC_CALIBRATION:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		rs->hasLookup = true;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_SOC_CALIBRATION");
+//		rs->hasLookup = true;
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_BATTERY_SINGLE_CUT_ERROR_CODE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_SINGLE_CUT_ERROR_CODE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_BATTERY_HOME_R_BATTERY_FAULT_1_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_FAULT_1_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_BATTERY_HOME_R_BATTERY_FAULT_2_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_FAULT_2_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_BATTERY_HOME_R_BATTERY_FAULT_3_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_FAULT_3_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_BATTERY_HOME_R_BATTERY_FAULT_4_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_FAULT_4_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_BATTERY_HOME_R_BATTERY_FAULT_5_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_FAULT_5_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_BATTERY_HOME_R_BATTERY_FAULT_6_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_FAULT_6_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_BATTERY_HOME_R_BATTERY_WARNING_1_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_WARNING_1_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_BATTERY_HOME_R_BATTERY_WARNING_2_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_WARNING_2_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_BATTERY_HOME_R_BATTERY_WARNING_3_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_WARNING_3_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_BATTERY_HOME_R_BATTERY_WARNING_4_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_WARNING_4_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_BATTERY_HOME_R_BATTERY_WARNING_5_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_WARNING_5_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_BATTERY_HOME_R_BATTERY_WARNING_6_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_BATTERY_HOME_R_BATTERY_WARNING_6_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_INVERTER_HOME_R_VOLTAGE_L1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_VOLTAGE_L1");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_VOLTAGE_L2:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_VOLTAGE_L2");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_VOLTAGE_L3:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_VOLTAGE_L3");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_CURRENT_L1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_CURRENT_L1");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_CURRENT_L2:
 	{
 		rs->returnDataType = modbusReturnDataType::signedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_CURRENT_L2");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_CURRENT_L3:
 	{
 		rs->returnDataType = modbusReturnDataType::signedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_CURRENT_L3");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_POWER_L1_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_POWER_L1_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_INVERTER_HOME_R_POWER_L2_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_POWER_L2_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_INVERTER_HOME_R_POWER_L3_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_POWER_L3_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_INVERTER_HOME_R_POWER_TOTAL_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_POWER_TOTAL_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_INVERTER_HOME_R_BACKUP_VOLTAGE_L1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_BACKUP_VOLTAGE_L1");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_BACKUP_VOLTAGE_L2:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_BACKUP_VOLTAGE_L2");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_BACKUP_VOLTAGE_L3:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_BACKUP_VOLTAGE_L3");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_BACKUP_CURRENT_L1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_BACKUP_CURRENT_L1");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_BACKUP_CURRENT_L2:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_BACKUP_CURRENT_L2");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_BACKUP_CURRENT_L3:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_BACKUP_CURRENT_L3");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_BACKUP_POWER_L1_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_BACKUP_POWER_L1_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_INVERTER_HOME_R_BACKUP_POWER_L2_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_BACKUP_POWER_L2_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_INVERTER_HOME_R_BACKUP_POWER_L3_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_BACKUP_POWER_L3_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_INVERTER_HOME_R_BACKUP_POWER_TOTAL_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_BACKUP_POWER_TOTAL_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_INVERTER_HOME_R_FREQUENCY:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_FREQUENCY");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_PV1_VOLTAGE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_PV1_VOLTAGE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_PV1_CURRENT:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_PV1_CURRENT");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_PV1_POWER_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_PV1_POWER_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_INVERTER_HOME_R_PV2_VOLTAGE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_PV2_VOLTAGE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_PV2_CURRENT:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_PV2_CURRENT");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_PV2_POWER_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_PV2_POWER_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_INVERTER_HOME_R_PV3_VOLTAGE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_PV3_VOLTAGE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_PV3_CURRENT:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_PV3_CURRENT");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_PV3_POWER_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_PV3_POWER_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_INVERTER_HOME_R_PV4_VOLTAGE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_PV4_VOLTAGE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_PV4_CURRENT:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_PV4_CURRENT");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_PV4_POWER_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_PV4_POWER_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_INVERTER_HOME_R_PV5_VOLTAGE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_PV5_VOLTAGE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_PV5_CURRENT:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_PV5_CURRENT");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_PV5_POWER_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_PV5_POWER_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_INVERTER_HOME_R_PV6_VOLTAGE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_PV6_VOLTAGE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_PV6_CURRENT:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_PV6_CURRENT");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_PV6_POWER_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_PV6_POWER_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_INVERTER_HOME_R_INVERTER_TEMP:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_INVERTER_TEMP");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_INVERTER_HOME_R_INVERTER_WARNING_1_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_INVERTER_WARNING_1_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_INVERTER_HOME_R_INVERTER_WARNING_2_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_INVERTER_WARNING_2_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_INVERTER_HOME_R_INVERTER_FAULT_1_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_INVERTER_FAULT_1_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_INVERTER_HOME_R_INVERTER_FAULT_2_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_INVERTER_FAULT_2_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_INVERTER_HOME_R_INVERTER_TOTAL_PV_ENERGY_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_INVERTER_TOTAL_PV_ENERGY_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_INVERTER_HOME_R_WORKING_MODE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_INVERTER_HOME_R_WORKING_MODE");
-		rs->hasLookup = true;
+//		rs->hasLookup = true;
 		rs->registerCount = 1;
+		break;
+	}
+#ifdef EMS_35_36
+	case REG_INVERTER_HOME_R_INVERTER_BAT_VOLTAGE:
+	{
+		rs->returnDataType = modbusReturnDataType::unsignedShort;
+		rs->registerCount = 1;
+		break;
+	}
+	case REG_INVERTER_HOME_R_INVERTER_BAT_CURRENT:
+	{
+		rs->returnDataType = modbusReturnDataType::unsignedShort;
+		rs->registerCount = 1;
+		break;
+	}
+	case REG_INVERTER_HOME_R_INVERTER_BAT_POWER:
+	{
+		rs->returnDataType = modbusReturnDataType::signedShort;
+		rs->registerCount = 1;
+		break;
+	}
+	case REG_INVERTER_HOME_R_INVERTER_TOTAL_REACT_POWER_1:
+	{
+		rs->returnDataType = modbusReturnDataType::signedInt;
+		rs->registerCount = 2;
+		break;
+	}
+	case REG_INVERTER_HOME_R_INVERTER_TOTAL_APPARENT_POWER_1:
+	{
+		rs->returnDataType = modbusReturnDataType::signedInt;
+		rs->registerCount = 2;
+		break;
+	}
+	case REG_INVERTER_HOME_R_INVERTER_FREQUENCY:
+	{
+		rs->returnDataType = modbusReturnDataType::unsignedShort;
+		rs->registerCount = 1;
+		break;
+	}
+	case REG_INVERTER_HOME_R_INVERTER_BACKUP_FREQUENCY:
+	{
+		rs->returnDataType = modbusReturnDataType::unsignedShort;
+		rs->registerCount = 1;
+		break;
+	}
+	case REG_INVERTER_HOME_R_INVERTER_POWER_FACTOR:
+	{
+		rs->returnDataType = modbusReturnDataType::signedShort;
+		rs->registerCount = 1;
+		break;
+	}
+	case REG_INVERTER_HOME_R_INVERTER_FAULT_EXTEND_1_1:
+	{
+		rs->returnDataType = modbusReturnDataType::unsignedInt;
+		rs->registerCount = 2;
+		break;
+	}
+	case REG_INVERTER_HOME_R_INVERTER_FAULT_EXTEND_2_1:
+	{
+		rs->returnDataType = modbusReturnDataType::unsignedInt;
+		rs->registerCount = 2;
+		break;
+	}
+	case REG_INVERTER_HOME_R_INVERTER_FAULT_EXTEND_3_1:
+	{
+		rs->returnDataType = modbusReturnDataType::unsignedInt;
+		rs->registerCount = 2;
+		break;
+	}
+	case REG_INVERTER_HOME_R_INVERTER_FAULT_EXTEND_4_1:
+	{
+		rs->returnDataType = modbusReturnDataType::unsignedInt;
+		rs->registerCount = 2;
+		break;
+	}
+#endif // EMS_35_36
+	case REG_INVERTER_HOME_R_PV_TOTAL_POWER_1:
+	{
+		rs->returnDataType = modbusReturnDataType::unsignedInt;
+		rs->registerCount = 2;
 		break;
 	}
 	case REG_INVERTER_INFO_R_MASTER_SOFTWARE_VERSION_1:
 	{
 		rs->returnDataType = modbusReturnDataType::character;
-		strcpy(rs->mqttName, "REG_INVERTER_INFO_R_MASTER_SOFTWARE_VERSION_1");
 		rs->registerCount = 5;
 		break;
 	}
-
-
-
-
 	case REG_INVERTER_INFO_R_SLAVE_SOFTWARE_VERSION_1:
 	{
 		rs->returnDataType = modbusReturnDataType::character;
-		strcpy(rs->mqttName, "REG_INVERTER_INFO_R_SLAVE_SOFTWARE_VERSION_1");
 		rs->registerCount = 5;
 		break;
 	}
-
-
-
-
 	case REG_INVERTER_INFO_R_SERIAL_NUMBER_1:
 	{
 		rs->returnDataType = modbusReturnDataType::character;
-		strcpy(rs->mqttName, "REG_INVERTER_INFO_R_SERIAL_NUMBER_1");
 		rs->registerCount = 10;
 		break;
 	}
-
-
-
-
-
-
-
-
-
+	case REG_INVERTER_INFO_R_ARM_SOFTWARE_VERSION_1:
+	{
+		rs->returnDataType = modbusReturnDataType::character;
+		rs->registerCount = 5;
+		break;
+	}
+	case REG_SYSTEM_INFO_RW_FEED_INTO_GRID_PERCENT:
+	{
+		rs->returnDataType = modbusReturnDataType::unsignedShort;
+		rs->registerCount = 1;
+		break;
+	}
+	case REG_SYSTEM_INFO_R_SYSTEM_FAULT:
+	{
+		rs->returnDataType = modbusReturnDataType::unsignedInt;
+		rs->registerCount = 2;
+		break;
+	}
 	case REG_SYSTEM_INFO_RW_SYSTEM_TIME_YEAR_MONTH:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_SYSTEM_INFO_RW_SYSTEM_TIME_YEAR_MONTH");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_SYSTEM_INFO_RW_SYSTEM_TIME_DAY_HOUR:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_SYSTEM_INFO_RW_SYSTEM_TIME_DAY_HOUR");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_SYSTEM_INFO_RW_SYSTEM_TIME_MINUTE_SECOND:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_SYSTEM_INFO_RW_SYSTEM_TIME_MINUTE_SECOND");
 		rs->registerCount = 1;
 		break;
 	}
-
 	case REG_SYSTEM_INFO_R_EMS_SN_BYTE_1_2:
 	{
 		rs->returnDataType = modbusReturnDataType::character;
-		strcpy(rs->mqttName, "REG_SYSTEM_INFO_R_EMS_SN_BYTE_1_2");
 		rs->registerCount = 8;
 		break;
 	}
 	case REG_SYSTEM_INFO_R_EMS_VERSION_HIGH:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_SYSTEM_INFO_R_EMS_VERSION_HIGH");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_SYSTEM_INFO_R_EMS_VERSION_MIDDLE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_SYSTEM_INFO_R_EMS_VERSION_MIDDLE");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_SYSTEM_INFO_R_EMS_VERSION_LOW:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_SYSTEM_INFO_R_EMS_VERSION_LOW");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_SYSTEM_INFO_R_PROTOCOL_VERSION:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_SYSTEM_INFO_R_PROTOCOL_VERSION");
 		rs->registerCount = 1;
+		break;
+	}
+	case REG_SYSTEM_INFO_R_EMS_VERSION_LOW_SUFFIX_1:
+	{
+		rs->returnDataType = modbusReturnDataType::character;
+		rs->registerCount = 4;
 		break;
 	}
 	case REG_SYSTEM_CONFIG_RW_MAX_FEED_INTO_GRID_PERCENT:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_SYSTEM_CONFIG_RW_MAX_FEED_INTO_GRID_PERCENT");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_SYSTEM_CONFIG_RW_PV_CAPACITY_STORAGE_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_SYSTEM_CONFIG_RW_PV_CAPACITY_STORAGE_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_SYSTEM_CONFIG_RW_PV_CAPACITY_OF_GRID_INVERTER_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_SYSTEM_CONFIG_RW_PV_CAPACITY_OF_GRID_INVERTER_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_SYSTEM_CONFIG_RW_SYSTEM_MODE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_SYSTEM_CONFIG_RW_SYSTEM_MODE");
 		rs->registerCount = 1;
-		rs->hasLookup = true;
+//		rs->hasLookup = true;
 		break;
 	}
 	case REG_SYSTEM_CONFIG_RW_METER_CT_SELECT:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_SYSTEM_CONFIG_RW_METER_CT_SELECT");
 		rs->registerCount = 1;
-		rs->hasLookup = true;
+//		rs->hasLookup = true;
 		break;
 	}
 	case REG_SYSTEM_CONFIG_RW_BATTERY_READY:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_SYSTEM_CONFIG_RW_BATTERY_READY");
 		rs->registerCount = 1;
-		rs->hasLookup = true;
+//		rs->hasLookup = true;
 		break;
 	}
 	case REG_SYSTEM_CONFIG_RW_IP_METHOD:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_SYSTEM_CONFIG_RW_IP_METHOD");
 		rs->registerCount = 1;
-		rs->hasLookup = true;
+//		rs->hasLookup = true;
 		break;
 	}
 	case REG_SYSTEM_CONFIG_RW_LOCAL_IP_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_SYSTEM_CONFIG_RW_LOCAL_IP_1");
 		rs->registerCount = 2;
-		rs->hasLookup = true; // Using this to treat output as string
+//		rs->hasLookup = true; // Using this to treat output as string
 		break;
 	}
-
 	case REG_SYSTEM_CONFIG_RW_SUBNET_MASK_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_SYSTEM_CONFIG_RW_SUBNET_MASK_1");
 		rs->registerCount = 2;
-		rs->hasLookup = true; // Using this to treat output as string
+//		rs->hasLookup = true; // Using this to treat output as string
 		break;
 	}
-
 	case REG_SYSTEM_CONFIG_RW_GATEWAY_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_SYSTEM_CONFIG_RW_GATEWAY_1");
 		rs->registerCount = 2;
-		rs->hasLookup = true; // Using this to treat output as string
+//		rs->hasLookup = true; // Using this to treat output as string
 		break;
 	}
-
 	case REG_SYSTEM_CONFIG_RW_MODBUS_ADDRESS:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_SYSTEM_CONFIG_RW_MODBUS_ADDRESS");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_SYSTEM_CONFIG_RW_MODBUS_BAUD_RATE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_SYSTEM_CONFIG_RW_MODBUS_BAUD_RATE");
 		rs->registerCount = 1;
-		rs->hasLookup = true;
+//		rs->hasLookup = true;
 		break;
 	}
 	case REG_TIMING_RW_TIME_PERIOD_CONTROL_FLAG:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_TIMING_RW_TIME_PERIOD_CONTROL_FLAG");
 		rs->registerCount = 1;
-		rs->hasLookup = true;
+//		rs->hasLookup = true;
 		break;
 	}
 	case REG_TIMING_RW_UPS_RESERVE_SOC:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_TIMING_RW_UPS_RESERVE_SOC");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_TIMING_RW_TIME_DISCHARGE_START_TIME_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_TIMING_RW_TIME_DISCHARGE_START_TIME_1");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_TIMING_RW_TIME_DISCHARGE_STOP_TIME_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_TIMING_RW_TIME_DISCHARGE_STOP_TIME_1");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_TIMING_RW_TIME_DISCHARGE_START_TIME_2:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_TIMING_RW_TIME_DISCHARGE_START_TIME_2");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_TIMING_RW_TIME_DISCHARGE_STOP_TIME_2:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_TIMING_RW_TIME_DISCHARGE_STOP_TIME_2");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_TIMING_RW_CHARGE_CUT_SOC:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_TIMING_RW_CHARGE_CUT_SOC");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_TIMING_RW_TIME_CHARGE_START_TIME_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_TIMING_RW_TIME_CHARGE_START_TIME_1");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_TIMING_RW_TIME_CHARGE_STOP_TIME_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_TIMING_RW_TIME_CHARGE_STOP_TIME_1");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_TIMING_RW_TIME_CHARGE_START_TIME_2:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_TIMING_RW_TIME_CHARGE_START_TIME_2");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_TIMING_RW_TIME_CHARGE_STOP_TIME_2:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_TIMING_RW_TIME_CHARGE_STOP_TIME_2");
 		rs->registerCount = 1;
 		break;
 	}
+#ifdef EMS_35_36
+	case REG_TIMING_RW_TIME_DISCHARGE_START_TIME_1_MIN:
+	{
+		rs->returnDataType = modbusReturnDataType::unsignedShort;
+		rs->registerCount = 1;
+		break;
+	}
+	case REG_TIMING_RW_TIME_DISCHARGE_STOP_TIME_1_MIN:
+	{
+		rs->returnDataType = modbusReturnDataType::unsignedShort;
+		rs->registerCount = 1;
+		break;
+	}
+	case REG_TIMING_RW_TIME_DISCHARGE_START_TIME_2_MIN:
+	{
+		rs->returnDataType = modbusReturnDataType::unsignedShort;
+		rs->registerCount = 1;
+		break;
+	}
+	case REG_TIMING_RW_TIME_DISCHARGE_STOP_TIME_2_MIN:
+	{
+		rs->returnDataType = modbusReturnDataType::unsignedShort;
+		rs->registerCount = 1;
+		break;
+	}
+	case REG_TIMING_RW_TIME_CHARGE_START_TIME_1_MIN:
+	{
+		rs->returnDataType = modbusReturnDataType::unsignedShort;
+		rs->registerCount = 1;
+		break;
+	}
+	case REG_TIMING_RW_TIME_CHARGE_STOP_TIME_1_MIN:
+	{
+		rs->returnDataType = modbusReturnDataType::unsignedShort;
+		rs->registerCount = 1;
+		break;
+	}
+	case REG_TIMING_RW_TIME_CHARGE_START_TIME_2_MIN:
+	{
+		rs->returnDataType = modbusReturnDataType::unsignedShort;
+		rs->registerCount = 1;
+		break;
+	}
+	case REG_TIMING_RW_TIME_CHARGE_STOP_TIME_2_MIN:
+	{
+		rs->returnDataType = modbusReturnDataType::unsignedShort;
+		rs->registerCount = 1;
+		break;
+	}
+#endif // EMS_35_36
 	case REG_DISPATCH_RW_DISPATCH_START:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_DISPATCH_RW_DISPATCH_START");
 		rs->registerCount = 1;
-		rs->hasLookup = true;
+//		rs->hasLookup = true;
 		break;
 	}
 	case REG_DISPATCH_RW_ACTIVE_POWER_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_DISPATCH_RW_ACTIVE_POWER_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_DISPATCH_RW_REACTIVE_POWER_1:
 	{
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_DISPATCH_RW_REACTIVE_POWER_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_DISPATCH_RW_DISPATCH_MODE:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_DISPATCH_RW_DISPATCH_MODE");
 		rs->registerCount = 1;
-		rs->hasLookup = true;
+//		rs->hasLookup = true;
 		break;
 	}
 	case REG_DISPATCH_RW_DISPATCH_SOC:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_DISPATCH_RW_DISPATCH_SOC");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_DISPATCH_RW_DISPATCH_TIME_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_DISPATCH_RW_DISPATCH_TIME_1");
 		rs->registerCount = 2;
 		break;
 	}
-
-
-
+	case REG_DISPATCH_RW_DISPATCH_PARA_7:
+	{
+		rs->returnDataType = modbusReturnDataType::unsignedShort;
+		rs->registerCount = 1;
+		break;
+	}
+	case REG_DISPATCH_RW_DISPATCH_PARA_8:
+	{
+		rs->returnDataType = modbusReturnDataType::unsignedShort;
+		rs->registerCount = 1;
+		break;
+	}
 	case REG_AUXILIARY_R_EMS_DI0:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_AUXILIARY_R_EMS_DI0");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_AUXILIARY_R_EMS_DI1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_AUXILIARY_R_EMS_DI1");
 		rs->registerCount = 1;
 		break;
 	}
 	case REG_SYSTEM_OP_R_PV_INVERTER_ENERGY_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_SYSTEM_OP_R_PV_INVERTER_ENERGY_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_SYSTEM_OP_R_SYSTEM_TOTAL_PV_ENERGY_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_SYSTEM_OP_R_SYSTEM_TOTAL_PV_ENERGY_1");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_SYSTEM_OP_R_SYSTEM_FAULT_1:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedInt;
-		strcpy(rs->mqttName, "REG_SYSTEM_OP_R_SYSTEM_FAULT_1");
 		rs->registerCount = 2;
-		rs->hasLookup = true;
+//		rs->hasLookup = true;
 		break;
 	}
-
 	case REG_SAFETY_TEST_RW_GRID_REGULATION:
 	{
 		rs->returnDataType = modbusReturnDataType::unsignedShort;
-		strcpy(rs->mqttName, "REG_SAFETY_TEST_RW_GRID_REGULATION");
 		rs->registerCount = 1;
-		rs->hasLookup = true;
+//		rs->hasLookup = true;
 		break;
 	}
-
 	case REG_CUSTOM_SYSTEM_DATE_TIME:
 	{
 		// Custom, going to do the date/time formatting, so swap back to register for YEAR/MONTH and pull 3 bytes.
 		rs->returnDataType = modbusReturnDataType::character;
-		strcpy(rs->mqttName, "REG_CUSTOM_SYSTEM_DATE_TIME");
 		rs->registerCount = 3;
 		break;
 	}
-
 	case REG_CUSTOM_LOAD:
 	{
 		// Custom, derive a load using a combination of registers to substitute lack of load from a data register
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_CUSTOM_LOAD");
 		rs->registerCount = 2;
 		break;
 	}
-
 	case REG_CUSTOM_GRID_CURRENT_A_PHASE:
 	{
 		// Custom, derive a grid current using grid power / grid voltage, seeing as REG_GRID_METER_R_CURRENT_OF_A_PHASE is always zero for me
 		rs->returnDataType = modbusReturnDataType::signedShort;
-		strcpy(rs->mqttName, "REG_CUSTOM_GRID_CURRENT_A_PHASE");
 		rs->registerCount = 1;
 		break;
 	}
-
 	case REG_CUSTOM_TOTAL_SOLAR_POWER:
 	{
 		// Custom, derive a safe total solar power using figures from either PV CT or in the case of hybrids, from the individual PV strings too.
 		rs->returnDataType = modbusReturnDataType::signedInt;
-		strcpy(rs->mqttName, "REG_CUSTOM_TOTAL_SOLAR_POWER");
 		rs->registerCount = 2;
 		break;
 	}
-
-	
-
 	default:
 	{
 		// Not a valid register we have written code to handle, do something here to prevent the send
@@ -1909,7 +1772,10 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			if (result == modbusRequestAndResponseStatusValues::preProcessing)
 			{
 				// Generate a frame without CRC (ending 0, 0), sendModbus will do the rest
-				uint8_t	frame[] = { ALPHA_SLAVE_ID, MODBUS_FN_READDATAREGISTER, registerAddressToSend >> 8, registerAddressToSend & 0xff, 0, rs->registerCount, 0, 0 };
+				uint8_t	frame[] = { ALPHA_SLAVE_ID, MODBUS_FN_READDATAREGISTER,
+						    (uint8_t)((registerAddressToSend >> 8) & 0xff), (uint8_t)(registerAddressToSend & 0xff),
+						    0, rs->registerCount,
+						    0, 0 };
 
 				// And send to the device, it's all synchronos so by the time we get a response we will know if success or failure
 				result = _modBus->sendModbus(frame, sizeof(frame), rs);
@@ -1952,6 +1818,12 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 		{
 			rs->signedShortValue = (int16_t)(rs->data[0] << 8 | rs->data[1]);
 			strcpy(rs->returnDataTypeDesc, MODBUS_RETURN_DATA_TYPE_SIGNED_SHORT_DESC);
+			break;
+		}
+		case modbusReturnDataType::notDefined:
+		{
+			strcpy(rs->returnDataTypeDesc, MODBUS_RETURN_DATA_TYPE_NOT_DEFINED_DESC);
+			result = modbusRequestAndResponseStatusValues::notHandledRegister;
 			break;
 		}
 		}
@@ -2043,7 +1915,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 		{
 			// Type: Unsigned Short
 			// 0.01Hz
-			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedShortValue * 0.01);
+			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedShortValue * FREQUENCY_MULTIPLIER);
 			break;
 		}
 		case REG_GRID_METER_R_ACTIVE_POWER_OF_A_PHASE_1:
@@ -2051,7 +1923,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1W/bit
 			// Minus = feeding, Positive = drawing
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -2060,7 +1932,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1W/bit
 			// Minus = feeding, Positive = drawing
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -2069,7 +1941,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1W/bit
 			// Minus = feeding, Positive = drawing
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -2078,7 +1950,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1W/bit
 			// Minus = feeding, Positive = drawing
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -2087,7 +1959,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1var
 			// Always zero for me
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -2096,7 +1968,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1var
 			// Always zero for me
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -2105,7 +1977,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1var
 			// Always zero for me
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -2114,7 +1986,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1var
 			// Always zero for me
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -2123,7 +1995,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1VA
 			// Always zero for me
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -2132,7 +2004,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1VA
 			// Always zero for me
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -2141,7 +2013,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1VA
 			// Always zero for me
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -2150,7 +2022,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1VA
 			// Always zero for me
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -2272,7 +2144,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 		{
 			// Type: Unsigned Short
 			// 0.01Hz
-			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedShortValue * 0.01);
+			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedShortValue * FREQUENCY_MULTIPLIER);
 			break;
 		}
 		case REG_PV_METER_R_ACTIVE_POWER_OF_A_PHASE_1:
@@ -2281,7 +2153,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// 1W/bit
 			// Current generation
 			// Positive = PV generating / In theory should never be negative.
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -2291,7 +2163,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// 1W/bit
 			// Current generation
 			// Positive = PV generating / In theory should never be negative.
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -2301,7 +2173,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// 1W/bit
 			// Current generation
 			// Positive = PV generating / In theory should never be negative.
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -2311,7 +2183,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// 1W/bit
 			// Current generation
 			// Positive = PV generating / In theory should never be negative.
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -2320,7 +2192,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1var
 			// Always zero for me
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -2329,7 +2201,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1var
 			// Always zero for me
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -2338,7 +2210,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1var
 			// Always zero for me
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -2347,7 +2219,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1var
 			// Always zero for me
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -2356,7 +2228,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1VA
 			// Always zero for me
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -2365,7 +2237,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1VA
 			// Always zero for me
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -2374,7 +2246,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1VA
 			// Always zero for me
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -2383,7 +2255,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1VA
 			// Always zero for me
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -2438,7 +2310,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 		{
 			// Type: Unsigned Short
 			// 0.1/bit
-			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedShortValue * 0.1);
+			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedShortValue * BATTERY_SOC_MULTIPLIER);
 			break;
 		}
 		case REG_BATTERY_HOME_R_STATUS:
@@ -2588,7 +2460,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Short
 			// 0.001D/bit
 			// ###HERE###
-			sprintf(rs->dataValueFormatted, "%0.02f", rs->signedShortValue * 0.1);
+			sprintf(rs->dataValueFormatted, "%0.02f", rs->signedShortValue * BATTERY_TEMP_MULTIPLIER);
 			break;
 		}
 		case REG_BATTERY_HOME_R_PACK_ID_OF_MAX_CELL_TEMPERATURE:
@@ -2612,7 +2484,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Short
 			// 0.001D/bit
 			// ###HERE###
-			sprintf(rs->dataValueFormatted, "%0.02f", rs->signedShortValue * 0.1);
+			sprintf(rs->dataValueFormatted, "%0.02f", rs->signedShortValue * BATTERY_TEMP_MULTIPLIER);
 			break;
 		}
 		case REG_BATTERY_HOME_R_MAX_CHARGE_CURRENT:
@@ -2684,7 +2556,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Short
 			// 0.1kWh/bit
 			// 114 so 11.4, correct for me
-			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedShortValue * 0.1);
+			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedShortValue * BATTERY_KWH_MULTIPLIER);
 			break;
 		}
 		case REG_BATTERY_HOME_R_BATTERY_TYPE:
@@ -2744,6 +2616,11 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 				strcpy(rs->dataValueFormatted, BATTERY_TYPE_SMILE_BAT_13_7P_DESC);
 				break;
 			}
+			case BATTERY_TYPE_SMILE_BAT_8_2_PHA:
+			{
+				strcpy(rs->dataValueFormatted, BATTERY_TYPE_SMILE_BAT_8_2_PHA_DESC);
+				break;
+			}
 			default:
 			{
 				strcpy(rs->dataValueFormatted, "Unknown");
@@ -2763,9 +2640,33 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 		case REG_BATTERY_HOME_R_BATTERY_WARNING_1:
 		{
 			// Type: Unsigned Integer
-			// Reserve
-			// Zero for me, or warning is actually zero, so I cannot confirm
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			// <<Note28 - Battery Warning>>
+			if (rs->unsignedIntValue == 0) {
+				strcpy(rs->dataValueFormatted, "0");
+			} else {
+				const char *warning;
+				if (rs->unsignedIntValue & 0b00000000000000000000000000000001)
+					warning = BATTERY_WARNING_BIT_0;
+				else if (rs->unsignedIntValue & 0b00000000000000000000000000000010)
+					warning = BATTERY_WARNING_BIT_1;
+				else if (rs->unsignedIntValue & 0b00000000000000000000000000000100)
+					warning = BATTERY_WARNING_BIT_2;
+				else if (rs->unsignedIntValue & 0b00000000000000000000000000001000)
+					warning = BATTERY_WARNING_BIT_3;
+				else if (rs->unsignedIntValue & 0b00000000000000000000000000010000)
+					warning = BATTERY_WARNING_BIT_4;
+				else if (rs->unsignedIntValue & 0b00000000000000000000000000100000)
+					warning = BATTERY_WARNING_BIT_5;
+				else if (rs->unsignedIntValue & 0b00000000000000000000000001000000)
+					warning = BATTERY_WARNING_BIT_6;
+				else if (rs->unsignedIntValue & 0b00000000000000000000000010000000)
+					warning = BATTERY_WARNING_BIT_7;
+				else if (rs->unsignedIntValue & 0b00000000000000000000000100000000)
+					warning = BATTERY_WARNING_BIT_8;
+				else
+					warning = "Unknown";
+				snprintf(rs->dataValueFormatted, sizeof(rs->dataValueFormatted), "0x%lX - %s", rs->unsignedIntValue, warning);
+			}
 			break;
 		}
 
@@ -2773,70 +2674,78 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 		{
 			// Type: Unsigned Integer
 			// <<Note4 - BATTERY ERROR LOOKUP>>
-			if (rs->unsignedIntValue & 0b00000000000000000000000000000001)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_0);
-			else if (rs->unsignedIntValue & 0b00000000000000000000000000000010)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_1);
-			else if (rs->unsignedIntValue & 0b00000000000000000000000000000100)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_2);
-			else if (rs->unsignedIntValue & 0b00000000000000000000000000001000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_3);
-			else if (rs->unsignedIntValue & 0b00000000000000000000000000010000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_4);
-			else if (rs->unsignedIntValue & 0b00000000000000000000000000100000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_5);
-			else if (rs->unsignedIntValue & 0b00000000000000000000000001000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_6);
-			else if (rs->unsignedIntValue & 0b00000000000000000000000010000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_7);
-			else if (rs->unsignedIntValue & 0b00000000000000000000000100000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_8);
-			else if (rs->unsignedIntValue & 0b00000000000000000000001000000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_9);
-			else if (rs->unsignedIntValue & 0b00000000000000000000010000000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_10);
-			else if (rs->unsignedIntValue & 0b00000000000000000000100000000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_11);
-			else if (rs->unsignedIntValue & 0b00000000000000000001000000000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_12);
-			else if (rs->unsignedIntValue & 0b00000000000000000010000000000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_13);
-			else if (rs->unsignedIntValue & 0b00000000000000000100000000000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_14);
-			else if (rs->unsignedIntValue & 0b00000000000000001000000000000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_15);
-			else if (rs->unsignedIntValue & 0b00000000000000010000000000000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_16);
-			else if (rs->unsignedIntValue & 0b00000000000000100000000000000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_17);
-			else if (rs->unsignedIntValue & 0b00000000000001000000000000000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_18);
-			else if (rs->unsignedIntValue & 0b00000000000010000000000000000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_19);
-			else if (rs->unsignedIntValue & 0b00000000000100000000000000000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_20);
-			else if (rs->unsignedIntValue & 0b00000000001000000000000000000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_21);
-			else if (rs->unsignedIntValue & 0b00000000010000000000000000000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_22);
-			else if (rs->unsignedIntValue & 0b00000000100000000000000000000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_23);
-			else if (rs->unsignedIntValue & 0b00000001000000000000000000000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_24);
-			else if (rs->unsignedIntValue & 0b00000010000000000000000000000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_25);
-			else if (rs->unsignedIntValue & 0b00000100000000000000000000000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_26);
-			else if (rs->unsignedIntValue & 0b00001000000000000000000000000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_27);
-			else if (rs->unsignedIntValue & 0b00010000000000000000000000000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_28);
-			else if (rs->unsignedIntValue & 0b00100000000000000000000000000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_29);
-			else if (rs->unsignedIntValue & 0b01000000000000000000000000000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_30);
-			else if (rs->unsignedIntValue & 0b10000000000000000000000000000000)
-				strcpy(rs->dataValueFormatted, BATTERY_ERROR_BIT_31);
+			if (rs->unsignedIntValue == 0) {
+				strcpy(rs->dataValueFormatted, "0");
+			} else {
+				const char *fault;
+				if (rs->unsignedIntValue & 0b00000000000000000000000000000001)
+					fault = BATTERY_ERROR_BIT_0;
+				else if (rs->unsignedIntValue & 0b00000000000000000000000000000010)
+					fault = BATTERY_ERROR_BIT_1;
+				else if (rs->unsignedIntValue & 0b00000000000000000000000000000100)
+					fault = BATTERY_ERROR_BIT_2;
+				else if (rs->unsignedIntValue & 0b00000000000000000000000000001000)
+					fault = BATTERY_ERROR_BIT_3;
+				else if (rs->unsignedIntValue & 0b00000000000000000000000000010000)
+					fault = BATTERY_ERROR_BIT_4;
+				else if (rs->unsignedIntValue & 0b00000000000000000000000000100000)
+					fault = BATTERY_ERROR_BIT_5;
+				else if (rs->unsignedIntValue & 0b00000000000000000000000001000000)
+					fault = BATTERY_ERROR_BIT_6;
+				else if (rs->unsignedIntValue & 0b00000000000000000000000010000000)
+					fault = BATTERY_ERROR_BIT_7;
+				else if (rs->unsignedIntValue & 0b00000000000000000000000100000000)
+					fault = BATTERY_ERROR_BIT_8;
+				else if (rs->unsignedIntValue & 0b00000000000000000000001000000000)
+					fault = BATTERY_ERROR_BIT_9;
+				else if (rs->unsignedIntValue & 0b00000000000000000000010000000000)
+					fault = BATTERY_ERROR_BIT_10;
+				else if (rs->unsignedIntValue & 0b00000000000000000000100000000000)
+					fault = BATTERY_ERROR_BIT_11;
+				else if (rs->unsignedIntValue & 0b00000000000000000001000000000000)
+					fault = BATTERY_ERROR_BIT_12;
+				else if (rs->unsignedIntValue & 0b00000000000000000010000000000000)
+					fault = BATTERY_ERROR_BIT_13;
+				else if (rs->unsignedIntValue & 0b00000000000000000100000000000000)
+					fault = BATTERY_ERROR_BIT_14;
+				else if (rs->unsignedIntValue & 0b00000000000000001000000000000000)
+					fault = BATTERY_ERROR_BIT_15;
+				else if (rs->unsignedIntValue & 0b00000000000000010000000000000000)
+					fault = BATTERY_ERROR_BIT_16;
+				else if (rs->unsignedIntValue & 0b00000000000000100000000000000000)
+					fault = BATTERY_ERROR_BIT_17;
+				else if (rs->unsignedIntValue & 0b00000000000001000000000000000000)
+					fault = BATTERY_ERROR_BIT_18;
+				else if (rs->unsignedIntValue & 0b00000000000010000000000000000000)
+					fault = BATTERY_ERROR_BIT_19;
+				else if (rs->unsignedIntValue & 0b00000000000100000000000000000000)
+					fault = BATTERY_ERROR_BIT_20;
+				else if (rs->unsignedIntValue & 0b00000000001000000000000000000000)
+					fault = BATTERY_ERROR_BIT_21;
+				else if (rs->unsignedIntValue & 0b00000000010000000000000000000000)
+					fault = BATTERY_ERROR_BIT_22;
+				else if (rs->unsignedIntValue & 0b00000000100000000000000000000000)
+					fault = BATTERY_ERROR_BIT_23;
+				else if (rs->unsignedIntValue & 0b00000001000000000000000000000000)
+					fault = BATTERY_ERROR_BIT_24;
+				else if (rs->unsignedIntValue & 0b00000010000000000000000000000000)
+					fault = BATTERY_ERROR_BIT_25;
+				else if (rs->unsignedIntValue & 0b00000100000000000000000000000000)
+					fault = BATTERY_ERROR_BIT_26;
+				else if (rs->unsignedIntValue & 0b00001000000000000000000000000000)
+					fault = BATTERY_ERROR_BIT_27;
+				else if (rs->unsignedIntValue & 0b00010000000000000000000000000000)
+					fault = BATTERY_ERROR_BIT_28;
+				else if (rs->unsignedIntValue & 0b00100000000000000000000000000000)
+					fault = BATTERY_ERROR_BIT_29;
+				else if (rs->unsignedIntValue & 0b01000000000000000000000000000000)
+					fault = BATTERY_ERROR_BIT_30;
+				else if (rs->unsignedIntValue & 0b10000000000000000000000000000000)
+					fault = BATTERY_ERROR_BIT_31;
+				else
+					fault = "Unknown"; // Shouldn't happen.
+				snprintf(rs->dataValueFormatted, sizeof(rs->dataValueFormatted), "0x%lX - %s", rs->unsignedIntValue, fault);
+			}
 			break;
 		}
 
@@ -2845,7 +2754,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// 0.1kWh/bit
 			// Lifetime charge in kWh
-			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedIntValue * 0.1);
+			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedIntValue * BATTERY_KWH_MULTIPLIER);
 			break;
 		}
 
@@ -2854,7 +2763,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// 0.1kWh/bit
 			// Lifetime discharge in kWh
-			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedIntValue * 0.1);
+			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedIntValue * BATTERY_KWH_MULTIPLIER);
 			break;
 		}
 
@@ -2863,7 +2772,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// 0.1kWh/bit
 			// Lifetime charge from grid in kWh
-			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedIntValue * 0.1);
+			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedIntValue * BATTERY_KWH_MULTIPLIER);
 			break;
 		}
 
@@ -2888,7 +2797,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Short
 			// 0.1/bit (Rate_SOC UPS_SOC)
 			// Zero for me, however cannot verify as not sure purpose
-			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedShortValue * 0.1);
+			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedShortValue * BATTERY_SOC_MULTIPLIER);
 			break;
 		}
 		case REG_BATTERY_HOME_R_BATTERY_IMPLEMENTATION_DISCHARGE_SOC:
@@ -2896,7 +2805,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Short
 			// 0.1/bit (Rate_SOC UPS_SOC)
 			// Zero for me, however cannot verify as not sure purpose
-			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedShortValue * 0.1);
+			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedShortValue * BATTERY_SOC_MULTIPLIER);
 			break;
 		}
 		case REG_BATTERY_HOME_R_BATTERY_REMAINING_CHARGE_SOC:
@@ -2904,7 +2813,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Short
 			// 0.1/bit (Rate_SOC Remain_SOC)
 			// Zero for me, however cannot verify as not sure purpose
-			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedShortValue * 0.1);
+			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedShortValue * BATTERY_SOC_MULTIPLIER);
 			break;
 		}
 		case REG_BATTERY_HOME_R_BATTERY_REMAINING_DISCHARGE_SOC:
@@ -2912,7 +2821,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Short
 			// 0.1/bit (Remain_SOC UPS_SOC)
 			// Zero for me, however cannot verify as not sure purpose
-			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedShortValue * 0.1);
+			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedShortValue * BATTERY_SOC_MULTIPLIER);
 			break;
 		}
 		case REG_BATTERY_HOME_R_BATTERY_MAX_CHARGE_POWER:
@@ -2966,7 +2875,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// //
 			// Zero for me at present, unable to verify
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -2975,7 +2884,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// //
 			// Zero for me at present, unable to verify
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -2984,7 +2893,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// //
 			// Zero for me at present, unable to verify
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -2993,7 +2902,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// //
 			// Zero for me at present, unable to verify
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3002,7 +2911,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// //
 			// Zero for me at present, unable to verify
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3011,7 +2920,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// //
 			// Zero for me at present, unable to verify
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3020,7 +2929,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// //
 			// Zero for me at present, unable to verify
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3029,7 +2938,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// //
 			// Zero for me at present, unable to verify
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3038,7 +2947,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// //
 			// Zero for me at present, unable to verify
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3047,7 +2956,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// //
 			// Zero for me at present, unable to verify
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3056,7 +2965,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// //
 			// Zero for me at present, unable to verify
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3065,7 +2974,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// //
 			// Zero for me at present, unable to verify
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3120,7 +3029,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1W/bit
 			// My B3 returns a number I don't recognise.  It's load of house or battery related but doesn't match the web interface
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -3129,7 +3038,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1W/bit
 			// Zero for me
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -3138,7 +3047,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1W/bit
 			// Zero for me
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -3147,7 +3056,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1W/bit
 			// My B3 returns 65526.  Or 65.526kW  What the?
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -3202,7 +3111,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 		{
 			// Type: Unsigned Integer
 			// 1W/bit
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3211,7 +3120,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// 1W/bit
 			// Zero for me
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3220,7 +3129,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// 1W/bit
 			// Zero for me
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3228,7 +3137,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 		{
 			// Type: Unsigned Integer
 			// 1W/bit
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3236,7 +3145,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 		{
 			// Type: Unsigned Short
 			// 0.1Hz/bit
-			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedShortValue * 0.01);
+			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedShortValue * FREQUENCY_MULTIPLIER);
 			break;
 		}
 		case REG_INVERTER_HOME_R_PV1_VOLTAGE:
@@ -3260,7 +3169,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// 1W/bit
 			// Zero for me
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3285,7 +3194,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// 1W/bit
 			// Zero for me
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3310,7 +3219,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// 1W/bit
 			// Zero for me
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3335,7 +3244,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// 1W/bit
 			// Zero for me
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3360,7 +3269,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// 1W/bit
 			// Zero for me
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3385,7 +3294,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// 1W/bit
 			// Zero for me
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3401,7 +3310,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 		{
 			// Type: Unsigned Integer
 			// Reserve
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3409,7 +3318,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 		{
 			// Type: Unsigned Integer
 			// Reserve
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3417,7 +3326,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 		{
 			// Type: Unsigned Integer
 			// Reserve
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3425,7 +3334,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 		{
 			// Type: Unsigned Integer
 			// Reserve
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3504,11 +3413,103 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			}
 			break;
 		}
+#ifdef EMS_35_36
+		case REG_INVERTER_HOME_R_INVERTER_BAT_VOLTAGE:
+		{
+			// Type: Unsigned Short
+			// 1V/bit
+			sprintf(rs->dataValueFormatted, "%u", rs->unsignedShortValue);
+			break;
+		}
+		case REG_INVERTER_HOME_R_INVERTER_BAT_CURRENT:
+		{
+			// Type: Unsigned Short
+			// 0.1A/bit
+			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedShortValue * 0.1);
+			break;
+		}
+		case REG_INVERTER_HOME_R_INVERTER_BAT_POWER:
+		{
+			// Type: Signed Short
+			// 1W/bit
+			sprintf(rs->dataValueFormatted, "%d", rs->signedShortValue);
+			break;
+		}
+		case REG_INVERTER_HOME_R_INVERTER_TOTAL_REACT_POWER_1:
+		{
+			// Type: Signed Int
+			// 1W/bit
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
+			break;
+		}
+		case REG_INVERTER_HOME_R_INVERTER_TOTAL_APPARENT_POWER_1:
+		{
+			// Type: Signed Int
+			// 1W/bit
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
+			break;
+		}
+		case REG_INVERTER_HOME_R_INVERTER_FREQUENCY:
+		{
+			// Type: Unsigned Short
+			// 0.01Hz/bit
+			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedShortValue * FREQUENCY_MULTIPLIER);
+			break;
+		}
+		case REG_INVERTER_HOME_R_INVERTER_BACKUP_FREQUENCY:
+		{
+			// Type: Unsigned Short
+			// 0.01Hz/bit
+			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedShortValue * FREQUENCY_MULTIPLIER);
+			break;
+		}
+		case REG_INVERTER_HOME_R_INVERTER_POWER_FACTOR:
+		{
+			// Type: Signed Short
+			// 0.01/bit
+			sprintf(rs->dataValueFormatted, "%0.02f", rs->signedShortValue * 0.01);
+			break;
+		}
+		case REG_INVERTER_HOME_R_INVERTER_FAULT_EXTEND_1_1:
+		{
+			// Type: Unsigned Int
+			// Note 27 : XXX TBD XXX
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
+			break;
+		}
+		case REG_INVERTER_HOME_R_INVERTER_FAULT_EXTEND_2_1:
+		{
+			// Type: Unsigned Int
+			// Note 27 : XXX TBD XXX
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
+			break;
+		}
+		case REG_INVERTER_HOME_R_INVERTER_FAULT_EXTEND_3_1:
+		{
+			// Type: Unsigned Int
+			// Reserve
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
+			break;
+		}
+		case REG_INVERTER_HOME_R_INVERTER_FAULT_EXTEND_4_1:
+		{
+			// Type: Unsigned Int
+			// Reserve
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
+			break;
+		}
+#endif // EMS_35_36
+		case REG_INVERTER_HOME_R_PV_TOTAL_POWER_1:
+		{
+			// Type: Unsigned Integer
+			// 1W/bit
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
+			break;
+		}
 		case REG_INVERTER_INFO_R_MASTER_SOFTWARE_VERSION_1:
 		{
 			// Type: Unsigned Char
 			// //
-			// Brings back nothing
 			strcpy(rs->dataValueFormatted, rs->characterValue);
 			break;
 		}
@@ -3520,7 +3521,6 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 		{
 			// Type: Unsigned Char
 			// //
-			// Brings back nothing
 			strcpy(rs->dataValueFormatted, rs->characterValue);
 			break;
 		}
@@ -3532,12 +3532,33 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 		{
 			// Type: Unsigned Char
 			// //
-			// Brings back nothing
+			strcpy(rs->dataValueFormatted, rs->characterValue);
+			break;
+		}
+
+		case REG_INVERTER_INFO_R_ARM_SOFTWARE_VERSION_1:
+		{
+			// Type: Unsigned Char
+			// //
 			strcpy(rs->dataValueFormatted, rs->characterValue);
 			break;
 		}
 
 
+		case REG_SYSTEM_INFO_RW_FEED_INTO_GRID_PERCENT:
+		{
+			// Type: Unsigned Short
+			// 1%/bit
+			sprintf(rs->dataValueFormatted, "%u", rs->unsignedShortValue);
+			break;
+		}
+		case REG_SYSTEM_INFO_R_SYSTEM_FAULT:
+		{
+			// Type: Unsigned Integer
+			// Note 6 : XXX TBD XXX
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
+			break;
+		}
 		case REG_SYSTEM_INFO_RW_SYSTEM_TIME_YEAR_MONTH:
 		{
 			// Type: Unsigned Short
@@ -3603,6 +3624,13 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			sprintf(rs->dataValueFormatted, "%u", rs->unsignedShortValue);
 			break;
 		}
+		case REG_SYSTEM_INFO_R_EMS_VERSION_LOW_SUFFIX_1:
+		{
+			// Type: Unsigned Char
+			// //
+			strcpy(rs->dataValueFormatted, rs->characterValue);
+			break;
+		}
 		case REG_SYSTEM_CONFIG_RW_MAX_FEED_INTO_GRID_PERCENT:
 		{
 			// Type: Unsigned Short
@@ -3615,7 +3643,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// 1W/bit
 			// Always returns zero for me
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3624,7 +3652,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Unsigned Integer
 			// 1W/bit
 			// Returns the PV capacity as defined on the web site
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
 			break;
 		}
 
@@ -3912,6 +3940,64 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			sprintf(rs->dataValueFormatted, "%u", rs->unsignedShortValue);
 			break;
 		}
+#ifdef EMS_35_36
+		case REG_TIMING_RW_TIME_DISCHARGE_START_TIME_1_MIN:
+		{
+			// Type: Unsigned Short
+			// 1min/bit
+			sprintf(rs->dataValueFormatted, "%u", rs->unsignedShortValue);
+			break;
+		}
+		case REG_TIMING_RW_TIME_DISCHARGE_STOP_TIME_1_MIN:
+		{
+			// Type: Unsigned Short
+			// 1min/bit
+			sprintf(rs->dataValueFormatted, "%u", rs->unsignedShortValue);
+			break;
+		}
+		case REG_TIMING_RW_TIME_DISCHARGE_START_TIME_2_MIN:
+		{
+			// Type: Unsigned Short
+			// 1min/bit
+			sprintf(rs->dataValueFormatted, "%u", rs->unsignedShortValue);
+			break;
+		}
+		case REG_TIMING_RW_TIME_DISCHARGE_STOP_TIME_2_MIN:
+		{
+			// Type: Unsigned Short
+			// 1min/bit
+			sprintf(rs->dataValueFormatted, "%u", rs->unsignedShortValue);
+			break;
+		}
+		case REG_TIMING_RW_TIME_CHARGE_START_TIME_1_MIN:
+		{
+			// Type: Unsigned Short
+			// 1min/bit
+			sprintf(rs->dataValueFormatted, "%u", rs->unsignedShortValue);
+			break;
+		}
+		case REG_TIMING_RW_TIME_CHARGE_STOP_TIME_1_MIN:
+		{
+			// Type: Unsigned Short
+			// 1min/bit
+			sprintf(rs->dataValueFormatted, "%u", rs->unsignedShortValue);
+			break;
+		}
+		case REG_TIMING_RW_TIME_CHARGE_START_TIME_2_MIN:
+		{
+			// Type: Unsigned Short
+			// 1min/bit
+			sprintf(rs->dataValueFormatted, "%u", rs->unsignedShortValue);
+			break;
+		}
+		case REG_TIMING_RW_TIME_CHARGE_STOP_TIME_2_MIN:
+		{
+			// Type: Unsigned Short
+			// 1min/bit
+			sprintf(rs->dataValueFormatted, "%u", rs->unsignedShortValue);
+			break;
+		}
+#endif // EMS_35_36
 		case REG_DISPATCH_RW_DISPATCH_START:
 		{
 			// Type: Unsigned Short
@@ -3941,7 +4027,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1W/bit Offset: 32000 load<32000
 
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 
 			break;
 		}
@@ -3951,7 +4037,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1Var/bit Offset: 32000 load<32000
 
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -3966,14 +4052,9 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 				strcpy(rs->dataValueFormatted, DISPATCH_MODE_BATTERY_ONLY_CHARGED_VIA_PV_DESC);
 				break;
 			}
-			case DISPATCH_MODE_ECO_MODE:
+			case DISPATCH_MODE_STATE_OF_CHARGE_CONTROL:
 			{
-				strcpy(rs->dataValueFormatted, DISPATCH_MODE_ECO_MODE_DESC);
-				break;
-			}
-			case DISPATCH_MODE_FCAS_MODE:
-			{
-				strcpy(rs->dataValueFormatted, DISPATCH_MODE_FCAS_MODE_DESC);
+				strcpy(rs->dataValueFormatted, DISPATCH_MODE_STATE_OF_CHARGE_CONTROL_DESC);
 				break;
 			}
 			case DISPATCH_MODE_LOAD_FOLLOWING:
@@ -3981,9 +4062,9 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 				strcpy(rs->dataValueFormatted, DISPATCH_MODE_LOAD_FOLLOWING_DESC);
 				break;
 			}
-			case DISPATCH_MODE_MAXIMISE_CONSUMPTION:
+			case DISPATCH_MODE_MAXIMISE_OUTPUT:
 			{
-				strcpy(rs->dataValueFormatted, DISPATCH_MODE_MAXIMISE_CONSUMPTION_DESC);
+				strcpy(rs->dataValueFormatted, DISPATCH_MODE_MAXIMISE_OUTPUT_DESC);
 				break;
 			}
 			case DISPATCH_MODE_NORMAL_MODE:
@@ -3996,14 +4077,34 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 				strcpy(rs->dataValueFormatted, DISPATCH_MODE_OPTIMISE_CONSUMPTION_DESC);
 				break;
 			}
+			case DISPATCH_MODE_MAXIMISE_CONSUMPTION:
+			{
+				strcpy(rs->dataValueFormatted, DISPATCH_MODE_MAXIMISE_CONSUMPTION_DESC);
+				break;
+			}
+			case DISPATCH_MODE_ECO_MODE:
+			{
+				strcpy(rs->dataValueFormatted, DISPATCH_MODE_ECO_MODE_DESC);
+				break;
+			}
+			case DISPATCH_MODE_FCAS_MODE:
+			{
+				strcpy(rs->dataValueFormatted, DISPATCH_MODE_FCAS_MODE_DESC);
+				break;
+			}
 			case DISPATCH_MODE_PV_POWER_SETTING:
 			{
 				strcpy(rs->dataValueFormatted, DISPATCH_MODE_PV_POWER_SETTING_DESC);
 				break;
 			}
-			case DISPATCH_MODE_STATE_OF_CHARGE_CONTROL:
+			case DISPATCH_MODE_NO_BATTERY_CHARGE:
 			{
-				strcpy(rs->dataValueFormatted, DISPATCH_MODE_STATE_OF_CHARGE_CONTROL_DESC);
+				strcpy(rs->dataValueFormatted, DISPATCH_MODE_NO_BATTERY_CHARGE_DESC);
+				break;
+			}
+			case DISPATCH_MODE_BURNIN_MODE:
+			{
+				strcpy(rs->dataValueFormatted, DISPATCH_MODE_BURNIN_MODE_DESC);
 				break;
 			}
 			default:
@@ -4013,21 +4114,34 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			}
 			}
 			break;
-
 		}
 		case REG_DISPATCH_RW_DISPATCH_SOC:
 		{
 			// Type: Unsigned Short
 			// 0.4%/bit, 95=SOC of 38%
 			// Reduce it back to a percent
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedShortValue * DISPATCH_SOC_MULTIPLIER);
+			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedShortValue * DISPATCH_SOC_MULTIPLIER);
 			break;
 		}
 		case REG_DISPATCH_RW_DISPATCH_TIME_1:
 		{
 			// Type: Unsigned Integer
 			// 1S/bit
-			sprintf(rs->dataValueFormatted, "%u", rs->unsignedIntValue);
+			sprintf(rs->dataValueFormatted, "%lu", rs->unsignedIntValue);
+			break;
+		}
+		case REG_DISPATCH_RW_DISPATCH_PARA_7:
+		{
+			// Type: Unsigned Short
+			//
+			sprintf(rs->dataValueFormatted, "%u", rs->unsignedShortValue);
+			break;
+		}
+		case REG_DISPATCH_RW_DISPATCH_PARA_8:
+		{
+			// Type: Unsigned Short
+			//
+			sprintf(rs->dataValueFormatted, "%u", rs->unsignedShortValue);
 			break;
 		}
 
@@ -4054,7 +4168,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// 0.1kWh/bit
 			// Zero for me.  Multiplier is *presumably* wrong in documentation, see below
 			// ###HERE###
-			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedIntValue * TOTAL_ENERGY_MUTLIPLIER);
+			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedIntValue * TOTAL_ENERGY_MULTIPLIER);
 			break;
 		}
 
@@ -4064,7 +4178,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// 0.1kWh/bit
 			// My value was 308695, and according to web interface my total PV is 3086kWh, so multiplier seems wrong
 			// ###HERE###
-			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedIntValue * TOTAL_ENERGY_MUTLIPLIER);
+			sprintf(rs->dataValueFormatted, "%0.02f", rs->unsignedIntValue * TOTAL_ENERGY_MULTIPLIER);
 			break;
 		}
 
@@ -4072,106 +4186,115 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 		{
 			// Type: Unsigned Integer
 			// <<Note6 - SYSTEM ERROR LOOKUP>>
-			if (_serialNumberPrefix[0] == 'A' && _serialNumberPrefix[1] == 'L')
-			{
-				if (rs->unsignedIntValue & 0b00000000000000000000000000000001)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AL_BIT_0);
-				else if (rs->unsignedIntValue & 0b00000000000000000000000000000010)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AL_BIT_1);
-				else if (rs->unsignedIntValue & 0b00000000000000000000000000000100)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AL_BIT_2);
-				else if (rs->unsignedIntValue & 0b00000000000000000000000000001000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AL_BIT_3);
-				else if (rs->unsignedIntValue & 0b00000000000000000000000000010000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AL_BIT_4);
-				else if (rs->unsignedIntValue & 0b00000000000000000000000000100000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AL_BIT_5);
-				else if (rs->unsignedIntValue & 0b00000000000000000000000001000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AL_BIT_6);
-				else if (rs->unsignedIntValue & 0b00000000000000000000000010000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AL_BIT_7);
-				else if (rs->unsignedIntValue & 0b00000000000000000000000100000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AL_BIT_8);
-				else if (rs->unsignedIntValue & 0b00000000000000000000001000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AL_BIT_9);
-				else if (rs->unsignedIntValue & 0b00000000000000000000010000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AL_BIT_10);
-				else if (rs->unsignedIntValue & 0b00000000000000000000100000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AL_BIT_11);
-				else if (rs->unsignedIntValue & 0b00000000000000000001000000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AL_BIT_12);
-				else if (rs->unsignedIntValue & 0b00000000000000000001000000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AL_BIT_13);
-				else if (rs->unsignedIntValue & 0b00000000000000000010000000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AL_BIT_14);
-				else if (rs->unsignedIntValue & 0b00000000000000000100000000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AL_BIT_15);
-				else if (rs->unsignedIntValue & 0b00000000000000001000000000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AL_BIT_16);
-				break;
-			}
-			else if (_serialNumberPrefix[0] == 'A' && _serialNumberPrefix[1] == 'E')
-			{
-				if (rs->unsignedIntValue & 0b00000000000000000000000000000001)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_0);
-				else if (rs->unsignedIntValue & 0b00000000000000000000000000000010)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_1);
-				else if (rs->unsignedIntValue & 0b00000000000000000000000000000100)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_2);
-				else if (rs->unsignedIntValue & 0b00000000000000000000000000001000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_3);
-				else if (rs->unsignedIntValue & 0b00000000000000000000000000010000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_4);
-				else if (rs->unsignedIntValue & 0b00000000000000000000000000100000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_5);
-				else if (rs->unsignedIntValue & 0b00000000000000000000000001000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_6);
-				else if (rs->unsignedIntValue & 0b00000000000000000000000010000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_7);
-				else if (rs->unsignedIntValue & 0b00000000000000000000000100000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_8);
-				else if (rs->unsignedIntValue & 0b00000000000000000000001000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_9);
-				else if (rs->unsignedIntValue & 0b00000000000000000000010000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_10);
-				else if (rs->unsignedIntValue & 0b00000000000000000000100000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_11);
-				else if (rs->unsignedIntValue & 0b00000000000000000001000000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_12);
-				else if (rs->unsignedIntValue & 0b00000000000000000010000000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_13);
-				else if (rs->unsignedIntValue & 0b00000000000000000100000000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_14);
-				else if (rs->unsignedIntValue & 0b00000000000000001000000000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_15);
-				else if (rs->unsignedIntValue & 0b00000000000000010000000000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_16);
-				else if (rs->unsignedIntValue & 0b00000000000000100000000000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_17);
-				else if (rs->unsignedIntValue & 0b00000000000001000000000000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_18);
-				else if (rs->unsignedIntValue & 0b00000000000010000000000000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_19);
-				else if (rs->unsignedIntValue & 0b00000000000100000000000000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_20);
-				else if (rs->unsignedIntValue & 0b00000000001000000000000000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_21);
-				else if (rs->unsignedIntValue & 0b00000000010000000000000000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_22);
-				else if (rs->unsignedIntValue & 0b00000000100000000000000000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_23);
-				else if (rs->unsignedIntValue & 0b00000001000000000000000000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_24);
-				else if (rs->unsignedIntValue & 0b00000010000000000000000000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_25);
-				else if (rs->unsignedIntValue & 0b00000100000000000000000000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_26);
-				else if (rs->unsignedIntValue & 0b00001000000000000000000000000000)
-					strcpy(rs->dataValueFormatted, SYSTEM_ERROR_AE_BIT_27);
-				break;
-			}
-			else
-			{
+			if (_serialNumberPrefix[0] == 'A' && _serialNumberPrefix[1] == 'L') {
+				if (rs->unsignedIntValue == 0) {
+					strcpy(rs->dataValueFormatted, "0");
+				} else {
+					const char *error;
+					if (rs->unsignedIntValue & 0b00000000000000000000000000000001)
+						error = SYSTEM_ERROR_AL_BIT_0;
+					else if (rs->unsignedIntValue & 0b00000000000000000000000000000010)
+						error = SYSTEM_ERROR_AL_BIT_1;
+					else if (rs->unsignedIntValue & 0b00000000000000000000000000000100)
+						error = SYSTEM_ERROR_AL_BIT_2;
+					else if (rs->unsignedIntValue & 0b00000000000000000000000000001000)
+						error = SYSTEM_ERROR_AL_BIT_3;
+					else if (rs->unsignedIntValue & 0b00000000000000000000000000010000)
+						error = SYSTEM_ERROR_AL_BIT_4;
+					else if (rs->unsignedIntValue & 0b00000000000000000000000000100000)
+						error = SYSTEM_ERROR_AL_BIT_5;
+					else if (rs->unsignedIntValue & 0b00000000000000000000000001000000)
+						error = SYSTEM_ERROR_AL_BIT_6;
+					else if (rs->unsignedIntValue & 0b00000000000000000000000010000000)
+						error = SYSTEM_ERROR_AL_BIT_7;
+					else if (rs->unsignedIntValue & 0b00000000000000000000000100000000)
+						error = SYSTEM_ERROR_AL_BIT_8;
+					else if (rs->unsignedIntValue & 0b00000000000000000000001000000000)
+						error = SYSTEM_ERROR_AL_BIT_9;
+					else if (rs->unsignedIntValue & 0b00000000000000000000010000000000)
+						error = SYSTEM_ERROR_AL_BIT_10;
+					else if (rs->unsignedIntValue & 0b00000000000000000000100000000000)
+						error = SYSTEM_ERROR_AL_BIT_11;
+					else if (rs->unsignedIntValue & 0b00000000000000000001000000000000)
+						error = SYSTEM_ERROR_AL_BIT_12;
+					else if (rs->unsignedIntValue & 0b00000000000000000010000000000000)
+						error = SYSTEM_ERROR_AL_BIT_13;
+					else if (rs->unsignedIntValue & 0b00000000000000000100000000000000)
+						error = SYSTEM_ERROR_AL_BIT_14;
+					else if (rs->unsignedIntValue & 0b00000000000000001000000000000000)
+						error = SYSTEM_ERROR_AL_BIT_15;
+					else if (rs->unsignedIntValue & 0b00000000000000010000000000000000)
+						error = SYSTEM_ERROR_AL_BIT_16;
+					else
+						error = "Unknown";
+					snprintf(rs->dataValueFormatted, sizeof(rs->dataValueFormatted), "0x%lX - %s", rs->unsignedIntValue, error);
+				}
+			} else if (_serialNumberPrefix[0] == 'A' && _serialNumberPrefix[1] == 'E') {
+				if (rs->unsignedIntValue == 0) {
+					strcpy(rs->dataValueFormatted, "0");
+				} else {
+					const char *error;
+					if (rs->unsignedIntValue & 0b00000000000000000000000000000001)
+						error = SYSTEM_ERROR_AE_BIT_0;
+					else if (rs->unsignedIntValue & 0b00000000000000000000000000000010)
+						error = SYSTEM_ERROR_AE_BIT_1;
+					else if (rs->unsignedIntValue & 0b00000000000000000000000000000100)
+						error = SYSTEM_ERROR_AE_BIT_2;
+					else if (rs->unsignedIntValue & 0b00000000000000000000000000001000)
+						error = SYSTEM_ERROR_AE_BIT_3;
+					else if (rs->unsignedIntValue & 0b00000000000000000000000000010000)
+						error = SYSTEM_ERROR_AE_BIT_4;
+					else if (rs->unsignedIntValue & 0b00000000000000000000000000100000)
+						error = SYSTEM_ERROR_AE_BIT_5;
+					else if (rs->unsignedIntValue & 0b00000000000000000000000001000000)
+						error = SYSTEM_ERROR_AE_BIT_6;
+					else if (rs->unsignedIntValue & 0b00000000000000000000000010000000)
+						error = SYSTEM_ERROR_AE_BIT_7;
+					else if (rs->unsignedIntValue & 0b00000000000000000000000100000000)
+						error = SYSTEM_ERROR_AE_BIT_8;
+					else if (rs->unsignedIntValue & 0b00000000000000000000001000000000)
+						error = SYSTEM_ERROR_AE_BIT_9;
+					else if (rs->unsignedIntValue & 0b00000000000000000000010000000000)
+						error = SYSTEM_ERROR_AE_BIT_10;
+					else if (rs->unsignedIntValue & 0b00000000000000000000100000000000)
+						error = SYSTEM_ERROR_AE_BIT_11;
+					else if (rs->unsignedIntValue & 0b00000000000000000001000000000000)
+						error = SYSTEM_ERROR_AE_BIT_12;
+					else if (rs->unsignedIntValue & 0b00000000000000000010000000000000)
+						error = SYSTEM_ERROR_AE_BIT_13;
+					else if (rs->unsignedIntValue & 0b00000000000000000100000000000000)
+						error = SYSTEM_ERROR_AE_BIT_14;
+					else if (rs->unsignedIntValue & 0b00000000000000001000000000000000)
+						error = SYSTEM_ERROR_AE_BIT_15;
+					else if (rs->unsignedIntValue & 0b00000000000000010000000000000000)
+						error = SYSTEM_ERROR_AE_BIT_16;
+					else if (rs->unsignedIntValue & 0b00000000000000100000000000000000)
+						error = SYSTEM_ERROR_AE_BIT_17;
+					else if (rs->unsignedIntValue & 0b00000000000001000000000000000000)
+						error = SYSTEM_ERROR_AE_BIT_18;
+					else if (rs->unsignedIntValue & 0b00000000000010000000000000000000)
+						error = SYSTEM_ERROR_AE_BIT_19;
+					else if (rs->unsignedIntValue & 0b00000000000100000000000000000000)
+						error = SYSTEM_ERROR_AE_BIT_20;
+					else if (rs->unsignedIntValue & 0b00000000001000000000000000000000)
+						error = SYSTEM_ERROR_AE_BIT_21;
+					else if (rs->unsignedIntValue & 0b00000000010000000000000000000000)
+						error = SYSTEM_ERROR_AE_BIT_22;
+					else if (rs->unsignedIntValue & 0b00000000100000000000000000000000)
+						error = SYSTEM_ERROR_AE_BIT_23;
+					else if (rs->unsignedIntValue & 0b00000001000000000000000000000000)
+						error = SYSTEM_ERROR_AE_BIT_24;
+					else if (rs->unsignedIntValue & 0b00000010000000000000000000000000)
+						error = SYSTEM_ERROR_AE_BIT_25;
+					else if (rs->unsignedIntValue & 0b00000100000000000000000000000000)
+						error = SYSTEM_ERROR_AE_BIT_26;
+					else if (rs->unsignedIntValue & 0b00001000000000000000000000000000)
+						error = SYSTEM_ERROR_AE_BIT_27;
+					else
+						error = "Unknown";
+					snprintf(rs->dataValueFormatted, sizeof(rs->dataValueFormatted), "0x%lX - %s", rs->unsignedIntValue, error);
+				}
+			} else {
 				strcpy(rs->dataValueFormatted, "Unknown");
 			}
 			break;
@@ -4373,6 +4496,11 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 				strcpy(rs->dataValueFormatted, GRID_REGULATION_AL_37_DESC);
 				break;
 			}
+			case GRID_REGULATION_AL_38:
+			{
+				strcpy(rs->dataValueFormatted, GRID_REGULATION_AL_38_DESC);
+				break;
+			}
 			}
 			break;
 		}
@@ -4382,7 +4510,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Signed Integer
 			// 1W/bit
 			// Current load of house
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 
@@ -4411,7 +4539,7 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// 1W/bit
 			// Current generation
 			// Positive = Load pulling / In theory should never be negative.
-			sprintf(rs->dataValueFormatted, "%d", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
 			break;
 		}
 		}
@@ -4433,7 +4561,7 @@ Takes a series of uint8_t variables and converts into UK formatted date/time val
 void RegisterHandler::createFormattedDateTime(char *target, uint8_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute, uint8_t second)
 {
 	char months[12][4] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-	sprintf(target, "%02d/%0s/20%d %02d:%02d:%02d", day, months[month - 1], year, hour, minute, second);
+	sprintf(target, "%02d/%s/20%d %02d:%02d:%02d", day, months[month - 1], year, hour, minute, second);
 }
 
 
@@ -4451,16 +4579,16 @@ Sends a basic Read Data Register request to the Alpha system and returns back fo
 */
 modbusRequestAndResponseStatusValues RegisterHandler::readRawRegister(uint16_t registerAddress, modbusRequestAndResponse* rs)
 {
-	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
+	modbusRequestAndResponseStatusValues result;
 
-	if (result == modbusRequestAndResponseStatusValues::preProcessing)
-	{
-		// Generate a frame with CRC placeholders of 0, 0 at the end
-		uint8_t	frame[] = { ALPHA_SLAVE_ID, MODBUS_FN_READDATAREGISTER, registerAddress >> 8, registerAddress & 0xff, 0, rs->registerCount, 0, 0 };
+	// Generate a frame with CRC placeholders of 0, 0 at the end
+	uint8_t	frame[] = { ALPHA_SLAVE_ID, MODBUS_FN_READDATAREGISTER,
+			    (uint8_t)((registerAddress >> 8) & 0xff), (uint8_t)(registerAddress & 0xff),
+			    0, rs->registerCount,
+			    0, 0 };
 
-		// And send to the device, it's all synchronos so by the time we get a response we will know if success or failure
-		result = _modBus->sendModbus(frame, sizeof(frame), rs);
-	}
+	// And send to the device, it's all synchronos so by the time we get a response we will know if success or failure
+	result = _modBus->sendModbus(frame, sizeof(frame), rs);
 
 	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess)
 	{
@@ -4485,16 +4613,16 @@ Sends a basic Write Single Register request to the Alpha system and returns back
 */
 modbusRequestAndResponseStatusValues RegisterHandler::writeRawSingleRegister(uint16_t registerAddress, uint16_t value, modbusRequestAndResponse* rs)
 {
-	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
+	modbusRequestAndResponseStatusValues result;
 
-	if (result == modbusRequestAndResponseStatusValues::preProcessing)
-	{
-		// Generate a frame with CRC placeholders of 0, 0 at the end
-		uint8_t	frame[] = { ALPHA_SLAVE_ID, MODBUS_FN_WRITESINGLEREGISTER, registerAddress >> 8, registerAddress & 0xff, value >> 8, value & 0xff, 0, 0 };
+	// Generate a frame with CRC placeholders of 0, 0 at the end
+	uint8_t	frame[] = { ALPHA_SLAVE_ID, MODBUS_FN_WRITESINGLEREGISTER,
+			    (uint8_t)((registerAddress >> 8) & 0xff), (uint8_t)(registerAddress & 0xff),
+			    (uint8_t)((value >> 8) & 0xff), (uint8_t)(value & 0xff),
+			    0, 0 };
 
-		// And send to the device, it's all synchronos so by the time we get a response we will know if success or failure
-		result = _modBus->sendModbus(frame, sizeof(frame), rs);
-	}
+	// And send to the device, it's all synchronos so by the time we get a response we will know if success or failure
+	result = _modBus->sendModbus(frame, sizeof(frame), rs);
 
 	if (result == modbusRequestAndResponseStatusValues::writeSingleRegisterSuccess)
 	{
@@ -4518,20 +4646,57 @@ This expects number of registers (1 for 2 byte registers, 2 for 4 byte registers
 modbusRequestAndResponseStatusValues RegisterHandler::writeRawDataRegister(uint16_t registerAddress, uint32_t value, modbusRequestAndResponse* rs)
 {
 	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
-	if (result == modbusRequestAndResponseStatusValues::preProcessing)
+	if (rs->registerCount == 1)
 	{
-		if (rs->registerCount == 1)
-		{
-			uint8_t	frame[] = { ALPHA_SLAVE_ID, MODBUS_FN_WRITEDATAREGISTER, registerAddress >> 8, registerAddress & 0xff, 0, rs->registerCount, 2, value >> 8, value & 0xff, 0, 0 };
-			result = _modBus->sendModbus(frame, sizeof(frame), rs);
-		}
-		else if (rs->registerCount == 2)
-		{
-			uint8_t	frame[] = { ALPHA_SLAVE_ID, MODBUS_FN_WRITEDATAREGISTER, registerAddress >> 8, registerAddress & 0xff, 0, rs->registerCount, 4, value >> 24, value >> 16, value >> 8, value & 0xff, 0, 0 };
-			result = _modBus->sendModbus(frame, sizeof(frame), rs);
-		}
-		// And now it has been sent to the device, the response is essentially synchronos so by the time we get a response we will know if success or failure
+		uint8_t	frame[] = { ALPHA_SLAVE_ID, MODBUS_FN_WRITEDATAREGISTER,
+				    (uint8_t)((registerAddress >> 8) & 0xff), (uint8_t)(registerAddress & 0xff),
+				    0, rs->registerCount, 2,
+				    (uint8_t)((value >> 8) & 0xff), (uint8_t)(value & 0xff),
+				    0, 0 };
+		result = _modBus->sendModbus(frame, sizeof(frame), rs);
 	}
+	else if (rs->registerCount == 2)
+	{
+		uint8_t	frame[] = { ALPHA_SLAVE_ID, MODBUS_FN_WRITEDATAREGISTER,
+				    (uint8_t)((registerAddress >> 8) & 0xff), (uint8_t)(registerAddress & 0xff),
+				    0, rs->registerCount, 4,
+				    (uint8_t)((value >> 24) & 0xff), (uint8_t)((value >> 16) & 0xff), (uint8_t)((value >> 8) & 0xff), (uint8_t)(value & 0xff),
+				    0, 0 };
+		result = _modBus->sendModbus(frame, sizeof(frame), rs);
+	}
+	// And now it has been sent to the device, the response is essentially synchronos so by the time we get a response we will know if success or failure
+
+	if (result == modbusRequestAndResponseStatusValues::writeDataRegisterSuccess)
+	{
+		// Maybe we will want to do something?
+	}
+
+	return result;
+}
+
+/*
+writeDispatchRegisters
+
+Sends all of the data for the Dispatch Registers as a single event
+This expects 3 values: Mode, ActivePower, and TargetSOC
+This writes 5 parameters (registers): Start (1), ActivePower (2), ReactivePower (2), Mode (1), SOC (1), Time (2)
+*/
+modbusRequestAndResponseStatusValues RegisterHandler::writeDispatchRegisters(uint32_t activePower, uint16_t mode, uint16_t socTarget, modbusRequestAndResponse* rs)
+{
+	modbusRequestAndResponseStatusValues result;
+	uint8_t	frame[] = { ALPHA_SLAVE_ID, MODBUS_FN_WRITEDATAREGISTER,
+			(uint8_t)((REG_DISPATCH_RW_DISPATCH_START >> 8) & 0xff), (uint8_t)(REG_DISPATCH_RW_DISPATCH_START & 0xff),
+			0, 9, 18,										// 9 registers (1+2+2+1+1+2) and 9*2
+			(uint8_t)((DISPATCH_START_START >> 8) & 0xff), (uint8_t)(DISPATCH_START_START & 0xff),	// Start/Stop
+			(uint8_t)((activePower >> 24) & 0xff), (uint8_t)((activePower >> 16) & 0xff),		// Active Power
+			(uint8_t)((activePower >> 8) & 0xff), (uint8_t)(activePower & 0xff),
+			0x00, 0x00, 0x00, 0x00,									// Reactive Power (just use zero)
+			(uint8_t)((mode >> 8) & 0xff), (uint8_t)(mode & 0xff),					// Dispatch Mode
+			(uint8_t)((socTarget >> 8) & 0xff), (uint8_t)(socTarget & 0xff),			// SOC Target
+			0x7F, 0xFF, 0xFF, 0xFF,									// Time (essentially forever)
+			0, 0 };
+	result = _modBus->sendModbus(frame, sizeof(frame), rs);
+	// And now it has been sent to the device, the response is essentially synchronos so by the time we get a response we will know if success or failure
 
 	if (result == modbusRequestAndResponseStatusValues::writeDataRegisterSuccess)
 	{
