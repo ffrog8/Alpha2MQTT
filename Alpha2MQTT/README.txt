@@ -38,17 +38,37 @@ Configuration:
 ==============
 Configure Alpha2MQTT by opening up Definitions.h and verifying/customising the following definitions for your need:
 - Set your inverter (delete the //) between lines 25-28 and ensure the rest are commented out by adding //.
-- Set your WiFi Access Point name in Secrets.h.
-- Set your WiFi password in Secrets.h.
+- Set your WiFi Access Point name on line 32.
+- Set your WiFi password on line 33.
 - Set your MQTT broker server on line 36.
 - Set your MQTT broker port on line 37.  (Default is 1883)
-- Set your MQTT username in Secrets.h if you use security (you should) or leave it blank.
-- Set your MQTT password in Secrets.h if you use security (again, you should) or leave it blank.
+- Set your MQTT username on line 38 if you use security (you should) or leave it blank.
+- Set your MQTT password on line 39 if you use security (again, you should) or leave it blank.
 - Set your Alpha2MQTT device name on line 43.  This is the device name presented on your network and is also how MQTT topics begin.  This document assumes Alpha2MQTT.
 - Set your AlphaESS inverter's slave id on line 46.  By default this is 0x55 and shouldn't need changing unless you've changed it via Modbus or via inverters which have an integrated display.  Don't change it.
 - Set your maximum payload size on line 54.  ESP8266's work well with 4096 bytes which is enough for 70 to 80 registers on any schedule or request.
 - Set whether the device should auto restart every so many hours.  This is for specific routers only.  Uncomment line 70 if you want to use this feature
 - Set the number of hours for an automatic restart on line 71
+
+PlatformIO Targets (ESPuno / XIAO / ESP8266):
+==============================================
+This project includes PlatformIO environments for ESPuno (ESP32-C6), Seeed XIAO ESP32C6 (untested), and ESP8266 (untested).
+Use one of the following targets when building:
+
+- ESPuno Pi Zero: uses MP_ESPUNO_ESP32C6 board definition and supports the onboard NeoPixel on pin 8.
+- xiao_esp32c6: uses MP_XIAO_ESP32C6 board definition.
+- esp8266: uses MP_ESP8266 board definition and standard PlatformIO ESP8266.
+
+The ESPuno target requires a custom Arduino-compatible ESP32 platform in platformio.ini, and the Seeed XIAO uses the Seed Studio support repo for PlatformIO.
+
+ESPuno Status LED:
+==================
+On ESPuno, the status LED is a NeoPixel on pin 8. The status color reflects system state:
+- Red when WiFi is disconnected.
+- Yellow when WiFi is connected but MQTT is disconnected.
+- Purple when WiFi and MQTT are connected but RS485 is disconnected.
+- Green when WiFi, MQTT, and RS485 are all connected.
+Other boards continue to use LED_BUILTIN as a simple on/off indicator.
 
 States:
 =======
@@ -64,7 +84,7 @@ Each of the schedules can be customised to report a number* / any combination of
 
 *See maximum payload size above.
 
-You can customise the schedules by modifying Alpha2MQTT.ino.  Search for 'Schedules' and add or remove registers as you see fit from each schedule.  The list of supported registers begins on line 85 in Definitions.h.  A register name which contains _R_ is read only, one which contains _RW_ is read/write, and one which contains _W_ is write only.
+You can customise the schedules by modifying src/main.cpp.  Search for 'Schedules' and add or remove registers as you see fit from each schedule.  The list of supported registers begins on line 85 in Definitions.h.  A register name which contains _R_ is read only, one which contains _RW_ is read/write, and one which contains _W_ is write only.
 
 An example response for any subscribed state is a JSON of name/value pairs which are separated by commas, for example:
 {
@@ -547,3 +567,7 @@ The same process is employed for four bytes, the numbers just keep doubling and 
 Thanks to Colin McGerty's (colin@mcgerty.co.uk) work on Sofar2MQTT which brought about my intrigue and on which some of Alpha2MQTT's program logic and circuitry is based.
 Thanks to the AlphaESS DE Team (https://www.alpha-ess.de/) for latest Modbus documentation and email support.
 calcCRC by angelo.compagnucci@gmail.com and jpmzometa@gmail.com
+
+Legacy Arduino sketch
+=====================
+The original Arduino sketch (Alpha2MQTT.ino) remains available for legacy Arduino builds and retains the second-by-second schedule (_mqttSecondStatusRegisters). If you use it, provide WiFi/MQTT credentials via a local Secrets.h (gitignored) or a local secrets.txt workflow that generates the same WIFI_SSID, WIFI_PASSWORD, MQTT_SERVER, MQTT_USERNAME, and MQTT_PASSWORD definitions. When Secrets.h is present, those values also serve as defaults in the captive portal for the PlatformIO build.
