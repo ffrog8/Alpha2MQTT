@@ -27,3 +27,6 @@
 
 ## 2026-01-06
 - Move legacy Arduino sketch out of the build path so Arduino CLI targets the src implementation.
+
+## 2026-01-06
+- Install WiFiManager and Preferences in Arduino CI to fix compile failures.

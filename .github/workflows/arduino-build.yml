@@ -22,6 +22,8 @@ jobs:
           arduino-cli lib install "Adafruit BusIO"
           arduino-cli lib install "Adafruit SSD1306"
           arduino-cli lib install "Adafruit GFX Library"
+          arduino-cli lib install "WiFiManager"
+          arduino-cli lib install "Preferences"
           arduino-cli lib install PubSubClient
 
       - name: Compile Alpha2MQTT (ESP8266)
