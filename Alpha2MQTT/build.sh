@@ -5,10 +5,12 @@
 #  docker exec -it arduino-cli-build /project/Alpha2MQTT/build.sh
 
 arduino-cli core update-index --additional-urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
-arduino-cli core install esp8266:esp8266@3.0.2  --additional-urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
+arduino-cli core install esp8266:esp8266@3.1.2  --additional-urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
 arduino-cli lib install "Adafruit BusIO"
 arduino-cli lib install "Adafruit SSD1306"
 arduino-cli lib install "Adafruit GFX Library"
+arduino-cli lib install "WiFiManager"
+arduino-cli lib install "Preferences"
 arduino-cli lib install PubSubClient
 
 cd /project

@@ -62,13 +62,17 @@ These are conventions, not guarantees; adjust only if the environment requires i
 - If downloads fail due to network constraints, report and defer.
 
 ## Expected Arduino build behavior
-When an Arduino build or test is requested, the agent should attempt, in order:
+When an Arduino build or test is requested, or when the agent changes source code, the agent should attempt, in order:
 1. Ensure `arduino-cli` is available (install if missing).
 2. Initialize or update configuration as needed (including proxy).
 3. Install required cores and libraries.
-4. Compile and report results.
+4. Compile and report results using the same targets and options as `.github/workflows/arduino-build.yml`.
 
 If any step cannot run due to environment constraints, stop and explain why.
+
+## Build script parity
+- Keep `Alpha2MQTT/build.sh` aligned with `.github/workflows/arduino-build.yml` for core versions and library lists.
+- If one changes, update the other in the same change set to prevent drift.
 
 ## CI relationship
 - Codex Cloud provides provisional feedback only.
