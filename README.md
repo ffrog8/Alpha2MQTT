@@ -39,6 +39,7 @@ The Arduino sketch includes wrapper headers in the `Alpha2MQTT/` folder so Ardui
 Source files under `Alpha2MQTT/src` include the wrapper headers via relative `../` paths to keep Arduino CLI compilation aligned with PlatformIO.
 Arduino CLI builds also map `ESP8266`/`ESP32` defines to the `MP_ESP*` flags expected by the shared headers.
 The CI workflow installs the WiFiManager and Preferences libraries required by `Alpha2MQTT/src/main.cpp` before compiling.
+CI uses the ESP8266 core version aligned with local Arduino CLI builds to reduce version drift.
 When a compile fails, the workflow uploads the full logs as the `arduino-compile-logs` artifact and posts a PR comment with the first section of the failure output.
 
 ### Configuring WiFi and MQTT

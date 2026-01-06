@@ -562,7 +562,11 @@ configHandler(void)
 	WiFiManagerParameter custom_ext_ant("ext_antenna", "Use external WiFi antenna\n", "T", 2, _customHtml_checkbox, WFM_LABEL_AFTER);
 #endif // MP_ESPUNO_ESP32C6
 
+#if defined(MP_ESP8266)
+	WiFi.disconnect(true); // Disconnect and erase saved WiFi config
+#else
 	WiFi.disconnect(true, true); // Disconnect and erase saved WiFi config
+#endif
 	updateOLED(false, "Web", "config", "active");
 
 #ifdef MP_XIAO_ESP32C6
