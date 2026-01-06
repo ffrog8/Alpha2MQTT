@@ -19,9 +19,9 @@ If conflicts arise, **this file is the source of truth** for this repo.
 ## Arduino / arduino-cli usage policy
 
 ### Installation timing
-- Prefer **test-time** installation and configuration of `arduino-cli`.
-- Avoid installing or configuring Arduino tooling during generic setup/startup
-  unless a task explicitly requires early availability.
+- Check for `arduino-cli` availability up front.
+- If it is missing, stop and report an environment error; do not attempt installation here.
+- Codex Cloud installs `arduino-cli` only via setup scripts, so treat it as a prerequisite.
 
 ### Network and proxy handling
 - In Codex Cloud, outbound access for `arduino-cli` commonly requires a proxy.
