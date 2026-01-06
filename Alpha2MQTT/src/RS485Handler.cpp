@@ -10,7 +10,7 @@ Notes
 
 Handles Modbus requests and responses in a tidy class separate from main program logic.
 */
-#include "RS485Handler.h"
+#include "../RS485Handler.h"
 
 /*
 Default Constructor

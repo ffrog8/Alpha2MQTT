@@ -21,3 +21,15 @@
 
 ## 2025-01-05
 - Add gh bootstrap helper for CI log polling.
+
+## 2026-01-06
+- Align handler includes with Arduino CLI sketch-root wrapper headers and map ESP8266/ESP32 defines.
+
+## 2026-01-06
+- Move legacy Arduino sketch out of the build path so Arduino CLI targets the src implementation.
+
+## 2026-01-06
+- Install WiFiManager and Preferences in Arduino CI to fix compile failures.
+
+## 2026-01-06
+- Align ESP8266 disconnect usage and CI core version with local builds.

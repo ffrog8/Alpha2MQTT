@@ -36,6 +36,10 @@ The configuration (WiFi and MQTT settings) of this hardware itself is now done v
 ### CI build check
 GitHub Actions runs an Arduino CLI build for the ESP8266 targets on pull requests to validate compilation.
 The Arduino sketch includes wrapper headers in the `Alpha2MQTT/` folder so Arduino CLI builds can find the headers moved under `Alpha2MQTT/include`.
+Source files under `Alpha2MQTT/src` include the wrapper headers via relative `../` paths to keep Arduino CLI compilation aligned with PlatformIO.
+Arduino CLI builds also map `ESP8266`/`ESP32` defines to the `MP_ESP*` flags expected by the shared headers.
+The CI workflow installs the WiFiManager and Preferences libraries required by `Alpha2MQTT/src/main.cpp` before compiling.
+CI uses the ESP8266 core version aligned with local Arduino CLI builds to reduce version drift.
 When a compile fails, the workflow uploads the full logs as the `arduino-compile-logs` artifact and posts a PR comment with the first section of the failure output.
 
 ### Configuring WiFi and MQTT
@@ -119,4 +123,4 @@ Device wiring:
 - The AlphaSniffer project is a quick and dirty RS485 sniffer that lets this hardware sniff the RS485 bus while some other master talks to your AlphaESS.  It streams the (somewhat parsed) output over TCP to a host.
 
 ### Legacy Arduino sketch
-The original Arduino sketch (`Alpha2MQTT/Alpha2MQTT.ino`) is still available for legacy Arduino builds and retains the second-by-second schedule (`_mqttSecondStatusRegisters`). If you use it, provide WiFi/MQTT credentials via a local `Secrets.h` (gitignored), or via a local `secrets.txt` workflow that generates the same `WIFI_SSID`, `WIFI_PASSWORD`, `MQTT_SERVER`, `MQTT_USERNAME`, and `MQTT_PASSWORD` definitions.
+The original Arduino sketch now lives at `Alpha2MQTT/legacy/Alpha2MQTT_legacy.ino` for legacy Arduino builds and retains the second-by-second schedule (`_mqttSecondStatusRegisters`). If you use it, provide WiFi/MQTT credentials via a local `Secrets.h` (gitignored), or via a local `secrets.txt` workflow that generates the same `WIFI_SSID`, `WIFI_PASSWORD`, `MQTT_SERVER`, `MQTT_USERNAME`, and `MQTT_PASSWORD` definitions.

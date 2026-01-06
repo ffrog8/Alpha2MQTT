@@ -15,6 +15,12 @@ Customise these options as per README.txt.  Please read README.txt before contin
 #define _Definitions_h
 
 #include <Arduino.h>
+#if (defined(ESP8266) || defined(ARDUINO_ARCH_ESP8266)) && !defined(MP_ESP8266)
+#define MP_ESP8266
+#endif
+#if (defined(ESP32) || defined(ARDUINO_ARCH_ESP32)) && !defined(MP_ESP32)
+#define MP_ESP32
+#endif
 #ifdef __has_include
 #if __has_include("Secrets.h")
 #include "Secrets.h"
@@ -85,7 +91,7 @@ Customise these options as per README.txt.  Please read README.txt before contin
 //#define DEBUG_LEVEL2		// For serial flooding action
 //#define DEBUG_OUTPUT_TX_RX	// write RS485 frames to serial debugging port
 //#define DEBUG_FREEMEM	// Enable extra debug on display and via MQTT
-//#define DEBUG_WIFI	// Enable extra debug on display and via MQTT
+//#define A2M_DEBUG_WIFI	// Enable extra debug on display and via MQTT
 //#define DEBUG_CALLBACKS	// Enable extra debug on display and via MQTT
 //#define DEBUG_OPS     // Enable extra debug for opModes
 //#define DEBUG_RS485	// Enable extra debug on display and via MQTT
@@ -1294,12 +1300,12 @@ enum mqttEntityId {
 #ifdef DEBUG_CALLBACKS
 	entityCallbacks,
 #endif // DEBUG_CALLBACKS
-#ifdef DEBUG_WIFI
+#ifdef A2M_DEBUG_WIFI
 	entityRSSI,
 	entityBSSID,
 	entityTxPower,
 	entityWifiRecon,
-#endif // DEBUG_WIFI
+#endif // A2M_DEBUG_WIFI
 #ifdef DEBUG_RS485
 	entityRs485Errors,
 #endif // DEBUG_RS485

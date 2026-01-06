@@ -570,4 +570,4 @@ calcCRC by angelo.compagnucci@gmail.com and jpmzometa@gmail.com
 
 Legacy Arduino sketch
 =====================
-The original Arduino sketch (Alpha2MQTT.ino) remains available for legacy Arduino builds and retains the second-by-second schedule (_mqttSecondStatusRegisters). If you use it, provide WiFi/MQTT credentials via a local Secrets.h (gitignored) or a local secrets.txt workflow that generates the same WIFI_SSID, WIFI_PASSWORD, MQTT_SERVER, MQTT_USERNAME, and MQTT_PASSWORD definitions. When Secrets.h is present, those values also serve as defaults in the captive portal for the PlatformIO build.
+The original Arduino sketch now lives at Alpha2MQTT/legacy/Alpha2MQTT_legacy.ino for legacy Arduino builds and retains the second-by-second schedule (_mqttSecondStatusRegisters). If you use it, provide WiFi/MQTT credentials via a local Secrets.h (gitignored) or a local secrets.txt workflow that generates the same WIFI_SSID, WIFI_PASSWORD, MQTT_SERVER, MQTT_USERNAME, and MQTT_PASSWORD definitions. When Secrets.h is present, those values also serve as defaults in the captive portal for the PlatformIO build.

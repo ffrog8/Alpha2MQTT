@@ -21,7 +21,7 @@ it does not attempt any data changes and it does not yield any response (nor sla
 system.  I found that WRITE DATA REGISTER will write any appropriate single (2 byte) or double (4 byte)
 register, and we just leverage 'Number of bytes' to guide it accordingly.
 */
-#include "RegisterHandler.h"
+#include "../RegisterHandler.h"
 
 /*
 Default Constructor

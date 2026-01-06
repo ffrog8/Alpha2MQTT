@@ -16,9 +16,9 @@ First, go and customise options at the top of Definitions.h!
 #include <cstdint>
 #include <iostream>
 // Supporting files
-#include "RegisterHandler.h"
-#include "RS485Handler.h"
-#include "Definitions.h"
+#include "../RegisterHandler.h"
+#include "../RS485Handler.h"
+#include "../Definitions.h"
 #include <Arduino.h>
 #if defined MP_ESP8266
 #include <ESP8266WiFi.h>
@@ -62,7 +62,7 @@ WiFiClient _wifi;
 #define WIFI_POWER_MAX 20.5
 #define WIFI_POWER_MIN 12
 #define WIFI_POWER_DECREMENT .25
-float wifiPower = WIFI_MAX_POWER + WIFI_POWER_DECREMENT;  // Will decrement once before setting
+float wifiPower = WIFI_POWER_MAX + WIFI_POWER_DECREMENT;  // Will decrement once before setting
 #else // MP_ESP8266
 wifi_power_t wifiPower = WIFI_POWER_11dBm; // Will bump to max before setting
 #endif // MP_ESP8266
@@ -86,7 +86,7 @@ char _oledLine3[OLED_CHARACTER_WIDTH] = "";
 char _oledLine4[OLED_CHARACTER_WIDTH] = "";
 
 // Config handling
-struct Config {
+struct AppConfig {
 	String wifiSSID;
 	String wifiPass;
 	String mqttSrvr;
@@ -98,7 +98,7 @@ struct Config {
 #endif // MP_XIAO_ESP32C6 || MP_ESPUNO_ESP32C6
 };
 
-Config config;
+AppConfig appConfig;
 
 // RS485 and AlphaESS functionality are packed up into classes
 // to keep separate from the main program logic.
@@ -111,9 +111,9 @@ char _debugOutput[128];
 #endif // DEBUG_OVER_SERIAL || DEBUG_LEVEL2 || DEBUG_OUTPUT_TX_RX
 
 int32_t regNumberToRead = -1;
-#ifdef DEBUG_WIFI
+#ifdef A2M_DEBUG_WIFI
 uint32_t wifiReconnects = 0;
-#endif // DEBUG_WIFI
+#endif // A2M_DEBUG_WIFI
 #ifdef DEBUG_CALLBACKS
 uint32_t receivedCallbacks = 0;
 uint32_t unknownCallbacks = 0;
@@ -172,12 +172,12 @@ static struct mqttState _mqttAllEntities[] =
 #ifdef DEBUG_RS485
 	{ mqttEntityId::entityRs485Errors,        "A2M_RS485_Errors",     mqttUpdateFreq::freqTenSec,  false, false, homeAssistantClass::haClassInfo },
 #endif // DEBUG_RS485
-#ifdef DEBUG_WIFI
+#ifdef A2M_DEBUG_WIFI
 	{ mqttEntityId::entityRSSI,               "A2M_RSSI",             mqttUpdateFreq::freqOneMin,  false, false, homeAssistantClass::haClassInfo },
 	{ mqttEntityId::entityBSSID,              "A2M_BSSID",            mqttUpdateFreq::freqOneMin,  false, false, homeAssistantClass::haClassInfo },
 	{ mqttEntityId::entityTxPower,            "A2M_TX_Power",         mqttUpdateFreq::freqOneMin,  false, false, homeAssistantClass::haClassInfo },
 	{ mqttEntityId::entityWifiRecon,          "A2M_reconnects",       mqttUpdateFreq::freqOneMin,  false, false, homeAssistantClass::haClassInfo },
-#endif // DEBUG_WIFI
+#endif // A2M_DEBUG_WIFI
 	{ mqttEntityId::entityRs485Avail,         "RS485_Connected",      mqttUpdateFreq::freqNever,   false, true,  homeAssistantClass::haClassBinaryProblem },
 	{ mqttEntityId::entityA2MUptime,          "A2M_uptime",           mqttUpdateFreq::freqTenSec,  false, false, homeAssistantClass::haClassDuration },
 	{ mqttEntityId::entityA2MVersion,         "A2M_version",          mqttUpdateFreq::freqOneDay,  false, true,  homeAssistantClass::haClassInfo },
@@ -329,45 +329,45 @@ void setup()
 #endif
 
 	preferences.begin(DEVICE_NAME, true); // RO
-	config.wifiSSID = preferences.getString("WiFi_SSID", "");
-	config.wifiPass = preferences.getString("WiFi_Password", "");
-	config.mqttSrvr = preferences.getString("MQTT_Server", "");
-	config.mqttPort = preferences.getInt("MQTT_Port", 0);
-	config.mqttUser = preferences.getString("MQTT_Username", "");
-	config.mqttPass = preferences.getString("MQTT_Password", "");
+	appConfig.wifiSSID = preferences.getString("WiFi_SSID", "");
+	appConfig.wifiPass = preferences.getString("WiFi_Password", "");
+	appConfig.mqttSrvr = preferences.getString("MQTT_Server", "");
+	appConfig.mqttPort = preferences.getInt("MQTT_Port", 0);
+	appConfig.mqttUser = preferences.getString("MQTT_Username", "");
+	appConfig.mqttPass = preferences.getString("MQTT_Password", "");
 #if defined(MP_XIAO_ESP32C6)
-	config.extAntenna = preferences.getBool("Ext_Antenna", false);
+	appConfig.extAntenna = preferences.getBool("Ext_Antenna", false);
 #elif defined(MP_ESPUNO_ESP32C6)
-	config.extAntenna = preferences.getBool("Ext_Antenna", false);
+	appConfig.extAntenna = preferences.getBool("Ext_Antenna", false);
 #endif // MP_XIAO_ESP32C6
 	preferences.end();
 
-	if (config.wifiSSID == "" && String(WIFI_SSID).length() > 0) {
-		config.wifiSSID = WIFI_SSID;
+	if (appConfig.wifiSSID == "" && String(WIFI_SSID).length() > 0) {
+		appConfig.wifiSSID = WIFI_SSID;
 	}
-	if (config.wifiPass == "" && String(WIFI_PASSWORD).length() > 0) {
-		config.wifiPass = WIFI_PASSWORD;
+	if (appConfig.wifiPass == "" && String(WIFI_PASSWORD).length() > 0) {
+		appConfig.wifiPass = WIFI_PASSWORD;
 	}
-	if (config.mqttSrvr == "" && String(MQTT_SERVER).length() > 0) {
-		config.mqttSrvr = MQTT_SERVER;
+	if (appConfig.mqttSrvr == "" && String(MQTT_SERVER).length() > 0) {
+		appConfig.mqttSrvr = MQTT_SERVER;
 	}
-	if (config.mqttPort == 0 && MQTT_PORT > 0) {
-		config.mqttPort = MQTT_PORT;
+	if (appConfig.mqttPort == 0 && MQTT_PORT > 0) {
+		appConfig.mqttPort = MQTT_PORT;
 	}
-	if (config.mqttUser == "" && String(MQTT_USERNAME).length() > 0) {
-		config.mqttUser = MQTT_USERNAME;
+	if (appConfig.mqttUser == "" && String(MQTT_USERNAME).length() > 0) {
+		appConfig.mqttUser = MQTT_USERNAME;
 	}
-	if (config.mqttPass == "" && String(MQTT_PASSWORD).length() > 0) {
-		config.mqttPass = MQTT_PASSWORD;
+	if (appConfig.mqttPass == "" && String(MQTT_PASSWORD).length() > 0) {
+		appConfig.mqttPass = MQTT_PASSWORD;
 	}
 
 	// If config is not setup, then enter config mode
-	if ((config.wifiSSID == "") ||
-	    (config.wifiPass == "") ||
-	    (config.mqttSrvr == "") ||
-	    (config.mqttPort == 0) ||
-	    (config.mqttUser == "") ||
-	    (config.mqttPass == "")) {
+	if ((appConfig.wifiSSID == "") ||
+	    (appConfig.wifiPass == "") ||
+	    (appConfig.mqttSrvr == "") ||
+	    (appConfig.mqttPort == 0) ||
+	    (appConfig.mqttUser == "") ||
+	    (appConfig.mqttPass == "")) {
 		configLoop();
 		ESP.restart();
 	} else {
@@ -379,7 +379,7 @@ void setup()
 	setupWifi(true);
 
 	// Configure MQTT to the address and port specified above
-	_mqtt.setServer(config.mqttSrvr.c_str(), config.mqttPort);
+	_mqtt.setServer(appConfig.mqttSrvr.c_str(), appConfig.mqttPort);
 #ifdef DEBUG_OVER_SERIAL
 	sprintf(_debugOutput, "About to request buffer");
 	Serial.println(_debugOutput);
@@ -547,12 +547,12 @@ configHandler(void)
 	wifiManager.setBreakAfterConfig(true);
 	wifiManager.setTitle(DEVICE_NAME);
 	wifiManager.setShowInfoUpdate(false);
-	String mqttPortDefault = String(config.mqttPort);
+	String mqttPortDefault = String(appConfig.mqttPort);
 	WiFiManagerParameter p_lineBreak_text("<p>MQTT settings:</p>");
-	WiFiManagerParameter custom_mqtt_server("server", "MQTT server", config.mqttSrvr.c_str(), 40);
+	WiFiManagerParameter custom_mqtt_server("server", "MQTT server", appConfig.mqttSrvr.c_str(), 40);
 	WiFiManagerParameter custom_mqtt_port("port", "MQTT port", mqttPortDefault.c_str(), 6);
-	WiFiManagerParameter custom_mqtt_user("user", "MQTT user", config.mqttUser.c_str(), 32);
-	WiFiManagerParameter custom_mqtt_pass("mpass", "MQTT password", config.mqttPass.c_str(), 32);
+	WiFiManagerParameter custom_mqtt_user("user", "MQTT user", appConfig.mqttUser.c_str(), 32);
+	WiFiManagerParameter custom_mqtt_pass("mpass", "MQTT password", appConfig.mqttPass.c_str(), 32);
 #ifdef MP_XIAO_ESP32C6
 	const char _customHtml_checkbox[] = "type=\"checkbox\"";
 	WiFiManagerParameter custom_ext_ant("ext_antenna", "Use external WiFi antenna\n", "T", 2, _customHtml_checkbox, WFM_LABEL_AFTER);
@@ -562,7 +562,11 @@ configHandler(void)
 	WiFiManagerParameter custom_ext_ant("ext_antenna", "Use external WiFi antenna\n", "T", 2, _customHtml_checkbox, WFM_LABEL_AFTER);
 #endif // MP_ESPUNO_ESP32C6
 
+#if defined(MP_ESP8266)
+	WiFi.disconnect(true); // Disconnect and erase saved WiFi config
+#else
 	WiFi.disconnect(true, true); // Disconnect and erase saved WiFi config
+#endif
 	updateOLED(false, "Web", "config", "active");
 
 #ifdef MP_XIAO_ESP32C6
@@ -744,9 +748,9 @@ setupWifi(bool initialConnect)
 #if defined(MP_XIAO_ESP32C6) || defined(MP_ESPUNO_ESP32C6)
 		bool useExtAntenna = false;
 #ifdef MP_XIAO_ESP32C6
-		useExtAntenna = config.extAntenna;
+		useExtAntenna = appConfig.extAntenna;
 #else // MP_XIAO_ESP32C6
-		useExtAntenna = config.extAntenna;
+		useExtAntenna = appConfig.extAntenna;
 #endif // MP_XIAO_ESP32C6
 #ifdef WIFI_ENABLE
 		pinMode(WIFI_ENABLE, OUTPUT);
@@ -758,10 +762,10 @@ setupWifi(bool initialConnect)
 		digitalWrite(WIFI_ANT_CONFIG, useExtAntenna ? HIGH : LOW);
 #endif // WIFI_ANT_CONFIG
 #endif // MP_XIAO_ESP32C6 || MP_ESPUNO_ESP32C6
-#ifdef DEBUG_WIFI
+#ifdef A2M_DEBUG_WIFI
 	} else {
 		wifiReconnects++;
-#endif // DEBUG_WIFI
+#endif // A2M_DEBUG_WIFI
 	}
 
 	// And continually try to connect to WiFi.
@@ -785,14 +789,16 @@ setupWifi(bool initialConnect)
 			// Set up in Station Mode - Will be connecting to an access point
 			WiFi.mode(WIFI_STA);
 			// Helps when multiple APs for our SSID
+#if defined MP_ESP32
 			WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
 			WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+#endif // MP_ESP32
 
 			// Set the hostname for this Arduino
 			WiFi.hostname(DEVICE_NAME);
 
 			// And connect to the details defined at the top
-			WiFi.begin(config.wifiSSID.c_str(), config.wifiPass.c_str());
+			WiFi.begin(appConfig.wifiSSID.c_str(), appConfig.wifiPass.c_str());
 
 #if defined MP_ESP8266
 			wifiPower -= WIFI_POWER_DECREMENT;
@@ -1197,17 +1203,21 @@ updateRunstate()
 				snprintf(line4, sizeof(line4), "Mem: %u", freeMemory());
 				debugIdx = 2;
 #endif // DEBUG_FREEMEM
-#ifdef DEBUG_WIFI
+#ifdef A2M_DEBUG_WIFI
 			} else if (debugIdx < 3) {
 				snprintf(line4, sizeof(line4), "WiFi recon: %lu", wifiReconnects);
 				debugIdx = 3;
 			} else if (debugIdx < 4) {
+#if defined(MP_ESP32)
 				snprintf(line4, sizeof(line4), "WiFi TX: %0.01fdBm", (int)WiFi.getTxPower() / 4.0f);
+#else
+				snprintf(line4, sizeof(line4), "WiFi TX: %0.01fdBm", wifiPower);
+#endif
 				debugIdx = 4;
 			} else if (debugIdx < 5) {
 				snprintf(line4, sizeof(line4), "WiFi RSSI: %d", WiFi.RSSI());
 				debugIdx = 5;
-#endif // DEBUG_WIFI
+#endif // A2M_DEBUG_WIFI
 #ifdef DEBUG_CALLBACKS
 			} else if (debugIdx < 6) {
 				snprintf(line4, sizeof(line4), "Callbacks: %lu", receivedCallbacks);
@@ -1396,7 +1406,7 @@ mqttReconnect(void)
 		delay(100);
 
 		// Attempt to connect
-		if (_mqtt.connect(haUniqueId, config.mqttUser.c_str(), config.mqttPass.c_str(), statusTopic, 0, true,
+		if (_mqtt.connect(haUniqueId, appConfig.mqttUser.c_str(), appConfig.mqttPass.c_str(), statusTopic, 0, true,
 				  "{ \"a2mStatus\": \"offline\", \"rs485Status\": \"unavailable\", \"gridStatus\": \"unavailable\" }")) {
 			int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
 #ifdef DEBUG_OVER_SERIAL
@@ -2029,7 +2039,7 @@ readEntity(mqttState *singleEntity, modbusRequestAndResponse* rs)
 		}
 #endif // DEBUG_NO_RS485
 		break;
-#ifdef DEBUG_WIFI
+#ifdef A2M_DEBUG_WIFI
 	case mqttEntityId::entityRSSI:
 		sprintf(rs->dataValueFormatted, "%ld", WiFi.RSSI());
 		result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
@@ -2042,14 +2052,18 @@ readEntity(mqttState *singleEntity, modbusRequestAndResponse* rs)
 		result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
 		break;
 	case mqttEntityId::entityTxPower:
+#if defined(MP_ESP32)
 		sprintf(rs->dataValueFormatted, "%0.1f", WiFi.getTxPower() / 4.0f);
+#else
+		sprintf(rs->dataValueFormatted, "%0.1f", wifiPower);
+#endif
 		result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
 		break;
 	case mqttEntityId::entityWifiRecon:
 		sprintf(rs->dataValueFormatted, "%lu", wifiReconnects);
 		result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
 		break;
-#endif // DEBUG_WIFI
+#endif // A2M_DEBUG_WIFI
 	}
 
 	if ((result != modbusRequestAndResponseStatusValues::readDataInvalidValue) &&
@@ -2380,14 +2394,14 @@ addConfig(mqttState *singleEntity, modbusRequestAndResponseStatusValues& resultA
 			 ", \"min\": %d, \"max\": %d",
 			 0, INVERTER_POWER_MAX);
 		break;
-#ifdef DEBUG_WIFI
+#ifdef A2M_DEBUG_WIFI
 	case mqttEntityId::entityRSSI:
 	case mqttEntityId::entityBSSID:
 	case mqttEntityId::entityTxPower:
 	case mqttEntityId::entityWifiRecon:
 		sprintf(stateAddition, ", \"icon\": \"mdi:wifi\"");
 		break;
-#endif // DEBUG_WIFI
+#endif // A2M_DEBUG_WIFI
 	case mqttEntityId::entityA2MVersion:
 	case mqttEntityId::entityInverterVersion:
 	case mqttEntityId::entityEmsVersion:
@@ -2554,12 +2568,12 @@ addConfig(mqttState *singleEntity, modbusRequestAndResponseStatusValues& resultA
 #ifdef DEBUG_CALLBACKS
 	case entityCallbacks:
 #endif // DEBUG_CALLBACKS
-#ifdef DEBUG_WIFI
+#ifdef A2M_DEBUG_WIFI
 	case entityRSSI:
 	case entityBSSID:
 	case entityTxPower:
 	case entityWifiRecon:
-#endif // DEBUG_WIFI
+#endif // A2M_DEBUG_WIFI
 #ifdef DEBUG_RS485
 	case entityRs485Errors:
 #endif // DEBUG_RS485
