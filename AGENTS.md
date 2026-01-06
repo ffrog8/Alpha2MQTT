@@ -39,6 +39,15 @@ If conflicts arise, **this file is the source of truth** for this repo.
 - It may be created or overwritten at test/build time.
 - Do not assume any prior state in ephemeral environments.
 
+### Arduino config location rule (non-negotiable)
+If `ARDUINO_DATA_DIR` is set, all `arduino-cli config ...` commands MUST run with the same
+`ARDUINO_DATA_DIR`/`ARDUINO_SKETCHBOOK_DIR` environment, so the proxy is written to the
+active config file (e.g. `/opt/arduino/arduino15/arduino-cli.yaml`), not `~/.arduino15`.
+
+### Proxy verification
+After setting the proxy, the agent MUST prove it is active by running:
+`arduino-cli config dump` with `ARDUINO_DATA_DIR` set, and showing `network.proxy`.
+
 ### Cache locations
 When running Arduino-related commands, prefer explicit cache locations:
 - `ARDUINO_DATA_DIR=/opt/arduino/arduino15`
