@@ -1,5 +1,8 @@
 # Changes
 
+## 2026-01-07
+- Add persisted per-entity polling intervals with MQTT config topics and Home Assistant discovery visibility.
+
 ## 2025-01-05
 - Merge upstream BMorgan1296/Alpha2MQTT master into the fork (robustness updates).
 - Preserve legacy Arduino sketch support and second-by-second status schedule.
