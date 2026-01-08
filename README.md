@@ -47,11 +47,11 @@ Before this device can do anything, it must be given basic configuration.  It ne
 If you define WiFi/MQTT values via `Secrets.h` (or a `secrets.txt` workflow that generates it), those values are used as defaults for the captive portal fields and as initial settings when no stored configuration exists.
 
 ### Configuring polling intervals via MQTT
-Alpha2MQTT can store per-entity polling intervals that persist across restarts and show up in Home Assistant via MQTT discovery. The authoritative config is a retained payload published to `DEVICE_NAME/config`, with delta updates sent to `DEVICE_NAME/config/set`. When you set an entity to `freqNever`, the device stops polling and removes that entity's discovery configuration in HA until it is re-enabled.
+Alpha2MQTT can store per-entity polling intervals that persist across restarts and show up in Home Assistant via MQTT discovery. The authoritative config is a retained payload published to `DEVICE_NAME/config`, with delta updates sent to `DEVICE_NAME/config/set`. When you set an entity to `freqDisabled`, the device stops polling and removes that entity's discovery configuration in HA until it is re-enabled. `freqNever` is reserved for legacy defaults and is not user-settable.
 
 - **Config topic (retained):** `DEVICE_NAME/config`
 - **Config update topic (non-retained):** `DEVICE_NAME/config/set`
-- **Example update payload:** `{ "Grid_Power": "freqOneMin", "Battery_Temp": "freqNever" }`
+- **Example update payload:** `{ "Grid_Power": "freqOneMin", "Battery_Temp": "freqDisabled" }`
 - **HA discovery:** a diagnostic sensor named **MQTT Config** exposes `last_change` as its state and the full JSON as attributes.
 
 ### What you will see

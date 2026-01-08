@@ -80,13 +80,14 @@ char* _mqttPayload;
 bool resendHaData = false;
 bool resendAllData = false;
 char _pollingLastChange[32] = "";
+// freqNever is reserved for legacy defaults and is not user-settable via /config/set.
 const char *_pollingAllowedIntervals[] = {
 	"freqTenSec",
 	"freqOneMin",
 	"freqFiveMin",
 	"freqOneHour",
 	"freqOneDay",
-	"freqNever"
+	"freqDisabled"
 };
 const size_t _pollingAllowedIntervalCount = sizeof(_pollingAllowedIntervals) / sizeof(_pollingAllowedIntervals[0]);
 
@@ -752,7 +753,7 @@ getUptimeSeconds(void)
 bool
 isValidMqttUpdateFreq(int value)
 {
-	return value >= mqttUpdateFreq::freqTenSec && value <= mqttUpdateFreq::freqNever;
+	return value >= mqttUpdateFreq::freqTenSec && value <= mqttUpdateFreq::freqDisabled;
 }
 
 const char*
@@ -771,6 +772,8 @@ mqttUpdateFreqToString(mqttUpdateFreq value)
 		return "freqOneDay";
 	case mqttUpdateFreq::freqNever:
 		return "freqNever";
+	case mqttUpdateFreq::freqDisabled:
+		return "freqDisabled";
 	default:
 		return "freqNever";
 	}
@@ -782,11 +785,29 @@ mqttUpdateFreqFromString(const char *value, mqttUpdateFreq *result)
 	if (value == NULL || result == NULL) {
 		return false;
 	}
-	for (size_t i = 0; i < _pollingAllowedIntervalCount; i++) {
-		if (strcmp(value, _pollingAllowedIntervals[i]) == 0) {
-			*result = static_cast<mqttUpdateFreq>(i);
-			return true;
-		}
+	if (strcmp(value, "freqTenSec") == 0) {
+		*result = mqttUpdateFreq::freqTenSec;
+		return true;
+	}
+	if (strcmp(value, "freqOneMin") == 0) {
+		*result = mqttUpdateFreq::freqOneMin;
+		return true;
+	}
+	if (strcmp(value, "freqFiveMin") == 0) {
+		*result = mqttUpdateFreq::freqFiveMin;
+		return true;
+	}
+	if (strcmp(value, "freqOneHour") == 0) {
+		*result = mqttUpdateFreq::freqOneHour;
+		return true;
+	}
+	if (strcmp(value, "freqOneDay") == 0) {
+		*result = mqttUpdateFreq::freqOneDay;
+		return true;
+	}
+	if (strcmp(value, "freqDisabled") == 0) {
+		*result = mqttUpdateFreq::freqDisabled;
+		return true;
 	}
 	return false;
 }
@@ -1024,6 +1045,11 @@ publishHaEntityDiscovery(mqttState *entity)
 	}
 
 	if (entity->effectiveFreq == mqttUpdateFreq::freqNever) {
+		sendDataFromMqttState(entity, true);
+		return;
+	}
+
+	if (entity->effectiveFreq == mqttUpdateFreq::freqDisabled) {
 		switch (entity->haClass) {
 		case homeAssistantClass::haClassBox:
 			entityType = "number";
@@ -3285,7 +3311,9 @@ sendDataFromMqttState(mqttState *singleEntity, bool doHomeAssistant)
 
 	if (singleEntity == NULL)
 		return;
-	if (!doHomeAssistant && singleEntity->effectiveFreq == mqttUpdateFreq::freqNever) {
+	if (!doHomeAssistant &&
+	    (singleEntity->effectiveFreq == mqttUpdateFreq::freqNever ||
+	     singleEntity->effectiveFreq == mqttUpdateFreq::freqDisabled)) {
 		return;
 	}
 

@@ -2,6 +2,7 @@
 
 ## 2026-01-07
 - Add persisted per-entity polling intervals with MQTT config topics and Home Assistant discovery visibility.
+- Add freqDisabled for user-controlled discovery removal; reserve freqNever for legacy defaults.
 
 ## 2025-01-05
 - Merge upstream BMorgan1296/Alpha2MQTT master into the fork (robustness updates).
