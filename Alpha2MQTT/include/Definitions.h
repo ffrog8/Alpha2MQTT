@@ -1352,7 +1352,8 @@ enum mqttUpdateFreq {
 	freqFiveMin,
 	freqOneHour,
 	freqOneDay,
-	freqNever		// included in something else (i.e. statusTopic items)
+	freqNever,		// Reserved for legacy defaults; not user-settable.
+	freqDisabled		// User-settable disable that removes HA discovery and stops polling.
 };
 
 enum homeAssistantClass {
@@ -1398,6 +1399,8 @@ struct mqttState
 	mqttEntityId entityId;
 	char mqttName[MAX_MQTT_NAME_LENGTH];
 	mqttUpdateFreq updateFreq;
+	mqttUpdateFreq defaultFreq;
+	mqttUpdateFreq effectiveFreq;
 	bool subscribe;
 	bool retain;
 	homeAssistantClass haClass;

@@ -13,6 +13,7 @@ First, go and customise options at the top of Definitions.h!
 
 #include <bit>
 #include <bitset>
+#include <cctype>
 #include <cstdint>
 #include <iostream>
 // Supporting files
@@ -78,6 +79,17 @@ char* _mqttPayload;
 
 bool resendHaData = false;
 bool resendAllData = false;
+char _pollingLastChange[32] = "";
+// freqNever is reserved for legacy defaults and is not user-settable via /config/set.
+const char *_pollingAllowedIntervals[] = {
+	"freqTenSec",
+	"freqOneMin",
+	"freqFiveMin",
+	"freqOneHour",
+	"freqOneDay",
+	"freqDisabled"
+};
+const size_t _pollingAllowedIntervalCount = sizeof(_pollingAllowedIntervals) / sizeof(_pollingAllowedIntervals[0]);
 
 // OLED variables
 char _oledOperatingIndicator = '*';
@@ -160,60 +172,62 @@ struct {
 /*
  * Home Assistant auto-discovered values
  */
+#define MQTT_ENTITY(id, name, freq, subscribe, retain, haClass) { id, name, freq, freq, freq, subscribe, retain, haClass }
 static struct mqttState _mqttAllEntities[] =
 {
 	// Entity,                                "Name",                 Update Frequency,        Subscribe, Retain, HA Class
 #ifdef DEBUG_FREEMEM
-	{ mqttEntityId::entityFreemem,            "A2M_freemem",          mqttUpdateFreq::freqOneMin,  false, false, homeAssistantClass::haClassInfo },
+	MQTT_ENTITY(mqttEntityId::entityFreemem,            "A2M_freemem",          mqttUpdateFreq::freqOneMin,  false, false, homeAssistantClass::haClassInfo),
 #endif
 #ifdef DEBUG_CALLBACKS
-	{ mqttEntityId::entityCallbacks,          "A2M_Callbacks",        mqttUpdateFreq::freqTenSec,  false, false, homeAssistantClass::haClassInfo },
+	MQTT_ENTITY(mqttEntityId::entityCallbacks,          "A2M_Callbacks",        mqttUpdateFreq::freqTenSec,  false, false, homeAssistantClass::haClassInfo),
 #endif // DEBUG_CALLBACKS
 #ifdef DEBUG_RS485
-	{ mqttEntityId::entityRs485Errors,        "A2M_RS485_Errors",     mqttUpdateFreq::freqTenSec,  false, false, homeAssistantClass::haClassInfo },
+	MQTT_ENTITY(mqttEntityId::entityRs485Errors,        "A2M_RS485_Errors",     mqttUpdateFreq::freqTenSec,  false, false, homeAssistantClass::haClassInfo),
 #endif // DEBUG_RS485
 #ifdef A2M_DEBUG_WIFI
-	{ mqttEntityId::entityRSSI,               "A2M_RSSI",             mqttUpdateFreq::freqOneMin,  false, false, homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityBSSID,              "A2M_BSSID",            mqttUpdateFreq::freqOneMin,  false, false, homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityTxPower,            "A2M_TX_Power",         mqttUpdateFreq::freqOneMin,  false, false, homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityWifiRecon,          "A2M_reconnects",       mqttUpdateFreq::freqOneMin,  false, false, homeAssistantClass::haClassInfo },
+	MQTT_ENTITY(mqttEntityId::entityRSSI,               "A2M_RSSI",             mqttUpdateFreq::freqOneMin,  false, false, homeAssistantClass::haClassInfo),
+	MQTT_ENTITY(mqttEntityId::entityBSSID,              "A2M_BSSID",            mqttUpdateFreq::freqOneMin,  false, false, homeAssistantClass::haClassInfo),
+	MQTT_ENTITY(mqttEntityId::entityTxPower,            "A2M_TX_Power",         mqttUpdateFreq::freqOneMin,  false, false, homeAssistantClass::haClassInfo),
+	MQTT_ENTITY(mqttEntityId::entityWifiRecon,          "A2M_reconnects",       mqttUpdateFreq::freqOneMin,  false, false, homeAssistantClass::haClassInfo),
 #endif // A2M_DEBUG_WIFI
-	{ mqttEntityId::entityRs485Avail,         "RS485_Connected",      mqttUpdateFreq::freqNever,   false, true,  homeAssistantClass::haClassBinaryProblem },
-	{ mqttEntityId::entityA2MUptime,          "A2M_uptime",           mqttUpdateFreq::freqTenSec,  false, false, homeAssistantClass::haClassDuration },
-	{ mqttEntityId::entityA2MVersion,         "A2M_version",          mqttUpdateFreq::freqOneDay,  false, true,  homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityInverterVersion,    "Inverter_version",     mqttUpdateFreq::freqOneDay,  false, true,  homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityInverterSn,         "Inverter_SN",          mqttUpdateFreq::freqOneDay,  false, true,  homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityEmsVersion,         "EMS_version",          mqttUpdateFreq::freqOneDay,  false, true,  homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityEmsSn,              "EMS_SN",               mqttUpdateFreq::freqOneDay,  false, true,  homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityBatSoc,             "State_of_Charge",      mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassBattery },
-	{ mqttEntityId::entityBatPwr,             "ESS_Power",            mqttUpdateFreq::freqTenSec,  false, true,  homeAssistantClass::haClassPower },
-	{ mqttEntityId::entityBatEnergyCharge,    "ESS_Energy_Charge",    mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassEnergy },
-	{ mqttEntityId::entityBatEnergyDischarge, "ESS_Energy_Discharge", mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassEnergy },
-	{ mqttEntityId::entityGridAvail,          "Grid_Connected",       mqttUpdateFreq::freqNever,   false, true,  homeAssistantClass::haClassBinaryProblem },
-	{ mqttEntityId::entityGridPwr,            "Grid_Power",           mqttUpdateFreq::freqTenSec,  false, true,  homeAssistantClass::haClassPower },
-	{ mqttEntityId::entityGridEnergyTo,       "Grid_Energy_To",       mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassEnergy },
-	{ mqttEntityId::entityGridEnergyFrom,     "Grid_Energy_From",     mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassEnergy },
-	{ mqttEntityId::entityPvPwr,              "Solar_Power",          mqttUpdateFreq::freqTenSec,  false, true,  homeAssistantClass::haClassPower },
-	{ mqttEntityId::entityPvEnergy,           "Solar_Energy",         mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassEnergy },
-	{ mqttEntityId::entityFrequency,          "Frequency",            mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassFrequency },
-	{ mqttEntityId::entityOpMode,             "Op_Mode",              mqttUpdateFreq::freqOneMin,  true,  true,  homeAssistantClass::haClassSelect },
-	{ mqttEntityId::entitySocTarget,          "SOC_Target",           mqttUpdateFreq::freqOneMin,  true,  true,  homeAssistantClass::haClassBox },
-	{ mqttEntityId::entityChargePwr,          "Charge_Power",         mqttUpdateFreq::freqOneMin,  true,  true,  homeAssistantClass::haClassBox },
-	{ mqttEntityId::entityDischargePwr,       "Discharge_Power",      mqttUpdateFreq::freqOneMin,  true,  true,  homeAssistantClass::haClassBox },
-	{ mqttEntityId::entityPushPwr,            "Push_Power",           mqttUpdateFreq::freqOneMin,  true,  true,  homeAssistantClass::haClassBox },
-	{ mqttEntityId::entityBatCap,             "Battery_Capacity",     mqttUpdateFreq::freqOneDay,  false, true,  homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityBatTemp,            "Battery_Temp",         mqttUpdateFreq::freqFiveMin, false, true,  homeAssistantClass::haClassTemp },
-	{ mqttEntityId::entityInverterTemp,       "Inverter_Temp",        mqttUpdateFreq::freqFiveMin, false, true,  homeAssistantClass::haClassTemp },
-	{ mqttEntityId::entityBatFaults,          "Battery_Faults",       mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassBinaryProblem },
-	{ mqttEntityId::entityBatWarnings,        "Battery_Warnings",     mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassBinaryProblem },
-	{ mqttEntityId::entityInverterFaults,     "Inverter_Faults",      mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassBinaryProblem },
-	{ mqttEntityId::entityInverterWarnings,   "Inverter_Warnings",    mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassBinaryProblem },
-	{ mqttEntityId::entitySystemFaults,       "System_Faults",        mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassBinaryProblem },
-	{ mqttEntityId::entityInverterMode,       "Inverter_Mode",        mqttUpdateFreq::freqTenSec,  false, true,  homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityGridReg,            "Grid_Regulation",      mqttUpdateFreq::freqOneDay,  false, false, homeAssistantClass::haClassInfo },
-	{ mqttEntityId::entityRegNum,             "Register_Number",      mqttUpdateFreq::freqOneMin,  true,  false, homeAssistantClass::haClassBox },
-	{ mqttEntityId::entityRegValue,           "Register_Value",       mqttUpdateFreq::freqOneMin,  false, false, homeAssistantClass::haClassInfo }
+	MQTT_ENTITY(mqttEntityId::entityRs485Avail,         "RS485_Connected",      mqttUpdateFreq::freqNever,   false, true,  homeAssistantClass::haClassBinaryProblem),
+	MQTT_ENTITY(mqttEntityId::entityA2MUptime,          "A2M_uptime",           mqttUpdateFreq::freqTenSec,  false, false, homeAssistantClass::haClassDuration),
+	MQTT_ENTITY(mqttEntityId::entityA2MVersion,         "A2M_version",          mqttUpdateFreq::freqOneDay,  false, true,  homeAssistantClass::haClassInfo),
+	MQTT_ENTITY(mqttEntityId::entityInverterVersion,    "Inverter_version",     mqttUpdateFreq::freqOneDay,  false, true,  homeAssistantClass::haClassInfo),
+	MQTT_ENTITY(mqttEntityId::entityInverterSn,         "Inverter_SN",          mqttUpdateFreq::freqOneDay,  false, true,  homeAssistantClass::haClassInfo),
+	MQTT_ENTITY(mqttEntityId::entityEmsVersion,         "EMS_version",          mqttUpdateFreq::freqOneDay,  false, true,  homeAssistantClass::haClassInfo),
+	MQTT_ENTITY(mqttEntityId::entityEmsSn,              "EMS_SN",               mqttUpdateFreq::freqOneDay,  false, true,  homeAssistantClass::haClassInfo),
+	MQTT_ENTITY(mqttEntityId::entityBatSoc,             "State_of_Charge",      mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassBattery),
+	MQTT_ENTITY(mqttEntityId::entityBatPwr,             "ESS_Power",            mqttUpdateFreq::freqTenSec,  false, true,  homeAssistantClass::haClassPower),
+	MQTT_ENTITY(mqttEntityId::entityBatEnergyCharge,    "ESS_Energy_Charge",    mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassEnergy),
+	MQTT_ENTITY(mqttEntityId::entityBatEnergyDischarge, "ESS_Energy_Discharge", mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassEnergy),
+	MQTT_ENTITY(mqttEntityId::entityGridAvail,          "Grid_Connected",       mqttUpdateFreq::freqNever,   false, true,  homeAssistantClass::haClassBinaryProblem),
+	MQTT_ENTITY(mqttEntityId::entityGridPwr,            "Grid_Power",           mqttUpdateFreq::freqTenSec,  false, true,  homeAssistantClass::haClassPower),
+	MQTT_ENTITY(mqttEntityId::entityGridEnergyTo,       "Grid_Energy_To",       mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassEnergy),
+	MQTT_ENTITY(mqttEntityId::entityGridEnergyFrom,     "Grid_Energy_From",     mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassEnergy),
+	MQTT_ENTITY(mqttEntityId::entityPvPwr,              "Solar_Power",          mqttUpdateFreq::freqTenSec,  false, true,  homeAssistantClass::haClassPower),
+	MQTT_ENTITY(mqttEntityId::entityPvEnergy,           "Solar_Energy",         mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassEnergy),
+	MQTT_ENTITY(mqttEntityId::entityFrequency,          "Frequency",            mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassFrequency),
+	MQTT_ENTITY(mqttEntityId::entityOpMode,             "Op_Mode",              mqttUpdateFreq::freqOneMin,  true,  true,  homeAssistantClass::haClassSelect),
+	MQTT_ENTITY(mqttEntityId::entitySocTarget,          "SOC_Target",           mqttUpdateFreq::freqOneMin,  true,  true,  homeAssistantClass::haClassBox),
+	MQTT_ENTITY(mqttEntityId::entityChargePwr,          "Charge_Power",         mqttUpdateFreq::freqOneMin,  true,  true,  homeAssistantClass::haClassBox),
+	MQTT_ENTITY(mqttEntityId::entityDischargePwr,       "Discharge_Power",      mqttUpdateFreq::freqOneMin,  true,  true,  homeAssistantClass::haClassBox),
+	MQTT_ENTITY(mqttEntityId::entityPushPwr,            "Push_Power",           mqttUpdateFreq::freqOneMin,  true,  true,  homeAssistantClass::haClassBox),
+	MQTT_ENTITY(mqttEntityId::entityBatCap,             "Battery_Capacity",     mqttUpdateFreq::freqOneDay,  false, true,  homeAssistantClass::haClassInfo),
+	MQTT_ENTITY(mqttEntityId::entityBatTemp,            "Battery_Temp",         mqttUpdateFreq::freqFiveMin, false, true,  homeAssistantClass::haClassTemp),
+	MQTT_ENTITY(mqttEntityId::entityInverterTemp,       "Inverter_Temp",        mqttUpdateFreq::freqFiveMin, false, true,  homeAssistantClass::haClassTemp),
+	MQTT_ENTITY(mqttEntityId::entityBatFaults,          "Battery_Faults",       mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassBinaryProblem),
+	MQTT_ENTITY(mqttEntityId::entityBatWarnings,        "Battery_Warnings",     mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassBinaryProblem),
+	MQTT_ENTITY(mqttEntityId::entityInverterFaults,     "Inverter_Faults",      mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassBinaryProblem),
+	MQTT_ENTITY(mqttEntityId::entityInverterWarnings,   "Inverter_Warnings",    mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassBinaryProblem),
+	MQTT_ENTITY(mqttEntityId::entitySystemFaults,       "System_Faults",        mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassBinaryProblem),
+	MQTT_ENTITY(mqttEntityId::entityInverterMode,       "Inverter_Mode",        mqttUpdateFreq::freqTenSec,  false, true,  homeAssistantClass::haClassInfo),
+	MQTT_ENTITY(mqttEntityId::entityGridReg,            "Grid_Regulation",      mqttUpdateFreq::freqOneDay,  false, false, homeAssistantClass::haClassInfo),
+	MQTT_ENTITY(mqttEntityId::entityRegNum,             "Register_Number",      mqttUpdateFreq::freqOneMin,  true,  false, homeAssistantClass::haClassBox),
+	MQTT_ENTITY(mqttEntityId::entityRegValue,           "Register_Value",       mqttUpdateFreq::freqOneMin,  false, false, homeAssistantClass::haClassInfo)
 };
+#undef MQTT_ENTITY
 
 
 
@@ -254,6 +268,19 @@ uint32_t getUptimeSeconds(void);
 void emptyPayload(void);
 void sendMqtt(const char*, bool);
 void sendDataFromMqttState(mqttState*, bool);
+void loadPollingConfig(void);
+void savePollingConfig(mqttState*);
+void publishPollingConfig(void);
+void publishConfigDiscovery(void);
+void publishHaEntityDiscovery(mqttState*);
+bool handlePollingConfigSet(const char*);
+const char* mqttUpdateFreqToString(mqttUpdateFreq);
+bool mqttUpdateFreqFromString(const char*, mqttUpdateFreq*);
+bool isValidMqttUpdateFreq(int);
+void updatePollingLastChange(void);
+void getPollingTimestamp(char*, size_t);
+void buildPollingKey(const mqttState*, char*, size_t);
+mqttState* lookupEntityByName(const char*);
 void checkAndSetDispatchMode(void);
 void printWifiBars(int rssi);
 void getOpModeDesc(char *dest, size_t size, enum opMode mode);
@@ -476,6 +503,7 @@ void setup()
 
 	// Get the serial number (especially prefix for error codes)
 	getSerialNumber();
+	loadPollingConfig();
 
 	// Connect to MQTT
 	mqttReconnect();
@@ -720,6 +748,429 @@ getUptimeSeconds(void)
 	}
 	uptimeSeconds = nowSeconds;
 	return uptimeSecondsSaved + uptimeSeconds;
+}
+
+bool
+isValidMqttUpdateFreq(int value)
+{
+	return value >= mqttUpdateFreq::freqTenSec && value <= mqttUpdateFreq::freqDisabled;
+}
+
+const char*
+mqttUpdateFreqToString(mqttUpdateFreq value)
+{
+	switch (value) {
+	case mqttUpdateFreq::freqTenSec:
+		return "freqTenSec";
+	case mqttUpdateFreq::freqOneMin:
+		return "freqOneMin";
+	case mqttUpdateFreq::freqFiveMin:
+		return "freqFiveMin";
+	case mqttUpdateFreq::freqOneHour:
+		return "freqOneHour";
+	case mqttUpdateFreq::freqOneDay:
+		return "freqOneDay";
+	case mqttUpdateFreq::freqNever:
+		return "freqNever";
+	case mqttUpdateFreq::freqDisabled:
+		return "freqDisabled";
+	default:
+		return "freqNever";
+	}
+}
+
+bool
+mqttUpdateFreqFromString(const char *value, mqttUpdateFreq *result)
+{
+	if (value == NULL || result == NULL) {
+		return false;
+	}
+	if (strcmp(value, "freqTenSec") == 0) {
+		*result = mqttUpdateFreq::freqTenSec;
+		return true;
+	}
+	if (strcmp(value, "freqOneMin") == 0) {
+		*result = mqttUpdateFreq::freqOneMin;
+		return true;
+	}
+	if (strcmp(value, "freqFiveMin") == 0) {
+		*result = mqttUpdateFreq::freqFiveMin;
+		return true;
+	}
+	if (strcmp(value, "freqOneHour") == 0) {
+		*result = mqttUpdateFreq::freqOneHour;
+		return true;
+	}
+	if (strcmp(value, "freqOneDay") == 0) {
+		*result = mqttUpdateFreq::freqOneDay;
+		return true;
+	}
+	if (strcmp(value, "freqDisabled") == 0) {
+		*result = mqttUpdateFreq::freqDisabled;
+		return true;
+	}
+	return false;
+}
+
+void
+buildPollingKey(const mqttState *entity, char *target, size_t size)
+{
+	snprintf(target, size, "Freq_%u", static_cast<unsigned int>(entity->entityId));
+}
+
+void
+getPollingTimestamp(char *target, size_t size)
+{
+	modbusRequestAndResponse response;
+	modbusRequestAndResponseStatusValues result;
+	const char *fallback = "01/Jan/1970 00:00:00";
+
+	if (_registerHandler != NULL) {
+		result = _registerHandler->readHandledRegister(REG_CUSTOM_SYSTEM_DATE_TIME, &response);
+		if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess &&
+		    response.dataValueFormatted[0] != 0) {
+			strlcpy(target, response.dataValueFormatted, size);
+			return;
+		}
+	}
+
+	strlcpy(target, fallback, size);
+}
+
+void
+updatePollingLastChange(void)
+{
+	Preferences preferences;
+
+	getPollingTimestamp(_pollingLastChange, sizeof(_pollingLastChange));
+	preferences.begin(DEVICE_NAME, false);
+	preferences.putString("Freq_Last", _pollingLastChange);
+	preferences.end();
+}
+
+void
+loadPollingConfig(void)
+{
+	Preferences preferences;
+	int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
+
+	preferences.begin(DEVICE_NAME, false);
+	{
+		String lastChange = preferences.getString("Freq_Last", "");
+		if (lastChange.length() == 0) {
+			getPollingTimestamp(_pollingLastChange, sizeof(_pollingLastChange));
+			preferences.putString("Freq_Last", _pollingLastChange);
+		} else {
+			strlcpy(_pollingLastChange, lastChange.c_str(), sizeof(_pollingLastChange));
+		}
+	}
+
+	for (int i = 0; i < numberOfEntities; i++) {
+		char key[16];
+		int storedValue;
+
+		_mqttAllEntities[i].defaultFreq = _mqttAllEntities[i].updateFreq;
+		_mqttAllEntities[i].effectiveFreq = _mqttAllEntities[i].updateFreq;
+
+		buildPollingKey(&_mqttAllEntities[i], key, sizeof(key));
+		storedValue = preferences.getInt(key, static_cast<int>(_mqttAllEntities[i].defaultFreq));
+
+		if (!isValidMqttUpdateFreq(storedValue)) {
+			_mqttAllEntities[i].effectiveFreq = _mqttAllEntities[i].defaultFreq;
+			preferences.putInt(key, static_cast<int>(_mqttAllEntities[i].defaultFreq));
+		} else {
+			_mqttAllEntities[i].effectiveFreq = static_cast<mqttUpdateFreq>(storedValue);
+		}
+	}
+
+	preferences.end();
+}
+
+void
+savePollingConfig(mqttState *entity)
+{
+	Preferences preferences;
+	char key[16];
+
+	if (entity == NULL) {
+		return;
+	}
+
+	buildPollingKey(entity, key, sizeof(key));
+	preferences.begin(DEVICE_NAME, false);
+	preferences.putInt(key, static_cast<int>(entity->effectiveFreq));
+	preferences.end();
+}
+
+mqttState *
+lookupEntityByName(const char *name)
+{
+	int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
+	for (int i = 0; i < numberOfEntities; i++) {
+		if (!strcmp(name, _mqttAllEntities[i].mqttName)) {
+			return &_mqttAllEntities[i];
+		}
+	}
+	return NULL;
+}
+
+void
+publishPollingConfig(void)
+{
+	char addition[256];
+	bool first = true;
+	modbusRequestAndResponseStatusValues resultAddedToPayload;
+	int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
+
+	emptyPayload();
+
+	resultAddedToPayload = addToPayload("{");
+	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		return;
+	}
+
+	snprintf(addition, sizeof(addition), "\"last_change\": \"%s\", \"allowed_intervals\": [", _pollingLastChange);
+	resultAddedToPayload = addToPayload(addition);
+	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		return;
+	}
+
+	for (size_t i = 0; i < _pollingAllowedIntervalCount; i++) {
+		snprintf(addition, sizeof(addition), "%s\"%s\"", first ? "" : ", ", _pollingAllowedIntervals[i]);
+		first = false;
+		resultAddedToPayload = addToPayload(addition);
+		if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+			return;
+		}
+	}
+
+	resultAddedToPayload = addToPayload("], \"entity_intervals\": {");
+	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		return;
+	}
+
+	first = true;
+	for (int i = 0; i < numberOfEntities; i++) {
+		snprintf(addition, sizeof(addition), "%s\"%s\": \"%s\"",
+			 first ? "" : ", ",
+			 _mqttAllEntities[i].mqttName,
+			 mqttUpdateFreqToString(_mqttAllEntities[i].effectiveFreq));
+		first = false;
+		resultAddedToPayload = addToPayload(addition);
+		if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+			return;
+		}
+	}
+
+	resultAddedToPayload = addToPayload("}}");
+	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		return;
+	}
+
+	sendMqtt(DEVICE_NAME "/config", MQTT_RETAIN);
+}
+
+void
+publishConfigDiscovery(void)
+{
+	char addition[256];
+	modbusRequestAndResponseStatusValues resultAddedToPayload;
+	const char *sensorName = "MQTT_Config";
+	const char *prettyName = "MQTT Config";
+	char topic[128];
+
+	emptyPayload();
+
+	resultAddedToPayload = addToPayload("{");
+	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		return;
+	}
+
+	snprintf(addition, sizeof(addition), "\"component\": \"sensor\"");
+	resultAddedToPayload = addToPayload(addition);
+	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		return;
+	}
+
+	snprintf(addition, sizeof(addition),
+		 ", \"device\": {"
+		 " \"name\": \"%s\", \"model\": \"%s\", \"manufacturer\": \"AlphaESS\","
+		 " \"identifiers\": [\"%s\"]}",
+		 haUniqueId, deviceBatteryType,
+		 haUniqueId);
+	resultAddedToPayload = addToPayload(addition);
+	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		return;
+	}
+
+	snprintf(addition, sizeof(addition), ", \"name\": \"%s\"", prettyName);
+	resultAddedToPayload = addToPayload(addition);
+	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		return;
+	}
+
+	snprintf(addition, sizeof(addition), ", \"unique_id\": \"%s_%s\"", haUniqueId, sensorName);
+	resultAddedToPayload = addToPayload(addition);
+	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		return;
+	}
+
+	snprintf(addition, sizeof(addition),
+		", \"state_topic\": \"" DEVICE_NAME "/config\""
+		", \"value_template\": \"{{ value_json.last_change | default(\\\"\\\") }}\""
+		", \"json_attributes_topic\": \"" DEVICE_NAME "/config\""
+		", \"entity_category\": \"diagnostic\"");
+	resultAddedToPayload = addToPayload(addition);
+	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		return;
+	}
+
+	resultAddedToPayload = addToPayload("}");
+	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		return;
+	}
+
+	snprintf(topic, sizeof(topic), "homeassistant/sensor/%s/%s/config", haUniqueId, sensorName);
+	sendMqtt(topic, MQTT_RETAIN);
+}
+
+void
+publishHaEntityDiscovery(mqttState *entity)
+{
+	const char *entityType;
+	char topic[128];
+
+	if (entity == NULL) {
+		return;
+	}
+
+	if (entity->effectiveFreq == mqttUpdateFreq::freqNever) {
+		sendDataFromMqttState(entity, true);
+		return;
+	}
+
+	if (entity->effectiveFreq == mqttUpdateFreq::freqDisabled) {
+		switch (entity->haClass) {
+		case homeAssistantClass::haClassBox:
+			entityType = "number";
+			break;
+		case homeAssistantClass::haClassSelect:
+			entityType = "select";
+			break;
+		case homeAssistantClass::haClassBinaryProblem:
+			entityType = "binary_sensor";
+			break;
+		default:
+			entityType = "sensor";
+			break;
+		}
+		snprintf(topic, sizeof(topic), "homeassistant/%s/%s/%s/config", entityType, haUniqueId, entity->mqttName);
+		emptyPayload();
+		sendMqtt(topic, MQTT_RETAIN);
+		return;
+	}
+
+	sendDataFromMqttState(entity, true);
+}
+
+bool
+handlePollingConfigSet(const char *payload)
+{
+	const char *cursor = payload;
+	bool anyChange = false;
+	bool payloadValid = false;
+
+	while (cursor && *cursor && isspace(static_cast<unsigned char>(*cursor))) {
+		cursor++;
+	}
+	if (*cursor != '{') {
+		return false;
+	}
+	cursor++;
+
+	while (cursor && *cursor) {
+		char key[64];
+		char value[32];
+		size_t keyIndex = 0;
+		size_t valueIndex = 0;
+
+		while (*cursor && isspace(static_cast<unsigned char>(*cursor))) {
+			cursor++;
+		}
+		if (*cursor == '}') {
+			payloadValid = true;
+			break;
+		}
+		if (*cursor != '"') {
+			break;
+		}
+		cursor++;
+		while (*cursor && *cursor != '"' && keyIndex < sizeof(key) - 1) {
+			key[keyIndex++] = *cursor++;
+		}
+		key[keyIndex] = '\0';
+		if (*cursor != '"') {
+			break;
+		}
+		cursor++;
+		while (*cursor && isspace(static_cast<unsigned char>(*cursor))) {
+			cursor++;
+		}
+		if (*cursor != ':') {
+			break;
+		}
+		cursor++;
+		while (*cursor && isspace(static_cast<unsigned char>(*cursor))) {
+			cursor++;
+		}
+		if (*cursor != '"') {
+			break;
+		}
+		cursor++;
+		while (*cursor && *cursor != '"' && valueIndex < sizeof(value) - 1) {
+			value[valueIndex++] = *cursor++;
+		}
+		value[valueIndex] = '\0';
+		if (*cursor != '"') {
+			break;
+		}
+		cursor++;
+
+		payloadValid = true;
+
+		mqttState *entity = lookupEntityByName(key);
+		if (entity != NULL) {
+			mqttUpdateFreq parsed;
+			if (mqttUpdateFreqFromString(value, &parsed)) {
+				if (entity->effectiveFreq != parsed) {
+					entity->effectiveFreq = parsed;
+					savePollingConfig(entity);
+					publishHaEntityDiscovery(entity);
+					anyChange = true;
+				}
+			}
+		}
+
+		while (*cursor && isspace(static_cast<unsigned char>(*cursor))) {
+			cursor++;
+		}
+		if (*cursor == ',') {
+			cursor++;
+			continue;
+		}
+		if (*cursor == '}') {
+			payloadValid = true;
+			break;
+		}
+	}
+
+	if (anyChange) {
+		updatePollingLastChange();
+		publishPollingConfig();
+		resendAllData = true;
+	}
+
+	return payloadValid;
 }
 
 /*
@@ -1420,6 +1871,12 @@ mqttReconnect(void)
 			snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", subscriptionDef, subscribed);
 			Serial.println(_debugOutput);
 #endif
+			sprintf(subscriptionDef, DEVICE_NAME "/config/set");
+			subscribed = subscribed && _mqtt.subscribe(subscriptionDef, MQTT_SUBSCRIBE_QOS);
+#ifdef DEBUG_OVER_SERIAL
+			snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", subscriptionDef, subscribed);
+			Serial.println(_debugOutput);
+#endif
 
 			for (int i = 0; i < numberOfEntities; i++) {
 				if (_mqttAllEntities[i].subscribe) {
@@ -1434,6 +1891,7 @@ mqttReconnect(void)
 
 			// Subscribe or resubscribe to topics.
 			if (subscribed) {
+				publishPollingConfig();
 				break;
 			}
 		}
@@ -2628,8 +3086,9 @@ sendHaData()
 {
 	int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
 
+	publishConfigDiscovery();
 	for (int i = 0; i < numberOfEntities; i++) {
-		sendDataFromMqttState(&_mqttAllEntities[i], true);
+		publishHaEntityDiscovery(&_mqttAllEntities[i]);
 	}
 	resendHaData = false;
 }
@@ -2803,7 +3262,7 @@ sendData()
 	if (checkTimer(&lastRunTenSeconds, STATUS_INTERVAL_TEN_SECONDS)) {
 		sendStatus();
 		for (int i = 0; i < numberOfEntities; i++) {
-			if (_mqttAllEntities[i].updateFreq == mqttUpdateFreq::freqTenSec) {
+			if (_mqttAllEntities[i].effectiveFreq == mqttUpdateFreq::freqTenSec) {
 				sendDataFromMqttState(&_mqttAllEntities[i], false);
 			}
 		}
@@ -2811,7 +3270,7 @@ sendData()
 
 	if (checkTimer(&lastRunOneMinute, STATUS_INTERVAL_ONE_MINUTE)) {
 		for (int i = 0; i < numberOfEntities; i++) {
-			if (_mqttAllEntities[i].updateFreq == mqttUpdateFreq::freqOneMin) {
+			if (_mqttAllEntities[i].effectiveFreq == mqttUpdateFreq::freqOneMin) {
 				sendDataFromMqttState(&_mqttAllEntities[i], false);
 			}
 		}
@@ -2820,7 +3279,7 @@ sendData()
 
 	if (checkTimer(&lastRunFiveMinutes, STATUS_INTERVAL_FIVE_MINUTE)) {
 		for (int i = 0; i < numberOfEntities; i++) {
-			if (_mqttAllEntities[i].updateFreq == mqttUpdateFreq::freqFiveMin) {
+			if (_mqttAllEntities[i].effectiveFreq == mqttUpdateFreq::freqFiveMin) {
 				sendDataFromMqttState(&_mqttAllEntities[i], false);
 			}
 		}
@@ -2828,7 +3287,7 @@ sendData()
 
 	if (checkTimer(&lastRunOneHour, STATUS_INTERVAL_ONE_HOUR)) {
 		for (int i = 0; i < numberOfEntities; i++) {
-			if (_mqttAllEntities[i].updateFreq == mqttUpdateFreq::freqOneHour) {
+			if (_mqttAllEntities[i].effectiveFreq == mqttUpdateFreq::freqOneHour) {
 				sendDataFromMqttState(&_mqttAllEntities[i], false);
 			}
 		}
@@ -2836,7 +3295,7 @@ sendData()
 
 	if (checkTimer(&lastRunOneDay, STATUS_INTERVAL_ONE_DAY)) {
 		for (int i = 0; i < numberOfEntities; i++) {
-			if (_mqttAllEntities[i].updateFreq == mqttUpdateFreq::freqOneDay) {
+			if (_mqttAllEntities[i].effectiveFreq == mqttUpdateFreq::freqOneDay) {
 				sendDataFromMqttState(&_mqttAllEntities[i], false);
 			}
 		}
@@ -2852,6 +3311,11 @@ sendDataFromMqttState(mqttState *singleEntity, bool doHomeAssistant)
 
 	if (singleEntity == NULL)
 		return;
+	if (!doHomeAssistant &&
+	    (singleEntity->effectiveFreq == mqttUpdateFreq::freqNever ||
+	     singleEntity->effectiveFreq == mqttUpdateFreq::freqDisabled)) {
+		return;
+	}
 
 	emptyPayload();
 
@@ -2914,7 +3378,7 @@ sendDataFromMqttState(mqttState *singleEntity, bool doHomeAssistant)
  */
 void mqttCallback(char* topic, byte* message, unsigned int length)
 {
-	char mqttIncomingPayload[64] = ""; // Should be enough to cover command requests
+	char mqttIncomingPayload[512] = ""; // Should be enough to cover command requests
 	mqttState *mqttEntity = NULL;
 
 #ifdef DEBUG_OVER_SERIAL
@@ -2956,6 +3420,9 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 			Serial.println(mqttIncomingPayload);
 #endif
 		}
+		return; // No further processing needed.
+	} else if (strcmp(topic, DEVICE_NAME "/config/set") == 0) {
+		handlePollingConfigSet(mqttIncomingPayload);
 		return; // No further processing needed.
 	} else {
 		// match to DEVICE_NAME "/SERIAL#/MQTT_NAME/command"

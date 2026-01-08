@@ -46,6 +46,14 @@ When a compile fails, the workflow uploads the full logs as the `arduino-compile
 Before this device can do anything, it must be given basic configuration.  It needs to know your WiFi SSID and password, and your MQTT server details (IP, port, username, and password).  These details used to be hardcoded in `Definitions.h` but are now configured via a captive portal web interface and saved in flash.  There are two ways to start the configuration portal:  Button press or "as needed".  The button press is preferred as it is more secure, but this is only available when a button is defined.  (A button is currently only defined for the XIAO ESP32C6 which uses the "BOOT" button.)  Simply press the button to enter config mode, and you can re-configure any time by pressing it again.  When no button is defined, the "as needed" method is used and it simply starts the portal at bootup if the configuration is incomplete.  Once configuration mode starts the hardware will create its own WiFi network (SSID="Alpha2MQTT" and no password).  Join that network and you will be taken to the captive web portal where you can enter the configuration details.  Once you are done, the hardware will reboot and should join your WiFi network and talk to your MQTT server.
 If you define WiFi/MQTT values via `Secrets.h` (or a `secrets.txt` workflow that generates it), those values are used as defaults for the captive portal fields and as initial settings when no stored configuration exists.
 
+### Configuring polling intervals via MQTT
+Alpha2MQTT can store per-entity polling intervals that persist across restarts and show up in Home Assistant via MQTT discovery. The authoritative config is a retained payload published to `DEVICE_NAME/config`, with delta updates sent to `DEVICE_NAME/config/set`. When you set an entity to `freqDisabled`, the device stops polling and removes that entity's discovery configuration in HA until it is re-enabled. `freqNever` is reserved for legacy defaults and is not user-settable.
+
+- **Config topic (retained):** `DEVICE_NAME/config`
+- **Config update topic (non-retained):** `DEVICE_NAME/config/set`
+- **Example update payload:** `{ "Grid_Power": "freqOneMin", "Battery_Temp": "freqDisabled" }`
+- **HA discovery:** a diagnostic sensor named **MQTT Config** exposes `last_change` as its state and the full JSON as attributes.
+
 ### What you will see
 - Once your Alpha2MQTT device is working, in Home Assistant go to Settings->Devices & Services->Integrations->MQTT->devices
 - In this list is your new Alpha2MQTT device which starts with "A2M" and ends with your AlphaESS serial number.  In this image it is the top entry. (The 2nd entry is my dummy testing device which you won't see.)
