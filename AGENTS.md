@@ -5,7 +5,6 @@ If conflicts arise, **this file is the source of truth** for this repo.
 
 ## Scope
 - Repository: alpha2mqtt
-- Typical environment: Codex Cloud (ephemeral) + GitHub CI
 - Firmware toolchain: Arduino CLI–based (ESP-class targets)
 
 ## General principles
@@ -21,23 +20,11 @@ If conflicts arise, **this file is the source of truth** for this repo.
 ### Installation timing
 - Check for `arduino-cli` availability up front.
 - If it is missing, stop and report an environment error; do not attempt installation here.
-- Codex Cloud installs `arduino-cli` only via setup scripts, so treat it as a prerequisite.
-
-### Network and proxy handling
-- In Codex Cloud, outbound access for `arduino-cli` commonly requires a proxy.
-- At the point Arduino commands are first needed, the agent should:
-  - Attempt to obtain a proxy URL from `HTTPS_PROXY` or `ALL_PROXY`.
-  - Configure the CLI to use it (for example via `arduino-cli config set network.proxy`).
-- If proxy configuration is unavailable or ineffective:
-  - Treat this as an environment limitation.
-  - Report it rather than attempting repeated or speculative workarounds.
-- Keep `NO_PROXY` scoped to local addresses (`localhost`, `127.0.0.1`);
-  do not globally disable proxy usage.
+- Treat `arduino-cli` as a prerequisite provided by the environment or setup scripts.
 
 ### Configuration file (`arduino-cli.yaml`)
 - The file does not need to exist until `arduino-cli` is actually used.
 - It may be created or overwritten at test/build time.
-- Do not assume any prior state in ephemeral environments.
 
 ### Arduino config location rule (non-negotiable)
 If `ARDUINO_DATA_DIR` is set, all `arduino-cli config ...` commands MUST run with the same
@@ -63,7 +50,7 @@ These are conventions, not guarantees; adjust only if the environment requires i
 
 ## Expected Arduino build behavior
 When an Arduino build or test is requested, or when the agent changes source code, the agent should attempt, in order:
-1. Ensure `arduino-cli` is available (install if missing).
+1. Ensure `arduino-cli` is available (if missing, follow Installation timing policy).
 2. Initialize or update configuration as needed (including proxy).
 3. Install required cores and libraries.
 4. Compile and report results using the same targets and options as `.github/workflows/arduino-build.yml`.
@@ -75,6 +62,6 @@ If any step cannot run due to environment constraints, stop and explain why.
 - If one changes, update the other in the same change set to prevent drift.
 
 ## CI relationship
-- Codex Cloud provides provisional feedback only.
+- Local runs provide provisional feedback only.
 - GitHub CI is the final authority for correctness.
 - Work must not be labeled “verified” unless CI passes.
