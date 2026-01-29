@@ -11,6 +11,7 @@ Notes
 Handles Modbus requests and responses in a tidy class separate from main program logic.
 */
 #include "../RS485Handler.h"
+#include "../include/ModbusCodec.h"
 
 /*
 Default Constructor
@@ -588,7 +589,7 @@ bool RS485Handler::checkCRC(uint8_t frame[], byte actualFrameSize)
 	unsigned int calculated_crc, received_crc;
 
 	received_crc = ((frame[actualFrameSize - 2] << 8) | frame[actualFrameSize - 1]);
-	calcCRC(frame, actualFrameSize);
+	appendCrc(frame, actualFrameSize);
 	calculated_crc = ((frame[actualFrameSize - 2] << 8) | frame[actualFrameSize - 1]);
 
 	return (received_crc == calculated_crc);
@@ -604,25 +605,7 @@ https://github.com/angeloc/simplemodbusng/blob/master/SimpleModbusMaster/SimpleM
 */
 void RS485Handler::calcCRC(uint8_t frame[], byte actualFrameSize)
 {
-	unsigned int temp = 0xffff, flag;
-
-	for (unsigned char i = 0; i < actualFrameSize - 2; i++)
-	{
-		temp = temp ^ frame[i];
-
-		for (unsigned char j = 1; j <= 8; j++)
-		{
-			flag = temp & 0x0001;
-			temp >>= 1;
-
-			if (flag)
-				temp ^= 0xA001;
-		}
-	}
-
-	// Bytes are reversed.
-	frame[actualFrameSize - 2] = temp & 0xff;
-	frame[actualFrameSize - 1] = temp >> 8;
+	appendCrc(frame, actualFrameSize);
 }
 
 
