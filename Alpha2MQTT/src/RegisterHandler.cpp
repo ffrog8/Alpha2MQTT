@@ -22,6 +22,7 @@ system.  I found that WRITE DATA REGISTER will write any appropriate single (2 b
 register, and we just leverage 'Number of bytes' to guide it accordingly.
 */
 #include "../RegisterHandler.h"
+#include "../include/ModbusCodec.h"
 
 /*
 Default Constructor
@@ -4582,10 +4583,8 @@ modbusRequestAndResponseStatusValues RegisterHandler::readRawRegister(uint16_t r
 	modbusRequestAndResponseStatusValues result;
 
 	// Generate a frame with CRC placeholders of 0, 0 at the end
-	uint8_t	frame[] = { ALPHA_SLAVE_ID, MODBUS_FN_READDATAREGISTER,
-			    (uint8_t)((registerAddress >> 8) & 0xff), (uint8_t)(registerAddress & 0xff),
-			    0, rs->registerCount,
-			    0, 0 };
+	uint8_t frame[kModbusReadFrameSize];
+	buildReadFrame(ALPHA_SLAVE_ID, MODBUS_FN_READDATAREGISTER, registerAddress, rs->registerCount, frame);
 
 	// And send to the device, it's all synchronos so by the time we get a response we will know if success or failure
 	result = _modBus->sendModbus(frame, sizeof(frame), rs);
@@ -4648,21 +4647,36 @@ modbusRequestAndResponseStatusValues RegisterHandler::writeRawDataRegister(uint1
 	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
 	if (rs->registerCount == 1)
 	{
-		uint8_t	frame[] = { ALPHA_SLAVE_ID, MODBUS_FN_WRITEDATAREGISTER,
-				    (uint8_t)((registerAddress >> 8) & 0xff), (uint8_t)(registerAddress & 0xff),
-				    0, rs->registerCount, 2,
-				    (uint8_t)((value >> 8) & 0xff), (uint8_t)(value & 0xff),
-				    0, 0 };
-		result = _modBus->sendModbus(frame, sizeof(frame), rs);
+		uint16_t values[] = { static_cast<uint16_t>(value & 0xffff) };
+		uint8_t frame[16];
+		size_t frameSize = buildWriteMultipleRegistersFrame(ALPHA_SLAVE_ID,
+								    MODBUS_FN_WRITEDATAREGISTER,
+								    registerAddress,
+								    values,
+								    rs->registerCount,
+								    frame,
+								    sizeof(frame));
+		if (frameSize > 0) {
+			result = _modBus->sendModbus(frame, static_cast<byte>(frameSize), rs);
+		}
 	}
 	else if (rs->registerCount == 2)
 	{
-		uint8_t	frame[] = { ALPHA_SLAVE_ID, MODBUS_FN_WRITEDATAREGISTER,
-				    (uint8_t)((registerAddress >> 8) & 0xff), (uint8_t)(registerAddress & 0xff),
-				    0, rs->registerCount, 4,
-				    (uint8_t)((value >> 24) & 0xff), (uint8_t)((value >> 16) & 0xff), (uint8_t)((value >> 8) & 0xff), (uint8_t)(value & 0xff),
-				    0, 0 };
-		result = _modBus->sendModbus(frame, sizeof(frame), rs);
+		uint16_t values[] = {
+			static_cast<uint16_t>((value >> 16) & 0xffff),
+			static_cast<uint16_t>(value & 0xffff)
+		};
+		uint8_t frame[20];
+		size_t frameSize = buildWriteMultipleRegistersFrame(ALPHA_SLAVE_ID,
+								    MODBUS_FN_WRITEDATAREGISTER,
+								    registerAddress,
+								    values,
+								    rs->registerCount,
+								    frame,
+								    sizeof(frame));
+		if (frameSize > 0) {
+			result = _modBus->sendModbus(frame, static_cast<byte>(frameSize), rs);
+		}
 	}
 	// And now it has been sent to the device, the response is essentially synchronos so by the time we get a response we will know if success or failure
 
