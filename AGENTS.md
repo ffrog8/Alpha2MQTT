@@ -7,6 +7,15 @@ If conflicts arise, **this file is the source of truth** for this repo.
 - Repository: alpha2mqtt
 - Firmware toolchain: Arduino CLI–based (ESP-class targets)
 
+## Project map
+- `Alpha2MQTT/` — main firmware sketch, headers, and PlatformIO project
+- `Alpha2MQTT/build.sh` — Arduino CLI build script (ESP8266)
+- `Alpha2MQTT/legacy/` — legacy Arduino sketch
+- `AlphaSniffer/` — RS485 sniffer sketch
+- `Home Assistant/` — HA examples and dashboards
+- `Node Red Flows/` — Node-RED examples
+- `README.md` / `README-orig.md` — behavior and setup guidance
+
 ## General principles
 - Do not claim builds, tests, or verification unless they actually ran.
 - Explicitly label outcomes as:
@@ -56,6 +65,10 @@ When an Arduino build or test is requested, or when the agent changes source cod
 4. Compile and report results using the same targets and options as `.github/workflows/arduino-build.yml`.
 
 If any step cannot run due to environment constraints, stop and explain why.
+
+## Canonical build/test command
+- Default build command: `Alpha2MQTT/build.sh` (Arduino CLI ESP8266 builds).
+- If no local build ran, state “Not executed” and why, then reference the command above.
 
 ## Build script parity
 - Keep `Alpha2MQTT/build.sh` aligned with `.github/workflows/arduino-build.yml` for core versions and library lists.
