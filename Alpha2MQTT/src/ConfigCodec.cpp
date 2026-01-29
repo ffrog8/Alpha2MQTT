@@ -7,6 +7,7 @@
 namespace {
 const char *kKeyPollInterval = "poll_interval_s";
 const char *kKeyBootMode = "boot_mode";
+const char *kKeyBootIntent = "boot_intent";
 const char *kKeyRegisterMask = "enabled_register_mask";
 
 BootMode parseBootMode(const std::string &value)
@@ -22,7 +23,6 @@ BootMode parseBootMode(const std::string &value)
 	}
 	return BootMode::Normal;
 }
-
 const char *bootModeToString(BootMode mode)
 {
 	switch (mode) {
@@ -73,7 +73,7 @@ bool parseUint64(const std::string &value, uint64_t *result)
 
 Config defaultConfig()
 {
-	return { kPollIntervalDefaultSeconds, BootMode::Normal, 0 };
+	return { kPollIntervalDefaultSeconds, BootMode::Normal, BootIntent::Normal, 0 };
 }
 
 uint32_t clampPollInterval(uint32_t valueSeconds)
@@ -90,9 +90,10 @@ uint32_t clampPollInterval(uint32_t valueSeconds)
 std::string serializeConfig(const Config &config)
 {
 	std::string output;
-	output.reserve(128);
+	output.reserve(160);
 	output.append(kKeyPollInterval).append("=").append(std::to_string(config.pollIntervalSeconds)).append(";");
 	output.append(kKeyBootMode).append("=").append(bootModeToString(config.bootMode)).append(";");
+	output.append(kKeyBootIntent).append("=").append(bootIntentToString(config.bootIntent)).append(";");
 	output.append(kKeyRegisterMask).append("=").append(std::to_string(config.enabledRegisterMask));
 	return output;
 }
@@ -119,6 +120,8 @@ Config deserializeConfig(const std::string &payload)
 				}
 			} else if (key == kKeyBootMode) {
 				config.bootMode = parseBootMode(value);
+			} else if (key == kKeyBootIntent) {
+				config.bootIntent = bootIntentFromString(value.c_str());
 			} else if (key == kKeyRegisterMask) {
 				uint64_t parsed = 0;
 				if (parseUint64(value, &parsed)) {
@@ -131,4 +134,11 @@ Config deserializeConfig(const std::string &payload)
 
 	config.pollIntervalSeconds = clampPollInterval(config.pollIntervalSeconds);
 	return config;
+}
+
+BootIntent consumeBootIntent(Config &config)
+{
+	BootIntent prior = config.bootIntent;
+	config.bootIntent = BootIntent::Normal;
+	return prior;
 }

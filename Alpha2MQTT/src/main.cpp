@@ -20,6 +20,7 @@ First, go and customise options at the top of Definitions.h!
 #include "../RegisterHandler.h"
 #include "../RS485Handler.h"
 #include "../Definitions.h"
+#include "../include/BootModes.h"
 #include "../include/Scheduler.h"
 #include "../include/TimeProvider.h"
 #include <Arduino.h>
@@ -73,6 +74,15 @@ char portalStatusIp[20] = "";
 int portalLastDisconnectReason = -1;
 char portalLastDisconnectLabel[32] = "";
 unsigned long portalConnectStart = 0;
+const char kPreferenceBootIntent[] = "Boot_Intent";
+const char kPreferenceDeviceSerial[] = "Device_Serial";
+BootIntent currentBootIntent = BootIntent::Normal;
+BootIntent bootIntentForPublish = BootIntent::Normal;
+bool bootIntentPendingClear = false;
+bool bootEventPublished = false;
+#if defined(MP_ESP8266)
+const int kSafeModePin = 0; // D3 (GPIO0) strap for safe mode.
+#endif
 
 // WiFi parameters
 WiFiClient _wifi;
@@ -310,6 +320,9 @@ void setStatusLed(bool on);
 void setStatusLedColor(uint8_t red, uint8_t green, uint8_t blue);
 void updateStatusLed(void);
 void buildDeviceName(void);
+void publishBootEventOncePerBoot(void);
+void setMqttIdentifiersFromSerial(const char *serial);
+void setBootIntentAndReboot(BootIntent intent);
 const char* portalStatusLabel(PortalStatus status);
 const char* wifiStatusReason(wl_status_t status);
 const char* wifiStatusLabel(wl_status_t status);
@@ -322,6 +335,61 @@ buildDeviceName(void)
 	uint8_t mac[6] = { 0 };
 	WiFi.macAddress(mac);
 	snprintf(deviceName, sizeof(deviceName), "%s-%02X%02X%02X", DEVICE_NAME, mac[3], mac[4], mac[5]);
+}
+
+void
+setMqttIdentifiersFromSerial(const char *serial)
+{
+	if (serial == nullptr || *serial == '\0') {
+		return;
+	}
+
+	snprintf(haUniqueId, sizeof(haUniqueId), "A2M-%s", serial);
+	snprintf(statusTopic, sizeof(statusTopic), "%s/%s/status", deviceName, haUniqueId);
+}
+
+void
+publishBootEventOncePerBoot(void)
+{
+	if (bootEventPublished || !_mqtt.connected()) {
+		return;
+	}
+
+	char bootTopic[128];
+	char payload[192];
+	String resetReason = ESP.getResetReason();
+
+	if (haUniqueId[0] != '\0') {
+		snprintf(bootTopic, sizeof(bootTopic), "%s/%s/boot", deviceName, haUniqueId);
+	} else {
+		snprintf(bootTopic, sizeof(bootTopic), "%s/boot", deviceName);
+	}
+	snprintf(payload, sizeof(payload),
+		 "{ \"boot_intent\": \"%s\", \"reset_reason\": \"%s\", \"ts_ms\": %lu }",
+		 bootIntentToString(bootIntentForPublish), resetReason.c_str(), millis());
+
+	_mqtt.publish(bootTopic, payload, true);
+	bootEventPublished = true;
+
+	if (bootIntentPendingClear) {
+		Preferences preferences;
+		preferences.begin(DEVICE_NAME, false);
+		preferences.putString(kPreferenceBootIntent, bootIntentToString(BootIntent::Normal));
+		preferences.end();
+		bootIntentPendingClear = false;
+	}
+}
+
+void
+setBootIntentAndReboot(BootIntent intent)
+{
+	Preferences preferences;
+
+	// ESP8266 doesn't provide reset intent; persist requested reboot reason for next boot.
+	preferences.begin(DEVICE_NAME, false);
+	preferences.putString(kPreferenceBootIntent, bootIntentToString(intent));
+	preferences.end();
+	ESP.restart();
 }
 
 const char*
@@ -439,6 +507,8 @@ handlePortalStatusRequest(WiFiManager& wifiManager)
 	html += ")";
 	html += "<br>Target SSID: ";
 	html += portalStatusSsid;
+	html += "<br>Boot intent: ";
+	html += bootIntentToString(currentBootIntent);
 	html += "<br>Last disconnect: ";
 	html += portalLastDisconnectLabel;
 	html += " (";
@@ -521,6 +591,10 @@ void setup()
 	// Bit of a delay to give things time to kick in
 	delay(500);
 
+#if defined(MP_ESP8266)
+	pinMode(kSafeModePin, INPUT_PULLUP);
+#endif
+
 #ifdef DEBUG_OVER_SERIAL
 	sprintf(_debugOutput, "Starting.");
 	Serial.println(_debugOutput);
@@ -528,7 +602,15 @@ void setup()
 
 	buildDeviceName();
 
-	preferences.begin(DEVICE_NAME, true); // RO
+	preferences.begin(DEVICE_NAME, false); // RW
+	// ESP8266 doesn't provide reset intent; read once and clear so we can distinguish intentional reboots.
+	{
+		String storedIntent = preferences.getString(kPreferenceBootIntent, "");
+		currentBootIntent = bootIntentFromString(storedIntent.c_str());
+		bootIntentForPublish = currentBootIntent;
+		bootIntentPendingClear = (currentBootIntent != BootIntent::Normal);
+	}
+	String storedSerial = preferences.getString(kPreferenceDeviceSerial, "");
 	appConfig.wifiSSID = preferences.getString("WiFi_SSID", "");
 	appConfig.wifiPass = preferences.getString("WiFi_Password", "");
 	appConfig.mqttSrvr = preferences.getString("MQTT_Server", "");
@@ -541,6 +623,14 @@ void setup()
 	appConfig.extAntenna = preferences.getBool("Ext_Antenna", false);
 #endif // MP_XIAO_ESP32C6
 	preferences.end();
+	if (storedSerial.length() > 0) {
+		setMqttIdentifiersFromSerial(storedSerial.c_str());
+	}
+
+#ifdef DEBUG_OVER_SERIAL
+	Serial.print("boot_intent=");
+	Serial.println(bootIntentToString(currentBootIntent));
+#endif
 
 	if (appConfig.wifiSSID == "" && String(WIFI_SSID).length() > 0) {
 		appConfig.wifiSSID = WIFI_SSID;
@@ -561,6 +651,17 @@ void setup()
 		appConfig.mqttPass = MQTT_PASSWORD;
 	}
 
+#if defined(MP_ESP8266)
+	if (digitalRead(kSafeModePin) == LOW) {
+#ifdef DEBUG_OVER_SERIAL
+		Serial.println("Safe mode strap detected (GPIO0/D3 LOW); starting config portal.");
+#endif
+		updateOLED(false, "Safe", "mode", "portal");
+		configHandler();
+		return;
+	}
+#endif
+
 	// If config is not setup, then enter config mode
 	if ((appConfig.wifiSSID == "") ||
 	    (appConfig.wifiPass == "") ||
@@ -569,7 +670,7 @@ void setup()
 	    (appConfig.mqttUser == "") ||
 	    (appConfig.mqttPass == "")) {
 		configLoop();
-		ESP.restart();
+		setBootIntentAndReboot(BootIntent::WifiConfig);
 	} else {
 		updateOLED(false, "Found", "config", _version);
 		delay(250);
@@ -617,6 +718,14 @@ void setup()
 
 	// And any messages we are subscribed to will be pushed to the mqttCallback function for processing
 	_mqtt.setCallback(mqttCallback);
+
+	if (haUniqueId[0] == '\0') {
+		setMqttIdentifiersFromSerial("UNKNOWN");
+	}
+
+	// Connect to MQTT before any RS485 probing so boot intent is observable even if RS485 stalls.
+	mqttReconnect();
+	publishBootEventOncePerBoot();
 
 	// Set up the serial for communicating with the MAX
 	_modBus = new RS485Handler;
@@ -677,9 +786,6 @@ void setup()
 	// Get the serial number (especially prefix for error codes)
 	getSerialNumber();
 	loadPollingConfig();
-
-	// Connect to MQTT
-	mqttReconnect();
 	sendHaData();
 	resendHaData = true;  // Tell loop() to do it again
 
@@ -915,7 +1021,7 @@ configHandler(void)
 					wifiManager.process();
 					delay(50);
 				}
-				ESP.restart();
+				setBootIntentAndReboot(BootIntent::WifiConfig);
 			}
 
 			if (portalConnectStart > 0 && millis() - portalConnectStart >= 20000) {
@@ -1018,7 +1124,7 @@ loop()
 	// Force Restart?
 #ifdef FORCE_RESTART_HOURS
 	if (checkTimer(&autoReboot, FORCE_RESTART_HOURS * 60 * 60 * 1000)) {
-		ESP.restart();
+		setBootIntentAndReboot(BootIntent::Normal);
 	}
 #endif
 }
@@ -1518,7 +1624,7 @@ setupWifi(bool initialConnect)
 		snprintf(line3, sizeof(line3), "WiFi %d ...", tries);
 
 		if (tries == 5000) {
-			ESP.restart();
+			setBootIntentAndReboot(BootIntent::Normal);
 		}
 #ifdef BUTTON_PIN
 		// Read button state
@@ -1825,8 +1931,18 @@ getSerialNumber()
 #endif
 
 	_registerHandler->setSerialNumberPrefix(deviceSerialNumber[0], deviceSerialNumber[1]);
-	snprintf(haUniqueId, sizeof(haUniqueId), "A2M-%s", deviceSerialNumber);
-	snprintf(statusTopic, sizeof(statusTopic), "%s/%s/status", deviceName, haUniqueId);
+	if (haUniqueId[0] == '\0') {
+		setMqttIdentifiersFromSerial(deviceSerialNumber);
+	}
+	{
+		Preferences preferences;
+		preferences.begin(DEVICE_NAME, false);
+		String storedSerial = preferences.getString(kPreferenceDeviceSerial, "");
+		if (storedSerial != deviceSerialNumber) {
+			preferences.putString(kPreferenceDeviceSerial, deviceSerialNumber);
+		}
+		preferences.end();
+	}
 
 	delay(4000);
 
@@ -2152,6 +2268,8 @@ mqttReconnect(void)
 #ifdef DEBUG_OVER_SERIAL
 			Serial.println("Connected MQTT");
 #endif
+			// Publish boot intent early; RS485 init can stall before periodic status messages.
+			publishBootEventOncePerBoot();
 
 			// Special case for Home Assistant
 			sprintf(subscriptionDef, "%s", MQTT_SUB_HOMEASSISTANT);
@@ -2872,8 +2990,9 @@ sendStatus(void)
 
 	emptyPayload();
 
-	snprintf(stateAddition, sizeof(stateAddition), "{ \"a2mStatus\": \"online\", \"rs485Status\": \"%s\", \"gridStatus\": \"%s\" }",
-		 opData.essRs485Connected ? "OK" : "Problem", gridStatusStr);
+	snprintf(stateAddition, sizeof(stateAddition),
+		 "{ \"a2mStatus\": \"online\", \"rs485Status\": \"%s\", \"gridStatus\": \"%s\", \"boot_intent\": \"%s\" }",
+		 opData.essRs485Connected ? "OK" : "Problem", gridStatusStr, bootIntentToString(currentBootIntent));
 	resultAddedToPayload = addToPayload(stateAddition);
 	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
 		return;
