@@ -58,6 +58,21 @@ char deviceSerialNumber[17]; // 8 registers = max 16 chars (usually 15)
 char deviceBatteryType[32];
 char haUniqueId[32];
 char statusTopic[128];
+char deviceName[32];
+
+enum PortalStatus : uint8_t {
+	portalStatusIdle = 0,
+	portalStatusConnecting,
+	portalStatusSuccess,
+	portalStatusFailed
+};
+PortalStatus portalStatus = portalStatusIdle;
+char portalStatusReason[64] = "";
+char portalStatusSsid[33] = "";
+char portalStatusIp[20] = "";
+int portalLastDisconnectReason = -1;
+char portalLastDisconnectLabel[32] = "";
+unsigned long portalConnectStart = 0;
 
 // WiFi parameters
 WiFiClient _wifi;
@@ -294,6 +309,160 @@ modbusRequestAndResponseStatusValues getSerialNumber();
 void setStatusLed(bool on);
 void setStatusLedColor(uint8_t red, uint8_t green, uint8_t blue);
 void updateStatusLed(void);
+void buildDeviceName(void);
+const char* portalStatusLabel(PortalStatus status);
+const char* wifiStatusReason(wl_status_t status);
+const char* wifiStatusLabel(wl_status_t status);
+const char* wifiModeLabel(WiFiMode_t mode);
+void handlePortalStatusRequest(WiFiManager& wifiManager);
+
+void
+buildDeviceName(void)
+{
+	uint8_t mac[6] = { 0 };
+	WiFi.macAddress(mac);
+	snprintf(deviceName, sizeof(deviceName), "%s-%02X%02X%02X", DEVICE_NAME, mac[3], mac[4], mac[5]);
+}
+
+const char*
+portalStatusLabel(PortalStatus status)
+{
+	switch (status) {
+	case portalStatusConnecting:
+		return "Connecting";
+	case portalStatusSuccess:
+		return "Connected";
+	case portalStatusFailed:
+		return "Failed";
+	case portalStatusIdle:
+	default:
+		return "Idle";
+	}
+}
+
+const char*
+wifiStatusReason(wl_status_t status)
+{
+	switch (status) {
+	case WL_NO_SSID_AVAIL:
+		return "SSID not found";
+	case WL_CONNECT_FAILED:
+		return "Connection failed";
+	case WL_CONNECTION_LOST:
+		return "Connection lost";
+	case WL_DISCONNECTED:
+		return "Disconnected";
+	case WL_IDLE_STATUS:
+		return "Idle";
+	default:
+		return "Unknown";
+	}
+}
+
+const char*
+wifiStatusLabel(wl_status_t status)
+{
+	switch (status) {
+	case WL_CONNECTED:
+		return "Connected";
+	case WL_NO_SSID_AVAIL:
+		return "No SSID";
+	case WL_CONNECT_FAILED:
+		return "Connect failed";
+	case WL_CONNECTION_LOST:
+		return "Connection lost";
+	case WL_DISCONNECTED:
+		return "Disconnected";
+	case WL_IDLE_STATUS:
+		return "Idle";
+	default:
+		return "Unknown";
+	}
+}
+
+const char*
+wifiModeLabel(WiFiMode_t mode)
+{
+	switch (mode) {
+	case WIFI_STA:
+		return "STA";
+	case WIFI_AP:
+		return "AP";
+	case WIFI_AP_STA:
+		return "AP+STA";
+	case WIFI_OFF:
+		return "OFF";
+	default:
+		return "Unknown";
+	}
+}
+
+void
+handlePortalStatusRequest(WiFiManager& wifiManager)
+{
+	String html;
+	html.reserve(900);
+	html += "<!DOCTYPE html><html><head>";
+	html += "<meta http-equiv=\"refresh\" content=\"1\">";
+	html += "<meta charset=\"utf-8\">";
+	html += "<title>Alpha2MQTT WiFi Status</title>";
+	html += "</head><body>";
+	html += "<h2>WiFi Status: ";
+	html += portalStatusLabel(portalStatus);
+	html += "</h2>";
+
+	if (portalStatus == portalStatusSuccess) {
+		html += "<p>SSID: ";
+		html += portalStatusSsid;
+		html += "<br>IP: ";
+		html += portalStatusIp;
+		html += "</p>";
+	} else if (portalStatus == portalStatusFailed) {
+		html += "<p>Reason: ";
+		html += portalStatusReason;
+		html += "</p>";
+	} else {
+		html += "<p>Attempting to connect...</p>";
+	}
+
+	html += "<h3>Diagnostics</h3><p>";
+	html += "Mode: ";
+	html += wifiModeLabel(WiFi.getMode());
+	html += "<br>SoftAP SSID: ";
+	html += WiFi.softAPSSID();
+	html += "<br>SoftAP IP: ";
+	html += WiFi.softAPIP().toString();
+	html += "<br>STA status: ";
+	html += wifiStatusLabel(WiFi.status());
+	html += " (";
+	html += String(static_cast<int>(WiFi.status()));
+	html += ")";
+	html += "<br>Target SSID: ";
+	html += portalStatusSsid;
+	html += "<br>Last disconnect: ";
+	html += portalLastDisconnectLabel;
+	html += " (";
+	html += String(portalLastDisconnectReason);
+	html += ")";
+	if (WiFi.status() == WL_CONNECTED) {
+		html += "<br>RSSI: ";
+		html += String(WiFi.RSSI());
+		html += " dBm<br>Channel: ";
+		html += String(WiFi.channel());
+	}
+	html += "<br>Free heap: ";
+	html += String(ESP.getFreeHeap());
+	html += "<br>Uptime (ms): ";
+	html += String(millis());
+	html += "</p>";
+
+	html += "<p>Page refreshes every second.</p>";
+	html += "</body></html>";
+
+	if (wifiManager.server) {
+		wifiManager.server->send(200, "text/html", html);
+	}
+}
 
 /*
  * setup
@@ -356,6 +525,8 @@ void setup()
 	sprintf(_debugOutput, "Starting.");
 	Serial.println(_debugOutput);
 #endif
+
+	buildDeviceName();
 
 	preferences.begin(DEVICE_NAME, true); // RO
 	appConfig.wifiSSID = preferences.getString("WiFi_SSID", "");
@@ -574,9 +745,13 @@ configHandler(void)
 	Preferences preferences;
 	WiFiManager wifiManager;
 
-	wifiManager.setBreakAfterConfig(true);
-	wifiManager.setTitle(DEVICE_NAME);
+	// Keep AP alive while attempting STA connection so the portal stays reachable.
+	WiFi.mode(WIFI_AP_STA);
+	wifiManager.setBreakAfterConfig(false);
+	wifiManager.setTitle(deviceName);
 	wifiManager.setShowInfoUpdate(false);
+	wifiManager.setConnectTimeout(20);
+	wifiManager.setConfigPortalTimeout(0);
 	String mqttPortDefault = String(appConfig.mqttPort);
 	WiFiManagerParameter p_lineBreak_text("<p>MQTT settings:</p>");
 	WiFiManagerParameter custom_mqtt_server("server", "MQTT server", appConfig.mqttSrvr.c_str(), 40);
@@ -611,50 +786,161 @@ configHandler(void)
 	wifiManager.addParameter(&custom_mqtt_user);
 	wifiManager.addParameter(&custom_mqtt_pass);
 
-	if (!wifiManager.startConfigPortal(DEVICE_NAME)) {
-#ifdef DEBUG_OVER_SERIAL
-		Serial.println("failed to connect and hit timeout");
-#endif
-		updateOLED(false, "Web", "config", "failed");
-		delay(3000);
-		//reset and try again
-		ESP.restart();
-	}
+	portalStatus = portalStatusIdle;
+	portalStatusReason[0] = '\0';
+	portalStatusSsid[0] = '\0';
+	portalStatusIp[0] = '\0';
+	portalLastDisconnectReason = -1;
+	portalLastDisconnectLabel[0] = '\0';
+	portalConnectStart = 0;
 
-	//if you get here you have connected to the WiFi
+#if defined MP_ESP8266
+	static WiFiEventHandler disconnectHandler;
+	disconnectHandler = WiFi.onStationModeDisconnected([](const WiFiEventStationModeDisconnected& event) {
+		portalLastDisconnectReason = static_cast<int>(event.reason);
+		switch (event.reason) {
+		case REASON_AUTH_FAIL:
+			strlcpy(portalLastDisconnectLabel, "Auth failed", sizeof(portalLastDisconnectLabel));
+			break;
+		case REASON_NO_AP_FOUND:
+			strlcpy(portalLastDisconnectLabel, "AP not found", sizeof(portalLastDisconnectLabel));
+			break;
+		case REASON_ASSOC_FAIL:
+			strlcpy(portalLastDisconnectLabel, "Association failed", sizeof(portalLastDisconnectLabel));
+			break;
+		case REASON_HANDSHAKE_TIMEOUT:
+			strlcpy(portalLastDisconnectLabel, "Handshake timeout", sizeof(portalLastDisconnectLabel));
+			break;
+		default:
+			strlcpy(portalLastDisconnectLabel, "Disconnect", sizeof(portalLastDisconnectLabel));
+			break;
+		}
 #ifdef DEBUG_OVER_SERIAL
-	Serial.println("connected...yeey :)");
+		Serial.print("WiFi disconnect: SSID=");
+		Serial.print(portalStatusSsid);
+		Serial.print(" reason=");
+		Serial.print(portalLastDisconnectReason);
+		Serial.print(" (");
+		Serial.print(portalLastDisconnectLabel);
+		Serial.println(")");
 #endif
-	updateOLED(false, "Web", "config", "succeeded");
+	});
+#endif
 
-	preferences.begin(DEVICE_NAME, false); // RW
-	preferences.putString("WiFi_SSID", wifiManager.getWiFiSSID());
-	preferences.putString("WiFi_Password", wifiManager.getWiFiPass());
-	preferences.putString("MQTT_Server", custom_mqtt_server.getValue());
-	{
-		int port = strtol(custom_mqtt_port.getValue(), NULL, 10);
-		if (port < 0 || port > SHRT_MAX)
-			port = 0;
-		preferences.putInt("MQTT_Port", port);
-	}
-	preferences.putString("MQTT_Username", custom_mqtt_user.getValue());
-	preferences.putString("MQTT_Password", custom_mqtt_pass.getValue());
+	wifiManager.setCustomHeadElement(
+		"<script>"
+		"if (window.location && window.location.pathname === '/wifisave') {"
+		"window.location.href = '/status';"
+		"}"
+		"</script>");
+	wifiManager.setWebServerCallback([&]() {
+		if (wifiManager.server) {
+			wifiManager.server->on("/status", [&]() {
+				handlePortalStatusRequest(wifiManager);
+			});
+		}
+	});
+	wifiManager.setSaveConfigCallback([&]() {
+		portalStatus = portalStatusConnecting;
+		portalConnectStart = millis();
+		strlcpy(portalStatusSsid, wifiManager.getWiFiSSID().c_str(), sizeof(portalStatusSsid));
+		portalStatusReason[0] = '\0';
+#ifdef DEBUG_OVER_SERIAL
+		Serial.print("WiFi save: SSID=");
+		Serial.println(portalStatusSsid);
+		Serial.print("Status URL: http://");
+		Serial.print(WiFi.softAPIP());
+		Serial.println("/status");
+#endif
+	});
+	wifiManager.setConfigPortalBlocking(false);
+	wifiManager.startConfigPortal(deviceName);
+
+#ifdef DEBUG_OVER_SERIAL
+	Serial.print("Config portal SSID: ");
+	Serial.println(deviceName);
+	Serial.print("Config portal IP: ");
+	Serial.println(WiFi.softAPIP());
+#endif
+
+	for (;;) {
+		wifiManager.process();
+
+		if (portalStatus == portalStatusConnecting) {
+			if (WiFi.status() == WL_CONNECTED) {
+				portalStatus = portalStatusSuccess;
+				strlcpy(portalStatusIp, WiFi.localIP().toString().c_str(), sizeof(portalStatusIp));
+#ifdef DEBUG_OVER_SERIAL
+				Serial.print("WiFi connected: SSID=");
+				Serial.print(portalStatusSsid);
+				Serial.print(" IP=");
+				Serial.print(portalStatusIp);
+				Serial.print(" RSSI=");
+				Serial.print(WiFi.RSSI());
+				Serial.print(" channel=");
+				Serial.print(WiFi.channel());
+				Serial.print(" heap=");
+				Serial.println(ESP.getFreeHeap());
+#endif
+				updateOLED(false, "Web", "config", "succeeded");
+
+				preferences.begin(DEVICE_NAME, false); // RW
+				preferences.putString("WiFi_SSID", wifiManager.getWiFiSSID());
+				preferences.putString("WiFi_Password", wifiManager.getWiFiPass());
+				preferences.putString("MQTT_Server", custom_mqtt_server.getValue());
+				{
+					int port = strtol(custom_mqtt_port.getValue(), NULL, 10);
+					if (port < 0 || port > SHRT_MAX)
+						port = 0;
+					preferences.putInt("MQTT_Port", port);
+				}
+				preferences.putString("MQTT_Username", custom_mqtt_user.getValue());
+				preferences.putString("MQTT_Password", custom_mqtt_pass.getValue());
 #ifdef MP_XIAO_ESP32C6
-	{
-		const char *extAnt = custom_ext_ant.getValue();
-		preferences.putBool("Ext_Antenna", extAnt[0] == 'T');
-	}
+				{
+					const char *extAnt = custom_ext_ant.getValue();
+					preferences.putBool("Ext_Antenna", extAnt[0] == 'T');
+				}
 #endif // MP_XIAO_ESP32C6
 #ifdef MP_ESPUNO_ESP32C6
-	{
-		const char *extAnt = custom_ext_ant.getValue();
-		preferences.putBool("Ext_Antenna", extAnt[0] == 'T');
-	}
+				{
+					const char *extAnt = custom_ext_ant.getValue();
+					preferences.putBool("Ext_Antenna", extAnt[0] == 'T');
+				}
 #endif // MP_ESPUNO_ESP32C6
-	preferences.end();
+				preferences.end();
 
-	delay(1000);
-	ESP.restart();
+				unsigned long statusStart = millis();
+				while (millis() - statusStart < 3000) {
+					wifiManager.process();
+					delay(50);
+				}
+				ESP.restart();
+			}
+
+			if (portalConnectStart > 0 && millis() - portalConnectStart >= 20000) {
+				portalStatus = portalStatusFailed;
+				const char *reason = wifiStatusReason(WiFi.status());
+				if (strcmp(reason, "Unknown") == 0) {
+					strlcpy(portalStatusReason, "failed to connect and hit timeout", sizeof(portalStatusReason));
+				} else {
+					strlcpy(portalStatusReason, reason, sizeof(portalStatusReason));
+				}
+#ifdef DEBUG_OVER_SERIAL
+				Serial.print("WiFi connect failed: ");
+				Serial.print(portalStatusReason);
+				Serial.print(" status=");
+				Serial.print(static_cast<int>(WiFi.status()));
+				Serial.print(" heap=");
+				Serial.println(ESP.getFreeHeap());
+#endif
+				updateOLED(false, "Web", "config", "failed");
+				// Stay in the portal on failure so the device remains reachable for retries.
+				portalConnectStart = 0;
+			}
+		}
+		delay(50);
+	}
 }
 
 /*
@@ -969,7 +1255,11 @@ publishPollingConfig(void)
 		return;
 	}
 
-	sendMqtt(DEVICE_NAME "/config", MQTT_RETAIN);
+	{
+		char configTopic[64];
+		snprintf(configTopic, sizeof(configTopic), "%s/config", deviceName);
+		sendMqtt(configTopic, MQTT_RETAIN);
+	}
 }
 
 void
@@ -1018,10 +1308,11 @@ publishConfigDiscovery(void)
 	}
 
 	snprintf(addition, sizeof(addition),
-		", \"state_topic\": \"" DEVICE_NAME "/config\""
+		", \"state_topic\": \"%s/config\""
 		", \"value_template\": \"{{ value_json.last_change | default(\\\"\\\") }}\""
-		", \"json_attributes_topic\": \"" DEVICE_NAME "/config\""
-		", \"entity_category\": \"diagnostic\"");
+		", \"json_attributes_topic\": \"%s/config\""
+		", \"entity_category\": \"diagnostic\"",
+		deviceName, deviceName);
 	resultAddedToPayload = addToPayload(addition);
 	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
 		return;
@@ -1248,7 +1539,7 @@ setupWifi(bool initialConnect)
 #endif // MP_ESP32
 
 			// Set the hostname for this Arduino
-			WiFi.hostname(DEVICE_NAME);
+			WiFi.hostname(deviceName);
 
 			// And connect to the details defined at the top
 			WiFi.begin(appConfig.wifiSSID.c_str(), appConfig.wifiPass.c_str());
@@ -1535,7 +1826,7 @@ getSerialNumber()
 
 	_registerHandler->setSerialNumberPrefix(deviceSerialNumber[0], deviceSerialNumber[1]);
 	snprintf(haUniqueId, sizeof(haUniqueId), "A2M-%s", deviceSerialNumber);
-	snprintf(statusTopic, sizeof(statusTopic), DEVICE_NAME "/%s/status", haUniqueId);
+	snprintf(statusTopic, sizeof(statusTopic), "%s/%s/status", deviceName, haUniqueId);
 
 	delay(4000);
 
@@ -1869,7 +2160,7 @@ mqttReconnect(void)
 			snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", subscriptionDef, subscribed);
 			Serial.println(_debugOutput);
 #endif
-			sprintf(subscriptionDef, DEVICE_NAME "/config/set");
+			sprintf(subscriptionDef, "%s/config/set", deviceName);
 			subscribed = subscribed && _mqtt.subscribe(subscriptionDef, MQTT_SUBSCRIBE_QOS);
 #ifdef DEBUG_OVER_SERIAL
 			snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", subscriptionDef, subscribed);
@@ -1878,7 +2169,7 @@ mqttReconnect(void)
 
 			for (int i = 0; i < numberOfEntities; i++) {
 				if (_mqttAllEntities[i].subscribe) {
-					sprintf(subscriptionDef, DEVICE_NAME "/%s/%s/command", haUniqueId, _mqttAllEntities[i].mqttName);
+					sprintf(subscriptionDef, "%s/%s/%s/command", deviceName, haUniqueId, _mqttAllEntities[i].mqttName);
 					subscribed = subscribed && _mqtt.subscribe(subscriptionDef, MQTT_SUBSCRIBE_QOS);
 #ifdef DEBUG_OVER_SERIAL
 					snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", subscriptionDef, subscribed);
@@ -2925,19 +3216,19 @@ addConfig(mqttState *singleEntity, modbusRequestAndResponseStatusValues& resultA
 	case mqttEntityId::entityInverterWarnings:
 	case mqttEntityId::entitySystemFaults:
 		snprintf(stateAddition, sizeof(stateAddition),
-			", \"state_topic\": \"" DEVICE_NAME "/%s/%s/state\""
+			", \"state_topic\": \"%s/%s/%s/state\""
 			", \"value_template\": \"{{ \\\"OK\\\" if value_json.numEvents == 0 else \\\"Problem\\\" }}\""
-			", \"json_attributes_topic\": \"" DEVICE_NAME "/%s/%s/state\"",
-			haUniqueId, singleEntity->mqttName,
-			haUniqueId, singleEntity->mqttName);
+			", \"json_attributes_topic\": \"%s/%s/%s/state\"",
+			deviceName, haUniqueId, singleEntity->mqttName,
+			deviceName, haUniqueId, singleEntity->mqttName);
 		break;
 	case mqttEntityId::entityFrequency:
 		snprintf(stateAddition, sizeof(stateAddition),
-			", \"state_topic\": \"" DEVICE_NAME "/%s/%s/state\""
+			", \"state_topic\": \"%s/%s/%s/state\""
 			", \"value_template\": \"{{ value_json[\\\"Use Frequency\\\"] | default(\\\"\\\") }}\""
-			", \"json_attributes_topic\": \"" DEVICE_NAME "/%s/%s/state\"",
-			haUniqueId, singleEntity->mqttName,
-			haUniqueId, singleEntity->mqttName);
+			", \"json_attributes_topic\": \"%s/%s/%s/state\"",
+			deviceName, haUniqueId, singleEntity->mqttName,
+			deviceName, haUniqueId, singleEntity->mqttName);
 		break;
 	case mqttEntityId::entityRs485Avail:
 		snprintf(stateAddition, sizeof(stateAddition),
@@ -2955,8 +3246,8 @@ addConfig(mqttState *singleEntity, modbusRequestAndResponseStatusValues& resultA
 		break;
 	default:
 		snprintf(stateAddition, sizeof(stateAddition),
-			", \"state_topic\": \"" DEVICE_NAME "/%s/%s/state\"",
-			haUniqueId, singleEntity->mqttName);
+			", \"state_topic\": \"%s/%s/%s/state\"",
+			deviceName, haUniqueId, singleEntity->mqttName);
 		break;
 	}
 	resultAddedToPayload = addToPayload(stateAddition);
@@ -2965,8 +3256,8 @@ addConfig(mqttState *singleEntity, modbusRequestAndResponseStatusValues& resultA
 	}
 
 	if (singleEntity->subscribe) {
-		sprintf(stateAddition, ", \"command_topic\": \"" DEVICE_NAME "/%s/%s/command\"",
-			haUniqueId, singleEntity->mqttName);
+		sprintf(stateAddition, ", \"command_topic\": \"%s/%s/%s/command\"",
+			deviceName, haUniqueId, singleEntity->mqttName);
 		resultAddedToPayload = addToPayload(stateAddition);
 		if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
 			return resultAddedToPayload;
@@ -3354,7 +3645,7 @@ sendDataFromMqttState(mqttState *singleEntity, bool doHomeAssistant)
 			skip = true;
 		}
 		if (!skip) {
-			snprintf(topic, sizeof(topic), DEVICE_NAME "/%s/%s/state", haUniqueId, singleEntity->mqttName);
+			snprintf(topic, sizeof(topic), "%s/%s/%s/state", deviceName, haUniqueId, singleEntity->mqttName);
 			result = addState(singleEntity, &resultAddedToPayload);
 		} else {
 			result = modbusRequestAndResponseStatusValues::preProcessing;
@@ -3419,14 +3710,14 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 #endif
 		}
 		return; // No further processing needed.
-	} else if (strcmp(topic, DEVICE_NAME "/config/set") == 0) {
+	} else if (strcmp(topic, (String(deviceName) + "/config/set").c_str()) == 0) {
 		handlePollingConfigSet(mqttIncomingPayload);
 		return; // No further processing needed.
 	} else {
-		// match to DEVICE_NAME "/SERIAL#/MQTT_NAME/command"
+		// match to deviceName "/SERIAL#/MQTT_NAME/command"
 		char matchPrefix[64];
 
-		snprintf(matchPrefix, sizeof(matchPrefix), DEVICE_NAME "/%s/", haUniqueId);
+		snprintf(matchPrefix, sizeof(matchPrefix), "%s/%s/", deviceName, haUniqueId);
 		if (!strncmp(topic, matchPrefix, strlen(matchPrefix)) &&
 		    !strcmp(&topic[strlen(topic) - strlen("/command")], "/command")) {
 			char topicEntityName[64];

@@ -70,6 +70,14 @@ If any step cannot run due to environment constraints, stop and explain why.
 - Default build command: `Alpha2MQTT/build.sh` (Arduino CLI ESP8266 builds).
 - If no local build ran, state “Not executed” and why, then reference the command above.
 
+## Containerized execution (environment-specific)
+If your environment runs builds inside a long-lived container, run the canonical build command inside that container to avoid repeated setup costs.
+
+Guidance:
+- Use the repo’s canonical command (`Alpha2MQTT/build.sh`); only the execution substrate changes.
+- Prefer reusing an existing long-lived container over creating new ephemeral containers.
+- Document the exact container name and exec command outside the repo (in your environment notes), to keep repo guidance tool-agnostic.
+
 ## Build script parity
 - Keep `Alpha2MQTT/build.sh` aligned with `.github/workflows/arduino-build.yml` for core versions and library lists.
 - If one changes, update the other in the same change set to prevent drift.
