@@ -361,6 +361,13 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# Alpha2MQTT build artifacts
+*.bin
+*.elf
+*.map
+Alpha2MQTT/build/
+build/
 Alpha2MQTT-54.bin
 Alpha2MQTT-63.bin
 NodeMCU-PyFlasher.exe
