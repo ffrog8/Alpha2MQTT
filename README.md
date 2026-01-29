@@ -42,6 +42,14 @@ The CI workflow installs the WiFiManager and Preferences libraries required by `
 CI uses the ESP8266 core version aligned with local Arduino CLI builds to reduce version drift.
 When a compile fails, the workflow uploads the full logs as the `arduino-compile-logs` artifact and posts a PR comment with the first section of the failure output.
 
+### Host unit tests
+Host-based unit tests validate scheduling, Modbus CRC/frame generation, config serialization, and boot-mode gating without requiring Arduino hardware. Run them locally with:
+
+- `./scripts/test_host.sh` (Linux host build)
+- `./scripts/test_host_docker.sh` (Docker wrapper for a consistent Linux toolchain)
+
+GitHub Actions also runs these tests via the `Host Tests` workflow alongside an ESP8266 smoke compile.
+
 ### Configuring WiFi and MQTT
 Before this device can do anything, it must be given basic configuration.  It needs to know your WiFi SSID and password, and your MQTT server details (IP, port, username, and password).  These details used to be hardcoded in `Definitions.h` but are now configured via a captive portal web interface and saved in flash.  There are two ways to start the configuration portal:  Button press or "as needed".  The button press is preferred as it is more secure, but this is only available when a button is defined.  (A button is currently only defined for the XIAO ESP32C6 which uses the "BOOT" button.)  Simply press the button to enter config mode, and you can re-configure any time by pressing it again.  When no button is defined, the "as needed" method is used and it simply starts the portal at bootup if the configuration is incomplete.  Once configuration mode starts the hardware will create its own WiFi network (SSID="Alpha2MQTT" and no password).  Join that network and you will be taken to the captive web portal where you can enter the configuration details.  Once you are done, the hardware will reboot and should join your WiFi network and talk to your MQTT server.
 If you define WiFi/MQTT values via `Secrets.h` (or a `secrets.txt` workflow that generates it), those values are used as defaults for the captive portal fields and as initial settings when no stored configuration exists.

@@ -20,6 +20,8 @@ First, go and customise options at the top of Definitions.h!
 #include "../RegisterHandler.h"
 #include "../RS485Handler.h"
 #include "../Definitions.h"
+#include "../include/Scheduler.h"
+#include "../include/TimeProvider.h"
 #include <Arduino.h>
 #if defined MP_ESP8266
 #include <ESP8266WiFi.h>
@@ -740,7 +742,7 @@ uint32_t
 getUptimeSeconds(void)
 {
 	static uint32_t uptimeSeconds = 0, uptimeSecondsSaved = 0;
-	uint32_t nowSeconds = millis() / 1000;
+	uint32_t nowSeconds = nowMillis() / 1000;
 
 	if (nowSeconds < uptimeSeconds) {
 		// We wrapped
@@ -1318,18 +1320,14 @@ setupWifi(bool initialConnect)
  * checkTimer
  *
  * Check to see if the elapsed interval has passed since the passed in millis() value. If it has, return true and update the lastRun.
- * Note that millis() overflows after 50 days, so we need to deal with that too... in our case we just zero the last run, which means the timer
- * could be shorter but it's not critical... not worth the extra effort of doing it properly for once in 50 days.
+ * Uses wraparound-safe arithmetic so the timer behaves across millis() overflow.
  */
 bool
 checkTimer(unsigned long *lastRun, unsigned long interval)
 {
-	unsigned long now = millis();
+	unsigned long now = nowMillis();
 
-	if (*lastRun > now)
-		*lastRun = 0;
-
-	if (*lastRun == 0 || now >= *lastRun + interval) {
+	if (shouldRun(now, *lastRun, interval)) {
 		*lastRun = now;
 		return true;
 	}
