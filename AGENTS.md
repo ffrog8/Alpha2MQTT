@@ -7,6 +7,15 @@ If conflicts arise, **this file is the source of truth** for this repo.
 - Repository: alpha2mqtt
 - Firmware toolchain: Arduino CLI–based (ESP-class targets)
 
+## Project map
+- `Alpha2MQTT/` — main firmware sketch, headers, and PlatformIO project
+- `Alpha2MQTT/build.sh` — Arduino CLI build script (ESP8266)
+- `Alpha2MQTT/legacy/` — legacy Arduino sketch
+- `AlphaSniffer/` — RS485 sniffer sketch
+- `Home Assistant/` — HA examples and dashboards
+- `Node Red Flows/` — Node-RED examples
+- `README.md` / `README-orig.md` — behavior and setup guidance
+
 ## General principles
 - Do not claim builds, tests, or verification unless they actually ran.
 - Explicitly label outcomes as:
@@ -56,6 +65,18 @@ When an Arduino build or test is requested, or when the agent changes source cod
 4. Compile and report results using the same targets and options as `.github/workflows/arduino-build.yml`.
 
 If any step cannot run due to environment constraints, stop and explain why.
+
+## Canonical build/test command
+- Default build command: `Alpha2MQTT/build.sh` (Arduino CLI ESP8266 builds).
+- If no local build ran, state “Not executed” and why, then reference the command above.
+
+## Containerized execution (environment-specific)
+If your environment runs builds inside a long-lived container, run the canonical build command inside that container to avoid repeated setup costs.
+
+Guidance:
+- Use the repo’s canonical command (`Alpha2MQTT/build.sh`); only the execution substrate changes.
+- Prefer reusing an existing long-lived container over creating new ephemeral containers.
+- Document the exact container name and exec command outside the repo (in your environment notes), to keep repo guidance tool-agnostic.
 
 ## Build script parity
 - Keep `Alpha2MQTT/build.sh` aligned with `.github/workflows/arduino-build.yml` for core versions and library lists.

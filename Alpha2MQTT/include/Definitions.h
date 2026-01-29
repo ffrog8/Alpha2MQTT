@@ -87,7 +87,7 @@ Customise these options as per README.txt.  Please read README.txt before contin
 #define MIN_MQTT_PAYLOAD_SIZE 512
 #define MQTT_HEADER_SIZE 512
 
-//#define DEBUG_OVER_SERIAL	// Enable debugging msgs over serial port
+#define DEBUG_OVER_SERIAL	// Enable debugging msgs over serial port
 //#define DEBUG_LEVEL2		// For serial flooding action
 //#define DEBUG_OUTPUT_TX_RX	// write RS485 frames to serial debugging port
 //#define DEBUG_FREEMEM	// Enable extra debug on display and via MQTT

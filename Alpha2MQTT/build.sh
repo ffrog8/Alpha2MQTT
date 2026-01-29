@@ -1,6 +1,6 @@
 #!/bin/bash 
 #  export GIT_BASE=/volume1/docker_cached/apps/vscode/git/Alpha2MQTT
-#  docker run -d --name arduino-cli-build -v  ${GIT_BASE}:/project --entrypoint tail solarbotics/arduino-cli:0.25.0-python3.7 -f /dev/null
+#  docker run -d --name arduino-cli-build -v  ${GIT_BASE}:/project --entrypoint tail arduinoci/ci-arduino-cli:v1.3.1 -f /dev/null
 #  chmod -R a+rwX $GIT_BASE/Alpha2MQTT/build/
 #  docker exec -it arduino-cli-build /project/Alpha2MQTT/build.sh
 
@@ -14,9 +14,5 @@ arduino-cli lib install "Preferences"
 arduino-cli lib install PubSubClient
 
 cd /project
-for SER in 63 54
-do
-    echo "Building for ${SER}"
-    arduino-cli  compile -e --build-property build.extra_flags="-DESP8266  -DDEVICE_NAME=\"Alpha2MQTT-${SER}\"" --fqbn esp8266:esp8266:nodemcuv2 Alpha2MQTT
-    mv Alpha2MQTT/build/esp8266.esp8266.nodemcuv2/Alpha2MQTT.ino.bin ./Alpha2MQTT-${SER}.bin
-done
+arduino-cli  compile -e --build-property build.extra_flags="-DMP_ESP8266 -UMP_ESP32 -UMP_XIAO_ESP32C6" --fqbn esp8266:esp8266:d1_mini Alpha2MQTT
+mv Alpha2MQTT/build/esp8266.esp8266.d1_mini/Alpha2MQTT.ino.bin ./Alpha2MQTT.bin
