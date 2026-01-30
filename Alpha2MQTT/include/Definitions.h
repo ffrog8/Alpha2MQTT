@@ -55,7 +55,9 @@ Customise these options as per README.txt.  Please read README.txt before contin
 
 // Display parameters - Set LARGE_DISPLAY for 128x64 oled
 // Don't set this if using the ESP8266 OLED Shield 64x48 display.
-#define LARGE_DISPLAY
+// Define DISABLE_DISPLAY to compile out the OLED when no display is connected.
+#define DISABLE_DISPLAY
+//#define LARGE_DISPLAY
 
 // If your OLED does have an RST pin, set this.
 // An OLED Shield compatible with an ESP8266 does have a RESET pin and it is linked to GPIO0 if using an ESP8266.

@@ -21,6 +21,7 @@ First, go and customise options at the top of Definitions.h!
 #include "../RS485Handler.h"
 #include "../Definitions.h"
 #include "../include/BootModes.h"
+#include "../include/StatusReporting.h"
 #include "../include/Scheduler.h"
 #include "../include/TimeProvider.h"
 #include <Arduino.h>
@@ -45,8 +46,10 @@ First, go and customise options at the top of Definitions.h!
 #include <PubSubClient.h>
 #include <SPI.h>
 #include <Wire.h>
+#ifndef DISABLE_DISPLAY
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#endif
 #ifdef MP_ESPUNO_ESP32C6
 #include <Adafruit_NeoPixel.h>
 #endif // MP_ESPUNO_ESP32C6
@@ -60,6 +63,7 @@ char deviceBatteryType[32];
 char haUniqueId[32];
 char statusTopic[128];
 char deviceName[32];
+char configSetTopic[64];
 
 enum PortalStatus : uint8_t {
 	portalStatusIdle = 0,
@@ -83,6 +87,22 @@ bool bootEventPublished = false;
 #if defined(MP_ESP8266)
 const int kSafeModePin = 0; // D3 (GPIO0) strap for safe mode.
 #endif
+const uint32_t kEventRateLimitMs = 30000;
+const uint32_t kPollOverrunMs = 5000;
+uint32_t wifiReconnectCount = 0;
+uint32_t mqttReconnectCount = 0;
+uint32_t pollOkCount = 0;
+uint32_t pollErrCount = 0;
+uint32_t lastPollMs = 0;
+uint32_t lastOkTsMs = 0;
+uint32_t lastErrTsMs = 0;
+int lastErrCode = 0;
+bool lastWifiConnected = false;
+bool lastMqttConnected = false;
+bool pendingWifiDisconnectEvent = false;
+bool pendingMqttDisconnectEvent = false;
+uint32_t eventCounts[static_cast<uint8_t>(MqttEventCode::MaxValue)] = {};
+EventLimiter eventLimiter;
 
 // WiFi parameters
 WiFiClient _wifi;
@@ -268,6 +288,7 @@ static struct mqttState _mqttAllEntities[] =
 #define STATUS_INTERVAL_ONE_DAY 86400000
 #define UPDATE_STATUS_BAR_INTERVAL 500
 
+#ifndef DISABLE_DISPLAY
 #ifdef LARGE_DISPLAY
 // Pins GPIO22 and GPIO21 (SCL/SDA) if ESP32
 // Pins GPIO23 and GPIO22 (SCL/SDA) if XIAO ESP32C6
@@ -278,6 +299,7 @@ Adafruit_SSD1306 _display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, 0);
 // Pins GPIO22 and GPIO21 (SCL/SDA) with optional reset on GPIO13 if ESP32
 Adafruit_SSD1306 _display(OLED_RST_PIN);
 #endif // LARGE_DISPLAY
+#endif // DISABLE_DISPLAY
 
 // Forward declarations (required for PlatformIO)
 void updateOLED(bool justStatus, const char* line2, const char* line3, const char* line4);
@@ -290,6 +312,7 @@ void sendHaData(void);
 void getA2mOpDataFromEss(void);
 bool readEssOpData(void);
 void sendData(void);
+void sendStatus(void);
 void updateRunstate(void);
 uint32_t getUptimeSeconds(void);
 void emptyPayload(void);
@@ -322,6 +345,10 @@ void updateStatusLed(void);
 void buildDeviceName(void);
 void publishBootEventOncePerBoot(void);
 void setMqttIdentifiersFromSerial(const char *serial);
+void publishStatusNow(void);
+void publishEvent(MqttEventCode code, const char *detail);
+MqttEventCode eventCodeFromResult(modbusRequestAndResponseStatusValues result);
+void noteRs485Error(modbusRequestAndResponseStatusValues result, const char *detail);
 void setBootIntentAndReboot(BootIntent intent);
 const char* portalStatusLabel(PortalStatus status);
 const char* wifiStatusReason(wl_status_t status);
@@ -335,6 +362,7 @@ buildDeviceName(void)
 	uint8_t mac[6] = { 0 };
 	WiFi.macAddress(mac);
 	snprintf(deviceName, sizeof(deviceName), "%s-%02X%02X%02X", DEVICE_NAME, mac[3], mac[4], mac[5]);
+	snprintf(configSetTopic, sizeof(configSetTopic), "%s/config/set", deviceName);
 }
 
 void
@@ -378,6 +406,107 @@ publishBootEventOncePerBoot(void)
 		preferences.end();
 		bootIntentPendingClear = false;
 	}
+}
+
+#if defined(DEBUG_OVER_SERIAL)
+void
+logHeap(const char *label)
+{
+	Serial.print("Heap ");
+	Serial.print(label);
+	Serial.print(": ");
+	Serial.println(ESP.getFreeHeap());
+}
+#endif
+
+void
+pumpMqttDuringSetup(uint32_t durationMs)
+{
+	uint32_t start = millis();
+
+	while (millis() - start < durationMs) {
+		if (_mqtt.connected()) {
+			_mqtt.loop();
+		}
+		delay(5);
+	}
+}
+
+void
+publishStatusNow(void)
+{
+	if (!_mqtt.connected()) {
+		return;
+	}
+	sendStatus();
+}
+
+void
+publishEvent(MqttEventCode code, const char *detail)
+{
+	if (code == MqttEventCode::None) {
+		return;
+	}
+	uint8_t index = static_cast<uint8_t>(code);
+	if (index >= static_cast<uint8_t>(MqttEventCode::MaxValue)) {
+		return;
+	}
+	eventCounts[index]++;
+
+	if (!_mqtt.connected()) {
+		return;
+	}
+	if (!eventLimiter.shouldPublish(code, millis(), kEventRateLimitMs)) {
+		return;
+	}
+
+	char topic[128];
+	char payload[192];
+	if (haUniqueId[0] != '\0') {
+		snprintf(topic, sizeof(topic), "%s/%s/event", deviceName, haUniqueId);
+	} else {
+		snprintf(topic, sizeof(topic), "%s/event", deviceName);
+	}
+	if (detail && detail[0] != '\0') {
+		snprintf(payload, sizeof(payload),
+			 "{ \"code\": %d, \"name\": \"%s\", \"count\": %lu, \"ts_ms\": %lu, \"detail\": \"%s\" }",
+			 static_cast<int>(code), eventCodeName(code),
+			 static_cast<unsigned long>(eventCounts[index]),
+			 static_cast<unsigned long>(millis()), detail);
+	} else {
+		snprintf(payload, sizeof(payload),
+			 "{ \"code\": %d, \"name\": \"%s\", \"count\": %lu, \"ts_ms\": %lu }",
+			 static_cast<int>(code), eventCodeName(code),
+			 static_cast<unsigned long>(eventCounts[index]),
+			 static_cast<unsigned long>(millis()));
+	}
+	_mqtt.publish(topic, payload, false);
+}
+
+MqttEventCode
+eventCodeFromResult(modbusRequestAndResponseStatusValues result)
+{
+	switch (result) {
+	case modbusRequestAndResponseStatusValues::noResponse:
+		return MqttEventCode::Rs485Timeout;
+	case modbusRequestAndResponseStatusValues::invalidFrame:
+	case modbusRequestAndResponseStatusValues::responseTooShort:
+	case modbusRequestAndResponseStatusValues::slaveError:
+		return MqttEventCode::ModbusFrame;
+	default:
+		return MqttEventCode::None;
+	}
+}
+
+void
+noteRs485Error(modbusRequestAndResponseStatusValues result, const char *detail)
+{
+	MqttEventCode code = eventCodeFromResult(result);
+	if (code == MqttEventCode::None) {
+		return;
+	}
+	lastErrCode = static_cast<int>(code);
+	publishEvent(code, detail);
 }
 
 void
@@ -541,6 +670,17 @@ handlePortalStatusRequest(WiFiManager& wifiManager)
  */
 void setup()
 {
+#if defined(DEBUG_OVER_SERIAL) || defined(DEBUG_LEVEL2) || defined(DEBUG_OUTPUT_TX_RX)
+	// Set up serial for debugging using an appropriate baud rate
+	// This is for communication with the development environment, NOT the Alpha system
+	// See Definitions.h for this.
+	Serial.begin(9600);
+#ifdef DEBUG_OVER_SERIAL
+	delay(100);
+	logHeap("boot");
+#endif
+#endif // DEBUG_OVER_SERIAL || DEBUG_LEVEL2 || DEBUG_OUTPUT_TX_RX
+
 	// All for testing different baud rates to 'wake up' the inverter
 	unsigned long knownBaudRates[7] = { 9600, 115200, 19200, 57600, 38400, 14400, 4800 };
 	bool gotResponse = false;
@@ -550,13 +690,6 @@ void setup()
 	int baudRateIterator = -1;
 	char *uartDebug;
 	Preferences preferences;
-
-#if defined(DEBUG_OVER_SERIAL) || defined(DEBUG_LEVEL2) || defined(DEBUG_OUTPUT_TX_RX)
-	// Set up serial for debugging using an appropriate baud rate
-	// This is for communication with the development environment, NOT the Alpha system
-	// See Definitions.h for this.
-	Serial.begin(9600);
-#endif // DEBUG_OVER_SERIAL || DEBUG_LEVEL2 || DEBUG_OUTPUT_TX_RX
 
 #ifdef MP_ESPUNO_ESP32C6
 	_statusPixel.begin();
@@ -583,10 +716,12 @@ void setup()
 #endif // MP_ESPUNO_ESP32C6
 
 	// Display time
+#ifndef DISABLE_DISPLAY
 	_display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS);  // initialize OLED
 	_display.clearDisplay();
 	_display.display();
 	updateOLED(false, "", "", _version);
+#endif
 
 	// Bit of a delay to give things time to kick in
 	delay(500);
@@ -678,9 +813,14 @@ void setup()
 
 	// Configure WIFI
 	setupWifi(true);
+	lastWifiConnected = true;
+#ifdef DEBUG_OVER_SERIAL
+	logHeap("after WiFi");
+#endif
 
 	// Configure MQTT to the address and port specified above
 	_mqtt.setServer(appConfig.mqttSrvr.c_str(), appConfig.mqttPort);
+	_mqtt.setKeepAlive(60);
 #ifdef DEBUG_OVER_SERIAL
 	sprintf(_debugOutput, "About to request buffer");
 	Serial.println(_debugOutput);
@@ -701,6 +841,9 @@ void setup()
 			_mqttPayload = new char[_maxPayloadSize];
 			if (_mqttPayload != NULL) {
 				emptyPayload();
+#ifdef DEBUG_OVER_SERIAL
+				logHeap("after MQTT payload");
+#endif
 				break;
 			} else {
 #ifdef DEBUG_OVER_SERIAL
@@ -728,6 +871,9 @@ void setup()
 	publishBootEventOncePerBoot();
 
 	// Set up the serial for communicating with the MAX
+#if defined(DEBUG_OVER_SERIAL)
+	logHeap("before RS485 init");
+#endif
 	_modBus = new RS485Handler;
 #if defined(DEBUG_OVER_SERIAL) || defined(DEBUG_LEVEL2) || defined(DEBUG_OUTPUT_TX_RX)
 	_modBus->setDebugOutput(_debugOutput);
@@ -735,6 +881,9 @@ void setup()
 
 	// Set up the helper class for reading with reading registers
 	_registerHandler = new RegisterHandler(_modBus);
+#if defined(DEBUG_OVER_SERIAL)
+	logHeap("after RS485 init");
+#endif
 
 	uartDebug = _modBus->uartInfo();
 
@@ -755,6 +904,7 @@ void setup()
 #ifdef DEBUG_OVER_SERIAL
 		sprintf(_debugOutput, "About To Try: %lu", knownBaudRates[baudRateIterator]);
 		Serial.println(_debugOutput);
+		logHeap("before RS485 probe");
 #endif
 		// Set the rate
 		_modBus->setBaudRate(knownBaudRates[baudRateIterator]);
@@ -765,6 +915,10 @@ void setup()
 #else // DEBUG_NO_RS485
 		result = _registerHandler->readHandledRegister(REG_SAFETY_TEST_RW_GRID_REGULATION, &response);
 #endif // DEBUG_NO_RS485
+#ifdef DEBUG_OVER_SERIAL
+		logHeap("after RS485 probe");
+#endif
+		pumpMqttDuringSetup(5);
 		if (result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
 #ifdef DEBUG_OVER_SERIAL
 			sprintf(_debugOutput, "Baud Rate Checker Problem: %s", response.statusMqttMessage);
@@ -776,7 +930,7 @@ void setup()
 			updateOLED(false, "Test Baud", baudRateString, response.displayMessage);
 
 			// Delay a while before trying the next
-			delay(1000);
+			pumpMqttDuringSetup(1000);
 		} else {
 			// Excellent, baud rate is set in the class, we got a response.. get out of here
 			gotResponse = true;
@@ -785,6 +939,9 @@ void setup()
 
 	// Get the serial number (especially prefix for error codes)
 	getSerialNumber();
+#ifdef DEBUG_OVER_SERIAL
+	logHeap("after inverter connect");
+#endif
 	loadPollingConfig();
 	sendHaData();
 	resendHaData = true;  // Tell loop() to do it again
@@ -802,6 +959,7 @@ void setup()
 	// loop until we get one clean read
 	while (!gotResponse) {
 		gotResponse = readEssOpData();
+		pumpMqttDuringSetup(5);
 	}
 	sendData();
 	resendAllData = true; // Tell sendData() to send everything again
@@ -1073,15 +1231,27 @@ loop()
 
 	// Make sure WiFi is good
 	if (WiFi.status() != WL_CONNECTED) {
+		if (lastWifiConnected) {
+			pendingWifiDisconnectEvent = true;
+		}
+		lastWifiConnected = false;
 		setupWifi(false);
 		mqttReconnect();
 		resendHaData = true;
+	} else {
+		lastWifiConnected = true;
 	}
 
 	// make sure mqtt is still connected
 	if ((!_mqtt.connected()) || !_mqtt.loop()) {
+		if (lastMqttConnected) {
+			pendingMqttDisconnectEvent = true;
+		}
+		lastMqttConnected = false;
 		mqttReconnect();
 		resendHaData = true;
+	} else {
+		lastMqttConnected = true;
 	}
 
 	updateStatusLed();
@@ -1617,6 +1787,9 @@ setupWifi(bool initialConnect)
 		wifiReconnects++;
 #endif // A2M_DEBUG_WIFI
 	}
+	if (!initialConnect) {
+		wifiReconnectCount++;
+	}
 
 	// And continually try to connect to WiFi.
 	// If it doesn't, the device will just wait here before continuing
@@ -1746,6 +1919,13 @@ checkTimer(unsigned long *lastRun, unsigned long interval)
 void
 updateOLED(bool justStatus, const char* line2, const char* line3, const char* line4)
 {
+#ifdef DISABLE_DISPLAY
+	(void)justStatus;
+	(void)line2;
+	(void)line3;
+	(void)line4;
+	return;
+#else
 	static unsigned long updateStatusBar = 0;
 
 	_display.clearDisplay();
@@ -1810,12 +1990,17 @@ updateOLED(bool justStatus, const char* line2, const char* line3, const char* li
 	}
 	// Refresh the display
 	_display.display();
+#endif
 }
 
 #define WIFI_X_POS 75 //102
 void
 printWifiBars(int rssi)
 {
+#ifdef DISABLE_DISPLAY
+	(void)rssi;
+	return;
+#else
 	if (rssi >= -55) { 
 		_display.fillRect((WIFI_X_POS + 0),7,4,1, WHITE);
 		_display.fillRect((WIFI_X_POS + 5),6,4,2, WHITE);
@@ -1853,6 +2038,7 @@ printWifiBars(int rssi)
 		_display.drawRect((WIFI_X_POS + 15),2,4,6, WHITE);
 		_display.drawRect((WIFI_X_POS + 20),0,4,8, WHITE);
 	}
+#endif
 }
 
 
@@ -1890,7 +2076,7 @@ getSerialNumber()
 #endif // DEBUG_RS485
 		snprintf(oledLine4, sizeof(oledLine4), "%ld", tries);
 		updateOLED(false, "Alpha sys", "not known", oledLine4);
-		delay(1000);
+		pumpMqttDuringSetup(1000);
 		result = _registerHandler->readHandledRegister(REG_SYSTEM_INFO_R_EMS_SN_BYTE_1_2, &response);
 	}
 #endif // DEBUG_NO_RS485
@@ -1910,20 +2096,22 @@ getSerialNumber()
 #endif // DEBUG_RS485
 		snprintf(oledLine4, sizeof(oledLine4), "%ld", tries);
 		updateOLED(false, "Bat type", "not known", oledLine4);
-		delay(1000);
+		pumpMqttDuringSetup(1000);
 		result = _registerHandler->readHandledRegister(REG_BATTERY_HOME_R_BATTERY_TYPE, &response);
 	}
 #endif // DEBUG_NO_RS485
 	strlcpy(deviceBatteryType, response.dataValueFormatted, sizeof(deviceBatteryType));
 
+#ifndef DISABLE_DISPLAY
 #ifdef LARGE_DISPLAY
 	strlcpy(oledLine3, deviceSerialNumber, sizeof(oledLine3));
 	strlcpy(oledLine4, deviceBatteryType, sizeof(oledLine4));
-#else //LARGE_DISPLAY
+#else // LARGE_DISPLAY
 	strlcpy(oledLine3, &response.dataValueFormatted[0], 11);
 	strlcpy(oledLine4, &response.dataValueFormatted[10], 6);
-#endif //LARGE_DISPLAY
+#endif // LARGE_DISPLAY
 	updateOLED(false, "Hello", oledLine3, oledLine4);
+#endif // DISABLE_DISPLAY
 
 #ifdef DEBUG_OVER_SERIAL
 	sprintf(_debugOutput, "Alpha Serial Number: %s", deviceSerialNumber);
@@ -1944,7 +2132,7 @@ getSerialNumber()
 		preferences.end();
 	}
 
-	delay(4000);
+	pumpMqttDuringSetup(4000);
 
 	//Flash the LED
 	setStatusLed(true);
@@ -1961,7 +2149,13 @@ getSerialNumber()
  * Determines a few things about the sytem and updates the display
  * Things updated - Dispatch state discharge/charge, battery power, battery percent
  */
-#ifdef LARGE_DISPLAY
+#ifdef DISABLE_DISPLAY
+void
+updateRunstate()
+{
+	return;
+}
+#elif defined(LARGE_DISPLAY)
 void
 updateRunstate()
 {
@@ -2178,10 +2372,10 @@ void updateRunstate()
 						strcpy(line2, "PV Pwr");
 						break;
 					case DISPATCH_MODE_NO_BATTERY_CHARGE:
-						dMode = "No Bat Chg";
+						strcpy(line2, "No Bat Chg");
 						break;
 					case DISPATCH_MODE_BURNIN_MODE:
-						dMode = "Burnin";
+						strcpy(line2, "Burnin");
 						break;
 					default:
 						strcpy(line2, "BadMode");
@@ -2219,7 +2413,7 @@ void updateRunstate()
 		updateOLED(false, line2, line3, line4);
 	}
 }
-#endif // LARGE_DISPLAY
+#endif // DISABLE_DISPLAY
 
 
 
@@ -2263,13 +2457,24 @@ mqttReconnect(void)
 
 		// Attempt to connect
 		if (_mqtt.connect(haUniqueId, appConfig.mqttUser.c_str(), appConfig.mqttPass.c_str(), statusTopic, 0, true,
-				  "{ \"a2mStatus\": \"offline\", \"rs485Status\": \"unavailable\", \"gridStatus\": \"unavailable\" }")) {
+				  "{ \"presence\": \"offline\", \"a2mStatus\": \"offline\", \"rs485Status\": \"unavailable\", \"gridStatus\": \"unavailable\" }")) {
 			int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
 #ifdef DEBUG_OVER_SERIAL
 			Serial.println("Connected MQTT");
 #endif
 			// Publish boot intent early; RS485 init can stall before periodic status messages.
 			publishBootEventOncePerBoot();
+			publishStatusNow();
+			mqttReconnectCount++;
+			lastMqttConnected = true;
+			if (pendingWifiDisconnectEvent) {
+				publishEvent(MqttEventCode::WifiDisconnect, "");
+				pendingWifiDisconnectEvent = false;
+			}
+			if (pendingMqttDisconnectEvent) {
+				publishEvent(MqttEventCode::MqttDisconnect, "");
+				pendingMqttDisconnectEvent = false;
+			}
 
 			// Special case for Home Assistant
 			sprintf(subscriptionDef, "%s", MQTT_SUB_HOMEASSISTANT);
@@ -2971,9 +3176,16 @@ addState(mqttState *singleEntity, modbusRequestAndResponseStatusValues *resultAd
 void
 sendStatus(void)
 {
-	char stateAddition[128] = "";
+	char stateAddition[256] = "";
+	char netAddition[256] = "";
+	char pollAddition[256] = "";
+	StatusCoreSnapshot core{};
+	StatusNetSnapshot net{};
+	StatusPollSnapshot poll{};
 	const char *gridStatusStr;
 	modbusRequestAndResponseStatusValues resultAddedToPayload;
+	String ssid = WiFi.SSID();
+	String ip = WiFi.localIP().toString();
 
 	switch (isGridOnline()) {
 	case gridStatus::gridOnline:
@@ -2990,15 +3202,51 @@ sendStatus(void)
 
 	emptyPayload();
 
-	snprintf(stateAddition, sizeof(stateAddition),
-		 "{ \"a2mStatus\": \"online\", \"rs485Status\": \"%s\", \"gridStatus\": \"%s\", \"boot_intent\": \"%s\" }",
-		 opData.essRs485Connected ? "OK" : "Problem", gridStatusStr, bootIntentToString(currentBootIntent));
+	core.presence = "online";
+	core.a2mStatus = "online";
+	core.rs485Status = opData.essRs485Connected ? "OK" : "Problem";
+	core.gridStatus = gridStatusStr;
+	core.bootIntent = bootIntentToString(currentBootIntent);
+
+	net.uptimeS = getUptimeSeconds();
+	net.freeHeap = ESP.getFreeHeap();
+	net.rssiDbm = WiFi.RSSI();
+	net.ip = ip.c_str();
+	net.ssid = ssid.c_str();
+	net.mqttConnected = _mqtt.connected();
+	net.mqttReconnects = mqttReconnectCount;
+	net.wifiStatus = wifiStatusLabel(WiFi.status());
+	net.wifiStatusCode = static_cast<int>(WiFi.status());
+	net.wifiReconnects = wifiReconnectCount;
+
+	poll.pollOkCount = pollOkCount;
+	poll.pollErrCount = pollErrCount;
+	poll.lastPollMs = lastPollMs;
+	poll.lastOkTsMs = lastOkTsMs;
+	poll.lastErrTsMs = lastErrTsMs;
+	poll.lastErrCode = lastErrCode;
+
+	if (!buildStatusCoreJson(core, stateAddition, sizeof(stateAddition))) {
+		return;
+	}
 	resultAddedToPayload = addToPayload(stateAddition);
 	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
 		return;
 	}
 
 	sendMqtt(statusTopic, MQTT_RETAIN);
+
+	char netTopic[160];
+	snprintf(netTopic, sizeof(netTopic), "%s/net", statusTopic);
+	if (buildStatusNetJson(net, netAddition, sizeof(netAddition))) {
+		_mqtt.publish(netTopic, netAddition, true);
+	}
+
+	char pollTopic[160];
+	snprintf(pollTopic, sizeof(pollTopic), "%s/poll", statusTopic);
+	if (buildStatusPollJson(poll, pollAddition, sizeof(pollAddition))) {
+		_mqtt.publish(pollTopic, pollAddition, true);
+	}
 }
 
 modbusRequestAndResponseStatusValues
@@ -3516,6 +3764,7 @@ readEssOpData()
 		// If less than interval, then return false so nothing gets read or written.
 		return false;
 	}
+	uint32_t pollStartMs = millis();
 
 #ifdef DEBUG_NO_RS485
 	static unsigned long lastRs485 = 0, lastGrid = 0;
@@ -3557,6 +3806,7 @@ readEssOpData()
 		opData.essGridPower = INT32_MAX;
 		opData.essPvPower = INT32_MAX;
 		opData.essInverterMode = UINT16_MAX;
+		lastErrCode = static_cast<int>(MqttEventCode::Rs485Timeout);
 		gotError = 9;
 	}
 #else // DEBUG_NO_RS485
@@ -3568,6 +3818,7 @@ readEssOpData()
 		opData.essDispatchStart = response.unsignedShortValue;
 	} else {
 		opData.essDispatchStart = UINT16_MAX;
+		noteRs485Error(result, response.statusMqttMessage);
 		gotError++;
 	}
 	result = _registerHandler->readHandledRegister(REG_DISPATCH_RW_DISPATCH_MODE, &response);
@@ -3575,6 +3826,7 @@ readEssOpData()
 		opData.essDispatchMode = response.unsignedShortValue;
 	} else {
 		opData.essDispatchMode = UINT16_MAX;
+		noteRs485Error(result, response.statusMqttMessage);
 		gotError++;
 	}
 	result = _registerHandler->readHandledRegister(REG_DISPATCH_RW_ACTIVE_POWER_1, &response);
@@ -3582,6 +3834,7 @@ readEssOpData()
 		opData.essDispatchActivePower = response.signedIntValue;
 	} else {
 		opData.essDispatchActivePower = INT32_MAX;
+		noteRs485Error(result, response.statusMqttMessage);
 		gotError++;
 	}
 	result = _registerHandler->readHandledRegister(REG_DISPATCH_RW_DISPATCH_SOC, &response);
@@ -3589,6 +3842,7 @@ readEssOpData()
 		opData.essDispatchSoc = response.unsignedShortValue;
 	} else {
 		opData.essDispatchSoc = UINT16_MAX;
+		noteRs485Error(result, response.statusMqttMessage);
 		gotError++;
 	}
 	result = _registerHandler->readHandledRegister(REG_BATTERY_HOME_R_SOC, &response);
@@ -3596,6 +3850,7 @@ readEssOpData()
 		opData.essBatterySoc = response.unsignedShortValue;
 	} else {
 		opData.essBatterySoc = UINT16_MAX;
+		noteRs485Error(result, response.statusMqttMessage);
 		gotError++;
 	}
 	result = _registerHandler->readHandledRegister(REG_BATTERY_HOME_R_BATTERY_POWER, &response);
@@ -3603,6 +3858,7 @@ readEssOpData()
 		opData.essBatteryPower = response.signedShortValue;
 	} else {
 		opData.essBatteryPower = INT16_MAX;
+		noteRs485Error(result, response.statusMqttMessage);
 		gotError++;
 	}
 	result = _registerHandler->readHandledRegister(REG_GRID_METER_R_TOTAL_ACTIVE_POWER_1, &response);
@@ -3610,6 +3866,7 @@ readEssOpData()
 		opData.essGridPower = response.signedIntValue;
 	} else {
 		opData.essGridPower = INT32_MAX;
+		noteRs485Error(result, response.statusMqttMessage);
 		gotError++;
 	}
 	result = _registerHandler->readHandledRegister(REG_CUSTOM_TOTAL_SOLAR_POWER, &response);
@@ -3617,6 +3874,7 @@ readEssOpData()
 		opData.essPvPower = response.signedIntValue;
 	} else {
 		opData.essPvPower = INT32_MAX;
+		noteRs485Error(result, response.statusMqttMessage);
 		gotError++;
 	}
 	result = _registerHandler->readHandledRegister(REG_INVERTER_HOME_R_WORKING_MODE, &response);
@@ -3624,6 +3882,7 @@ readEssOpData()
 		opData.essInverterMode = response.unsignedShortValue;
 	} else {
 		opData.essInverterMode = UINT16_MAX;
+		noteRs485Error(result, response.statusMqttMessage);
 		gotError++;
 	}
 	{
@@ -3635,11 +3894,20 @@ readEssOpData()
 	}
 #endif // DEBUG_NO_RS485
 
+	lastPollMs = millis() - pollStartMs;
 	if (gotError != 0) {
 		lastRun = 0;  // Retry ASAP
+		pollErrCount++;
+		lastErrTsMs = millis();
 #ifdef DEBUG_RS485
 		rs485Errors += gotError;
 #endif // DEBUG_RS485
+	} else {
+		pollOkCount++;
+		lastOkTsMs = millis();
+	}
+	if (lastPollMs > kPollOverrunMs) {
+		publishEvent(MqttEventCode::PollOverrun, "");
 	}
 
 	return true;
@@ -3682,7 +3950,6 @@ sendData()
 				sendDataFromMqttState(&_mqttAllEntities[i], false);
 			}
 		}
-		sendHaData();
 	}
 
 	if (checkTimer(&lastRunFiveMinutes, STATUS_INTERVAL_FIVE_MINUTE)) {
@@ -3829,7 +4096,7 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 #endif
 		}
 		return; // No further processing needed.
-	} else if (strcmp(topic, (String(deviceName) + "/config/set").c_str()) == 0) {
+	} else if (strcmp(topic, configSetTopic) == 0) {
 		handlePollingConfigSet(mqttIncomingPayload);
 		return; // No further processing needed.
 	} else {
