@@ -10,33 +10,6 @@ const char *kKeyBootMode = "boot_mode";
 const char *kKeyBootIntent = "boot_intent";
 const char *kKeyRegisterMask = "enabled_register_mask";
 
-BootMode parseBootMode(const std::string &value)
-{
-	if (value == "normal") {
-		return BootMode::Normal;
-	}
-	if (value == "ap_config") {
-		return BootMode::ApConfig;
-	}
-	if (value == "wifi_config") {
-		return BootMode::WifiConfig;
-	}
-	return BootMode::Normal;
-}
-const char *bootModeToString(BootMode mode)
-{
-	switch (mode) {
-	case BootMode::Normal:
-		return "normal";
-	case BootMode::ApConfig:
-		return "ap_config";
-	case BootMode::WifiConfig:
-		return "wifi_config";
-	default:
-		return "normal";
-	}
-}
-
 bool parseUint32(const std::string &value, uint32_t *result)
 {
 	if (value.empty()) {
@@ -119,7 +92,7 @@ Config deserializeConfig(const std::string &payload)
 					config.pollIntervalSeconds = clampPollInterval(parsed);
 				}
 			} else if (key == kKeyBootMode) {
-				config.bootMode = parseBootMode(value);
+				config.bootMode = bootModeFromString(value.c_str());
 			} else if (key == kKeyBootIntent) {
 				config.bootIntent = bootIntentFromString(value.c_str());
 			} else if (key == kKeyRegisterMask) {

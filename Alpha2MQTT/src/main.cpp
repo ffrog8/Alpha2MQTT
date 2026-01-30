@@ -21,6 +21,7 @@ First, go and customise options at the top of Definitions.h!
 #include "../RS485Handler.h"
 #include "../Definitions.h"
 #include "../include/BootModes.h"
+#include "../include/RebootRequest.h"
 #include "../include/StatusReporting.h"
 #include "../include/Scheduler.h"
 #include "../include/TimeProvider.h"
@@ -54,6 +55,12 @@ First, go and customise options at the top of Definitions.h!
 #include <Adafruit_NeoPixel.h>
 #endif // MP_ESPUNO_ESP32C6
 
+#if defined MP_ESP8266
+using HttpServer = ESP8266WebServer;
+#else
+using HttpServer = WebServer;
+#endif
+
 #define popcount __builtin_popcount
 
 // Device parameters
@@ -64,6 +71,9 @@ char haUniqueId[32];
 char statusTopic[128];
 char deviceName[32];
 char configSetTopic[64];
+char lastResetReason[64] = "";
+HttpServer httpServer(80);
+bool httpControlPlaneEnabled = false;
 
 enum PortalStatus : uint8_t {
 	portalStatusIdle = 0,
@@ -79,11 +89,15 @@ int portalLastDisconnectReason = -1;
 char portalLastDisconnectLabel[32] = "";
 unsigned long portalConnectStart = 0;
 const char kPreferenceBootIntent[] = "Boot_Intent";
+const char kPreferenceBootMode[] = "Boot_Mode";
 const char kPreferenceDeviceSerial[] = "Device_Serial";
 BootIntent currentBootIntent = BootIntent::Normal;
 BootIntent bootIntentForPublish = BootIntent::Normal;
+BootMode currentBootMode = BootMode::Normal;
 bool bootIntentPendingClear = false;
 bool bootEventPublished = false;
+bool inverterReady = false;
+bool inverterSubscriptionsSet = false;
 #if defined(MP_ESP8266)
 const int kSafeModePin = 0; // D3 (GPIO0) strap for safe mode.
 #endif
@@ -350,6 +364,14 @@ void publishEvent(MqttEventCode code, const char *detail);
 MqttEventCode eventCodeFromResult(modbusRequestAndResponseStatusValues result);
 void noteRs485Error(modbusRequestAndResponseStatusValues result, const char *detail);
 void setBootIntentAndReboot(BootIntent intent);
+void setupHttpControlPlane(void);
+void handleHttpRoot(void);
+void handleRebootNormal(void);
+void handleRebootAp(void);
+void handleRebootWifi(void);
+void triggerRestart(void);
+void subscribeInverterTopics(void);
+void serviceRs485Hooks(void);
 const char* portalStatusLabel(PortalStatus status);
 const char* wifiStatusReason(wl_status_t status);
 const char* wifiStatusLabel(wl_status_t status);
@@ -363,6 +385,7 @@ buildDeviceName(void)
 	WiFi.macAddress(mac);
 	snprintf(deviceName, sizeof(deviceName), "%s-%02X%02X%02X", DEVICE_NAME, mac[3], mac[4], mac[5]);
 	snprintf(configSetTopic, sizeof(configSetTopic), "%s/config/set", deviceName);
+	snprintf(statusTopic, sizeof(statusTopic), "%s/status", deviceName);
 }
 
 void
@@ -373,7 +396,7 @@ setMqttIdentifiersFromSerial(const char *serial)
 	}
 
 	snprintf(haUniqueId, sizeof(haUniqueId), "A2M-%s", serial);
-	snprintf(statusTopic, sizeof(statusTopic), "%s/%s/status", deviceName, haUniqueId);
+	inverterReady = true;
 }
 
 void
@@ -387,11 +410,7 @@ publishBootEventOncePerBoot(void)
 	char payload[192];
 	String resetReason = ESP.getResetReason();
 
-	if (haUniqueId[0] != '\0') {
-		snprintf(bootTopic, sizeof(bootTopic), "%s/%s/boot", deviceName, haUniqueId);
-	} else {
-		snprintf(bootTopic, sizeof(bootTopic), "%s/boot", deviceName);
-	}
+	snprintf(bootTopic, sizeof(bootTopic), "%s/boot", deviceName);
 	snprintf(payload, sizeof(payload),
 		 "{ \"boot_intent\": \"%s\", \"reset_reason\": \"%s\", \"ts_ms\": %lu }",
 		 bootIntentToString(bootIntentForPublish), resetReason.c_str(), millis());
@@ -433,6 +452,144 @@ pumpMqttDuringSetup(uint32_t durationMs)
 }
 
 void
+serviceRs485Hooks(void)
+{
+	if (_mqtt.connected()) {
+		_mqtt.loop();
+	}
+	if (httpControlPlaneEnabled) {
+		httpServer.handleClient();
+	}
+}
+
+class PreferencesBootStore : public RebootRequestStore {
+public:
+	void writeBootIntent(BootIntent intent) override
+	{
+		Preferences preferences;
+		preferences.begin(DEVICE_NAME, false);
+		preferences.putString(kPreferenceBootIntent, bootIntentToString(intent));
+		preferences.end();
+	}
+
+	void writeBootMode(BootMode mode) override
+	{
+		Preferences preferences;
+		preferences.begin(DEVICE_NAME, false);
+		preferences.putString(kPreferenceBootMode, bootModeToString(mode));
+		preferences.end();
+	}
+};
+
+PreferencesBootStore rebootStore;
+
+void
+triggerRestart(void)
+{
+	ESP.restart();
+}
+
+void
+setupHttpControlPlane(void)
+{
+	if (currentBootMode != BootMode::Normal) {
+		httpControlPlaneEnabled = false;
+#ifdef DEBUG_OVER_SERIAL
+		Serial.println("HTTP control plane disabled (boot_mode != normal).");
+#endif
+		return;
+	}
+
+	httpServer.on("/", HTTP_GET, handleHttpRoot);
+	httpServer.on("/reboot/normal", HTTP_POST, handleRebootNormal);
+	httpServer.on("/reboot/ap", HTTP_POST, handleRebootAp);
+	httpServer.on("/reboot/wifi", HTTP_POST, handleRebootWifi);
+	httpServer.begin();
+	httpControlPlaneEnabled = true;
+#ifdef DEBUG_OVER_SERIAL
+	Serial.println("HTTP control plane started on port 80.");
+#endif
+}
+
+void
+handleHttpRoot(void)
+{
+#ifdef DEBUG_OVER_SERIAL
+	Serial.println("HTTP GET /");
+#endif
+	char page[512];
+	snprintf(page, sizeof(page),
+		"<!doctype html><html><body>"
+		"<h3>Alpha2MQTT Control</h3>"
+		"<p>Boot mode: %s<br>Boot intent: %s<br>Reset reason: %s</p>"
+		"<form method='POST' action='/reboot/normal'><button>Reboot Normal</button></form>"
+		"<form method='POST' action='/reboot/ap'><button>Reboot AP Config</button></form>"
+		"<form method='POST' action='/reboot/wifi'><button>Reboot WiFi Config</button></form>"
+		"</body></html>",
+		bootModeToString(currentBootMode),
+		bootIntentToString(currentBootIntent),
+		lastResetReason);
+	httpServer.send(200, "text/html", page);
+}
+
+void
+handleRebootNormal(void)
+{
+#ifdef DEBUG_OVER_SERIAL
+	Serial.println("HTTP POST /reboot/normal");
+#endif
+	httpServer.send(200, "text/plain", "Rebooting into MODE_NORMAL...");
+	requestReboot(rebootStore, BootMode::Normal, BootIntent::Normal, triggerRestart);
+}
+
+void
+handleRebootAp(void)
+{
+#ifdef DEBUG_OVER_SERIAL
+	Serial.println("HTTP POST /reboot/ap");
+#endif
+	httpServer.send(200, "text/plain", "Rebooting into MODE_AP_CONFIG...");
+	requestReboot(rebootStore, BootMode::ApConfig, BootIntent::ApConfig, triggerRestart);
+}
+
+void
+handleRebootWifi(void)
+{
+#ifdef DEBUG_OVER_SERIAL
+	Serial.println("HTTP POST /reboot/wifi");
+#endif
+	httpServer.send(200, "text/plain", "Rebooting into MODE_WIFI_CONFIG...");
+	requestReboot(rebootStore, BootMode::WifiConfig, BootIntent::WifiConfig, triggerRestart);
+}
+
+void
+subscribeInverterTopics(void)
+{
+	if (!inverterReady || inverterSubscriptionsSet || !_mqtt.connected()) {
+		return;
+	}
+
+	int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
+	bool subscribed = true;
+	char subscriptionDef[100];
+
+	for (int i = 0; i < numberOfEntities; i++) {
+		if (_mqttAllEntities[i].subscribe) {
+			sprintf(subscriptionDef, "%s/%s/%s/command", deviceName, haUniqueId, _mqttAllEntities[i].mqttName);
+			subscribed = subscribed && _mqtt.subscribe(subscriptionDef, MQTT_SUBSCRIBE_QOS);
+#ifdef DEBUG_OVER_SERIAL
+			snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", subscriptionDef, subscribed);
+			Serial.println(_debugOutput);
+#endif
+		}
+	}
+
+	if (subscribed) {
+		inverterSubscriptionsSet = true;
+	}
+}
+
+void
 publishStatusNow(void)
 {
 	if (!_mqtt.connected()) {
@@ -462,11 +619,7 @@ publishEvent(MqttEventCode code, const char *detail)
 
 	char topic[128];
 	char payload[192];
-	if (haUniqueId[0] != '\0') {
-		snprintf(topic, sizeof(topic), "%s/%s/event", deviceName, haUniqueId);
-	} else {
-		snprintf(topic, sizeof(topic), "%s/event", deviceName);
-	}
+	snprintf(topic, sizeof(topic), "%s/event", deviceName);
 	if (detail && detail[0] != '\0') {
 		snprintf(payload, sizeof(payload),
 			 "{ \"code\": %d, \"name\": \"%s\", \"count\": %lu, \"ts_ms\": %lu, \"detail\": \"%s\" }",
@@ -638,6 +791,10 @@ handlePortalStatusRequest(WiFiManager& wifiManager)
 	html += portalStatusSsid;
 	html += "<br>Boot intent: ";
 	html += bootIntentToString(currentBootIntent);
+	html += "<br>Boot mode: ";
+	html += bootModeToString(currentBootMode);
+	html += "<br>Reset reason: ";
+	html += lastResetReason;
 	html += "<br>Last disconnect: ";
 	html += portalLastDisconnectLabel;
 	html += " (";
@@ -736,6 +893,10 @@ void setup()
 #endif
 
 	buildDeviceName();
+	{
+		String resetReason = ESP.getResetReason();
+		strlcpy(lastResetReason, resetReason.c_str(), sizeof(lastResetReason));
+	}
 
 	preferences.begin(DEVICE_NAME, false); // RW
 	// ESP8266 doesn't provide reset intent; read once and clear so we can distinguish intentional reboots.
@@ -744,6 +905,10 @@ void setup()
 		currentBootIntent = bootIntentFromString(storedIntent.c_str());
 		bootIntentForPublish = currentBootIntent;
 		bootIntentPendingClear = (currentBootIntent != BootIntent::Normal);
+	}
+	{
+		String storedMode = preferences.getString(kPreferenceBootMode, "");
+		currentBootMode = bootModeFromString(storedMode.c_str());
 	}
 	String storedSerial = preferences.getString(kPreferenceDeviceSerial, "");
 	appConfig.wifiSSID = preferences.getString("WiFi_SSID", "");
@@ -817,6 +982,7 @@ void setup()
 #ifdef DEBUG_OVER_SERIAL
 	logHeap("after WiFi");
 #endif
+	setupHttpControlPlane();
 
 	// Configure MQTT to the address and port specified above
 	_mqtt.setServer(appConfig.mqttSrvr.c_str(), appConfig.mqttPort);
@@ -862,10 +1028,6 @@ void setup()
 	// And any messages we are subscribed to will be pushed to the mqttCallback function for processing
 	_mqtt.setCallback(mqttCallback);
 
-	if (haUniqueId[0] == '\0') {
-		setMqttIdentifiersFromSerial("UNKNOWN");
-	}
-
 	// Connect to MQTT before any RS485 probing so boot intent is observable even if RS485 stalls.
 	mqttReconnect();
 	publishBootEventOncePerBoot();
@@ -878,6 +1040,7 @@ void setup()
 #if defined(DEBUG_OVER_SERIAL) || defined(DEBUG_LEVEL2) || defined(DEBUG_OUTPUT_TX_RX)
 	_modBus->setDebugOutput(_debugOutput);
 #endif // DEBUG_OVER_SERIAL || DEBUG_LEVEL2 || DEBUG_OUTPUT_TX_RX
+	_modBus->setServiceHook(serviceRs485Hooks);
 
 	// Set up the helper class for reading with reading registers
 	_registerHandler = new RegisterHandler(_modBus);
@@ -1253,6 +1416,11 @@ loop()
 	} else {
 		lastMqttConnected = true;
 	}
+
+	if (httpControlPlaneEnabled) {
+		httpServer.handleClient();
+	}
+	subscribeInverterTopics();
 
 	updateStatusLed();
 
@@ -2429,6 +2597,7 @@ mqttReconnect(void)
 	char subscriptionDef[100];
 	char line3[OLED_CHARACTER_WIDTH];
 	int tries = 0;
+	bool inverterSubscriptionsAdded = false;
 
 	// Loop until we're reconnected
 	while (true) {
@@ -2456,7 +2625,7 @@ mqttReconnect(void)
 		delay(100);
 
 		// Attempt to connect
-		if (_mqtt.connect(haUniqueId, appConfig.mqttUser.c_str(), appConfig.mqttPass.c_str(), statusTopic, 0, true,
+		if (_mqtt.connect(deviceName, appConfig.mqttUser.c_str(), appConfig.mqttPass.c_str(), statusTopic, 0, true,
 				  "{ \"presence\": \"offline\", \"a2mStatus\": \"offline\", \"rs485Status\": \"unavailable\", \"gridStatus\": \"unavailable\" }")) {
 			int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
 #ifdef DEBUG_OVER_SERIAL
@@ -2490,20 +2659,26 @@ mqttReconnect(void)
 			Serial.println(_debugOutput);
 #endif
 
-			for (int i = 0; i < numberOfEntities; i++) {
-				if (_mqttAllEntities[i].subscribe) {
-					sprintf(subscriptionDef, "%s/%s/%s/command", deviceName, haUniqueId, _mqttAllEntities[i].mqttName);
-					subscribed = subscribed && _mqtt.subscribe(subscriptionDef, MQTT_SUBSCRIBE_QOS);
+			if (inverterReady) {
+				for (int i = 0; i < numberOfEntities; i++) {
+					if (_mqttAllEntities[i].subscribe) {
+						sprintf(subscriptionDef, "%s/%s/%s/command", deviceName, haUniqueId, _mqttAllEntities[i].mqttName);
+						subscribed = subscribed && _mqtt.subscribe(subscriptionDef, MQTT_SUBSCRIBE_QOS);
 #ifdef DEBUG_OVER_SERIAL
-					snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", subscriptionDef, subscribed);
-					Serial.println(_debugOutput);
+						snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", subscriptionDef, subscribed);
+						Serial.println(_debugOutput);
 #endif
+					}
 				}
+				inverterSubscriptionsAdded = true;
 			}
 
 			// Subscribe or resubscribe to topics.
 			if (subscribed) {
 				publishPollingConfig();
+				if (inverterSubscriptionsAdded) {
+					inverterSubscriptionsSet = true;
+				}
 				break;
 			}
 		}
@@ -3206,7 +3381,9 @@ sendStatus(void)
 	core.a2mStatus = "online";
 	core.rs485Status = opData.essRs485Connected ? "OK" : "Problem";
 	core.gridStatus = gridStatusStr;
+	core.bootMode = bootModeToString(currentBootMode);
 	core.bootIntent = bootIntentToString(currentBootIntent);
+	core.httpControlPlaneEnabled = httpControlPlaneEnabled;
 
 	net.uptimeS = getUptimeSeconds();
 	net.freeHeap = ESP.getFreeHeap();
@@ -3740,6 +3917,9 @@ addToPayload(const char* addition)
 void
 sendHaData()
 {
+	if (!inverterReady) {
+		return;
+	}
 	int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
 
 	publishConfigDiscovery();
@@ -3929,6 +4109,10 @@ sendData()
 	static unsigned long lastRunOneDay = 0;
 	int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
 
+	if (!inverterReady) {
+		return;
+	}
+
 	if (resendAllData) {
 		resendAllData = false;
 		lastRunTenSeconds = lastRunOneMinute = lastRunFiveMinutes = lastRunOneHour = lastRunOneDay = 0;
@@ -4104,7 +4288,8 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 		char matchPrefix[64];
 
 		snprintf(matchPrefix, sizeof(matchPrefix), "%s/%s/", deviceName, haUniqueId);
-		if (!strncmp(topic, matchPrefix, strlen(matchPrefix)) &&
+		if (inverterReady &&
+		    !strncmp(topic, matchPrefix, strlen(matchPrefix)) &&
 		    !strcmp(&topic[strlen(topic) - strlen("/command")], "/command")) {
 			char topicEntityName[64];
 			int topicEntityLen = strlen(topic) - strlen(matchPrefix) - strlen("/command");

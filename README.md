@@ -59,6 +59,14 @@ Alpha2MQTT can store per-entity polling intervals that persist across restarts a
 
 - **Config topic (retained):** `DEVICE_NAME/config`
 - **Config update topic (non-retained):** `DEVICE_NAME/config/set`
+
+### HTTP control plane (MODE_NORMAL only)
+When boot mode is `normal`, the firmware exposes a lightweight HTTP page for requesting reboots into specific boot modes. The server is not started when boot mode is `ap_config` or `wifi_config`.
+
+- **GET /**: status page (boot mode, boot intent, reset reason)
+- **POST /reboot/normal**: set boot_mode=normal, boot_intent=normal, reboot
+- **POST /reboot/ap**: set boot_mode=ap_config, boot_intent=ap_config, reboot
+- **POST /reboot/wifi**: set boot_mode=wifi_config, boot_intent=wifi_config, reboot
 - **Example update payload:** `{ "Grid_Power": "freqOneMin", "Battery_Temp": "freqDisabled" }`
 - **HA discovery:** a diagnostic sensor named **MQTT Config** exposes `last_change` as its state and the full JSON as attributes.
 

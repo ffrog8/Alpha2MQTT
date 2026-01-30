@@ -35,7 +35,9 @@ struct StatusCoreSnapshot {
 	const char *a2mStatus;
 	const char *rs485Status;
 	const char *gridStatus;
+	const char *bootMode;
 	const char *bootIntent;
+	bool httpControlPlaneEnabled;
 };
 
 struct StatusNetSnapshot {

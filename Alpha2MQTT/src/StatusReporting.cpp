@@ -62,13 +62,17 @@ buildStatusCoreJson(const StatusCoreSnapshot &snapshot, char *out, size_t outSiz
 		"\"a2mStatus\":\"%s\","
 		"\"rs485Status\":\"%s\","
 		"\"gridStatus\":\"%s\","
-		"\"boot_intent\":\"%s\""
+		"\"boot_mode\":\"%s\","
+		"\"boot_intent\":\"%s\","
+		"\"http_control_plane_enabled\":%s"
 		"}",
 		snapshot.presence ? snapshot.presence : "",
 		snapshot.a2mStatus ? snapshot.a2mStatus : "",
 		snapshot.rs485Status ? snapshot.rs485Status : "",
 		snapshot.gridStatus ? snapshot.gridStatus : "",
-		snapshot.bootIntent ? snapshot.bootIntent : "");
+		snapshot.bootMode ? snapshot.bootMode : "",
+		snapshot.bootIntent ? snapshot.bootIntent : "",
+		snapshot.httpControlPlaneEnabled ? "true" : "false");
 	if (written < 0 || static_cast<size_t>(written) >= outSize) {
 		return false;
 	}

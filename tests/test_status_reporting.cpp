@@ -29,7 +29,9 @@ TEST_CASE("status core JSON builder includes required keys")
 	snapshot.a2mStatus = "online";
 	snapshot.rs485Status = "OK";
 	snapshot.gridStatus = "OK";
+	snapshot.bootMode = "normal";
 	snapshot.bootIntent = "normal";
+	snapshot.httpControlPlaneEnabled = true;
 
 	char buffer[512];
 	CHECK(buildStatusCoreJson(snapshot, buffer, sizeof(buffer)));
@@ -39,7 +41,9 @@ TEST_CASE("status core JSON builder includes required keys")
 	CHECK(payload.find("\"a2mStatus\":\"online\"") != std::string::npos);
 	CHECK(payload.find("\"rs485Status\":\"OK\"") != std::string::npos);
 	CHECK(payload.find("\"gridStatus\":\"OK\"") != std::string::npos);
+	CHECK(payload.find("\"boot_mode\":\"normal\"") != std::string::npos);
 	CHECK(payload.find("\"boot_intent\":\"normal\"") != std::string::npos);
+	CHECK(payload.find("\"http_control_plane_enabled\":true") != std::string::npos);
 }
 
 TEST_CASE("status net JSON builder includes required keys")

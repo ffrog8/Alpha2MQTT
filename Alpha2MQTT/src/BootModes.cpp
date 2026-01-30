@@ -17,6 +17,39 @@ SubsystemStates decideSubsystems(BootMode mode)
 }
 
 const char *
+bootModeToString(BootMode mode)
+{
+	switch (mode) {
+	case BootMode::Normal:
+		return "normal";
+	case BootMode::ApConfig:
+		return "ap_config";
+	case BootMode::WifiConfig:
+		return "wifi_config";
+	default:
+		return "normal";
+	}
+}
+
+BootMode
+bootModeFromString(const char *value)
+{
+	if (value == nullptr || *value == '\0') {
+		return BootMode::Normal;
+	}
+	if (strcmp(value, "normal") == 0) {
+		return BootMode::Normal;
+	}
+	if (strcmp(value, "ap_config") == 0) {
+		return BootMode::ApConfig;
+	}
+	if (strcmp(value, "wifi_config") == 0) {
+		return BootMode::WifiConfig;
+	}
+	return BootMode::Normal;
+}
+
+const char *
 bootIntentToString(BootIntent intent)
 {
 	switch (intent) {

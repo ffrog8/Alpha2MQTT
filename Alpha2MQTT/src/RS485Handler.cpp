@@ -49,6 +49,12 @@ RS485Handler::~RS485Handler()
 	_RS485Serial = NULL;
 }
 
+void
+RS485Handler::setServiceHook(void (*hook)())
+{
+	_serviceHook = hook;
+}
+
 
 /*
  * uartInfo()
@@ -622,6 +628,9 @@ bool RS485Handler::checkForData()
 	
 	while ((!_RS485Serial->available()) && (tries++ < RS485_TRIES))
 	{
+		if (_serviceHook != nullptr) {
+			_serviceHook();
+		}
 		delay(50);
 	}
 
@@ -651,6 +660,9 @@ void RS485Handler::checkRS485IsQuiet()
 		{
 			_RS485Serial->read();
 			startTime = millis();  // start over
+		}
+		if (_serviceHook != nullptr) {
+			_serviceHook();
 		}
 		delay(2);
 	}

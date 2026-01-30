@@ -13,11 +13,13 @@ add_executable(host_tests
     tests/test_config_codec.cpp
     tests/test_boot_modes.cpp
     tests/test_status_reporting.cpp
+    tests/test_reboot_request.cpp
     tests/src/TimeProviderHost.cpp
     Alpha2MQTT/src/Scheduler.cpp
     Alpha2MQTT/src/BootModes.cpp
     Alpha2MQTT/src/ConfigCodec.cpp
     Alpha2MQTT/src/StatusReporting.cpp
+    Alpha2MQTT/src/RebootRequest.cpp
     Alpha2MQTT/src/ModbusCodec.cpp
 )
 

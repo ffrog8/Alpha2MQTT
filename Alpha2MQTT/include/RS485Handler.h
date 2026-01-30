@@ -71,6 +71,7 @@ class RS485Handler
 		void checkRS485IsQuiet();
 		modbusRequestAndResponseStatusValues listenResponse(modbusRequestAndResponse* resp);
 		bool checkForData();
+		void (*_serviceHook)() = nullptr;
 #ifdef DEBUG_OUTPUT_TX_RX
 		void outputFrameToSerial(bool transmit, uint8_t frame[], byte actualFrameSize);
 #endif // DEBUG_OUTPUT_TX_RX
@@ -85,6 +86,7 @@ class RS485Handler
 		RS485Handler();
 		~RS485Handler();
 		modbusRequestAndResponseStatusValues sendModbus(uint8_t frame[], byte actualFrameSize, modbusRequestAndResponse* resp);
+		void setServiceHook(void (*hook)());
 		bool checkCRC(uint8_t frame[], byte actualFrameSize);
 		void calcCRC(uint8_t frame[], byte actualFrameSize);
 #if defined(DEBUG_OVER_SERIAL) || defined(DEBUG_LEVEL2) || defined(DEBUG_OUTPUT_TX_RX)
