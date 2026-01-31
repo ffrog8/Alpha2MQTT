@@ -1302,8 +1302,8 @@ configHandlerSta(void)
 	wifiManager.setTitle(deviceName);
 	wifiManager.setShowInfoUpdate(false);
 	{
-		const char* menu[] = { "wifinoscan", "info", "param", "sep", "restart" };
-		wifiManager.setMenu(menu, sizeof(menu) / sizeof(menu[0]));
+		PortalMenu menu = portalMenuDefault();
+		wifiManager.setMenu(menu.items, menu.count);
 	}
 	wifiManager.setConnectTimeout(20);
 	wifiManager.setConfigPortalTimeout(0);
@@ -1580,8 +1580,8 @@ configHandler(void)
 	{
 		// Avoid WiFiManager's "exit" action: it shuts down the portal without rebooting, which can
 		// leave the user stranded in a dead-end state. "restart" remains the exit path.
-		const char* menu[] = { "wifinoscan", "info", "param", "sep", "restart" };
-		wifiManager.setMenu(menu, sizeof(menu) / sizeof(menu[0]));
+		PortalMenu menu = portalMenuDefault();
+		wifiManager.setMenu(menu.items, menu.count);
 	}
 	wifiManager.setConnectTimeout(20);
 	wifiManager.setConfigPortalTimeout(0);
