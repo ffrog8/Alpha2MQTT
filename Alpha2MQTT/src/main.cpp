@@ -101,6 +101,7 @@ const char kPreferenceDeviceSerial[] = "Device_Serial";
 BootIntent currentBootIntent = BootIntent::Normal;
 BootIntent bootIntentForPublish = BootIntent::Normal;
 BootMode currentBootMode = BootMode::Normal;
+BootMode bootModeForDiagnostics = BootMode::Normal;
 bool bootIntentPendingClear = false;
 bool bootEventPublished = false;
 bool inverterReady = false;
@@ -332,6 +333,7 @@ const char* wifiStatusLabel(wl_status_t status);
 const char* wifiModeLabel(WiFiMode_t mode);
 void handlePortalStatusRequest(WiFiManager& wifiManager);
 bool portalHasPersistedWifiCredentials(void);
+void configHandlerSta(void);
 
 void
 buildDeviceName(void)
@@ -831,10 +833,16 @@ handlePortalStatusRequest(WiFiManager& wifiManager)
 	snprintf(buf, sizeof(buf), "Mode: %s", wifiModeLabel(WiFi.getMode()));
 	wifiManager.server->sendContent(buf);
 
-	IPAddress apIp = WiFi.softAPIP();
-	snprintf(buf, sizeof(buf), "<br>SoftAP SSID: %s<br>SoftAP IP: %u.%u.%u.%u",
-		 deviceName, apIp[0], apIp[1], apIp[2], apIp[3]);
-	wifiManager.server->sendContent(buf);
+	// Only show SoftAP info when it is actually enabled; MODE_WIFI_CONFIG uses STA-only portal.
+	WiFiMode_t mode = WiFi.getMode();
+	if (mode == WIFI_AP || mode == WIFI_AP_STA) {
+		IPAddress apIp = WiFi.softAPIP();
+		snprintf(buf, sizeof(buf), "<br>SoftAP SSID: %s<br>SoftAP IP: %u.%u.%u.%u",
+			 deviceName, apIp[0], apIp[1], apIp[2], apIp[3]);
+		wifiManager.server->sendContent(buf);
+	} else {
+		wifiManager.server->sendContent("<br>SoftAP: disabled");
+	}
 
 	wl_status_t staStatus = WiFi.status();
 	snprintf(buf, sizeof(buf), "<br>STA status: %s (%d)", wifiStatusLabel(staStatus), static_cast<int>(staStatus));
@@ -845,7 +853,7 @@ handlePortalStatusRequest(WiFiManager& wifiManager)
 
 	snprintf(buf, sizeof(buf), "<br>Boot intent: %s<br>Boot mode: %s",
 		 bootIntentToString(currentBootIntent),
-		 bootModeToString(currentBootMode));
+		 bootModeToString(bootModeForDiagnostics));
 	wifiManager.server->sendContent(buf);
 
 	snprintf(buf, sizeof(buf), "<br>Reset reason: %s", lastResetReason);
@@ -958,10 +966,11 @@ void setup()
 		bootIntentForPublish = currentBootIntent;
 		bootIntentPendingClear = (currentBootIntent != BootIntent::Normal);
 	}
-	{
-		String storedMode = preferences.getString(kPreferenceBootMode, "");
-		currentBootMode = bootModeFromString(storedMode.c_str());
-	}
+		{
+			String storedMode = preferences.getString(kPreferenceBootMode, "");
+			currentBootMode = bootModeFromString(storedMode.c_str());
+		}
+		bootModeForDiagnostics = currentBootMode;
 	String storedSerial = preferences.getString(kPreferenceDeviceSerial, "");
 	appConfig.wifiSSID = preferences.getString("WiFi_SSID", "");
 	appConfig.wifiPass = preferences.getString("WiFi_Password", "");
@@ -979,6 +988,7 @@ void setup()
 		setMqttIdentifiersFromSerial(storedSerial.c_str());
 	}
 	bootPlan = planForBootMode(currentBootMode);
+	BootMode startupMode = currentBootMode;
 
 #ifdef DEBUG_OVER_SERIAL
 	Serial.print("boot_intent=");
@@ -1017,13 +1027,21 @@ void setup()
 	}
 #endif
 
-	if (currentBootMode == BootMode::ApConfig || currentBootMode == BootMode::WifiConfig) {
+	if (startupMode == BootMode::ApConfig) {
 #ifdef DEBUG_OVER_SERIAL
-		portalLog("Config mode boot; starting captive portal.");
+		portalLog("Config mode boot (ap_config); starting AP captive portal.");
 #endif
-		// Explicit config modes force the existing portal once; success will return to normal.
+		// Explicit AP config mode forces the AP captive portal once; success will return to normal.
 		updateOLED(false, "Config", "mode", "portal");
 		configHandler();
+		return;
+	}
+	if (startupMode == BootMode::WifiConfig) {
+#ifdef DEBUG_OVER_SERIAL
+		portalLog("Config mode boot (wifi_config); starting STA-only portal.");
+#endif
+		updateOLED(false, "WiFi", "config", "portal");
+		configHandlerSta();
 		return;
 	}
 
@@ -1200,6 +1218,268 @@ void setup()
 		resendAllData = true; // Tell sendData() to send everything again
 
 		updateOLED(false, "", "", _version);
+	}
+}
+
+void
+configHandlerSta(void)
+{
+	Preferences preferences;
+	WiFiManager wifiManager;
+
+	// MODE_WIFI_CONFIG is STA-only (no SoftAP, no DNS). This avoids interfering with the LAN and
+	// keeps heap usage lower, but requires the user to reach the device on its STA IP.
+	WiFi.mode(WIFI_STA);
+
+	// Clear persisted boot_mode so a power cycle returns to normal unless explicitly requested again.
+	preferences.begin(DEVICE_NAME, false); // RW
+	preferences.putString(kPreferenceBootMode, bootModeToString(BootMode::Normal));
+	preferences.end();
+	currentBootMode = BootMode::Normal;
+
+#ifdef DEBUG_OVER_SERIAL
+	portalLog("STA portal: connecting to saved WiFi (ssid=%s)", appConfig.wifiSSID.c_str());
+#endif
+
+	WiFi.hostname(deviceName);
+	WiFi.begin(appConfig.wifiSSID.c_str(), appConfig.wifiPass.c_str());
+
+	const unsigned long start = millis();
+	while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {
+		delay(50);
+	}
+
+	if (WiFi.status() != WL_CONNECTED) {
+#ifdef DEBUG_OVER_SERIAL
+		portalLog("STA portal: connect failed; rebooting into normal. Hold D3/GPIO0 LOW at boot for AP portal.");
+#endif
+		preferences.begin(DEVICE_NAME, false); // RW
+		preferences.putString(kPreferenceBootMode, bootModeToString(BootMode::Normal));
+		preferences.end();
+		setBootIntentAndReboot(BootIntent::Normal);
+		return;
+	}
+
+#ifdef DEBUG_OVER_SERIAL
+	portalLog("STA portal: connected IP=%s", WiFi.localIP().toString().c_str());
+#endif
+
+	// Reuse the existing portal implementation, but without starting SoftAP/DNS.
+	wifiManager.setBreakAfterConfig(false);
+	wifiManager.setTitle(deviceName);
+	wifiManager.setShowInfoUpdate(false);
+	{
+		const char* menu[] = { "wifinoscan", "info", "param", "sep", "restart" };
+		wifiManager.setMenu(menu, sizeof(menu) / sizeof(menu[0]));
+	}
+	wifiManager.setConnectTimeout(20);
+	wifiManager.setConfigPortalTimeout(0);
+	wifiManager.setDisableConfigPortal(false);
+	wifiManager.setCustomHeadElement(
+		"<script>"
+		"(function(){"
+		"if (window.location && window.location.pathname === '/wifisave') {"
+		"window.location.href = '/status';"
+		"}"
+		"if (window.location && window.location.pathname === '/0wifi') {"
+		"window.addEventListener('DOMContentLoaded', function(){"
+		"var nodes=document.querySelectorAll(\"form[action^='/wifi?refresh=1']\");"
+		"for (var i=0;i<nodes.length;i++){nodes[i].remove();}"
+		"});"
+		"}"
+		"})();"
+		"</script>");
+
+	String mqttPortDefault = String(appConfig.mqttPort);
+	WiFiManagerParameter p_lineBreak_text("<p>MQTT settings:</p>");
+	WiFiManagerParameter custom_mqtt_server("server", "MQTT server", appConfig.mqttSrvr.c_str(), 40);
+	WiFiManagerParameter custom_mqtt_port("port", "MQTT port", mqttPortDefault.c_str(), 6);
+	WiFiManagerParameter custom_mqtt_user("user", "MQTT user", appConfig.mqttUser.c_str(), 32);
+	WiFiManagerParameter custom_mqtt_pass("mpass", "MQTT password", appConfig.mqttPass.c_str(), 32);
+
+	wifiManager.addParameter(&p_lineBreak_text);
+	wifiManager.addParameter(&custom_mqtt_server);
+	wifiManager.addParameter(&custom_mqtt_port);
+	wifiManager.addParameter(&custom_mqtt_user);
+	wifiManager.addParameter(&custom_mqtt_pass);
+
+	portalStatus = portalStatusIdle;
+	portalStatusReason[0] = '\0';
+	portalStatusSsid[0] = '\0';
+	portalStatusIp[0] = '\0';
+	portalLastDisconnectReason = -1;
+	portalLastDisconnectLabel[0] = '\0';
+	portalConnectStart = 0;
+	portalNeedsMqttConfig = false;
+	portalMqttSaved = false;
+	portalRebootScheduled = false;
+	portalRebootAt = 0;
+
+	wifiManager.setWebServerCallback([&]() {
+		if (wifiManager.server) {
+#ifdef DEBUG_OVER_SERIAL
+#if defined(MP_ESP8266)
+			wifiManager.server->addHandler(new PortalRequestLogger());
+#endif
+#endif
+			wifiManager.server->on("/status", [&]() {
+				handlePortalStatusRequest(wifiManager);
+			});
+		}
+	});
+
+	// Called before WiFiManager begins the connect-on-save attempt.
+	wifiManager.setPreSaveConfigCallback([&]() {
+		portalStatus = portalStatusConnecting;
+		portalConnectStart = millis();
+		strlcpy(portalStatusSsid, wifiManager.getWiFiSSID().c_str(), sizeof(portalStatusSsid));
+		portalStatusReason[0] = '\0';
+#ifdef DEBUG_OVER_SERIAL
+		portalLog("WiFi submit: SSID=%s", portalStatusSsid);
+		if (WiFi.status() == WL_CONNECTED) {
+			portalLog("Status URL (STA): http://%s/status", WiFi.localIP().toString().c_str());
+		}
+#endif
+	});
+	// Called only after a successful connect-on-save in WiFiManager.
+	wifiManager.setSaveConfigCallback([&]() {
+#ifdef DEBUG_OVER_SERIAL
+		portalLog("WiFi save callback (connected): SSID=%s", wifiManager.getWiFiSSID().c_str());
+#endif
+	});
+
+	wifiManager.setSaveParamsCallback([&]() {
+		preferences.begin(DEVICE_NAME, false); // RW
+		preferences.putString("MQTT_Server", custom_mqtt_server.getValue());
+		{
+			int port = strtol(custom_mqtt_port.getValue(), NULL, 10);
+			if (port < 0 || port > SHRT_MAX) {
+				port = 0;
+			}
+			preferences.putInt("MQTT_Port", port);
+		}
+		preferences.putString("MQTT_Username", custom_mqtt_user.getValue());
+		preferences.putString("MQTT_Password", custom_mqtt_pass.getValue());
+		preferences.end();
+
+		portalMqttSaved = true;
+		portalNeedsMqttConfig = mqttServerIsBlank(custom_mqtt_server.getValue());
+#ifdef DEBUG_OVER_SERIAL
+		portalLog("MQTT params saved (server=%s)", custom_mqtt_server.getValue());
+#endif
+	});
+
+	wifiManager.setConfigPortalBlocking(false);
+	wifiManager.startWebPortal();
+
+#ifdef DEBUG_OVER_SERIAL
+	portalLog("STA portal URL: http://%s/", WiFi.localIP().toString().c_str());
+	portalLog("Portal loop start free=%u max=%u frag=%u",
+		ESP.getFreeHeap(),
+		ESP.getMaxFreeBlockSize(),
+		ESP.getHeapFragmentation());
+#endif
+
+	unsigned long portalStatsLast = 0;
+	for (;;) {
+		unsigned long processStart = millis();
+		wifiManager.process();
+		unsigned long processElapsed = millis() - processStart;
+#ifdef DEBUG_OVER_SERIAL
+		if (processElapsed > 100) {
+			portalLog("process() took %lu ms free=%u max=%u frag=%u",
+				processElapsed,
+				ESP.getFreeHeap(),
+				ESP.getMaxFreeBlockSize(),
+				ESP.getHeapFragmentation());
+		}
+		if (checkTimer(&portalStatsLast, 5000)) {
+			unsigned long connectAge = 0;
+			if (portalConnectStart > 0) {
+				connectAge = millis() - portalConnectStart;
+			}
+			portalLog("Portal stats: status=%s free=%u max=%u frag=%u connect_age=%lu",
+				portalStatusLabel(portalStatus),
+				ESP.getFreeHeap(),
+				ESP.getMaxFreeBlockSize(),
+				ESP.getHeapFragmentation(),
+				connectAge);
+		}
+#endif
+
+		if (portalStatus == portalStatusConnecting) {
+			if (WiFi.status() == WL_CONNECTED) {
+				portalStatus = portalStatusSuccess;
+				strlcpy(portalStatusIp, WiFi.localIP().toString().c_str(), sizeof(portalStatusIp));
+#ifdef DEBUG_OVER_SERIAL
+				portalLog("WiFi connected: SSID=%s IP=%s RSSI=%d channel=%d free=%u max=%u frag=%u",
+					portalStatusSsid,
+					portalStatusIp,
+					WiFi.RSSI(),
+					WiFi.channel(),
+					ESP.getFreeHeap(),
+					ESP.getMaxFreeBlockSize(),
+					ESP.getHeapFragmentation());
+				portalLog("Status URL (STA): http://%s/status", portalStatusIp);
+#endif
+				updateOLED(false, "Web", "config", "succeeded");
+
+				preferences.begin(DEVICE_NAME, false); // RW
+				preferences.putString("WiFi_SSID", wifiManager.getWiFiSSID());
+				preferences.putString("WiFi_Password", wifiManager.getWiFiPass());
+				String storedMqttServer = preferences.getString("MQTT_Server", "");
+				PortalPostWifiAction postWifiAction = portalPostWifiActionAfterWifiSave(storedMqttServer.c_str());
+				portalNeedsMqttConfig = (postWifiAction == PortalPostWifiAction::RedirectToMqttParams);
+				preferences.putString(kPreferenceBootMode, bootModeToString(BootMode::Normal));
+				preferences.end();
+
+				if (postWifiAction == PortalPostWifiAction::Reboot) {
+					unsigned long statusStart = millis();
+					while (millis() - statusStart < 3000) {
+						wifiManager.process();
+						delay(50);
+					}
+					setBootIntentAndReboot(BootIntent::Normal);
+				}
+			}
+
+			if (portalConnectStart > 0 && millis() - portalConnectStart >= 20000) {
+				portalStatus = portalStatusFailed;
+				const char *reason = wifiStatusReason(WiFi.status());
+				if (strcmp(reason, "Unknown") == 0) {
+					strlcpy(portalStatusReason, "failed to connect and hit timeout", sizeof(portalStatusReason));
+				} else {
+					strlcpy(portalStatusReason, reason, sizeof(portalStatusReason));
+				}
+#ifdef DEBUG_OVER_SERIAL
+				portalLog("WiFi connect failed: %s status=%d heap=%u",
+					portalStatusReason,
+					static_cast<int>(WiFi.status()),
+					ESP.getFreeHeap());
+#endif
+				updateOLED(false, "Web", "config", "failed");
+				portalConnectStart = 0;
+			}
+		}
+
+		// Option B behavior: if MQTT params saved and WiFi credentials exist, reboot into normal.
+		if (portalMqttSaved && !portalNeedsMqttConfig && portalHasPersistedWifiCredentials()) {
+			if (!portalRebootScheduled) {
+				portalRebootScheduled = true;
+				portalRebootAt = millis() + 1500;
+#ifdef DEBUG_OVER_SERIAL
+				portalLog("MQTT configured and WiFi credentials present; reboot scheduled.");
+#endif
+			}
+		}
+		if (portalRebootScheduled && static_cast<long>(millis() - portalRebootAt) >= 0) {
+			preferences.begin(DEVICE_NAME, false); // RW
+			preferences.putString(kPreferenceBootMode, bootModeToString(BootMode::Normal));
+			preferences.end();
+			setBootIntentAndReboot(BootIntent::Normal);
+		}
+
+		delay(50);
 	}
 }
 
@@ -1511,15 +1791,15 @@ configHandler(void)
 
 				// If WiFi saved/connected but MQTT is blank, keep the portal alive and redirect to /param.
 				// Otherwise keep the legacy behavior: short status display then reboot into normal.
-				if (postWifiAction == PortalPostWifiAction::Reboot) {
-					unsigned long statusStart = millis();
-					while (millis() - statusStart < 3000) {
-						wifiManager.process();
-						delay(50);
+					if (postWifiAction == PortalPostWifiAction::Reboot) {
+						unsigned long statusStart = millis();
+						while (millis() - statusStart < 3000) {
+							wifiManager.process();
+							delay(50);
+						}
+						setBootIntentAndReboot(BootIntent::Normal);
 					}
-					setBootIntentAndReboot(BootIntent::WifiConfig);
 				}
-			}
 
 			if (portalConnectStart > 0 && millis() - portalConnectStart >= 20000) {
 				portalStatus = portalStatusFailed;
@@ -1561,7 +1841,7 @@ configHandler(void)
 				preferences.begin(DEVICE_NAME, false); // RW
 				preferences.putString(kPreferenceBootMode, bootModeToString(BootMode::Normal));
 				preferences.end();
-				setBootIntentAndReboot(BootIntent::WifiConfig);
+				setBootIntentAndReboot(BootIntent::Normal);
 			}
 			delay(50);
 		}
