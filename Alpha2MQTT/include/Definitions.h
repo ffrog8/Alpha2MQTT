@@ -1399,10 +1399,8 @@ enum gridStatus {
 struct mqttState
 {
 	mqttEntityId entityId;
-	char mqttName[MAX_MQTT_NAME_LENGTH];
+	const char *mqttName;
 	mqttUpdateFreq updateFreq;
-	mqttUpdateFreq defaultFreq;
-	mqttUpdateFreq effectiveFreq;
 	bool subscribe;
 	bool retain;
 	homeAssistantClass haClass;

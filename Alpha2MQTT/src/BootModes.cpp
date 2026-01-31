@@ -16,6 +16,34 @@ SubsystemStates decideSubsystems(BootMode mode)
 	}
 }
 
+SubsystemPlan
+planForBootMode(BootMode mode)
+{
+	switch (mode) {
+	case BootMode::Normal:
+		return { true, true, true };
+	case BootMode::ApConfig:
+		return { true, false, false };
+	case BootMode::WifiConfig:
+		return { true, false, false };
+	default:
+		return { true, false, false };
+	}
+}
+
+BootMode
+bootModeAfterPortalSuccess(BootMode currentMode)
+{
+	switch (currentMode) {
+	case BootMode::ApConfig:
+	case BootMode::WifiConfig:
+		return BootMode::Normal;
+	case BootMode::Normal:
+	default:
+		return currentMode;
+	}
+}
+
 const char *
 bootModeToString(BootMode mode)
 {

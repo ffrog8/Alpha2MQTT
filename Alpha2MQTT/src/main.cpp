@@ -14,6 +14,7 @@ First, go and customise options at the top of Definitions.h!
 #include <bit>
 #include <bitset>
 #include <cctype>
+#include <cstdarg>
 #include <cstdint>
 #include <iostream>
 // Supporting files
@@ -21,6 +22,8 @@ First, go and customise options at the top of Definitions.h!
 #include "../RS485Handler.h"
 #include "../Definitions.h"
 #include "../include/BootModes.h"
+#include "../include/MqttEntities.h"
+#include "../include/PortalConfig.h"
 #include "../include/RebootRequest.h"
 #include "../include/StatusReporting.h"
 #include "../include/Scheduler.h"
@@ -88,6 +91,10 @@ char portalStatusIp[20] = "";
 int portalLastDisconnectReason = -1;
 char portalLastDisconnectLabel[32] = "";
 unsigned long portalConnectStart = 0;
+bool portalNeedsMqttConfig = false;
+bool portalMqttSaved = false;
+bool portalRebootScheduled = false;
+unsigned long portalRebootAt = 0;
 const char kPreferenceBootIntent[] = "Boot_Intent";
 const char kPreferenceBootMode[] = "Boot_Mode";
 const char kPreferenceDeviceSerial[] = "Device_Serial";
@@ -98,6 +105,7 @@ bool bootIntentPendingClear = false;
 bool bootEventPublished = false;
 bool inverterReady = false;
 bool inverterSubscriptionsSet = false;
+SubsystemPlan bootPlan = { true, true, true };
 #if defined(MP_ESP8266)
 const int kSafeModePin = 0; // D3 (GPIO0) strap for safe mode.
 #endif
@@ -233,62 +241,7 @@ struct {
 /*
  * Home Assistant auto-discovered values
  */
-#define MQTT_ENTITY(id, name, freq, subscribe, retain, haClass) { id, name, freq, freq, freq, subscribe, retain, haClass }
-static struct mqttState _mqttAllEntities[] =
-{
-	// Entity,                                "Name",                 Update Frequency,        Subscribe, Retain, HA Class
-#ifdef DEBUG_FREEMEM
-	MQTT_ENTITY(mqttEntityId::entityFreemem,            "A2M_freemem",          mqttUpdateFreq::freqOneMin,  false, false, homeAssistantClass::haClassInfo),
-#endif
-#ifdef DEBUG_CALLBACKS
-	MQTT_ENTITY(mqttEntityId::entityCallbacks,          "A2M_Callbacks",        mqttUpdateFreq::freqTenSec,  false, false, homeAssistantClass::haClassInfo),
-#endif // DEBUG_CALLBACKS
-#ifdef DEBUG_RS485
-	MQTT_ENTITY(mqttEntityId::entityRs485Errors,        "A2M_RS485_Errors",     mqttUpdateFreq::freqTenSec,  false, false, homeAssistantClass::haClassInfo),
-#endif // DEBUG_RS485
-#ifdef A2M_DEBUG_WIFI
-	MQTT_ENTITY(mqttEntityId::entityRSSI,               "A2M_RSSI",             mqttUpdateFreq::freqOneMin,  false, false, homeAssistantClass::haClassInfo),
-	MQTT_ENTITY(mqttEntityId::entityBSSID,              "A2M_BSSID",            mqttUpdateFreq::freqOneMin,  false, false, homeAssistantClass::haClassInfo),
-	MQTT_ENTITY(mqttEntityId::entityTxPower,            "A2M_TX_Power",         mqttUpdateFreq::freqOneMin,  false, false, homeAssistantClass::haClassInfo),
-	MQTT_ENTITY(mqttEntityId::entityWifiRecon,          "A2M_reconnects",       mqttUpdateFreq::freqOneMin,  false, false, homeAssistantClass::haClassInfo),
-#endif // A2M_DEBUG_WIFI
-	MQTT_ENTITY(mqttEntityId::entityRs485Avail,         "RS485_Connected",      mqttUpdateFreq::freqNever,   false, true,  homeAssistantClass::haClassBinaryProblem),
-	MQTT_ENTITY(mqttEntityId::entityA2MUptime,          "A2M_uptime",           mqttUpdateFreq::freqTenSec,  false, false, homeAssistantClass::haClassDuration),
-	MQTT_ENTITY(mqttEntityId::entityA2MVersion,         "A2M_version",          mqttUpdateFreq::freqOneDay,  false, true,  homeAssistantClass::haClassInfo),
-	MQTT_ENTITY(mqttEntityId::entityInverterVersion,    "Inverter_version",     mqttUpdateFreq::freqOneDay,  false, true,  homeAssistantClass::haClassInfo),
-	MQTT_ENTITY(mqttEntityId::entityInverterSn,         "Inverter_SN",          mqttUpdateFreq::freqOneDay,  false, true,  homeAssistantClass::haClassInfo),
-	MQTT_ENTITY(mqttEntityId::entityEmsVersion,         "EMS_version",          mqttUpdateFreq::freqOneDay,  false, true,  homeAssistantClass::haClassInfo),
-	MQTT_ENTITY(mqttEntityId::entityEmsSn,              "EMS_SN",               mqttUpdateFreq::freqOneDay,  false, true,  homeAssistantClass::haClassInfo),
-	MQTT_ENTITY(mqttEntityId::entityBatSoc,             "State_of_Charge",      mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassBattery),
-	MQTT_ENTITY(mqttEntityId::entityBatPwr,             "ESS_Power",            mqttUpdateFreq::freqTenSec,  false, true,  homeAssistantClass::haClassPower),
-	MQTT_ENTITY(mqttEntityId::entityBatEnergyCharge,    "ESS_Energy_Charge",    mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassEnergy),
-	MQTT_ENTITY(mqttEntityId::entityBatEnergyDischarge, "ESS_Energy_Discharge", mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassEnergy),
-	MQTT_ENTITY(mqttEntityId::entityGridAvail,          "Grid_Connected",       mqttUpdateFreq::freqNever,   false, true,  homeAssistantClass::haClassBinaryProblem),
-	MQTT_ENTITY(mqttEntityId::entityGridPwr,            "Grid_Power",           mqttUpdateFreq::freqTenSec,  false, true,  homeAssistantClass::haClassPower),
-	MQTT_ENTITY(mqttEntityId::entityGridEnergyTo,       "Grid_Energy_To",       mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassEnergy),
-	MQTT_ENTITY(mqttEntityId::entityGridEnergyFrom,     "Grid_Energy_From",     mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassEnergy),
-	MQTT_ENTITY(mqttEntityId::entityPvPwr,              "Solar_Power",          mqttUpdateFreq::freqTenSec,  false, true,  homeAssistantClass::haClassPower),
-	MQTT_ENTITY(mqttEntityId::entityPvEnergy,           "Solar_Energy",         mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassEnergy),
-	MQTT_ENTITY(mqttEntityId::entityFrequency,          "Frequency",            mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassFrequency),
-	MQTT_ENTITY(mqttEntityId::entityOpMode,             "Op_Mode",              mqttUpdateFreq::freqOneMin,  true,  true,  homeAssistantClass::haClassSelect),
-	MQTT_ENTITY(mqttEntityId::entitySocTarget,          "SOC_Target",           mqttUpdateFreq::freqOneMin,  true,  true,  homeAssistantClass::haClassBox),
-	MQTT_ENTITY(mqttEntityId::entityChargePwr,          "Charge_Power",         mqttUpdateFreq::freqOneMin,  true,  true,  homeAssistantClass::haClassBox),
-	MQTT_ENTITY(mqttEntityId::entityDischargePwr,       "Discharge_Power",      mqttUpdateFreq::freqOneMin,  true,  true,  homeAssistantClass::haClassBox),
-	MQTT_ENTITY(mqttEntityId::entityPushPwr,            "Push_Power",           mqttUpdateFreq::freqOneMin,  true,  true,  homeAssistantClass::haClassBox),
-	MQTT_ENTITY(mqttEntityId::entityBatCap,             "Battery_Capacity",     mqttUpdateFreq::freqOneDay,  false, true,  homeAssistantClass::haClassInfo),
-	MQTT_ENTITY(mqttEntityId::entityBatTemp,            "Battery_Temp",         mqttUpdateFreq::freqFiveMin, false, true,  homeAssistantClass::haClassTemp),
-	MQTT_ENTITY(mqttEntityId::entityInverterTemp,       "Inverter_Temp",        mqttUpdateFreq::freqFiveMin, false, true,  homeAssistantClass::haClassTemp),
-	MQTT_ENTITY(mqttEntityId::entityBatFaults,          "Battery_Faults",       mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassBinaryProblem),
-	MQTT_ENTITY(mqttEntityId::entityBatWarnings,        "Battery_Warnings",     mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassBinaryProblem),
-	MQTT_ENTITY(mqttEntityId::entityInverterFaults,     "Inverter_Faults",      mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassBinaryProblem),
-	MQTT_ENTITY(mqttEntityId::entityInverterWarnings,   "Inverter_Warnings",    mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassBinaryProblem),
-	MQTT_ENTITY(mqttEntityId::entitySystemFaults,       "System_Faults",        mqttUpdateFreq::freqOneMin,  false, true,  homeAssistantClass::haClassBinaryProblem),
-	MQTT_ENTITY(mqttEntityId::entityInverterMode,       "Inverter_Mode",        mqttUpdateFreq::freqTenSec,  false, true,  homeAssistantClass::haClassInfo),
-	MQTT_ENTITY(mqttEntityId::entityGridReg,            "Grid_Regulation",      mqttUpdateFreq::freqOneDay,  false, false, homeAssistantClass::haClassInfo),
-	MQTT_ENTITY(mqttEntityId::entityRegNum,             "Register_Number",      mqttUpdateFreq::freqOneMin,  true,  false, homeAssistantClass::haClassBox),
-	MQTT_ENTITY(mqttEntityId::entityRegValue,           "Register_Value",       mqttUpdateFreq::freqOneMin,  false, false, homeAssistantClass::haClassInfo)
-};
-#undef MQTT_ENTITY
+// Entity descriptors live in flash (rodata). Per-boot mutable state is allocated only when MQTT is enabled.
 
 
 
@@ -329,14 +282,15 @@ void sendData(void);
 void sendStatus(void);
 void updateRunstate(void);
 uint32_t getUptimeSeconds(void);
+bool checkTimer(unsigned long *lastRun, unsigned long interval);
 void emptyPayload(void);
 void sendMqtt(const char*, bool);
-void sendDataFromMqttState(mqttState*, bool);
+void sendDataFromMqttState(const mqttState*, bool);
 void loadPollingConfig(void);
-void savePollingConfig(mqttState*);
+void savePollingConfig(const mqttState*);
 void publishPollingConfig(void);
 void publishConfigDiscovery(void);
-void publishHaEntityDiscovery(mqttState*);
+void publishHaEntityDiscovery(const mqttState*);
 bool handlePollingConfigSet(const char*);
 const char* mqttUpdateFreqToString(mqttUpdateFreq);
 bool mqttUpdateFreqFromString(const char*, mqttUpdateFreq*);
@@ -344,7 +298,7 @@ bool isValidMqttUpdateFreq(int);
 void updatePollingLastChange(void);
 void getPollingTimestamp(char*, size_t);
 void buildPollingKey(const mqttState*, char*, size_t);
-mqttState* lookupEntityByName(const char*);
+const mqttState* lookupEntityByName(const char*);
 void checkAndSetDispatchMode(void);
 void printWifiBars(int rssi);
 void getOpModeDesc(char *dest, size_t size, enum opMode mode);
@@ -377,6 +331,7 @@ const char* wifiStatusReason(wl_status_t status);
 const char* wifiStatusLabel(wl_status_t status);
 const char* wifiModeLabel(WiFiMode_t mode);
 void handlePortalStatusRequest(WiFiManager& wifiManager);
+bool portalHasPersistedWifiCredentials(void);
 
 void
 buildDeviceName(void)
@@ -433,8 +388,15 @@ logHeap(const char *label)
 {
 	Serial.print("Heap ");
 	Serial.print(label);
-	Serial.print(": ");
-	Serial.println(ESP.getFreeHeap());
+	Serial.print(": free=");
+	Serial.print(ESP.getFreeHeap());
+#if defined(MP_ESP8266)
+	Serial.print(" max=");
+	Serial.print(ESP.getMaxFreeBlockSize());
+	Serial.print(" frag=");
+	Serial.print(ESP.getHeapFragmentation());
+#endif
+	Serial.println();
 }
 #endif
 
@@ -568,14 +530,18 @@ subscribeInverterTopics(void)
 	if (!inverterReady || inverterSubscriptionsSet || !_mqtt.connected()) {
 		return;
 	}
+	if (!mqttEntitiesRtAvailable()) {
+		return;
+	}
 
-	int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
+	const mqttState *entities = mqttEntitiesDesc();
+	int numberOfEntities = static_cast<int>(mqttEntitiesCount());
 	bool subscribed = true;
 	char subscriptionDef[100];
 
 	for (int i = 0; i < numberOfEntities; i++) {
-		if (_mqttAllEntities[i].subscribe) {
-			sprintf(subscriptionDef, "%s/%s/%s/command", deviceName, haUniqueId, _mqttAllEntities[i].mqttName);
+		if (entities[i].subscribe) {
+			sprintf(subscriptionDef, "%s/%s/%s/command", deviceName, haUniqueId, entities[i].mqttName);
 			subscribed = subscribed && _mqtt.subscribe(subscriptionDef, MQTT_SUBSCRIBE_QOS);
 #ifdef DEBUG_OVER_SERIAL
 			snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", subscriptionDef, subscribed);
@@ -674,6 +640,82 @@ setBootIntentAndReboot(BootIntent intent)
 	ESP.restart();
 }
 
+#if defined(MP_ESP8266)
+using PortalServer = ESP8266WebServer;
+#endif
+
+#if defined(MP_ESP8266)
+static const char *
+httpMethodToString(HTTPMethod method)
+{
+	switch (method) {
+	case HTTP_GET:
+		return "GET";
+	case HTTP_POST:
+		return "POST";
+	case HTTP_PUT:
+		return "PUT";
+	case HTTP_DELETE:
+		return "DELETE";
+	case HTTP_PATCH:
+		return "PATCH";
+	case HTTP_OPTIONS:
+		return "OPTIONS";
+	default:
+		return "OTHER";
+	}
+}
+#endif
+
+#ifdef DEBUG_OVER_SERIAL
+static void
+portalLog(const char *format, ...)
+{
+	char message[160];
+	unsigned long nowMs = millis();
+	va_list args;
+	va_start(args, format);
+	vsnprintf(message, sizeof(message), format, args);
+	va_end(args);
+	Serial.print("[portal +");
+	Serial.print(nowMs);
+	Serial.print("] ");
+	Serial.println(message);
+}
+#endif
+
+#if defined(MP_ESP8266)
+class PortalRequestLogger : public RequestHandler {
+public:
+	bool canHandle(HTTPMethod method, const String& uri) override
+	{
+#ifdef DEBUG_OVER_SERIAL
+		portalLog("HTTP %s %s free=%u max=%u frag=%u",
+			httpMethodToString(method),
+			uri.c_str(),
+			ESP.getFreeHeap(),
+			ESP.getMaxFreeBlockSize(),
+			ESP.getHeapFragmentation());
+#endif
+		return false;
+	}
+
+	bool canUpload(const String& uri) override
+	{
+		(void)uri;
+		return false;
+	}
+
+	bool handle(PortalServer &server, HTTPMethod requestMethod, const String& requestUri) override
+	{
+		(void)server;
+		(void)requestMethod;
+		(void)requestUri;
+		return false;
+	}
+};
+#endif
+
 const char*
 portalStatusLabel(PortalStatus status)
 {
@@ -750,74 +792,84 @@ wifiModeLabel(WiFiMode_t mode)
 void
 handlePortalStatusRequest(WiFiManager& wifiManager)
 {
-	String html;
-	html.reserve(900);
-	html += "<!DOCTYPE html><html><head>";
-	html += "<meta http-equiv=\"refresh\" content=\"1\">";
-	html += "<meta charset=\"utf-8\">";
-	html += "<title>Alpha2MQTT WiFi Status</title>";
-	html += "</head><body>";
-	html += "<h2>WiFi Status: ";
-	html += portalStatusLabel(portalStatus);
-	html += "</h2>";
+	if (!wifiManager.server) {
+		return;
+	}
+
+	// Keep heap usage low in the portal: stream HTML in small chunks rather than building a large String.
+	// This avoids crashes when heap is fragmented after WiFiManager activity.
+	wifiManager.server->setContentLength(CONTENT_LENGTH_UNKNOWN);
+	wifiManager.server->send(200, "text/html", "");
+
+	char buf[256];
+	wifiManager.server->sendContent("<!DOCTYPE html><html><head>");
+	wifiManager.server->sendContent("<meta charset=\"utf-8\">");
+	wifiManager.server->sendContent("<meta http-equiv=\"refresh\" content=\"1\">");
+	wifiManager.server->sendContent("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
+	wifiManager.server->sendContent("<title>Alpha2MQTT WiFi Status</title>");
+	wifiManager.server->sendContent("</head><body>");
+
+	snprintf(buf, sizeof(buf), "<h2>WiFi Status: %s</h2>", portalStatusLabel(portalStatus));
+	wifiManager.server->sendContent(buf);
 
 	if (portalStatus == portalStatusSuccess) {
-		html += "<p>SSID: ";
-		html += portalStatusSsid;
-		html += "<br>IP: ";
-		html += portalStatusIp;
-		html += "</p>";
+		snprintf(buf, sizeof(buf), "<p>SSID: %s<br>IP: %s</p>", portalStatusSsid, portalStatusIp);
+		wifiManager.server->sendContent(buf);
+		if (portalNeedsMqttConfig) {
+			wifiManager.server->sendContent("<p><strong>MQTT settings not set.</strong> Redirecting to MQTT settings...</p>");
+			wifiManager.server->sendContent("<p><a href=\"/param\">Open MQTT settings</a></p>");
+			wifiManager.server->sendContent("<script>setTimeout(function(){window.location.href='/param';},500);</script>");
+		}
 	} else if (portalStatus == portalStatusFailed) {
-		html += "<p>Reason: ";
-		html += portalStatusReason;
-		html += "</p>";
+		snprintf(buf, sizeof(buf), "<p>Reason: %s</p>", portalStatusReason);
+		wifiManager.server->sendContent(buf);
 	} else {
-		html += "<p>Attempting to connect...</p>";
+		wifiManager.server->sendContent("<p>Attempting to connect...</p>");
 	}
 
-	html += "<h3>Diagnostics</h3><p>";
-	html += "Mode: ";
-	html += wifiModeLabel(WiFi.getMode());
-	html += "<br>SoftAP SSID: ";
-	html += WiFi.softAPSSID();
-	html += "<br>SoftAP IP: ";
-	html += WiFi.softAPIP().toString();
-	html += "<br>STA status: ";
-	html += wifiStatusLabel(WiFi.status());
-	html += " (";
-	html += String(static_cast<int>(WiFi.status()));
-	html += ")";
-	html += "<br>Target SSID: ";
-	html += portalStatusSsid;
-	html += "<br>Boot intent: ";
-	html += bootIntentToString(currentBootIntent);
-	html += "<br>Boot mode: ";
-	html += bootModeToString(currentBootMode);
-	html += "<br>Reset reason: ";
-	html += lastResetReason;
-	html += "<br>Last disconnect: ";
-	html += portalLastDisconnectLabel;
-	html += " (";
-	html += String(portalLastDisconnectReason);
-	html += ")";
-	if (WiFi.status() == WL_CONNECTED) {
-		html += "<br>RSSI: ";
-		html += String(WiFi.RSSI());
-		html += " dBm<br>Channel: ";
-		html += String(WiFi.channel());
-	}
-	html += "<br>Free heap: ";
-	html += String(ESP.getFreeHeap());
-	html += "<br>Uptime (ms): ";
-	html += String(millis());
-	html += "</p>";
+	wifiManager.server->sendContent("<h3>Diagnostics</h3><p>");
+	snprintf(buf, sizeof(buf), "Mode: %s", wifiModeLabel(WiFi.getMode()));
+	wifiManager.server->sendContent(buf);
 
-	html += "<p>Page refreshes every second.</p>";
-	html += "</body></html>";
+	IPAddress apIp = WiFi.softAPIP();
+	snprintf(buf, sizeof(buf), "<br>SoftAP SSID: %s<br>SoftAP IP: %u.%u.%u.%u",
+		 deviceName, apIp[0], apIp[1], apIp[2], apIp[3]);
+	wifiManager.server->sendContent(buf);
 
-	if (wifiManager.server) {
-		wifiManager.server->send(200, "text/html", html);
+	wl_status_t staStatus = WiFi.status();
+	snprintf(buf, sizeof(buf), "<br>STA status: %s (%d)", wifiStatusLabel(staStatus), static_cast<int>(staStatus));
+	wifiManager.server->sendContent(buf);
+
+	snprintf(buf, sizeof(buf), "<br>Target SSID: %s", portalStatusSsid);
+	wifiManager.server->sendContent(buf);
+
+	snprintf(buf, sizeof(buf), "<br>Boot intent: %s<br>Boot mode: %s",
+		 bootIntentToString(currentBootIntent),
+		 bootModeToString(currentBootMode));
+	wifiManager.server->sendContent(buf);
+
+	snprintf(buf, sizeof(buf), "<br>Reset reason: %s", lastResetReason);
+	wifiManager.server->sendContent(buf);
+
+	snprintf(buf, sizeof(buf), "<br>Last disconnect: %s (%d)", portalLastDisconnectLabel, portalLastDisconnectReason);
+	wifiManager.server->sendContent(buf);
+
+	if (staStatus == WL_CONNECTED) {
+		snprintf(buf, sizeof(buf), "<br>RSSI: %d dBm<br>Channel: %d", WiFi.RSSI(), WiFi.channel());
+		wifiManager.server->sendContent(buf);
 	}
+
+#if defined(MP_ESP8266)
+	snprintf(buf, sizeof(buf), "<br>Heap: free=%u max=%u frag=%u",
+		 ESP.getFreeHeap(), ESP.getMaxFreeBlockSize(), ESP.getHeapFragmentation());
+#else
+	snprintf(buf, sizeof(buf), "<br>Heap free=%u", ESP.getFreeHeap());
+#endif
+	wifiManager.server->sendContent(buf);
+
+	snprintf(buf, sizeof(buf), "<br>Uptime (ms): %lu</p>", static_cast<unsigned long>(millis()));
+	wifiManager.server->sendContent(buf);
+	wifiManager.server->sendContent("<p>Page refreshes every second.</p></body></html>");
 }
 
 /*
@@ -926,10 +978,13 @@ void setup()
 	if (storedSerial.length() > 0) {
 		setMqttIdentifiersFromSerial(storedSerial.c_str());
 	}
+	bootPlan = planForBootMode(currentBootMode);
 
 #ifdef DEBUG_OVER_SERIAL
 	Serial.print("boot_intent=");
 	Serial.println(bootIntentToString(currentBootIntent));
+	Serial.print("boot_mode=");
+	Serial.println(bootModeToString(currentBootMode));
 #endif
 
 	if (appConfig.wifiSSID == "" && String(WIFI_SSID).length() > 0) {
@@ -954,7 +1009,7 @@ void setup()
 #if defined(MP_ESP8266)
 	if (digitalRead(kSafeModePin) == LOW) {
 #ifdef DEBUG_OVER_SERIAL
-		Serial.println("Safe mode strap detected (GPIO0/D3 LOW); starting config portal.");
+		portalLog("Safe mode strap detected (GPIO0/D3 LOW); starting config portal.");
 #endif
 		updateOLED(false, "Safe", "mode", "portal");
 		configHandler();
@@ -962,36 +1017,51 @@ void setup()
 	}
 #endif
 
-	// If config is not setup, then enter config mode
-	if ((appConfig.wifiSSID == "") ||
-	    (appConfig.wifiPass == "") ||
-	    (appConfig.mqttSrvr == "") ||
-	    (appConfig.mqttPort == 0) ||
-	    (appConfig.mqttUser == "") ||
-	    (appConfig.mqttPass == "")) {
-		configLoop();
-		setBootIntentAndReboot(BootIntent::WifiConfig);
-	} else {
-		updateOLED(false, "Found", "config", _version);
-		delay(250);
+	if (currentBootMode == BootMode::ApConfig || currentBootMode == BootMode::WifiConfig) {
+#ifdef DEBUG_OVER_SERIAL
+		portalLog("Config mode boot; starting captive portal.");
+#endif
+		// Explicit config modes force the existing portal once; success will return to normal.
+		updateOLED(false, "Config", "mode", "portal");
+		configHandler();
+		return;
 	}
 
-	// Configure WIFI
-	setupWifi(true);
-	lastWifiConnected = true;
-#ifdef DEBUG_OVER_SERIAL
-	logHeap("after WiFi");
-#endif
-	setupHttpControlPlane();
+	if (bootPlan.mqtt) {
+		// If config is not setup, then enter config mode
+		if ((appConfig.wifiSSID == "") ||
+		    (appConfig.wifiPass == "") ||
+		    (appConfig.mqttSrvr == "") ||
+		    (appConfig.mqttPort == 0) ||
+		    (appConfig.mqttUser == "") ||
+		    (appConfig.mqttPass == "")) {
+			configLoop();
+			setBootIntentAndReboot(BootIntent::WifiConfig);
+		} else {
+			updateOLED(false, "Found", "config", _version);
+			delay(250);
+		}
+	}
 
-	// Configure MQTT to the address and port specified above
-	_mqtt.setServer(appConfig.mqttSrvr.c_str(), appConfig.mqttPort);
-	_mqtt.setKeepAlive(60);
+	if (bootPlan.wifiSta) {
+		// Configure WIFI
+		setupWifi(true);
+		lastWifiConnected = true;
 #ifdef DEBUG_OVER_SERIAL
-	sprintf(_debugOutput, "About to request buffer");
-	Serial.println(_debugOutput);
+		logHeap("after WiFi");
 #endif
-	for (int _bufferSize = (MAX_MQTT_PAYLOAD_SIZE + MQTT_HEADER_SIZE); _bufferSize >= MIN_MQTT_PAYLOAD_SIZE + MQTT_HEADER_SIZE; _bufferSize = _bufferSize - 1024) {
+		setupHttpControlPlane();
+	}
+
+	if (bootPlan.mqtt) {
+		// Configure MQTT to the address and port specified above
+		_mqtt.setServer(appConfig.mqttSrvr.c_str(), appConfig.mqttPort);
+		_mqtt.setKeepAlive(60);
+#ifdef DEBUG_OVER_SERIAL
+		sprintf(_debugOutput, "About to request buffer");
+		Serial.println(_debugOutput);
+#endif
+		for (int _bufferSize = (MAX_MQTT_PAYLOAD_SIZE + MQTT_HEADER_SIZE); _bufferSize >= MIN_MQTT_PAYLOAD_SIZE + MQTT_HEADER_SIZE; _bufferSize = _bufferSize - 1024) {
 #ifdef DEBUG_OVER_SERIAL
 		sprintf(_debugOutput, "Requesting a buffer of : %d bytes", _bufferSize);
 		Serial.println(_debugOutput);
@@ -1023,35 +1093,37 @@ void setup()
 			Serial.println(_debugOutput);
 #endif
 		}
+		}
+
+		// And any messages we are subscribed to will be pushed to the mqttCallback function for processing
+		_mqtt.setCallback(mqttCallback);
+
+		// Connect to MQTT before any RS485 probing so boot intent is observable even if RS485 stalls.
+		mqttReconnect();
+		publishBootEventOncePerBoot();
 	}
 
-	// And any messages we are subscribed to will be pushed to the mqttCallback function for processing
-	_mqtt.setCallback(mqttCallback);
-
-	// Connect to MQTT before any RS485 probing so boot intent is observable even if RS485 stalls.
-	mqttReconnect();
-	publishBootEventOncePerBoot();
-
-	// Set up the serial for communicating with the MAX
+	if (bootPlan.inverter) {
+		// Set up the serial for communicating with the MAX
 #if defined(DEBUG_OVER_SERIAL)
-	logHeap("before RS485 init");
+		logHeap("before RS485 init");
 #endif
-	_modBus = new RS485Handler;
+		_modBus = new RS485Handler;
 #if defined(DEBUG_OVER_SERIAL) || defined(DEBUG_LEVEL2) || defined(DEBUG_OUTPUT_TX_RX)
-	_modBus->setDebugOutput(_debugOutput);
+		_modBus->setDebugOutput(_debugOutput);
 #endif // DEBUG_OVER_SERIAL || DEBUG_LEVEL2 || DEBUG_OUTPUT_TX_RX
-	_modBus->setServiceHook(serviceRs485Hooks);
+		_modBus->setServiceHook(serviceRs485Hooks);
 
-	// Set up the helper class for reading with reading registers
-	_registerHandler = new RegisterHandler(_modBus);
+		// Set up the helper class for reading with reading registers
+		_registerHandler = new RegisterHandler(_modBus);
 #if defined(DEBUG_OVER_SERIAL)
-	logHeap("after RS485 init");
+		logHeap("after RS485 init");
 #endif
 
-	uartDebug = _modBus->uartInfo();
+		uartDebug = _modBus->uartInfo();
 
-	// Iterate known baud rates until we find a success
-	while (!gotResponse) {
+		// Iterate known baud rates until we find a success
+		while (!gotResponse) {
 		// Starts at -1, so increment to 0 for example
 		baudRateIterator++;
 
@@ -1098,36 +1170,37 @@ void setup()
 			// Excellent, baud rate is set in the class, we got a response.. get out of here
 			gotResponse = true;
 		}
-	}
+		}
 
-	// Get the serial number (especially prefix for error codes)
-	getSerialNumber();
+		// Get the serial number (especially prefix for error codes)
+		getSerialNumber();
 #ifdef DEBUG_OVER_SERIAL
-	logHeap("after inverter connect");
+		logHeap("after inverter connect");
 #endif
-	loadPollingConfig();
-	sendHaData();
-	resendHaData = true;  // Tell loop() to do it again
+		loadPollingConfig();
+		sendHaData();
+		resendHaData = true;  // Tell loop() to do it again
 
-	getA2mOpDataFromEss();
+		getA2mOpDataFromEss();
 #ifndef HA_IS_OP_MODE_AUTHORITY
-	opData.a2mReadyToUseOpMode = true;
-	opData.a2mReadyToUseSocTarget = true;
-	opData.a2mReadyToUsePwrCharge = true;
-	opData.a2mReadyToUsePwrDischarge = true;
-	// Don't set opData.a2mReadyToUsePwrPush here as HA is only source.
+		opData.a2mReadyToUseOpMode = true;
+		opData.a2mReadyToUseSocTarget = true;
+		opData.a2mReadyToUsePwrCharge = true;
+		opData.a2mReadyToUsePwrDischarge = true;
+		// Don't set opData.a2mReadyToUsePwrPush here as HA is only source.
 #endif // ! HA_IS_OP_MODE_AUTHORITY
 
-	gotResponse = readEssOpData();
-	// loop until we get one clean read
-	while (!gotResponse) {
 		gotResponse = readEssOpData();
-		pumpMqttDuringSetup(5);
-	}
-	sendData();
-	resendAllData = true; // Tell sendData() to send everything again
+		// loop until we get one clean read
+		while (!gotResponse) {
+			gotResponse = readEssOpData();
+			pumpMqttDuringSetup(5);
+		}
+		sendData();
+		resendAllData = true; // Tell sendData() to send everything again
 
-	updateOLED(false, "", "", _version);
+		updateOLED(false, "", "", _version);
+	}
 }
 
 void
@@ -1137,7 +1210,7 @@ configLoop(void)
 	bool ledOn = false;
 
 #ifdef DEBUG_OVER_SERIAL
-	Serial.println("Configuration is not set.");
+	portalLog("Configuration is not set.");
 #endif
 
 	// If we have a BUTTON_PIN then only start web config when it has been pressed.
@@ -1172,13 +1245,37 @@ configHandler(void)
 	Preferences preferences;
 	WiFiManager wifiManager;
 
+	// Config portal is intended to be a temporary recovery/config state, not a persistent "mode".
+	// Reset boot_mode back to normal as soon as we enter the portal so the next reboot attempts
+	// a normal boot (and falls back into the portal again if config is still missing/invalid).
+	if (currentBootMode != BootMode::Normal) {
+		preferences.begin(DEVICE_NAME, false); // RW
+		preferences.putString(kPreferenceBootMode, bootModeToString(BootMode::Normal));
+		preferences.end();
+		currentBootMode = BootMode::Normal;
+#ifdef DEBUG_OVER_SERIAL
+		Serial.println("Config portal entry: boot_mode reset to normal.");
+#endif
+	}
+
 	// Keep AP alive while attempting STA connection so the portal stays reachable.
 	WiFi.mode(WIFI_AP_STA);
 	wifiManager.setBreakAfterConfig(false);
 	wifiManager.setTitle(deviceName);
 	wifiManager.setShowInfoUpdate(false);
+	// Prefer the no-scan WiFi page by default to reduce heap churn; user can still scan via Refresh.
+	{
+		// Avoid WiFiManager's "exit" action: it shuts down the portal without rebooting, which can
+		// leave the user stranded in a dead-end state. "restart" remains the exit path.
+		const char* menu[] = { "wifinoscan", "info", "param", "sep", "restart" };
+		wifiManager.setMenu(menu, sizeof(menu) / sizeof(menu[0]));
+	}
 	wifiManager.setConnectTimeout(20);
 	wifiManager.setConfigPortalTimeout(0);
+	// Keep the config portal (SoftAP + web server) running after a successful WiFi save.
+	// WiFiManager defaults to shutting the portal down after connect, which breaks the
+	// intended flow where the user proceeds to configure MQTT settings.
+	wifiManager.setDisableConfigPortal(false);
 	String mqttPortDefault = String(appConfig.mqttPort);
 	WiFiManagerParameter p_lineBreak_text("<p>MQTT settings:</p>");
 	WiFiManagerParameter custom_mqtt_server("server", "MQTT server", appConfig.mqttSrvr.c_str(), 40);
@@ -1194,10 +1291,12 @@ configHandler(void)
 	WiFiManagerParameter custom_ext_ant("ext_antenna", "Use external WiFi antenna\n", "T", 2, _customHtml_checkbox, WFM_LABEL_AFTER);
 #endif // MP_ESPUNO_ESP32C6
 
+	// Do not erase saved WiFi credentials when entering the portal; the user may be
+	// here only to adjust MQTT settings.
 #if defined(MP_ESP8266)
-	WiFi.disconnect(true); // Disconnect and erase saved WiFi config
+	WiFi.disconnect();
 #else
-	WiFi.disconnect(true, true); // Disconnect and erase saved WiFi config
+	WiFi.disconnect(true);
 #endif
 	updateOLED(false, "Web", "config", "active");
 
@@ -1220,6 +1319,10 @@ configHandler(void)
 	portalLastDisconnectReason = -1;
 	portalLastDisconnectLabel[0] = '\0';
 	portalConnectStart = 0;
+	portalNeedsMqttConfig = false;
+	portalMqttSaved = false;
+	portalRebootScheduled = false;
+	portalRebootAt = 0;
 
 #if defined MP_ESP8266
 	static WiFiEventHandler disconnectHandler;
@@ -1243,86 +1346,155 @@ configHandler(void)
 			break;
 		}
 #ifdef DEBUG_OVER_SERIAL
-		Serial.print("WiFi disconnect: SSID=");
-		Serial.print(portalStatusSsid);
-		Serial.print(" reason=");
-		Serial.print(portalLastDisconnectReason);
-		Serial.print(" (");
-		Serial.print(portalLastDisconnectLabel);
-		Serial.println(")");
+		portalLog("WiFi disconnect: SSID=%s reason=%d (%s)",
+			portalStatusSsid,
+			portalLastDisconnectReason,
+			portalLastDisconnectLabel);
 #endif
 	});
 #endif
 
 	wifiManager.setCustomHeadElement(
 		"<script>"
+		"(function(){"
 		"if (window.location && window.location.pathname === '/wifisave') {"
 		"window.location.href = '/status';"
 		"}"
+		"if (window.location && window.location.pathname === '/0wifi') {"
+		"window.addEventListener('DOMContentLoaded', function(){"
+		"var nodes=document.querySelectorAll(\"form[action^='/wifi?refresh=1']\");"
+		"for (var i=0;i<nodes.length;i++){nodes[i].remove();}"
+		"});"
+		"}"
+		"})();"
 		"</script>");
 	wifiManager.setWebServerCallback([&]() {
 		if (wifiManager.server) {
+#ifdef DEBUG_OVER_SERIAL
+#if defined(MP_ESP8266)
+			// ESP8266WebServer takes ownership of handlers passed to addHandler() and deletes them on shutdown.
+			// Allocate on heap here so WiFiManager can safely destroy the web server after WiFi connect.
+			wifiManager.server->addHandler(new PortalRequestLogger());
+#endif
+#endif
 			wifiManager.server->on("/status", [&]() {
 				handlePortalStatusRequest(wifiManager);
 			});
 		}
 	});
-	wifiManager.setSaveConfigCallback([&]() {
+	// Called before WiFiManager begins the connect-on-save attempt.
+	// Use this to mark "connecting" so timeouts and status reflect reality even if connect fails.
+	wifiManager.setPreSaveConfigCallback([&]() {
 		portalStatus = portalStatusConnecting;
 		portalConnectStart = millis();
 		strlcpy(portalStatusSsid, wifiManager.getWiFiSSID().c_str(), sizeof(portalStatusSsid));
 		portalStatusReason[0] = '\0';
 #ifdef DEBUG_OVER_SERIAL
-		Serial.print("WiFi save: SSID=");
-		Serial.println(portalStatusSsid);
-		Serial.print("Status URL: http://");
-		Serial.print(WiFi.softAPIP());
-		Serial.println("/status");
+		IPAddress ip = WiFi.softAPIP();
+		portalLog("WiFi submit: SSID=%s", portalStatusSsid);
+		portalLog("Status URL (AP): http://%u.%u.%u.%u/status", ip[0], ip[1], ip[2], ip[3]);
+#endif
+	});
+	// Called only after a successful connect-on-save in WiFiManager.
+	wifiManager.setSaveConfigCallback([&]() {
+#ifdef DEBUG_OVER_SERIAL
+		portalLog("WiFi save callback (connected): SSID=%s", wifiManager.getWiFiSSID().c_str());
+#endif
+	});
+
+	// Persist MQTT parameters when /paramsave is used, independent of WiFi success/failure.
+	// Keeping this separate avoids WiFi saves clobbering MQTT values.
+	wifiManager.setSaveParamsCallback([&]() {
+		preferences.begin(DEVICE_NAME, false); // RW
+		preferences.putString("MQTT_Server", custom_mqtt_server.getValue());
+		{
+			int port = strtol(custom_mqtt_port.getValue(), NULL, 10);
+			if (port < 0 || port > SHRT_MAX) {
+				port = 0;
+			}
+			preferences.putInt("MQTT_Port", port);
+		}
+		preferences.putString("MQTT_Username", custom_mqtt_user.getValue());
+		preferences.putString("MQTT_Password", custom_mqtt_pass.getValue());
+		preferences.end();
+
+		portalMqttSaved = true;
+		portalNeedsMqttConfig = mqttServerIsBlank(custom_mqtt_server.getValue());
+#ifdef DEBUG_OVER_SERIAL
+		portalLog("MQTT params saved (server=%s)", custom_mqtt_server.getValue());
 #endif
 	});
 	wifiManager.setConfigPortalBlocking(false);
 	wifiManager.startConfigPortal(deviceName);
 
 #ifdef DEBUG_OVER_SERIAL
-	Serial.print("Config portal SSID: ");
-	Serial.println(deviceName);
-	Serial.print("Config portal IP: ");
-	Serial.println(WiFi.softAPIP());
+	IPAddress ip = WiFi.softAPIP();
+	portalLog("Config portal SSID: %s", deviceName);
+	portalLog("Config portal IP: %u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+	portalLog("Portal loop start free=%u max=%u frag=%u",
+		ESP.getFreeHeap(),
+		ESP.getMaxFreeBlockSize(),
+		ESP.getHeapFragmentation());
 #endif
 
+	unsigned long portalStatsLast = 0;
 	for (;;) {
+		unsigned long processStart = millis();
 		wifiManager.process();
+		unsigned long processElapsed = millis() - processStart;
+#ifdef DEBUG_OVER_SERIAL
+		if (processElapsed > 100) {
+			portalLog("process() took %lu ms free=%u max=%u frag=%u",
+				processElapsed,
+				ESP.getFreeHeap(),
+				ESP.getMaxFreeBlockSize(),
+				ESP.getHeapFragmentation());
+		}
+		if (checkTimer(&portalStatsLast, 5000)) {
+			unsigned long connectAge = 0;
+			if (portalConnectStart > 0) {
+				connectAge = millis() - portalConnectStart;
+			}
+			portalLog("Portal stats: status=%s free=%u max=%u frag=%u connect_age=%lu",
+				portalStatusLabel(portalStatus),
+				ESP.getFreeHeap(),
+				ESP.getMaxFreeBlockSize(),
+				ESP.getHeapFragmentation(),
+				connectAge);
+		}
+#endif
 
 		if (portalStatus == portalStatusConnecting) {
 			if (WiFi.status() == WL_CONNECTED) {
 				portalStatus = portalStatusSuccess;
 				strlcpy(portalStatusIp, WiFi.localIP().toString().c_str(), sizeof(portalStatusIp));
 #ifdef DEBUG_OVER_SERIAL
-				Serial.print("WiFi connected: SSID=");
-				Serial.print(portalStatusSsid);
-				Serial.print(" IP=");
-				Serial.print(portalStatusIp);
-				Serial.print(" RSSI=");
-				Serial.print(WiFi.RSSI());
-				Serial.print(" channel=");
-				Serial.print(WiFi.channel());
-				Serial.print(" heap=");
-				Serial.println(ESP.getFreeHeap());
+				portalLog("WiFi connected: SSID=%s IP=%s RSSI=%d channel=%d free=%u max=%u frag=%u",
+					portalStatusSsid,
+					portalStatusIp,
+					WiFi.RSSI(),
+					WiFi.channel(),
+					ESP.getFreeHeap(),
+					ESP.getMaxFreeBlockSize(),
+					ESP.getHeapFragmentation());
+				IPAddress apIp = WiFi.softAPIP();
+				portalLog("Status URL (STA): http://%s/status", portalStatusIp);
+				portalLog("Status URL (AP): http://%u.%u.%u.%u/status", apIp[0], apIp[1], apIp[2], apIp[3]);
 #endif
 				updateOLED(false, "Web", "config", "succeeded");
 
 				preferences.begin(DEVICE_NAME, false); // RW
+				// Save WiFi settings only here. MQTT settings are saved via setSaveParamsCallback (/paramsave).
 				preferences.putString("WiFi_SSID", wifiManager.getWiFiSSID());
 				preferences.putString("WiFi_Password", wifiManager.getWiFiPass());
-				preferences.putString("MQTT_Server", custom_mqtt_server.getValue());
-				{
-					int port = strtol(custom_mqtt_port.getValue(), NULL, 10);
-					if (port < 0 || port > SHRT_MAX)
-						port = 0;
-					preferences.putInt("MQTT_Port", port);
-				}
-				preferences.putString("MQTT_Username", custom_mqtt_user.getValue());
-				preferences.putString("MQTT_Password", custom_mqtt_pass.getValue());
+				String storedMqttServer = preferences.getString("MQTT_Server", "");
+				PortalPostWifiAction postWifiAction = portalPostWifiActionAfterWifiSave(storedMqttServer.c_str());
+				portalNeedsMqttConfig = (postWifiAction == PortalPostWifiAction::RedirectToMqttParams);
+#ifdef DEBUG_OVER_SERIAL
+				Serial.println("Config saved; returning boot_mode to normal after portal success.");
+#endif
+				// Return to normal after a successful portal save so later boots follow legacy behavior.
+				preferences.putString(kPreferenceBootMode, bootModeToString(bootModeAfterPortalSuccess(currentBootMode)));
 #ifdef MP_XIAO_ESP32C6
 				{
 					const char *extAnt = custom_ext_ant.getValue();
@@ -1337,12 +1509,16 @@ configHandler(void)
 #endif // MP_ESPUNO_ESP32C6
 				preferences.end();
 
-				unsigned long statusStart = millis();
-				while (millis() - statusStart < 3000) {
-					wifiManager.process();
-					delay(50);
+				// If WiFi saved/connected but MQTT is blank, keep the portal alive and redirect to /param.
+				// Otherwise keep the legacy behavior: short status display then reboot into normal.
+				if (postWifiAction == PortalPostWifiAction::Reboot) {
+					unsigned long statusStart = millis();
+					while (millis() - statusStart < 3000) {
+						wifiManager.process();
+						delay(50);
+					}
+					setBootIntentAndReboot(BootIntent::WifiConfig);
 				}
-				setBootIntentAndReboot(BootIntent::WifiConfig);
 			}
 
 			if (portalConnectStart > 0 && millis() - portalConnectStart >= 20000) {
@@ -1354,21 +1530,42 @@ configHandler(void)
 					strlcpy(portalStatusReason, reason, sizeof(portalStatusReason));
 				}
 #ifdef DEBUG_OVER_SERIAL
-				Serial.print("WiFi connect failed: ");
-				Serial.print(portalStatusReason);
-				Serial.print(" status=");
-				Serial.print(static_cast<int>(WiFi.status()));
-				Serial.print(" heap=");
-				Serial.println(ESP.getFreeHeap());
+				portalLog("WiFi connect failed: %s status=%d heap=%u",
+					portalStatusReason,
+					static_cast<int>(WiFi.status()),
+					ESP.getFreeHeap());
 #endif
 				updateOLED(false, "Web", "config", "failed");
 				// Stay in the portal on failure so the device remains reachable for retries.
 				portalConnectStart = 0;
 			}
 		}
-		delay(50);
+
+			// After MQTT params are saved:
+			// Option B: if WiFi credentials exist, reboot into normal immediately even if the STA is
+			// not currently connected. This keeps the portal workflow intuitive when WiFi was
+			// configured previously and the user only updated MQTT settings.
+			// Do not block inside nested loops here; it can run in a non-yieldable context depending on
+			// the WiFiManager call path and cause a core panic in __yield().
+			if (portalMqttSaved && !portalNeedsMqttConfig && portalHasPersistedWifiCredentials()) {
+				if (!portalRebootScheduled) {
+					portalRebootScheduled = true;
+					portalRebootAt = millis() + 1500;
+#ifdef DEBUG_OVER_SERIAL
+					portalLog("MQTT configured and WiFi credentials present; reboot scheduled.");
+#endif
+				}
+			}
+			if (portalRebootScheduled && static_cast<long>(millis() - portalRebootAt) >= 0) {
+				// Ensure the reboot exits into a normal boot attempt.
+				preferences.begin(DEVICE_NAME, false); // RW
+				preferences.putString(kPreferenceBootMode, bootModeToString(BootMode::Normal));
+				preferences.end();
+				setBootIntentAndReboot(BootIntent::WifiConfig);
+			}
+			delay(50);
+		}
 	}
-}
 
 /*
  * loop
@@ -1392,35 +1589,43 @@ loop()
 	// Refresh LED Screen, will cause the status asterisk to flicker
 	updateOLED(true, "", "", "");
 
-	// Make sure WiFi is good
-	if (WiFi.status() != WL_CONNECTED) {
-		if (lastWifiConnected) {
-			pendingWifiDisconnectEvent = true;
+	if (bootPlan.wifiSta) {
+		// Make sure WiFi is good
+		if (WiFi.status() != WL_CONNECTED) {
+			if (lastWifiConnected) {
+				pendingWifiDisconnectEvent = true;
+			}
+			lastWifiConnected = false;
+			setupWifi(false);
+			if (bootPlan.mqtt) {
+				mqttReconnect();
+				resendHaData = true;
+			}
+		} else {
+			lastWifiConnected = true;
 		}
-		lastWifiConnected = false;
-		setupWifi(false);
-		mqttReconnect();
-		resendHaData = true;
-	} else {
-		lastWifiConnected = true;
 	}
 
-	// make sure mqtt is still connected
-	if ((!_mqtt.connected()) || !_mqtt.loop()) {
-		if (lastMqttConnected) {
-			pendingMqttDisconnectEvent = true;
+	if (bootPlan.mqtt) {
+		// make sure mqtt is still connected
+		if ((!_mqtt.connected()) || !_mqtt.loop()) {
+			if (lastMqttConnected) {
+				pendingMqttDisconnectEvent = true;
+			}
+			lastMqttConnected = false;
+			mqttReconnect();
+			resendHaData = true;
+		} else {
+			lastMqttConnected = true;
 		}
-		lastMqttConnected = false;
-		mqttReconnect();
-		resendHaData = true;
-	} else {
-		lastMqttConnected = true;
 	}
 
 	if (httpControlPlaneEnabled) {
 		httpServer.handleClient();
 	}
-	subscribeInverterTopics();
+	if (bootPlan.mqtt) {
+		subscribeInverterTopics();
+	}
 
 	updateStatusLed();
 
@@ -1428,35 +1633,37 @@ loop()
 	updateRunstate();
 
 	// Send HA auto-discovery info
-	if (resendHaData == true) {
+	if (bootPlan.mqtt && resendHaData == true) {
 		sendHaData();
 	}
 
-	if (readEssOpData()) {
-		static bool longEnough = false;
-		if (!longEnough && getUptimeSeconds() > 60) {  // After a minute, set these even if we didn't get a callback
-			longEnough = true;
-			if (!opData.a2mReadyToUseOpMode) {
-				opData.a2mReadyToUseOpMode = true;
+	if (bootPlan.inverter) {
+		if (readEssOpData()) {
+			static bool longEnough = false;
+			if (!longEnough && getUptimeSeconds() > 60) {  // After a minute, set these even if we didn't get a callback
+				longEnough = true;
+				if (!opData.a2mReadyToUseOpMode) {
+					opData.a2mReadyToUseOpMode = true;
+				}
+				if (!opData.a2mReadyToUseSocTarget) {
+					opData.a2mReadyToUseSocTarget = true;
+				}
+				if (!opData.a2mReadyToUsePwrCharge) {
+					opData.a2mReadyToUsePwrCharge = true;
+				}
+				if (!opData.a2mReadyToUsePwrDischarge) {
+					opData.a2mReadyToUsePwrDischarge = true;
+				}
+				if (!opData.a2mReadyToUsePwrPush) {
+					opData.a2mReadyToUsePwrPush = true;
+				}
 			}
-			if (!opData.a2mReadyToUseSocTarget) {
-				opData.a2mReadyToUseSocTarget = true;
-			}
-			if (!opData.a2mReadyToUsePwrCharge) {
-				opData.a2mReadyToUsePwrCharge = true;
-			}
-			if (!opData.a2mReadyToUsePwrDischarge) {
-				opData.a2mReadyToUsePwrDischarge = true;
-			}
-			if (!opData.a2mReadyToUsePwrPush) {
-				opData.a2mReadyToUsePwrPush = true;
-			}
+			// Read and transmit all entity data to MQTT
+			sendData();
+
+			// Check and set the Dispatch Mode based on Operational Mode.
+			checkAndSetDispatchMode();
 		}
-		// Read and transmit all entity data to MQTT
-		sendData();
-	
-		// Check and set the Dispatch Mode based on Operational Mode.
-		checkAndSetDispatchMode();
 	}
 
 	// Force Restart?
@@ -1509,6 +1716,19 @@ mqttUpdateFreqToString(mqttUpdateFreq value)
 	default:
 		return "freqNever";
 	}
+}
+
+bool
+portalHasPersistedWifiCredentials(void)
+{
+	Preferences preferences;
+	char ssid[33] = "";
+
+	preferences.begin(DEVICE_NAME, true); // RO
+	preferences.getString("WiFi_SSID", ssid, sizeof(ssid));
+	preferences.end();
+
+	return ssid[0] != '\0';
 }
 
 bool
@@ -1583,8 +1803,13 @@ updatePollingLastChange(void)
 void
 loadPollingConfig(void)
 {
+	if (!mqttEntitiesRtAvailable()) {
+		return;
+	}
 	Preferences preferences;
-	int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
+	const mqttState *entities = mqttEntitiesDesc();
+	MqttEntityRuntime *rt = mqttEntitiesRt();
+	int numberOfEntities = static_cast<int>(mqttEntitiesCount());
 
 	preferences.begin(DEVICE_NAME, false);
 	{
@@ -1601,17 +1826,17 @@ loadPollingConfig(void)
 		char key[16];
 		int storedValue;
 
-		_mqttAllEntities[i].defaultFreq = _mqttAllEntities[i].updateFreq;
-		_mqttAllEntities[i].effectiveFreq = _mqttAllEntities[i].updateFreq;
+		rt[i].defaultFreq = entities[i].updateFreq;
+		rt[i].effectiveFreq = entities[i].updateFreq;
 
-		buildPollingKey(&_mqttAllEntities[i], key, sizeof(key));
-		storedValue = preferences.getInt(key, static_cast<int>(_mqttAllEntities[i].defaultFreq));
+		buildPollingKey(&entities[i], key, sizeof(key));
+		storedValue = preferences.getInt(key, static_cast<int>(rt[i].defaultFreq));
 
 		if (!isValidMqttUpdateFreq(storedValue)) {
-			_mqttAllEntities[i].effectiveFreq = _mqttAllEntities[i].defaultFreq;
-			preferences.putInt(key, static_cast<int>(_mqttAllEntities[i].defaultFreq));
+			rt[i].effectiveFreq = rt[i].defaultFreq;
+			preferences.putInt(key, static_cast<int>(rt[i].defaultFreq));
 		} else {
-			_mqttAllEntities[i].effectiveFreq = static_cast<mqttUpdateFreq>(storedValue);
+			rt[i].effectiveFreq = static_cast<mqttUpdateFreq>(storedValue);
 		}
 	}
 
@@ -1619,7 +1844,7 @@ loadPollingConfig(void)
 }
 
 void
-savePollingConfig(mqttState *entity)
+savePollingConfig(const mqttState *entity)
 {
 	Preferences preferences;
 	char key[16];
@@ -1627,20 +1852,28 @@ savePollingConfig(mqttState *entity)
 	if (entity == NULL) {
 		return;
 	}
+	if (!mqttEntitiesRtAvailable()) {
+		return;
+	}
+	size_t idx = static_cast<size_t>(entity - mqttEntitiesDesc());
+	if (idx >= mqttEntitiesCount()) {
+		return;
+	}
 
 	buildPollingKey(entity, key, sizeof(key));
 	preferences.begin(DEVICE_NAME, false);
-	preferences.putInt(key, static_cast<int>(entity->effectiveFreq));
+	preferences.putInt(key, static_cast<int>(mqttEntitiesRt()[idx].effectiveFreq));
 	preferences.end();
 }
 
-mqttState *
+const mqttState *
 lookupEntityByName(const char *name)
 {
-	int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
+	const mqttState *entities = mqttEntitiesDesc();
+	int numberOfEntities = static_cast<int>(mqttEntitiesCount());
 	for (int i = 0; i < numberOfEntities; i++) {
-		if (!strcmp(name, _mqttAllEntities[i].mqttName)) {
-			return &_mqttAllEntities[i];
+		if (!strcmp(name, entities[i].mqttName)) {
+			return &entities[i];
 		}
 	}
 	return NULL;
@@ -1649,10 +1882,15 @@ lookupEntityByName(const char *name)
 void
 publishPollingConfig(void)
 {
+	if (!mqttEntitiesRtAvailable()) {
+		return;
+	}
 	char addition[256];
 	bool first = true;
 	modbusRequestAndResponseStatusValues resultAddedToPayload;
-	int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
+	const mqttState *entities = mqttEntitiesDesc();
+	const MqttEntityRuntime *rt = mqttEntitiesRt();
+	int numberOfEntities = static_cast<int>(mqttEntitiesCount());
 
 	emptyPayload();
 
@@ -1685,8 +1923,8 @@ publishPollingConfig(void)
 	for (int i = 0; i < numberOfEntities; i++) {
 		snprintf(addition, sizeof(addition), "%s\"%s\": \"%s\"",
 			 first ? "" : ", ",
-			 _mqttAllEntities[i].mqttName,
-			 mqttUpdateFreqToString(_mqttAllEntities[i].effectiveFreq));
+			 entities[i].mqttName,
+			 mqttUpdateFreqToString(rt[i].effectiveFreq));
 		first = false;
 		resultAddedToPayload = addToPayload(addition);
 		if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
@@ -1772,7 +2010,7 @@ publishConfigDiscovery(void)
 }
 
 void
-publishHaEntityDiscovery(mqttState *entity)
+publishHaEntityDiscovery(const mqttState *entity)
 {
 	const char *entityType;
 	char topic[128];
@@ -1780,13 +2018,21 @@ publishHaEntityDiscovery(mqttState *entity)
 	if (entity == NULL) {
 		return;
 	}
+	if (!mqttEntitiesRtAvailable()) {
+		return;
+	}
+	size_t idx = static_cast<size_t>(entity - mqttEntitiesDesc());
+	if (idx >= mqttEntitiesCount()) {
+		return;
+	}
+	mqttUpdateFreq effectiveFreq = mqttEntitiesRt()[idx].effectiveFreq;
 
-	if (entity->effectiveFreq == mqttUpdateFreq::freqNever) {
+	if (effectiveFreq == mqttUpdateFreq::freqNever) {
 		sendDataFromMqttState(entity, true);
 		return;
 	}
 
-	if (entity->effectiveFreq == mqttUpdateFreq::freqDisabled) {
+	if (effectiveFreq == mqttUpdateFreq::freqDisabled) {
 		switch (entity->haClass) {
 		case homeAssistantClass::haClassBox:
 			entityType = "number";
@@ -1875,12 +2121,13 @@ handlePollingConfigSet(const char *payload)
 
 		payloadValid = true;
 
-		mqttState *entity = lookupEntityByName(key);
-		if (entity != NULL) {
+		const mqttState *entity = lookupEntityByName(key);
+		if (entity != NULL && mqttEntitiesRtAvailable()) {
 			mqttUpdateFreq parsed;
 			if (mqttUpdateFreqFromString(value, &parsed)) {
-				if (entity->effectiveFreq != parsed) {
-					entity->effectiveFreq = parsed;
+				size_t idx = static_cast<size_t>(entity - mqttEntitiesDesc());
+				if (idx < mqttEntitiesCount() && mqttEntitiesRt()[idx].effectiveFreq != parsed) {
+					mqttEntitiesRt()[idx].effectiveFreq = parsed;
 					savePollingConfig(entity);
 					publishHaEntityDiscovery(entity);
 					anyChange = true;
@@ -2119,16 +2366,24 @@ updateOLED(bool justStatus, const char* line2, const char* line3, const char* li
 #ifdef LARGE_DISPLAY
 	{
 		int8_t rssi = WiFi.RSSI();
+		bool mqttOk = false;
+		if (bootPlan.mqtt) {
+			mqttOk = _mqtt.connected() && _mqtt.loop();
+		}
 		// There's 20 characters we can play with, width wise.
 		snprintf(line1Contents, sizeof(line1Contents), "A2M  %c%c%c         %3hhd",
-			 _oledOperatingIndicator, (WiFi.status() == WL_CONNECTED ? 'W' : ' '), (_mqtt.connected() && _mqtt.loop() ? 'M' : ' '), rssi );
+			 _oledOperatingIndicator, (WiFi.status() == WL_CONNECTED ? 'W' : ' '), (mqttOk ? 'M' : ' '), rssi );
 		_display.println(line1Contents);
 		printWifiBars(rssi);
 	}
 #else // LARGE_DISPLAY
+	bool mqttOk = false;
+	if (bootPlan.mqtt) {
+		mqttOk = _mqtt.connected() && _mqtt.loop();
+	}
 	// There's ten characters we can play with, width wise.
 	snprintf(line1Contents, sizeof(line1Contents), "%s%c%c%c", "A2M    ",
-		 _oledOperatingIndicator, (WiFi.status() == WL_CONNECTED ? 'W' : ' '), (_mqtt.connected() && _mqtt.loop() ? 'M' : ' ') );
+		 _oledOperatingIndicator, (WiFi.status() == WL_CONNECTED ? 'W' : ' '), (mqttOk ? 'M' : ' ') );
 	_display.println(line1Contents);
 #endif // LARGE_DISPLAY
 
@@ -2593,6 +2848,7 @@ void updateRunstate()
 void
 mqttReconnect(void)
 {
+	initMqttEntitiesRtIfNeeded(true);
 	bool subscribed = false;
 	char subscriptionDef[100];
 	char line3[OLED_CHARACTER_WIDTH];
@@ -2627,7 +2883,8 @@ mqttReconnect(void)
 		// Attempt to connect
 		if (_mqtt.connect(deviceName, appConfig.mqttUser.c_str(), appConfig.mqttPass.c_str(), statusTopic, 0, true,
 				  "{ \"presence\": \"offline\", \"a2mStatus\": \"offline\", \"rs485Status\": \"unavailable\", \"gridStatus\": \"unavailable\" }")) {
-			int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
+			const mqttState *entities = mqttEntitiesDesc();
+			int numberOfEntities = static_cast<int>(mqttEntitiesCount());
 #ifdef DEBUG_OVER_SERIAL
 			Serial.println("Connected MQTT");
 #endif
@@ -2661,8 +2918,8 @@ mqttReconnect(void)
 
 			if (inverterReady) {
 				for (int i = 0; i < numberOfEntities; i++) {
-					if (_mqttAllEntities[i].subscribe) {
-						sprintf(subscriptionDef, "%s/%s/%s/command", deviceName, haUniqueId, _mqttAllEntities[i].mqttName);
+					if (entities[i].subscribe) {
+						sprintf(subscriptionDef, "%s/%s/%s/command", deviceName, haUniqueId, entities[i].mqttName);
 						subscribed = subscribed && _mqtt.subscribe(subscriptionDef, MQTT_SUBSCRIBE_QOS);
 #ifdef DEBUG_OVER_SERIAL
 						snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", subscriptionDef, subscribed);
@@ -2696,33 +2953,35 @@ mqttReconnect(void)
 	updateRunstate();
 }
 
-mqttState *
+const mqttState *
 lookupSubscription(char *entityName)
 {
-	int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
+	const mqttState *entities = mqttEntitiesDesc();
+	int numberOfEntities = static_cast<int>(mqttEntitiesCount());
 	for (int i = 0; i < numberOfEntities; i++) {
-		if (_mqttAllEntities[i].subscribe &&
-		    !strcmp(entityName, _mqttAllEntities[i].mqttName)) {
-			return &_mqttAllEntities[i];
+		if (entities[i].subscribe &&
+		    !strcmp(entityName, entities[i].mqttName)) {
+			return &entities[i];
 		}
 	}
 	return NULL;
 }
 
-mqttState *
+const mqttState *
 lookupEntity(mqttEntityId entityId)
 {
-	int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
+	const mqttState *entities = mqttEntitiesDesc();
+	int numberOfEntities = static_cast<int>(mqttEntitiesCount());
 	for (int i = 0; i < numberOfEntities; i++) {
-		if (_mqttAllEntities[i].entityId == entityId) {
-			return &_mqttAllEntities[i];
+		if (entities[i].entityId == entityId) {
+			return &entities[i];
 		}
 	}
 	return NULL;
 }
 
 modbusRequestAndResponseStatusValues
-readEntity(mqttState *singleEntity, modbusRequestAndResponse* rs)
+readEntity(const mqttState *singleEntity, modbusRequestAndResponse* rs)
 {
 	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
 
@@ -3331,7 +3590,7 @@ readEntity(mqttState *singleEntity, modbusRequestAndResponse* rs)
  * Query the handled entity in the usual way, and add the cleansed output to the buffer
  */
 modbusRequestAndResponseStatusValues
-addState(mqttState *singleEntity, modbusRequestAndResponseStatusValues *resultAddedToPayload)
+addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *resultAddedToPayload)
 {
 	modbusRequestAndResponse response;
 	modbusRequestAndResponseStatusValues result;
@@ -3427,7 +3686,7 @@ sendStatus(void)
 }
 
 modbusRequestAndResponseStatusValues
-addConfig(mqttState *singleEntity, modbusRequestAndResponseStatusValues& resultAddedToPayload)
+addConfig(const mqttState *singleEntity, modbusRequestAndResponseStatusValues& resultAddedToPayload)
 {
 	char stateAddition[1024] = "";
 	char prettyName[64];
@@ -3917,14 +4176,15 @@ addToPayload(const char* addition)
 void
 sendHaData()
 {
-	if (!inverterReady) {
+	if (!inverterReady || !mqttEntitiesRtAvailable()) {
 		return;
 	}
-	int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
+	const mqttState *entities = mqttEntitiesDesc();
+	int numberOfEntities = static_cast<int>(mqttEntitiesCount());
 
 	publishConfigDiscovery();
 	for (int i = 0; i < numberOfEntities; i++) {
-		publishHaEntityDiscovery(&_mqttAllEntities[i]);
+		publishHaEntityDiscovery(&entities[i]);
 	}
 	resendHaData = false;
 }
@@ -4107,11 +4367,13 @@ sendData()
 	static unsigned long lastRunFiveMinutes = 0;
 	static unsigned long lastRunOneHour = 0;
 	static unsigned long lastRunOneDay = 0;
-	int numberOfEntities = sizeof(_mqttAllEntities) / sizeof(struct mqttState);
 
-	if (!inverterReady) {
+	if (!inverterReady || !mqttEntitiesRtAvailable()) {
 		return;
 	}
+	const mqttState *entities = mqttEntitiesDesc();
+	const MqttEntityRuntime *rt = mqttEntitiesRt();
+	int numberOfEntities = static_cast<int>(mqttEntitiesCount());
 
 	if (resendAllData) {
 		resendAllData = false;
@@ -4122,47 +4384,47 @@ sendData()
 	if (checkTimer(&lastRunTenSeconds, STATUS_INTERVAL_TEN_SECONDS)) {
 		sendStatus();
 		for (int i = 0; i < numberOfEntities; i++) {
-			if (_mqttAllEntities[i].effectiveFreq == mqttUpdateFreq::freqTenSec) {
-				sendDataFromMqttState(&_mqttAllEntities[i], false);
+			if (rt[i].effectiveFreq == mqttUpdateFreq::freqTenSec) {
+				sendDataFromMqttState(&entities[i], false);
 			}
 		}
 	}
 
 	if (checkTimer(&lastRunOneMinute, STATUS_INTERVAL_ONE_MINUTE)) {
 		for (int i = 0; i < numberOfEntities; i++) {
-			if (_mqttAllEntities[i].effectiveFreq == mqttUpdateFreq::freqOneMin) {
-				sendDataFromMqttState(&_mqttAllEntities[i], false);
+			if (rt[i].effectiveFreq == mqttUpdateFreq::freqOneMin) {
+				sendDataFromMqttState(&entities[i], false);
 			}
 		}
 	}
 
 	if (checkTimer(&lastRunFiveMinutes, STATUS_INTERVAL_FIVE_MINUTE)) {
 		for (int i = 0; i < numberOfEntities; i++) {
-			if (_mqttAllEntities[i].effectiveFreq == mqttUpdateFreq::freqFiveMin) {
-				sendDataFromMqttState(&_mqttAllEntities[i], false);
+			if (rt[i].effectiveFreq == mqttUpdateFreq::freqFiveMin) {
+				sendDataFromMqttState(&entities[i], false);
 			}
 		}
 	}
 
 	if (checkTimer(&lastRunOneHour, STATUS_INTERVAL_ONE_HOUR)) {
 		for (int i = 0; i < numberOfEntities; i++) {
-			if (_mqttAllEntities[i].effectiveFreq == mqttUpdateFreq::freqOneHour) {
-				sendDataFromMqttState(&_mqttAllEntities[i], false);
+			if (rt[i].effectiveFreq == mqttUpdateFreq::freqOneHour) {
+				sendDataFromMqttState(&entities[i], false);
 			}
 		}
 	}
 
 	if (checkTimer(&lastRunOneDay, STATUS_INTERVAL_ONE_DAY)) {
 		for (int i = 0; i < numberOfEntities; i++) {
-			if (_mqttAllEntities[i].effectiveFreq == mqttUpdateFreq::freqOneDay) {
-				sendDataFromMqttState(&_mqttAllEntities[i], false);
+			if (rt[i].effectiveFreq == mqttUpdateFreq::freqOneDay) {
+				sendDataFromMqttState(&entities[i], false);
 			}
 		}
 	}
 }
 
 void
-sendDataFromMqttState(mqttState *singleEntity, bool doHomeAssistant)
+sendDataFromMqttState(const mqttState *singleEntity, bool doHomeAssistant)
 {
 	char topic[256];
 	modbusRequestAndResponseStatusValues result;
@@ -4170,9 +4432,17 @@ sendDataFromMqttState(mqttState *singleEntity, bool doHomeAssistant)
 
 	if (singleEntity == NULL)
 		return;
+	if (!mqttEntitiesRtAvailable()) {
+		return;
+	}
+	size_t idx = static_cast<size_t>(singleEntity - mqttEntitiesDesc());
+	if (idx >= mqttEntitiesCount()) {
+		return;
+	}
+	mqttUpdateFreq effectiveFreq = mqttEntitiesRt()[idx].effectiveFreq;
 	if (!doHomeAssistant &&
-	    (singleEntity->effectiveFreq == mqttUpdateFreq::freqNever ||
-	     singleEntity->effectiveFreq == mqttUpdateFreq::freqDisabled)) {
+	    (effectiveFreq == mqttUpdateFreq::freqNever ||
+	     effectiveFreq == mqttUpdateFreq::freqDisabled)) {
 		return;
 	}
 
@@ -4238,7 +4508,7 @@ sendDataFromMqttState(mqttState *singleEntity, bool doHomeAssistant)
 void mqttCallback(char* topic, byte* message, unsigned int length)
 {
 	char mqttIncomingPayload[512] = ""; // Should be enough to cover command requests
-	mqttState *mqttEntity = NULL;
+	const mqttState *mqttEntity = NULL;
 
 #ifdef DEBUG_OVER_SERIAL
 	sprintf(_debugOutput, "Topic: %s", topic);
@@ -4311,7 +4581,7 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 		int32_t singleInt32 = -1;
 		char *singleString;
 		char *endPtr = NULL;
-		mqttState *relatedMqttEntity;
+		const mqttState *relatedMqttEntity = NULL;
 		bool valueProcessingError = false;
 
 		// First, process value.
