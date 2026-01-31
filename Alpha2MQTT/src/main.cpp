@@ -522,7 +522,40 @@ handleRebootWifi(void)
 #ifdef DEBUG_OVER_SERIAL
 	Serial.println("HTTP POST /reboot/wifi");
 #endif
-	httpServer.send(200, "text/plain", "Rebooting into MODE_WIFI_CONFIG...");
+
+	// Serve a small "rebooting" page that polls the same host until the portal comes up.
+	// In STA-only portal mode there is no captive-portal DNS redirect, so this provides
+	// a reasonable browser UX when the mode switch is initiated from the control plane.
+	httpServer.send(200, "text/html",
+		"<!doctype html><html><head>"
+		"<meta charset='utf-8'>"
+		"<meta name='viewport' content='width=device-width,initial-scale=1'>"
+		"<title>Rebooting…</title>"
+		"</head><body>"
+		"<h3>Rebooting into Wi-Fi config…</h3>"
+		"<p>This page will auto-redirect when the portal is available.</p>"
+		"<pre id='s'>waiting…</pre>"
+		"<script>"
+		"(function(){"
+		"var start=Date.now();"
+		"function tick(){"
+		"document.getElementById('s').textContent='waiting '+Math.floor((Date.now()-start)/1000)+'s';"
+		"}"
+		"async function probe(){"
+		"try{"
+		"var r=await fetch('/',{cache:'no-store'});"
+		"if(r && r.ok){window.location.href='/';return;}"
+		"}catch(e){}"
+		"tick();"
+		"setTimeout(probe,1000);"
+		"}"
+		"setTimeout(probe,1000);"
+		"})();"
+		"</script>"
+		"</body></html>");
+
+	// Give the HTTP response a moment to flush before restarting.
+	delay(100);
 	requestReboot(rebootStore, BootMode::WifiConfig, BootIntent::WifiConfig, triggerRestart);
 }
 
