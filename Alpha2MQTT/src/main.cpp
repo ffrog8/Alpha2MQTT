@@ -26,6 +26,7 @@ First, go and customise options at the top of Definitions.h!
 #include "../include/PortalConfig.h"
 #include "../include/RebootRequest.h"
 #include "../include/StatusReporting.h"
+#include "../include/Rs485ProbeLogic.h"
 #include "../include/Scheduler.h"
 #include "../include/TimeProvider.h"
 #include <Arduino.h>
@@ -237,7 +238,33 @@ struct {
 	int32_t  essPvPower = 0;	// Positive
 	uint16_t essInverterMode = UINT16_MAX;
 	bool     essRs485Connected = false;
-} opData;
+ } opData;
+
+// Updated only by refreshEssSnapshot(). When false, ESS-derived publishes and dispatch must not run.
+static bool essSnapshotValid = false;
+
+static const unsigned long kKnownBaudRates[] = { 9600, 115200, 19200, 57600, 38400, 14400, 4800 };
+static constexpr uint32_t kRs485ProbeAttemptDelayMs = 1000;
+static constexpr uint32_t kRs485ProbeMaxBackoffMs = 15000;
+
+enum class Rs485ConnectState : uint8_t {
+	NotStarted = 0,
+	ProbingBaud,
+	ReadingIdentity,
+	Connected
+};
+
+static Rs485ConnectState rs485ConnectState = Rs485ConnectState::NotStarted;
+static int rs485BaudIndex = -1;
+static uint8_t rs485AttemptsInCycle = 0;
+static uint32_t rs485CycleBackoffMs = kRs485ProbeAttemptDelayMs;
+static unsigned long rs485NextAttemptAtMs = 0;
+static unsigned long rs485LockedBaud = 0;
+static const char *rs485UartInfo = nullptr;
+static uint32_t rs485ProbeLastAttemptMs = 0;
+
+static bool rs485TryReadIdentityOnce(void);
+static void rs485ProbeTick(void);
 
 /*
  * Home Assistant auto-discovered values
@@ -278,9 +305,9 @@ void mqttReconnect(void);
 void mqttCallback(char* topic, byte* message, unsigned int length);
 void sendHaData(void);
 void getA2mOpDataFromEss(void);
-bool readEssOpData(void);
+bool refreshEssSnapshot(void);
 void sendData(void);
-void sendStatus(void);
+void sendStatus(bool includeEssSnapshot);
 void updateRunstate(void);
 uint32_t getUptimeSeconds(void);
 bool checkTimer(unsigned long *lastRun, unsigned long interval);
@@ -334,6 +361,20 @@ const char* wifiModeLabel(WiFiMode_t mode);
 void handlePortalStatusRequest(WiFiManager& wifiManager);
 bool portalHasPersistedWifiCredentials(void);
 void configHandlerSta(void);
+
+static inline bool mqttEntityUsesEssSnapshot(mqttEntityId id)
+{
+	switch (id) {
+	case mqttEntityId::entityInverterMode:
+	case mqttEntityId::entityPvPwr:
+	case mqttEntityId::entityGridPwr:
+	case mqttEntityId::entityBatPwr:
+	case mqttEntityId::entityBatSoc:
+		return true;
+	default:
+		return false;
+	}
+}
 
 void
 buildDeviceName(void)
@@ -423,6 +464,152 @@ serviceRs485Hooks(void)
 	}
 	if (httpControlPlaneEnabled) {
 		httpServer.handleClient();
+	}
+}
+
+static bool
+rs485TryReadIdentityOnce(void)
+{
+	if (_registerHandler == NULL) {
+		return false;
+	}
+
+	modbusRequestAndResponseStatusValues result;
+	modbusRequestAndResponse response;
+
+	result = _registerHandler->readHandledRegister(REG_SYSTEM_INFO_R_EMS_SN_BYTE_1_2, &response);
+	if (result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess ||
+	    response.dataValueFormatted[0] == '\0' ||
+	    strlen(response.dataValueFormatted) < 15) {
+		return false;
+	}
+
+	strlcpy(deviceSerialNumber, response.dataValueFormatted, sizeof(deviceSerialNumber));
+	_registerHandler->setSerialNumberPrefix(deviceSerialNumber[0], deviceSerialNumber[1]);
+
+	// Battery type is helpful for diagnostics, but it is not required to establish inverter identity.
+	result = _registerHandler->readHandledRegister(REG_BATTERY_HOME_R_BATTERY_TYPE, &response);
+	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess &&
+	    response.dataValueFormatted[0] != '\0') {
+		strlcpy(deviceBatteryType, response.dataValueFormatted, sizeof(deviceBatteryType));
+	}
+
+	if (haUniqueId[0] == '\0') {
+		setMqttIdentifiersFromSerial(deviceSerialNumber);
+	}
+
+	{
+		Preferences preferences;
+		preferences.begin(DEVICE_NAME, false);
+		String storedSerial = preferences.getString(kPreferenceDeviceSerial, "");
+		if (storedSerial != deviceSerialNumber) {
+			preferences.putString(kPreferenceDeviceSerial, deviceSerialNumber);
+		}
+		preferences.end();
+	}
+
+#ifdef DEBUG_OVER_SERIAL
+	snprintf(_debugOutput, sizeof(_debugOutput), "Inverter identified: %s", deviceSerialNumber);
+	Serial.println(_debugOutput);
+#endif
+
+	return true;
+}
+
+static void
+rs485ProbeTick(void)
+{
+	if (rs485ConnectState == Rs485ConnectState::Connected) {
+		return;
+	}
+	if (_modBus == NULL || _registerHandler == NULL) {
+		return;
+	}
+
+	const unsigned long now = millis();
+	if (static_cast<long>(now - rs485NextAttemptAtMs) < 0) {
+		return;
+	}
+
+	if (rs485ConnectState == Rs485ConnectState::ReadingIdentity) {
+		rs485ProbeLastAttemptMs = now;
+		if (rs485TryReadIdentityOnce()) {
+			rs485ConnectState = Rs485ConnectState::Connected;
+			rs485AttemptsInCycle = 0;
+			rs485CycleBackoffMs = kRs485ProbeAttemptDelayMs;
+
+			// Now that inverter identity is known, discovery/config can be published under the real HA unique id.
+			loadPollingConfig();
+			resendHaData = true;
+			resendAllData = true;
+			return;
+		}
+
+		rs485NextAttemptAtMs = now + rs485CycleBackoffMs;
+		rs485CycleBackoffMs = rs485NextBackoffMs(rs485CycleBackoffMs, kRs485ProbeMaxBackoffMs);
+		return;
+	}
+
+	// ProbingBaud: try one baud per tick, and back off between full cycles.
+	rs485ProbeLastAttemptMs = now;
+	rs485BaudIndex = rs485NextIndex(rs485BaudIndex, static_cast<int>(sizeof(kKnownBaudRates) / sizeof(kKnownBaudRates[0])));
+	const unsigned long baud = kKnownBaudRates[rs485BaudIndex];
+	char baudRateString[10] = "";
+	snprintf(baudRateString, sizeof(baudRateString), "%lu", baud);
+
+	updateOLED(false, "Test Baud", baudRateString, rs485UartInfo ? rs485UartInfo : "");
+
+#ifdef DEBUG_OVER_SERIAL
+	snprintf(_debugOutput, sizeof(_debugOutput), "About To Try: %lu", baud);
+	Serial.println(_debugOutput);
+	logHeap("before RS485 probe");
+#endif
+
+	_modBus->setBaudRate(baud);
+
+	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
+	modbusRequestAndResponse response;
+#ifdef DEBUG_NO_RS485
+	result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
+#else
+	result = _registerHandler->readHandledRegister(REG_SAFETY_TEST_RW_GRID_REGULATION, &response);
+#endif
+
+#ifdef DEBUG_OVER_SERIAL
+	logHeap("after RS485 probe");
+#endif
+
+	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
+		rs485LockedBaud = baud;
+		// If inverter identity was previously persisted, we can treat the connection as established immediately.
+		// Otherwise we must read the serial to determine haUniqueId and enable inverterReady-dependent paths.
+		rs485ConnectState = inverterReady ? Rs485ConnectState::Connected : Rs485ConnectState::ReadingIdentity;
+		rs485AttemptsInCycle = 0;
+		rs485CycleBackoffMs = kRs485ProbeAttemptDelayMs;
+		rs485NextAttemptAtMs = now;
+#ifdef DEBUG_OVER_SERIAL
+		snprintf(_debugOutput, sizeof(_debugOutput), "RS485 baud established: %lu", baud);
+		Serial.println(_debugOutput);
+#endif
+		return;
+	}
+
+#ifdef DEBUG_OVER_SERIAL
+	snprintf(_debugOutput, sizeof(_debugOutput), "Baud Rate Checker Problem: %s", response.statusMqttMessage);
+	Serial.println(_debugOutput);
+#endif
+#ifdef DEBUG_RS485
+	rs485Errors++;
+#endif
+	updateOLED(false, "Test Baud", baudRateString, response.displayMessage);
+
+	rs485AttemptsInCycle++;
+	if (rs485AttemptsInCycle >= (sizeof(kKnownBaudRates) / sizeof(kKnownBaudRates[0]))) {
+		rs485AttemptsInCycle = 0;
+		rs485NextAttemptAtMs = now + rs485CycleBackoffMs;
+		rs485CycleBackoffMs = rs485NextBackoffMs(rs485CycleBackoffMs, kRs485ProbeMaxBackoffMs);
+	} else {
+		rs485NextAttemptAtMs = now + kRs485ProbeAttemptDelayMs;
 	}
 }
 
@@ -596,7 +783,8 @@ publishStatusNow(void)
 	if (!_mqtt.connected()) {
 		return;
 	}
-	sendStatus();
+	// Status-on-connect must not bypass ESS snapshot prerequisite. Publish liveness/net/poll only.
+	sendStatus(false);
 }
 
 void
@@ -931,15 +1119,9 @@ void setup()
 #endif
 #endif // DEBUG_OVER_SERIAL || DEBUG_LEVEL2 || DEBUG_OUTPUT_TX_RX
 
-	// All for testing different baud rates to 'wake up' the inverter
-	unsigned long knownBaudRates[7] = { 9600, 115200, 19200, 57600, 38400, 14400, 4800 };
-	bool gotResponse = false;
-	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
-	modbusRequestAndResponse response;
-	char baudRateString[10] = "";
-	int baudRateIterator = -1;
-	char *uartDebug;
-	Preferences preferences;
+		// RS485/inverter probing runs in loop() (background) so NORMAL-mode services (MQTT/http/scheduler)
+		// continue to operate even when the inverter is offline.
+		Preferences preferences;
 
 #ifdef MP_ESPUNO_ESP32C6
 	_statusPixel.begin();
@@ -1016,10 +1198,11 @@ void setup()
 #elif defined(MP_ESPUNO_ESP32C6)
 	appConfig.extAntenna = preferences.getBool("Ext_Antenna", false);
 #endif // MP_XIAO_ESP32C6
-	preferences.end();
-	if (storedSerial.length() > 0) {
-		setMqttIdentifiersFromSerial(storedSerial.c_str());
-	}
+		preferences.end();
+		if (storedSerial.length() > 0) {
+			strlcpy(deviceSerialNumber, storedSerial.c_str(), sizeof(deviceSerialNumber));
+			setMqttIdentifiersFromSerial(storedSerial.c_str());
+		}
 	bootPlan = planForBootMode(currentBootMode);
 	BootMode startupMode = currentBootMode;
 
@@ -1154,7 +1337,7 @@ void setup()
 		publishBootEventOncePerBoot();
 	}
 
-	if (bootPlan.inverter) {
+		if (bootPlan.inverter) {
 		// Set up the serial for communicating with the MAX
 #if defined(DEBUG_OVER_SERIAL)
 		logHeap("before RS485 init");
@@ -1165,94 +1348,31 @@ void setup()
 #endif // DEBUG_OVER_SERIAL || DEBUG_LEVEL2 || DEBUG_OUTPUT_TX_RX
 		_modBus->setServiceHook(serviceRs485Hooks);
 
-		// Set up the helper class for reading with reading registers
-		_registerHandler = new RegisterHandler(_modBus);
+			// Set up the helper class for reading with reading registers
+			_registerHandler = new RegisterHandler(_modBus);
+			if (deviceSerialNumber[0] != '\0' && deviceSerialNumber[1] != '\0') {
+				_registerHandler->setSerialNumberPrefix(deviceSerialNumber[0], deviceSerialNumber[1]);
+			}
 #if defined(DEBUG_OVER_SERIAL)
-		logHeap("after RS485 init");
+			logHeap("after RS485 init");
 #endif
 
-		uartDebug = _modBus->uartInfo();
+			rs485UartInfo = _modBus->uartInfo();
 
-		// Iterate known baud rates until we find a success
-		while (!gotResponse) {
-		// Starts at -1, so increment to 0 for example
-		baudRateIterator++;
+			// Start background probing; loop() will keep trying indefinitely with backoff capped at 15s.
+			rs485ConnectState = Rs485ConnectState::ProbingBaud;
+			rs485BaudIndex = -1;
+			rs485AttemptsInCycle = 0;
+			rs485CycleBackoffMs = kRs485ProbeAttemptDelayMs;
+			rs485NextAttemptAtMs = millis();
+			rs485LockedBaud = 0;
 
-		// Go back to zero if beyond the bounds
-		if (baudRateIterator > (sizeof(knownBaudRates) / sizeof(knownBaudRates[0])) - 1) {
-			baudRateIterator = 0;
+			// The scheduler owns ESS snapshot refresh and publishing cadence. Do not block setup() waiting
+			// for inverter connectivity; the inverter may be offline and MQTT must still operate.
+			essSnapshotValid = false;
+			updateOLED(false, "RS485", "probing", _version);
 		}
-
-		// Update the display
-		sprintf(baudRateString, "%lu", knownBaudRates[baudRateIterator]);
-
-		updateOLED(false, "Test Baud", baudRateString, uartDebug);
-#ifdef DEBUG_OVER_SERIAL
-		sprintf(_debugOutput, "About To Try: %lu", knownBaudRates[baudRateIterator]);
-		Serial.println(_debugOutput);
-		logHeap("before RS485 probe");
-#endif
-		// Set the rate
-		_modBus->setBaudRate(knownBaudRates[baudRateIterator]);
-
-		// Ask for a reading
-#ifdef DEBUG_NO_RS485
-		result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
-#else // DEBUG_NO_RS485
-		result = _registerHandler->readHandledRegister(REG_SAFETY_TEST_RW_GRID_REGULATION, &response);
-#endif // DEBUG_NO_RS485
-#ifdef DEBUG_OVER_SERIAL
-		logHeap("after RS485 probe");
-#endif
-		pumpMqttDuringSetup(5);
-		if (result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
-#ifdef DEBUG_OVER_SERIAL
-			sprintf(_debugOutput, "Baud Rate Checker Problem: %s", response.statusMqttMessage);
-			Serial.println(_debugOutput);
-#endif
-#ifdef DEBUG_RS485
-			rs485Errors++;
-#endif // DEBUG_RS485
-			updateOLED(false, "Test Baud", baudRateString, response.displayMessage);
-
-			// Delay a while before trying the next
-			pumpMqttDuringSetup(1000);
-		} else {
-			// Excellent, baud rate is set in the class, we got a response.. get out of here
-			gotResponse = true;
-		}
-		}
-
-		// Get the serial number (especially prefix for error codes)
-		getSerialNumber();
-#ifdef DEBUG_OVER_SERIAL
-		logHeap("after inverter connect");
-#endif
-		loadPollingConfig();
-		sendHaData();
-		resendHaData = true;  // Tell loop() to do it again
-
-		getA2mOpDataFromEss();
-#ifndef HA_IS_OP_MODE_AUTHORITY
-		opData.a2mReadyToUseOpMode = true;
-		opData.a2mReadyToUseSocTarget = true;
-		opData.a2mReadyToUsePwrCharge = true;
-		opData.a2mReadyToUsePwrDischarge = true;
-		// Don't set opData.a2mReadyToUsePwrPush here as HA is only source.
-#endif // ! HA_IS_OP_MODE_AUTHORITY
-
-		gotResponse = readEssOpData();
-		// loop until we get one clean read
-		while (!gotResponse) {
-			gotResponse = readEssOpData();
-			pumpMqttDuringSetup(5);
-		}
-		sendData();
-		resendAllData = true; // Tell sendData() to send everything again
-
-		updateOLED(false, "", "", _version);
 	}
-}
 
 void
 configHandlerSta(void)
@@ -1940,6 +2060,12 @@ loop()
 		subscribeInverterTopics();
 	}
 
+	// Keep attempting RS485/inverter connection in the background. This must not block loop() so MQTT, HTTP,
+	// and the scheduler remain responsive even when RS485 is disconnected.
+	if (bootPlan.inverter) {
+		rs485ProbeTick();
+	}
+
 	updateStatusLed();
 
 	// Check and display the runstate on the display
@@ -1951,32 +2077,20 @@ loop()
 	}
 
 	if (bootPlan.inverter) {
-		if (readEssOpData()) {
-			static bool longEnough = false;
-			if (!longEnough && getUptimeSeconds() > 60) {  // After a minute, set these even if we didn't get a callback
-				longEnough = true;
-				if (!opData.a2mReadyToUseOpMode) {
-					opData.a2mReadyToUseOpMode = true;
-				}
-				if (!opData.a2mReadyToUseSocTarget) {
-					opData.a2mReadyToUseSocTarget = true;
-				}
-				if (!opData.a2mReadyToUsePwrCharge) {
-					opData.a2mReadyToUsePwrCharge = true;
-				}
-				if (!opData.a2mReadyToUsePwrDischarge) {
-					opData.a2mReadyToUsePwrDischarge = true;
-				}
-				if (!opData.a2mReadyToUsePwrPush) {
-					opData.a2mReadyToUsePwrPush = true;
-				}
-			}
-			// Read and transmit all entity data to MQTT
-			sendData();
-
-			// Check and set the Dispatch Mode based on Operational Mode.
-			checkAndSetDispatchMode();
+		static bool longEnough = false;
+		if (!longEnough && getUptimeSeconds() > 60) {  // After a minute, set these even if we didn't get a callback
+			longEnough = true;
+			opData.a2mReadyToUseOpMode = true;
+			opData.a2mReadyToUseSocTarget = true;
+			opData.a2mReadyToUsePwrCharge = true;
+			opData.a2mReadyToUsePwrDischarge = true;
+			opData.a2mReadyToUsePwrPush = true;
 		}
+	}
+
+	// Scheduler runs continuously; per-bucket prerequisites are resolved inside sendData().
+	if (bootPlan.mqtt) {
+		sendData();
 	}
 
 	// Force Restart?
@@ -3162,6 +3276,7 @@ void
 mqttReconnect(void)
 {
 	initMqttEntitiesRtIfNeeded(true);
+	loadPollingConfig();
 	bool subscribed = false;
 	char subscriptionDef[100];
 	char line3[OLED_CHARACTER_WIDTH];
@@ -3921,7 +4036,7 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 }
 
 void
-sendStatus(void)
+sendStatus(bool includeEssSnapshot)
 {
 	char stateAddition[256] = "";
 	char netAddition[256] = "";
@@ -3934,24 +4049,32 @@ sendStatus(void)
 	String ssid = WiFi.SSID();
 	String ip = WiFi.localIP().toString();
 
-	switch (isGridOnline()) {
-	case gridStatus::gridOnline:
-		gridStatusStr = "OK";
-		break;
-	case gridStatus::gridOffline:
-		gridStatusStr = "Problem";
-		break;
-	case gridStatus::gridUnknown:
-	default:
+	if (includeEssSnapshot && essSnapshotValid) {
+		switch (isGridOnline()) {
+		case gridStatus::gridOnline:
+			gridStatusStr = "OK";
+			break;
+		case gridStatus::gridOffline:
+			gridStatusStr = "Problem";
+			break;
+		case gridStatus::gridUnknown:
+		default:
+			gridStatusStr = "unknown";
+			break;
+		}
+	} else {
 		gridStatusStr = "unknown";
-		break;
 	}
 
 	emptyPayload();
 
 	core.presence = "online";
 	core.a2mStatus = "online";
-	core.rs485Status = opData.essRs485Connected ? "OK" : "Problem";
+	if (includeEssSnapshot && essSnapshotValid) {
+		core.rs485Status = opData.essRs485Connected ? "OK" : "Problem";
+	} else {
+		core.rs485Status = "unknown";
+	}
 	core.gridStatus = gridStatusStr;
 	core.bootMode = bootModeToString(currentBootMode);
 	core.bootIntent = bootIntentToString(currentBootIntent);
@@ -3969,15 +4092,17 @@ sendStatus(void)
 	net.wifiReconnects = wifiReconnectCount;
 
 	poll.pollOkCount = pollOkCount;
-	poll.pollErrCount = pollErrCount;
-	poll.lastPollMs = lastPollMs;
-	poll.lastOkTsMs = lastOkTsMs;
-	poll.lastErrTsMs = lastErrTsMs;
-	poll.lastErrCode = lastErrCode;
+		poll.pollErrCount = pollErrCount;
+		poll.lastPollMs = lastPollMs;
+		poll.lastOkTsMs = lastOkTsMs;
+		poll.lastErrTsMs = lastErrTsMs;
+		poll.lastErrCode = lastErrCode;
+		poll.rs485ProbeLastAttemptMs = rs485ProbeLastAttemptMs;
+		poll.rs485ProbeBackoffMs = (rs485ConnectState == Rs485ConnectState::Connected) ? 0 : rs485CycleBackoffMs;
 
-	if (!buildStatusCoreJson(core, stateAddition, sizeof(stateAddition))) {
-		return;
-	}
+		if (!buildStatusCoreJson(core, stateAddition, sizeof(stateAddition))) {
+			return;
+		}
 	resultAddedToPayload = addToPayload(stateAddition);
 	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
 		return;
@@ -4503,20 +4628,15 @@ sendHaData()
 }
 
 /*
- * readEssOpData
+ * refreshEssSnapshot
  *
- * Read data from ESS and A2M
+ * Refresh opData from the inverter (ESS snapshot). This is a prerequisite operation called by the scheduler,
+ * not a time-driven tick. Return true only when all snapshot reads succeeded.
  */
 bool
-readEssOpData()
+refreshEssSnapshot(void)
 {
-	static unsigned long lastRun = 0;
 	int gotError = 0;
-
-	if (!checkTimer(&lastRun, STATUS_INTERVAL_TEN_SECONDS)) {
-		// If less than interval, then return false so nothing gets read or written.
-		return false;
-	}
 	uint32_t pollStartMs = millis();
 
 #ifdef DEBUG_NO_RS485
@@ -4563,8 +4683,22 @@ readEssOpData()
 		gotError = 9;
 	}
 #else // DEBUG_NO_RS485
-	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
-	modbusRequestAndResponse response;
+	if (_registerHandler == NULL) {
+		opData.essDispatchStart = UINT16_MAX;
+		opData.essDispatchMode = UINT16_MAX;
+		opData.essDispatchActivePower = INT32_MAX;
+		opData.essDispatchSoc = UINT16_MAX;
+		opData.essBatterySoc = UINT16_MAX;
+		opData.essBatteryPower = INT16_MAX;
+		opData.essGridPower = INT32_MAX;
+		opData.essPvPower = INT32_MAX;
+		opData.essInverterMode = UINT16_MAX;
+		opData.essRs485Connected = false;
+		lastErrCode = static_cast<int>(MqttEventCode::Rs485Timeout);
+		gotError = 1;
+	} else {
+		modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
+		modbusRequestAndResponse response;
 
 	result = _registerHandler->readHandledRegister(REG_DISPATCH_RW_DISPATCH_START, &response);
 	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
@@ -4638,32 +4772,34 @@ readEssOpData()
 		noteRs485Error(result, response.statusMqttMessage);
 		gotError++;
 	}
-	{
-		bool essRs485WasConnected = opData.essRs485Connected;
-		opData.essRs485Connected = _modBus->isRs485Online();
-		if (!essRs485WasConnected && opData.essRs485Connected) {
-			resendAllData = true;
+		{
+			bool essRs485WasConnected = opData.essRs485Connected;
+			opData.essRs485Connected = _modBus->isRs485Online();
+			if (!essRs485WasConnected && opData.essRs485Connected) {
+				resendAllData = true;
+			}
 		}
 	}
 #endif // DEBUG_NO_RS485
 
 	lastPollMs = millis() - pollStartMs;
 	if (gotError != 0) {
-		lastRun = 0;  // Retry ASAP
 		pollErrCount++;
 		lastErrTsMs = millis();
 #ifdef DEBUG_RS485
 		rs485Errors += gotError;
 #endif // DEBUG_RS485
+		essSnapshotValid = false;
 	} else {
 		pollOkCount++;
 		lastOkTsMs = millis();
+		essSnapshotValid = true;
 	}
 	if (lastPollMs > kPollOverrunMs) {
 		publishEvent(MqttEventCode::PollOverrun, "");
 	}
 
-	return true;
+	return essSnapshotValid;
 }
 
 /*
@@ -4681,29 +4817,53 @@ sendData()
 	static unsigned long lastRunOneHour = 0;
 	static unsigned long lastRunOneDay = 0;
 
-	if (!inverterReady || !mqttEntitiesRtAvailable()) {
-		return;
-	}
-	const mqttState *entities = mqttEntitiesDesc();
-	const MqttEntityRuntime *rt = mqttEntitiesRt();
-	int numberOfEntities = static_cast<int>(mqttEntitiesCount());
-
 	if (resendAllData) {
 		resendAllData = false;
 		lastRunTenSeconds = lastRunOneMinute = lastRunFiveMinutes = lastRunOneHour = lastRunOneDay = 0;
 	}
 
-	// Update all parameters and send to MQTT.
-	if (checkTimer(&lastRunTenSeconds, STATUS_INTERVAL_TEN_SECONDS)) {
-		sendStatus();
+	const bool dueTenSeconds = checkTimer(&lastRunTenSeconds, STATUS_INTERVAL_TEN_SECONDS);
+	const bool dueOneMinute = checkTimer(&lastRunOneMinute, STATUS_INTERVAL_ONE_MINUTE);
+	const bool dueFiveMinutes = checkTimer(&lastRunFiveMinutes, STATUS_INTERVAL_FIVE_MINUTE);
+	const bool dueOneHour = checkTimer(&lastRunOneHour, STATUS_INTERVAL_ONE_HOUR);
+	const bool dueOneDay = checkTimer(&lastRunOneDay, STATUS_INTERVAL_ONE_DAY);
+
+	if (!dueTenSeconds && !dueOneMinute && !dueFiveMinutes && !dueOneHour && !dueOneDay) {
+		return;
+	}
+
+	// 10s bucket has a hard-coded prerequisite: refresh ESS snapshot (opData) immediately before publishing.
+	// Dispatch shares the same prerequisite boundary.
+	bool snapshotOkThisPass = false;
+	if (dueTenSeconds) {
+		if (bootPlan.inverter && inverterReady) {
+			snapshotOkThisPass = refreshEssSnapshot();
+		} else {
+			essSnapshotValid = false;
+		}
+		sendStatus(snapshotOkThisPass);
+	}
+
+	if (!inverterReady || !mqttEntitiesRtAvailable()) {
+		return;
+	}
+
+	const mqttState *entities = mqttEntitiesDesc();
+	const MqttEntityRuntime *rt = mqttEntitiesRt();
+	const int numberOfEntities = static_cast<int>(mqttEntitiesCount());
+
+	if (dueTenSeconds) {
 		for (int i = 0; i < numberOfEntities; i++) {
 			if (rt[i].effectiveFreq == mqttUpdateFreq::freqTenSec) {
 				sendDataFromMqttState(&entities[i], false);
 			}
 		}
+		if (snapshotOkThisPass) {
+			checkAndSetDispatchMode();
+		}
 	}
 
-	if (checkTimer(&lastRunOneMinute, STATUS_INTERVAL_ONE_MINUTE)) {
+	if (dueOneMinute) {
 		for (int i = 0; i < numberOfEntities; i++) {
 			if (rt[i].effectiveFreq == mqttUpdateFreq::freqOneMin) {
 				sendDataFromMqttState(&entities[i], false);
@@ -4711,7 +4871,7 @@ sendData()
 		}
 	}
 
-	if (checkTimer(&lastRunFiveMinutes, STATUS_INTERVAL_FIVE_MINUTE)) {
+	if (dueFiveMinutes) {
 		for (int i = 0; i < numberOfEntities; i++) {
 			if (rt[i].effectiveFreq == mqttUpdateFreq::freqFiveMin) {
 				sendDataFromMqttState(&entities[i], false);
@@ -4719,7 +4879,7 @@ sendData()
 		}
 	}
 
-	if (checkTimer(&lastRunOneHour, STATUS_INTERVAL_ONE_HOUR)) {
+	if (dueOneHour) {
 		for (int i = 0; i < numberOfEntities; i++) {
 			if (rt[i].effectiveFreq == mqttUpdateFreq::freqOneHour) {
 				sendDataFromMqttState(&entities[i], false);
@@ -4727,7 +4887,7 @@ sendData()
 		}
 	}
 
-	if (checkTimer(&lastRunOneDay, STATUS_INTERVAL_ONE_DAY)) {
+	if (dueOneDay) {
 		for (int i = 0; i < numberOfEntities; i++) {
 			if (rt[i].effectiveFreq == mqttUpdateFreq::freqOneDay) {
 				sendDataFromMqttState(&entities[i], false);
@@ -4756,6 +4916,9 @@ sendDataFromMqttState(const mqttState *singleEntity, bool doHomeAssistant)
 	if (!doHomeAssistant &&
 	    (effectiveFreq == mqttUpdateFreq::freqNever ||
 	     effectiveFreq == mqttUpdateFreq::freqDisabled)) {
+		return;
+	}
+	if (!doHomeAssistant && mqttEntityUsesEssSnapshot(singleEntity->entityId) && !essSnapshotValid) {
 		return;
 	}
 
@@ -5123,6 +5286,9 @@ isGridOnline(void)
 {
 	enum gridStatus ret;
 
+	if (!essSnapshotValid) {
+		return gridStatus::gridUnknown;
+	}
 	switch (opData.essInverterMode) {
 	case INVERTER_OPERATION_MODE_ONLINE_MODE:
 	case INVERTER_OPERATION_MODE_CHECK_MODE:
@@ -5192,6 +5358,10 @@ checkAndSetDispatchMode(void)
 	uint16_t essDispatchMode, essBatterySocPct, essDispatchSoc;
 	int32_t essDispatchActivePower;
 	bool checkActivePower = true;
+
+	if (!essSnapshotValid) {
+		return;
+	}
 
 	if (!opData.a2mReadyToUseOpMode || !opData.a2mReadyToUseSocTarget || !opData.a2mReadyToUsePwrCharge ||
 	    !opData.a2mReadyToUsePwrDischarge || !opData.a2mReadyToUsePwrPush) {

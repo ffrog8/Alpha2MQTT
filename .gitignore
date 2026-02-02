@@ -158,6 +158,9 @@ nCrunchTemp_*
 
 # MightyMoose
 *.mm.*
+
+# Local developer notes (do not commit)
+LOCAL_DEV_NOTES.md
 AutoTest.Net/
 
 # Web workbench (sass)

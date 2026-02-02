@@ -131,14 +131,18 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		"\"last_poll_ms\":%lu,"
 		"\"last_ok_ts_ms\":%lu,"
 		"\"last_err_ts_ms\":%lu,"
-		"\"last_err_code\":%d"
+		"\"last_err_code\":%d,"
+		"\"rs485_probe_last_attempt_ms\":%lu,"
+		"\"rs485_probe_backoff_ms\":%lu"
 		"}",
 		static_cast<unsigned long>(snapshot.pollOkCount),
 		static_cast<unsigned long>(snapshot.pollErrCount),
 		static_cast<unsigned long>(snapshot.lastPollMs),
 		static_cast<unsigned long>(snapshot.lastOkTsMs),
 		static_cast<unsigned long>(snapshot.lastErrTsMs),
-		snapshot.lastErrCode);
+		snapshot.lastErrCode,
+		static_cast<unsigned long>(snapshot.rs485ProbeLastAttemptMs),
+		static_cast<unsigned long>(snapshot.rs485ProbeBackoffMs));
 	if (written < 0 || static_cast<size_t>(written) >= outSize) {
 		return false;
 	}

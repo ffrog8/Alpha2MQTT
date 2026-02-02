@@ -78,6 +78,8 @@ TEST_CASE("status poll JSON builder includes required keys")
 	snapshot.lastOkTsMs = 10000;
 	snapshot.lastErrTsMs = 11000;
 	snapshot.lastErrCode = 2;
+	snapshot.rs485ProbeLastAttemptMs = 12345;
+	snapshot.rs485ProbeBackoffMs = 15000;
 
 	char buffer[512];
 	CHECK(buildStatusPollJson(snapshot, buffer, sizeof(buffer)));
@@ -85,4 +87,6 @@ TEST_CASE("status poll JSON builder includes required keys")
 	std::string payload(buffer);
 	CHECK(payload.find("\"poll_err_count\":1") != std::string::npos);
 	CHECK(payload.find("\"last_err_code\":2") != std::string::npos);
+	CHECK(payload.find("\"rs485_probe_last_attempt_ms\":12345") != std::string::npos);
+	CHECK(payload.find("\"rs485_probe_backoff_ms\":15000") != std::string::npos);
 }

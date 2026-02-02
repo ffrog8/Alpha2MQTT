@@ -86,3 +86,38 @@ Guidance:
 - Local runs provide provisional feedback only.
 - GitHub CI is the final authority for correctness.
 - Work must not be labeled “verified” unless CI passes.
+
+## Canonical Verification Checklist (non-sensitive)
+When a change affects firmware behavior, prefer this minimal verification set:
+- Host unit tests: `./scripts/test_host.sh`
+- Firmware build: `Alpha2MQTT/build.sh`
+- Normal-mode HTTP smoke: `GET /` should return 200; config-only pages like `/update` should be unavailable outside portals.
+- MQTT smoke (if MQTT is enabled in MODE_NORMAL):
+  - Confirm a retained boot/presence message is published under the device root topic (e.g., `<device>/boot`, `<device>/status`).
+  - Confirm periodic status messages publish at the expected cadence (topics may include `<device>/status/*`).
+
+If any item is not run, explicitly state “Not executed” and why.
+
+### RS485 probing liveness (headless, no inverter required)
+If RS485/inverter is offline, the firmware should continue background probing without blocking NORMAL-mode services.
+Verify probing is still active via MQTT using `status/poll` uptime fields:
+- `rs485_probe_last_attempt_ms` (uptime millis at last probe attempt)
+- `rs485_probe_backoff_ms` (current backoff delay; capped in firmware, 0 when connected)
+
+How to check:
+- Read `uptime_s` from `<device>/status/net` and compute `uptime_ms = uptime_s * 1000`.
+- Compute `age_ms = uptime_ms - rs485_probe_last_attempt_ms`.
+- Probing is considered active when `age_ms <= rs485_probe_backoff_ms + slack_ms` (use a generous slack, e.g. 20000ms, for publish cadence and jitter).
+
+Notes:
+- With no inverter connected, `poll_ok_count` may remain 0; treat `rs485_probe_*` fields as the liveness signal.
+
+## Local Developer Operations (not committed)
+This repository is public. Do not add environment-specific or secret-bearing content to tracked files:
+- No IP addresses, hostnames, ports, or Wi-Fi SSIDs.
+- No MQTT credentials, tokens, passfiles, or `.env` contents.
+- No device-specific OTA URLs or curl commands tied to a private network.
+
+Instead, maintain a local-only notes file and keep it out of git:
+- Suggested filename: `LOCAL_DEV_NOTES.md` (ignored by `.gitignore`)
+- Contents may include: device IP(s), broker address, local helper commands/scripts, and deployment steps.

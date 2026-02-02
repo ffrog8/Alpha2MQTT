@@ -63,6 +63,8 @@ struct StatusPollSnapshot {
 	uint32_t lastOkTsMs;
 	uint32_t lastErrTsMs;
 	int lastErrCode;
+	uint32_t rs485ProbeLastAttemptMs;
+	uint32_t rs485ProbeBackoffMs;
 };
 
 bool buildStatusCoreJson(const StatusCoreSnapshot &snapshot, char *out, size_t outSize);
