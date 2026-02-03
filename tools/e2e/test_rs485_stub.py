@@ -19,11 +19,6 @@ MQTT connectivity:
   MQTT_PASS            MQTT password (or set MQTT_PASSFILE)
   MQTT_PASSFILE        Path to a file containing the password (one line)
 
-MQTT execution:
-  MOSQUITTO_SUB        Path to mosquitto_sub (optional; auto-detected)
-  MOSQUITTO_PUB        Path to mosquitto_pub (optional; auto-detected)
-  MQTT_DOCKER_CONTAINER If mosquitto_sub/pub are not available locally, use docker exec in this container (default: mqtt)
-
 Device discovery:
   DEVICE_TOPIC         Optional fixed device topic root (e.g. Alpha2MQTT-XXXXXX). If unset, script auto-discovers
                        by subscribing to '+/status/poll' and selecting a device that exposes 'rs485_backend' and
@@ -63,12 +58,10 @@ import argparse
 import json
 import os
 import re
-import shlex
-import shutil
 import subprocess
+import socket
 import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Tuple
 
@@ -134,25 +127,6 @@ def _discover_reboot_wifi_path_from_code() -> Optional[str]:
     return None
 
 
-@dataclass
-class MqttTools:
-    sub: str
-    pub: str
-    use_docker_container: Optional[str]
-
-
-def _resolve_mqtt_tools() -> MqttTools:
-    sub = os.environ.get("MOSQUITTO_SUB") or shutil.which("mosquitto_sub") or ""
-    pub = os.environ.get("MOSQUITTO_PUB") or shutil.which("mosquitto_pub") or ""
-    if sub and pub:
-        return MqttTools(sub=sub, pub=pub, use_docker_container=None)
-
-    container = os.environ.get("MQTT_DOCKER_CONTAINER", "mqtt")
-    if not shutil.which("docker"):
-        raise E2EError("No mosquitto_sub/pub found and docker not available; cannot run MQTT E2E")
-    return MqttTools(sub="mosquitto_sub", pub="mosquitto_pub", use_docker_container=container)
-
-
 def _run(cmd: list[str], timeout_s: int, env: Optional[dict[str, str]] = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         cmd,
@@ -163,116 +137,178 @@ def _run(cmd: list[str], timeout_s: int, env: Optional[dict[str, str]] = None) -
         env=env,
     )
 
+def _encode_varint(value: int) -> bytes:
+    out = bytearray()
+    while True:
+        byte = value % 128
+        value //= 128
+        if value > 0:
+            byte |= 0x80
+        out.append(byte)
+        if value == 0:
+            break
+    return bytes(out)
 
-class MqttClientShim:
-    def __init__(self, host: str, port: int, user: str, password: str, tools: MqttTools):
+
+def _encode_utf8(s: str) -> bytes:
+    data = s.encode("utf-8")
+    return len(data).to_bytes(2, "big") + data
+
+
+def _read_exact(sock: socket.socket, n: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = n
+    while remaining > 0:
+        part = sock.recv(remaining)
+        if not part:
+            raise E2EError("MQTT socket closed")
+        chunks.append(part)
+        remaining -= len(part)
+    return b"".join(chunks)
+
+
+def _read_varint(sock: socket.socket) -> int:
+    multiplier = 1
+    value = 0
+    while True:
+        b = _read_exact(sock, 1)[0]
+        value += (b & 0x7F) * multiplier
+        if (b & 0x80) == 0:
+            return value
+        multiplier *= 128
+        if multiplier > 128 * 128 * 128:
+            raise E2EError("MQTT remaining length varint too large")
+
+
+class MqttClient:
+    """
+    Minimal MQTT 3.1.1 client (QoS 0 only) for E2E validation.
+    Avoids external dependencies and avoids shelling out to mosquitto tools.
+    """
+
+    def __init__(self, host: str, port: int, user: str, password: str, client_id: str = "a2m-e2e"):
         self.host = host
         self.port = port
         self.user = user
         self.password = password
-        self.tools = tools
+        self.client_id = f"{client_id}-{int(time.time()*1000)}"
+        self.sock: Optional[socket.socket] = None
+        self._packet_id = 1
 
-    def _base_args(self) -> list[str]:
-        return ["-h", self.host, "-p", str(self.port), "-u", self.user, "-P", self.password]
+    def connect(self, timeout_s: int = 10) -> None:
+        sock = socket.create_connection((self.host, self.port), timeout=timeout_s)
+        sock.settimeout(5.0)
 
-    def _wrap(self, args: list[str]) -> list[str]:
-        if not self.tools.use_docker_container:
-            return args
-        # Avoid printing password: it's passed via env into container.
-        # Use robust shell quoting because payloads may contain spaces/quotes.
-        return [
-            "docker",
-            "exec",
-            "-i",
-            "-e",
-            "MQTT_PW",
-            self.tools.use_docker_container,
-            "sh",
-            "-lc",
-            " ".join(shlex.quote(a) for a in args),
-        ]
+        # CONNECT
+        proto = _encode_utf8("MQTT") + bytes([0x04])  # protocol level 4 (MQTT 3.1.1)
+        flags = 0x02  # clean session
+        if self.user:
+            flags |= 0x80
+        if self.password:
+            flags |= 0x40
+        keepalive = (30).to_bytes(2, "big")
 
-    def publish(self, topic: str, payload: str, retain: bool = False, timeout_s: int = 5) -> None:
-        args = [self.tools.pub] + self._base_args() + ["-t", topic, "-m", payload]
-        if retain:
-            args.append("-r")
-        env = None
-        if self.tools.use_docker_container:
-            env = {"MQTT_PW": self.password}
-            # Run the mosquitto tools *inside* the container, but still connect to MQTT_HOST.
-            # (Don't force 127.0.0.1; the broker may be external to the container.)
-            args = [
-                self.tools.pub,
-                "-h",
-                self.host,
-                "-p",
-                str(self.port),
-                "-u",
-                self.user,
-                "-P",
-                "$MQTT_PW",
-                "-t",
-                topic,
-                "-m",
-                payload,
-            ]
-            if retain:
-                args.append("-r")
-            args = self._wrap(args)
-        res = _run(args, timeout_s=timeout_s, env=env)
-        if res.returncode != 0:
-            raise E2EError(f"MQTT publish failed (rc={res.returncode}): {res.stdout.strip()}")
+        payload = _encode_utf8(self.client_id)
+        if self.user:
+            payload += _encode_utf8(self.user)
+        if self.password:
+            payload += _encode_utf8(self.password)
 
-    def subscribe_once(self, topic: str, timeout_s: int = 5) -> list[Tuple[str, str]]:
-        # -v includes topic in output.
-        args = [self.tools.sub] + self._base_args() + ["-t", topic, "-v", "-C", "1", "-W", str(timeout_s)]
-        env = None
-        if self.tools.use_docker_container:
-            env = {"MQTT_PW": self.password}
-            args = [
-                self.tools.sub,
-                "-h",
-                self.host,
-                "-p",
-                str(self.port),
-                "-u",
-                self.user,
-                "-P",
-                "$MQTT_PW",
-                "-t",
-                topic,
-                "-v",
-                "-C",
-                "1",
-                "-W",
-                str(timeout_s),
-            ]
-            args = self._wrap(args)
-        res = _run(args, timeout_s=timeout_s + 2, env=env)
-        out = res.stdout.strip()
-        if res.returncode != 0 or not out:
-            return []
-        lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
-        pairs: list[Tuple[str, str]] = []
-        for ln in lines:
-            if " " not in ln:
+        vh = proto + bytes([flags]) + keepalive
+        remaining = vh + payload
+        pkt = bytes([0x10]) + _encode_varint(len(remaining)) + remaining
+        sock.sendall(pkt)
+
+        # CONNACK
+        fixed = _read_exact(sock, 1)
+        if fixed[0] != 0x20:
+            raise E2EError(f"Unexpected MQTT CONNACK header: 0x{fixed[0]:02x}")
+        rl = _read_varint(sock)
+        data = _read_exact(sock, rl)
+        if len(data) != 2:
+            raise E2EError("Invalid CONNACK length")
+        rc = data[1]
+        if rc != 0:
+            raise E2EError(f"MQTT connect refused rc={rc}")
+
+        self.sock = sock
+
+    def close(self) -> None:
+        if self.sock:
+            try:
+                self.sock.close()
+            finally:
+                self.sock = None
+
+    def _next_packet_id(self) -> int:
+        pid = self._packet_id
+        self._packet_id = (self._packet_id % 0xFFFF) + 1
+        return pid
+
+    def publish(self, topic: str, payload: str, retain: bool = False) -> None:
+        if not self.sock:
+            raise E2EError("MQTT not connected")
+        flags = 0x01 if retain else 0x00
+        fixed = 0x30 | flags  # PUBLISH QoS0
+        body = _encode_utf8(topic) + payload.encode("utf-8")
+        self.sock.sendall(bytes([fixed]) + _encode_varint(len(body)) + body)
+
+    def subscribe(self, topic_filter: str) -> None:
+        if not self.sock:
+            raise E2EError("MQTT not connected")
+        pid = self._next_packet_id()
+        vh = pid.to_bytes(2, "big")
+        payload = _encode_utf8(topic_filter) + bytes([0x00])  # QoS 0
+        body = vh + payload
+        self.sock.sendall(bytes([0x82]) + _encode_varint(len(body)) + body)
+
+        # SUBACK
+        fixed = _read_exact(self.sock, 1)[0]
+        if fixed != 0x90:
+            raise E2EError(f"Unexpected SUBACK header: 0x{fixed:02x}")
+        rl = _read_varint(self.sock)
+        data = _read_exact(self.sock, rl)
+        if len(data) < 3:
+            raise E2EError("Invalid SUBACK length")
+        # data[0:2] packet id, data[2:] return codes
+        if data[0:2] != pid.to_bytes(2, "big"):
+            raise E2EError("SUBACK packet id mismatch")
+        if any(rc == 0x80 for rc in data[2:]):
+            raise E2EError("Subscription refused")
+
+    def wait_for_publish(self, timeout_s: int) -> Tuple[str, str]:
+        if not self.sock:
+            raise E2EError("MQTT not connected")
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            try:
+                b1 = _read_exact(self.sock, 1)[0]
+            except socket.timeout:
                 continue
-            t, p = ln.split(" ", 1)
-            pairs.append((t, p))
-        return pairs
+            pkt_type = b1 >> 4
+            rl = _read_varint(self.sock)
+            data = _read_exact(self.sock, rl)
+            if pkt_type == 3:  # PUBLISH
+                tlen = int.from_bytes(data[0:2], "big")
+                topic = data[2 : 2 + tlen].decode("utf-8", errors="replace")
+                payload = data[2 + tlen :].decode("utf-8", errors="replace")
+                return topic, payload
+            # Ignore other packets.
+        raise E2EError("Timeout waiting for MQTT publish")
 
 
 def _parse_json(payload: str) -> dict[str, Any]:
     return json.loads(payload)
 
 
-def _discover_device_topic(mqtt: MqttClientShim, status_poll_suffix: str) -> str:
+def _discover_device_topic(mqtt: MqttClient, status_poll_suffix: str) -> str:
     configured = os.environ.get("DEVICE_TOPIC")
     if configured:
         return configured.strip()
 
-    pairs = mqtt.subscribe_once(f"+{status_poll_suffix}", timeout_s=5)
-    for topic, payload in pairs:
+    mqtt.subscribe(f"+{status_poll_suffix}")
+    for _ in range(10):
+        topic, payload = mqtt.wait_for_publish(timeout_s=5)
         if not topic.endswith(status_poll_suffix):
             continue
         try:
@@ -301,17 +337,33 @@ def _assert_eventually(
     raise E2EError(f"Timeout waiting for: {name}. Last observed: {last_detail}")
 
 
-def _fetch_poll(mqtt: MqttClientShim, topic: str) -> dict[str, Any]:
-    pairs = mqtt.subscribe_once(topic, timeout_s=5)
-    if not pairs:
-        raise E2EError(f"No MQTT message received for {topic}")
-    _, payload = pairs[-1]
-    return _parse_json(payload)
+def _fetch_poll(mqtt: MqttClient, topic: str) -> dict[str, Any]:
+    # Subscribe is idempotent (broker will just add a second subscription on some brokers,
+    # but for our simple E2E it's acceptable).
+    mqtt.subscribe(topic)
+    _, payload = mqtt.wait_for_publish(timeout_s=10)
+    try:
+        return _parse_json(payload)
+    except Exception as e:
+        raise E2EError(f"Status payload was not valid JSON on {topic}: {payload!r} ({e})")
 
 
 def _ota_upload() -> None:
     base = _require_env("DEVICE_HTTP_BASE").rstrip("/")
-    fw = _require_env("FIRMWARE_BIN")
+    fw = os.environ.get("FIRMWARE_BIN")
+    if not fw:
+        # Prefer the stub backend firmware artifact for E2E because it enables runtime-controlled test modes
+        # without any inverter hardware. (Debug logging is built-in and always enabled in this repo.)
+        latest = _repo_root() / "Alpha2MQTT" / "build" / "firmware" / "Alpha2MQTT_latest_stub.txt"
+        if latest.exists():
+            fw_name = latest.read_text(encoding="utf-8").strip()
+            fw_path = _repo_root() / "Alpha2MQTT" / "build" / "firmware" / fw_name
+            fw = str(fw_path)
+        else:
+            raise E2EError(
+                "FIRMWARE_BIN is not set and Alpha2MQTT/build/firmware/Alpha2MQTT_latest_stub.txt is missing. "
+                "Run the firmware build or set FIRMWARE_BIN explicitly."
+            )
     if not Path(fw).exists():
         raise E2EError(f"Firmware not found: {fw}")
 
@@ -354,9 +406,8 @@ def main() -> int:
     port = int(os.environ.get("MQTT_PORT", "1883"))
     user = _require_env("MQTT_USER")
     password = _read_pass()
-    tools = _resolve_mqtt_tools()
-
-    mqtt = MqttClientShim(host=host, port=port, user=user, password=password, tools=tools)
+    mqtt = MqttClient(host=host, port=port, user=user, password=password)
+    mqtt.connect()
 
     control_suffix = _discover_control_suffix_from_code()
     status_poll_suffix = _discover_status_poll_suffix_from_code()
@@ -371,11 +422,15 @@ def main() -> int:
 
     # Verify stub backend is actually active.
     first = _fetch_poll(mqtt, poll_topic)
-    if first.get("rs485_backend") != "stub":
-        raise E2EError(f"Expected rs485_backend=stub but got: {first.get('rs485_backend')}")
+    rs485_backend = first.get("rs485_backend")
+    if rs485_backend != "stub":
+        raise E2EError(
+            "Expected rs485_backend=stub but device is not reporting stub backend. "
+            f"rs485_backend={rs485_backend!r} keys={sorted(first.keys())}"
+        )
 
     def set_mode(payload: str) -> None:
-        mqtt.publish(control_topic, payload, retain=False, timeout_s=5)
+        mqtt.publish(control_topic, payload, retain=False)
 
     def case_offline() -> None:
         print("[e2e] case: stub offline")
