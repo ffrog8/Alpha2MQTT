@@ -1355,10 +1355,10 @@ void setup()
 #endif
 		_modBus = new RS485Handler;
 #if defined(DEBUG_OVER_SERIAL)
-#if defined(RS485_STUB)
-		Serial.println("RS485 backend: stub");
+#if RS485_STUB
+			Serial.println("RS485 backend: stub");
 #else
-		Serial.println("RS485 backend: real");
+			Serial.println("RS485 backend: real");
 #endif
 #endif
 #if defined(DEBUG_OVER_SERIAL) || defined(DEBUG_LEVEL2) || defined(DEBUG_OUTPUT_TX_RX)
@@ -1371,10 +1371,10 @@ void setup()
 			if (deviceSerialNumber[0] != '\0' && deviceSerialNumber[1] != '\0') {
 				_registerHandler->setSerialNumberPrefix(deviceSerialNumber[0], deviceSerialNumber[1]);
 			}
-#if defined(RS485_STUB)
-			// Stub backend is used to validate scheduler + ESS snapshot behavior without inverter hardware.
-			// Mark inverterReady so the scheduler attempts refreshEssSnapshot() and dispatch gating can be exercised.
-			inverterReady = true;
+#if RS485_STUB
+				// Stub backend is used to validate scheduler + ESS snapshot behavior without inverter hardware.
+				// Mark inverterReady so the scheduler attempts refreshEssSnapshot() and dispatch gating can be exercised.
+				inverterReady = true;
 #endif
 #if defined(DEBUG_OVER_SERIAL)
 			logHeap("after RS485 init");
@@ -3367,11 +3367,11 @@ mqttReconnect(void)
 			Serial.println(_debugOutput);
 #endif
 
-#if defined(RS485_STUB)
-			subscribed = subscribed && _mqtt.subscribe(rs485StubControlTopic, MQTT_SUBSCRIBE_QOS);
+#if RS485_STUB
+				subscribed = subscribed && _mqtt.subscribe(rs485StubControlTopic, MQTT_SUBSCRIBE_QOS);
 #ifdef DEBUG_OVER_SERIAL
-			snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", rs485StubControlTopic, subscribed);
-			Serial.println(_debugOutput);
+				snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", rs485StubControlTopic, subscribed);
+				Serial.println(_debugOutput);
 #endif
 #endif
 
@@ -4066,15 +4066,15 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 	return result;
 }
 
-void
-sendStatus(bool includeEssSnapshot)
-{
-	char stateAddition[256] = "";
-	char netAddition[256] = "";
-	char pollAddition[256] = "";
-	StatusCoreSnapshot core{};
-	StatusNetSnapshot net{};
-	StatusPollSnapshot poll{};
+	void
+	sendStatus(bool includeEssSnapshot)
+	{
+		char stateAddition[256] = "";
+		char netAddition[256] = "";
+		char pollAddition[512] = "";
+		StatusCoreSnapshot core{};
+		StatusNetSnapshot net{};
+		StatusPollSnapshot poll{};
 	const char *gridStatusStr;
 	modbusRequestAndResponseStatusValues resultAddedToPayload;
 	String ssid = WiFi.SSID();
@@ -4131,19 +4131,19 @@ sendStatus(bool includeEssSnapshot)
 		poll.rs485ProbeLastAttemptMs = rs485ProbeLastAttemptMs;
 		poll.rs485ProbeBackoffMs = (rs485ConnectState == Rs485ConnectState::Connected) ? 0 : rs485CycleBackoffMs;
 		poll.rs485Backend =
-#if defined(RS485_STUB)
-			"stub";
+#if RS485_STUB
+				"stub";
 #else
-			"real";
+				"real";
 #endif
 		poll.essSnapshotLastOk = essSnapshotLastOk;
 		poll.essSnapshotAttempts = essSnapshotAttemptCount;
-#if defined(RS485_STUB)
-		poll.rs485StubMode = _modBus->stubModeLabel();
-		poll.rs485StubFailRemaining = _modBus->stubFailRemaining();
+#if RS485_STUB
+			poll.rs485StubMode = _modBus ? _modBus->stubModeLabel() : "uninit";
+			poll.rs485StubFailRemaining = _modBus ? _modBus->stubFailRemaining() : 0;
 #else
-		poll.rs485StubMode = "";
-		poll.rs485StubFailRemaining = 0;
+			poll.rs485StubMode = "";
+			poll.rs485StubFailRemaining = 0;
 #endif
 		poll.dispatchLastRunMs = dispatchLastRunMs;
 		poll.dispatchLastSkipReason = dispatchLastSkipReason;
@@ -4688,10 +4688,10 @@ refreshEssSnapshot(void)
 	uint32_t pollStartMs = millis();
 	essSnapshotAttemptCount++;
 
-#if defined(RS485_STUB)
-	if (_modBus != nullptr) {
-		_modBus->beginSnapshotAttempt();
-	}
+#if RS485_STUB
+		if (_modBus != nullptr) {
+			_modBus->beginSnapshotAttempt();
+		}
 #endif
 
 #ifdef DEBUG_NO_RS485
@@ -4855,10 +4855,10 @@ refreshEssSnapshot(void)
 		publishEvent(MqttEventCode::PollOverrun, "");
 	}
 
-#if defined(RS485_STUB)
-	if (_modBus != nullptr) {
-		_modBus->endSnapshotAttempt();
-	}
+#if RS485_STUB
+		if (_modBus != nullptr) {
+			_modBus->endSnapshotAttempt();
+		}
 #endif
 
 	return essSnapshotValid;
@@ -5094,11 +5094,11 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 	} else if (strcmp(topic, configSetTopic) == 0) {
 		handlePollingConfigSet(mqttIncomingPayload);
 		return; // No further processing needed.
-#if defined(RS485_STUB)
-	} else if (strcmp(topic, rs485StubControlTopic) == 0) {
-		// Runtime RS485 stub control (single firmware; no rebuilds per test case).
-		// Accepts either plain text ("offline", "online", "fail 2", "fail_n=2 reg=123")
-		// or JSON containing these tokens.
+#if RS485_STUB
+		} else if (strcmp(topic, rs485StubControlTopic) == 0) {
+			// Runtime RS485 stub control (single firmware; no rebuilds per test case).
+			// Accepts either plain text ("offline", "online", "fail 2", "fail_n=2 reg=123")
+			// or JSON containing these tokens.
 		Rs485StubMode mode = Rs485StubMode::OfflineForever;
 		uint32_t failN = 0;
 		uint16_t failReg = 0;

@@ -72,6 +72,14 @@ class E2EError(Exception):
     pass
 
 
+VERBOSE = False
+
+
+def _log(msg: str) -> None:
+    if VERBOSE:
+        print(f"[e2e] {msg}")
+
+
 def _read_pass() -> str:
     passfile = os.environ.get("MQTT_PASSFILE")
     if passfile:
@@ -216,6 +224,7 @@ class MqttClient:
         self._pending_publishes: list[Tuple[str, str]] = []
 
     def connect(self, timeout_s: int = 10) -> None:
+        _log(f"mqtt connect: tcp://{self.host}:{self.port} client_id={self.client_id}")
         sock = socket.create_connection((self.host, self.port), timeout=timeout_s)
         sock.settimeout(5.0)
 
@@ -252,6 +261,7 @@ class MqttClient:
             raise E2EError(f"MQTT connect refused rc={rc}")
 
         self.sock = sock
+        _log("mqtt connect: CONNACK accepted")
 
     def close(self) -> None:
         if self.sock:
@@ -272,11 +282,13 @@ class MqttClient:
         fixed = 0x30 | flags  # PUBLISH QoS0
         body = _encode_utf8(topic) + payload.encode("utf-8")
         self.sock.sendall(bytes([fixed]) + _encode_varint(len(body)) + body)
+        _log(f"mqtt publish: topic={topic} retain={int(retain)} bytes={len(payload)}")
 
     def subscribe(self, topic_filter: str) -> None:
         if not self.sock:
             raise E2EError("MQTT not connected")
         pid = self._next_packet_id()
+        _log(f"mqtt subscribe: filter={topic_filter} pid={pid}")
         vh = pid.to_bytes(2, "big")
         payload = _encode_utf8(topic_filter) + bytes([0x00])  # QoS 0
         body = vh + payload
@@ -289,6 +301,7 @@ class MqttClient:
             if pkt_type == 3:  # PUBLISH
                 topic, payload_str = self._decode_publish(data)
                 self._pending_publishes.append((topic, payload_str))
+                _log(f"mqtt rx buffered: topic={topic} bytes={len(payload_str)}")
                 continue
             if pkt_type != 9:  # not SUBACK
                 continue
@@ -312,7 +325,9 @@ class MqttClient:
         while time.time() < deadline:
             pkt_type, _flags, data = self._read_packet(timeout_s=5)
             if pkt_type == 3:  # PUBLISH
-                return self._decode_publish(data)
+                topic, payload = self._decode_publish(data)
+                _log(f"mqtt rx: topic={topic} bytes={len(payload)}")
+                return topic, payload
             # Ignore other packet types.
         raise E2EError("Timeout waiting for MQTT publish")
 
@@ -458,22 +473,38 @@ def _assert_eventually(
 
 
 def _fetch_poll(mqtt: MqttClient, topic: str) -> dict[str, Any]:
-    # Subscribe is idempotent (broker will just add a second subscription on some brokers,
-    # but for our simple E2E it's acceptable).
     mqtt.subscribe(topic)
-    _, payload = mqtt.wait_for_publish(timeout_s=10)
-    try:
-        return _parse_json(payload)
-    except Exception as e:
-        raise E2EError(f"Status payload was not valid JSON on {topic}: {payload!r} ({e})")
+    deadline = time.time() + 15
+    last = ""
+    while time.time() < deadline:
+        got_topic, payload = mqtt.wait_for_publish(timeout_s=10)
+        last = f"topic={got_topic} payload={payload!r}"
+        if got_topic != topic:
+            _log(f"poll wait: ignoring other topic={got_topic}")
+            continue
+        try:
+            _log(f"poll wait: got bytes={len(payload)}")
+            return _parse_json(payload)
+        except Exception as e:
+            raise E2EError(f"Status payload was not valid JSON on {topic}: {payload!r} ({e})")
+    raise E2EError(f"Timeout waiting for status JSON on {topic}. Last observed: {last}")
 
 def _fetch_boot(mqtt: MqttClient, boot_topic: str) -> dict[str, Any]:
     mqtt.subscribe(boot_topic)
-    _, payload = mqtt.wait_for_publish(timeout_s=10)
-    try:
-        return _parse_json(payload)
-    except Exception as e:
-        raise E2EError(f"Boot payload was not valid JSON on {boot_topic}: {payload!r} ({e})")
+    deadline = time.time() + 15
+    last = ""
+    while time.time() < deadline:
+        got_topic, payload = mqtt.wait_for_publish(timeout_s=10)
+        last = f"topic={got_topic} payload={payload!r}"
+        if got_topic != boot_topic:
+            _log(f"boot wait: ignoring other topic={got_topic}")
+            continue
+        try:
+            _log(f"boot wait: got bytes={len(payload)}")
+            return _parse_json(payload)
+        except Exception as e:
+            raise E2EError(f"Boot payload was not valid JSON on {boot_topic}: {payload!r} ({e})")
+    raise E2EError(f"Timeout waiting for boot JSON on {boot_topic}. Last observed: {last}")
 
 def _device_is_latest_stub(
     mqtt: MqttClient,
@@ -551,7 +582,10 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ota", action="store_true", help="Perform one OTA upload before running tests (requires DEVICE_HTTP_BASE).")
     ap.add_argument("--ensure-stub", action="store_true", help="Ensure the device is running the latest stub firmware (OTA if needed), then run tests.")
+    ap.add_argument("--verbose", action="store_true", help="Verbose logging (MQTT rx/tx and filtering).")
     args = ap.parse_args()
+    global VERBOSE
+    VERBOSE = args.verbose
 
     host = _require_env("MQTT_HOST")
     port = int(os.environ.get("MQTT_PORT", "1883"))
