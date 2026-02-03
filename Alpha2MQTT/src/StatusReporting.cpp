@@ -126,6 +126,13 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		out,
 		outSize,
 		"{"
+		"\"rs485_backend\":\"%s\","
+		"\"rs485_stub_mode\":\"%s\","
+		"\"rs485_stub_fail_remaining\":%lu,"
+		"\"ess_snapshot_last_ok\":%s,"
+		"\"ess_snapshot_attempts\":%lu,"
+		"\"dispatch_last_run_ms\":%lu,"
+		"\"dispatch_last_skip_reason\":\"%s\","
 		"\"poll_ok_count\":%lu,"
 		"\"poll_err_count\":%lu,"
 		"\"last_poll_ms\":%lu,"
@@ -135,6 +142,13 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		"\"rs485_probe_last_attempt_ms\":%lu,"
 		"\"rs485_probe_backoff_ms\":%lu"
 		"}",
+		snapshot.rs485Backend ? snapshot.rs485Backend : "",
+		snapshot.rs485StubMode ? snapshot.rs485StubMode : "",
+		static_cast<unsigned long>(snapshot.rs485StubFailRemaining),
+		snapshot.essSnapshotLastOk ? "true" : "false",
+		static_cast<unsigned long>(snapshot.essSnapshotAttempts),
+		static_cast<unsigned long>(snapshot.dispatchLastRunMs),
+		snapshot.dispatchLastSkipReason ? snapshot.dispatchLastSkipReason : "",
 		static_cast<unsigned long>(snapshot.pollOkCount),
 		static_cast<unsigned long>(snapshot.pollErrCount),
 		static_cast<unsigned long>(snapshot.lastPollMs),

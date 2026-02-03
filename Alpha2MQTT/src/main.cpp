@@ -79,6 +79,7 @@ char haUniqueId[32];
 char statusTopic[128];
 char deviceName[32];
 char configSetTopic[64];
+char rs485StubControlTopic[96];
 char lastResetReason[64] = "";
 HttpServer httpServer(80);
 bool httpControlPlaneEnabled = false;
@@ -125,6 +126,10 @@ uint32_t lastPollMs = 0;
 uint32_t lastOkTsMs = 0;
 uint32_t lastErrTsMs = 0;
 int lastErrCode = 0;
+uint32_t essSnapshotAttemptCount = 0;
+bool essSnapshotLastOk = false;
+uint32_t dispatchLastRunMs = 0;
+char dispatchLastSkipReason[48] = "";
 bool lastWifiConnected = false;
 bool lastMqttConnected = false;
 bool pendingWifiDisconnectEvent = false;
@@ -388,6 +393,7 @@ buildDeviceName(void)
 	snprintf(deviceName, sizeof(deviceName), "%s-%02X%02X%02X", DEVICE_NAME, mac[3], mac[4], mac[5]);
 	snprintf(configSetTopic, sizeof(configSetTopic), "%s/config/set", deviceName);
 	snprintf(statusTopic, sizeof(statusTopic), "%s/status", deviceName);
+	snprintf(rs485StubControlTopic, sizeof(rs485StubControlTopic), "%s/debug/rs485_stub/set", deviceName);
 }
 
 void
@@ -1348,6 +1354,13 @@ void setup()
 		logHeap("before RS485 init");
 #endif
 		_modBus = new RS485Handler;
+#if defined(DEBUG_OVER_SERIAL)
+#if defined(RS485_STUB)
+		Serial.println("RS485 backend: stub");
+#else
+		Serial.println("RS485 backend: real");
+#endif
+#endif
 #if defined(DEBUG_OVER_SERIAL) || defined(DEBUG_LEVEL2) || defined(DEBUG_OUTPUT_TX_RX)
 		_modBus->setDebugOutput(_debugOutput);
 #endif // DEBUG_OVER_SERIAL || DEBUG_LEVEL2 || DEBUG_OUTPUT_TX_RX
@@ -1358,6 +1371,11 @@ void setup()
 			if (deviceSerialNumber[0] != '\0' && deviceSerialNumber[1] != '\0') {
 				_registerHandler->setSerialNumberPrefix(deviceSerialNumber[0], deviceSerialNumber[1]);
 			}
+#if defined(RS485_STUB)
+			// Stub backend is used to validate scheduler + ESS snapshot behavior without inverter hardware.
+			// Mark inverterReady so the scheduler attempts refreshEssSnapshot() and dispatch gating can be exercised.
+			inverterReady = true;
+#endif
 #if defined(DEBUG_OVER_SERIAL)
 			logHeap("after RS485 init");
 #endif
@@ -3349,6 +3367,14 @@ mqttReconnect(void)
 			Serial.println(_debugOutput);
 #endif
 
+#if defined(RS485_STUB)
+			subscribed = subscribed && _mqtt.subscribe(rs485StubControlTopic, MQTT_SUBSCRIBE_QOS);
+#ifdef DEBUG_OVER_SERIAL
+			snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", rs485StubControlTopic, subscribed);
+			Serial.println(_debugOutput);
+#endif
+#endif
+
 			if (inverterReady) {
 				for (int i = 0; i < numberOfEntities; i++) {
 					if (entities[i].subscribe) {
@@ -4104,6 +4130,23 @@ sendStatus(bool includeEssSnapshot)
 		poll.lastErrCode = lastErrCode;
 		poll.rs485ProbeLastAttemptMs = rs485ProbeLastAttemptMs;
 		poll.rs485ProbeBackoffMs = (rs485ConnectState == Rs485ConnectState::Connected) ? 0 : rs485CycleBackoffMs;
+		poll.rs485Backend =
+#if defined(RS485_STUB)
+			"stub";
+#else
+			"real";
+#endif
+		poll.essSnapshotLastOk = essSnapshotLastOk;
+		poll.essSnapshotAttempts = essSnapshotAttemptCount;
+#if defined(RS485_STUB)
+		poll.rs485StubMode = _modBus->stubModeLabel();
+		poll.rs485StubFailRemaining = _modBus->stubFailRemaining();
+#else
+		poll.rs485StubMode = "";
+		poll.rs485StubFailRemaining = 0;
+#endif
+		poll.dispatchLastRunMs = dispatchLastRunMs;
+		poll.dispatchLastSkipReason = dispatchLastSkipReason;
 
 		if (!buildStatusCoreJson(core, stateAddition, sizeof(stateAddition))) {
 			return;
@@ -4643,6 +4686,13 @@ refreshEssSnapshot(void)
 {
 	int gotError = 0;
 	uint32_t pollStartMs = millis();
+	essSnapshotAttemptCount++;
+
+#if defined(RS485_STUB)
+	if (_modBus != nullptr) {
+		_modBus->beginSnapshotAttempt();
+	}
+#endif
 
 #ifdef DEBUG_NO_RS485
 	static unsigned long lastRs485 = 0, lastGrid = 0;
@@ -4800,9 +4850,16 @@ refreshEssSnapshot(void)
 		lastOkTsMs = millis();
 		essSnapshotValid = true;
 	}
+	essSnapshotLastOk = essSnapshotValid;
 	if (lastPollMs > kPollOverrunMs) {
 		publishEvent(MqttEventCode::PollOverrun, "");
 	}
+
+#if defined(RS485_STUB)
+	if (_modBus != nullptr) {
+		_modBus->endSnapshotAttempt();
+	}
+#endif
 
 	return essSnapshotValid;
 }
@@ -4865,6 +4922,9 @@ sendData()
 		}
 		if (snapshotOkThisPass) {
 			checkAndSetDispatchMode();
+			dispatchLastSkipReason[0] = '\0';
+		} else {
+			strlcpy(dispatchLastSkipReason, "ess_snapshot_failed", sizeof(dispatchLastSkipReason));
 		}
 	}
 
@@ -5034,6 +5094,61 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 	} else if (strcmp(topic, configSetTopic) == 0) {
 		handlePollingConfigSet(mqttIncomingPayload);
 		return; // No further processing needed.
+#if defined(RS485_STUB)
+	} else if (strcmp(topic, rs485StubControlTopic) == 0) {
+		// Runtime RS485 stub control (single firmware; no rebuilds per test case).
+		// Accepts either plain text ("offline", "online", "fail 2", "fail_n=2 reg=123")
+		// or JSON containing these tokens.
+		Rs485StubMode mode = Rs485StubMode::OfflineForever;
+		uint32_t failN = 0;
+		uint16_t failReg = 0;
+
+		auto findNumberAfter = [&](const char *key) -> int32_t {
+			const char *pos = strstr(mqttIncomingPayload, key);
+			if (!pos) return -1;
+			pos += strlen(key);
+			while (*pos && (*pos == ' ' || *pos == ':' || *pos == '=' || *pos == '\"')) pos++;
+			return static_cast<int32_t>(strtol(pos, nullptr, 10));
+		};
+
+		if (strstr(mqttIncomingPayload, "online") != nullptr || strstr(mqttIncomingPayload, "ONLINE") != nullptr) {
+			mode = Rs485StubMode::OnlineAlways;
+		}
+		if (strstr(mqttIncomingPayload, "offline") != nullptr || strstr(mqttIncomingPayload, "OFFLINE") != nullptr) {
+			mode = Rs485StubMode::OfflineForever;
+		}
+		if (strstr(mqttIncomingPayload, "fail") != nullptr || strstr(mqttIncomingPayload, "FAIL") != nullptr) {
+			mode = Rs485StubMode::FailFirstNThenRecover;
+		}
+
+		int32_t n = findNumberAfter("fail_n");
+		if (n < 0) n = findNumberAfter("failFirstN");
+		if (n < 0) n = findNumberAfter("n");
+		if (n < 0) {
+			const char *p = mqttIncomingPayload;
+			while (*p && (*p < '0' || *p > '9')) p++;
+			if (*p) n = static_cast<int32_t>(strtol(p, nullptr, 10));
+		}
+		if (n > 0) {
+			failN = static_cast<uint32_t>(n);
+		}
+
+		int32_t reg = findNumberAfter("reg");
+		if (reg < 0) reg = findNumberAfter("register");
+		if (reg > 0) {
+			failReg = static_cast<uint16_t>(reg);
+		}
+
+		_modBus->applyStubControl(mode, failN, failReg);
+#ifdef DEBUG_OVER_SERIAL
+		snprintf(_debugOutput, sizeof(_debugOutput), "RS485 stub control applied: mode=%s fail_n=%lu fail_reg=%u",
+			 _modBus->stubModeLabel(), static_cast<unsigned long>(failN), static_cast<unsigned>(failReg));
+		Serial.println(_debugOutput);
+#endif
+		// Force the next schedule pass to run ASAP so E2E tests can observe outcomes quickly.
+		resendAllData = true;
+		return;
+#endif
 	} else {
 		// match to deviceName "/SERIAL#/MQTT_NAME/command"
 		char matchPrefix[64];
@@ -5372,6 +5487,8 @@ checkAndSetDispatchMode(void)
 	    !opData.a2mReadyToUsePwrDischarge || !opData.a2mReadyToUsePwrPush) {
 		return;  // Don't set anything if opData isn't ready.
 	}
+
+	dispatchLastRunMs = millis();
 
 	essBatterySocPct = opData.essBatterySoc * BATTERY_SOC_MULTIPLIER;
 	if (opData.a2mSocTarget == 100) {

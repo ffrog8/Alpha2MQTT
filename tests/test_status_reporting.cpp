@@ -80,11 +80,25 @@ TEST_CASE("status poll JSON builder includes required keys")
 	snapshot.lastErrCode = 2;
 	snapshot.rs485ProbeLastAttemptMs = 12345;
 	snapshot.rs485ProbeBackoffMs = 15000;
+	snapshot.rs485Backend = "stub";
+	snapshot.essSnapshotLastOk = false;
+	snapshot.essSnapshotAttempts = 3;
+	snapshot.rs485StubMode = "offline";
+	snapshot.rs485StubFailRemaining = 0;
+	snapshot.dispatchLastRunMs = 0;
+	snapshot.dispatchLastSkipReason = "ess_snapshot_failed";
 
 	char buffer[512];
 	CHECK(buildStatusPollJson(snapshot, buffer, sizeof(buffer)));
 
 	std::string payload(buffer);
+	CHECK(payload.find("\"rs485_backend\":\"stub\"") != std::string::npos);
+	CHECK(payload.find("\"rs485_stub_mode\":\"offline\"") != std::string::npos);
+	CHECK(payload.find("\"rs485_stub_fail_remaining\":0") != std::string::npos);
+	CHECK(payload.find("\"ess_snapshot_last_ok\":false") != std::string::npos);
+	CHECK(payload.find("\"ess_snapshot_attempts\":3") != std::string::npos);
+	CHECK(payload.find("\"dispatch_last_run_ms\":0") != std::string::npos);
+	CHECK(payload.find("\"dispatch_last_skip_reason\":\"ess_snapshot_failed\"") != std::string::npos);
 	CHECK(payload.find("\"poll_err_count\":1") != std::string::npos);
 	CHECK(payload.find("\"last_err_code\":2") != std::string::npos);
 	CHECK(payload.find("\"rs485_probe_last_attempt_ms\":12345") != std::string::npos);

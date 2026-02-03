@@ -15,6 +15,7 @@ add_executable(host_tests
     tests/test_mqtt_entities.cpp
     tests/test_portal_config.cpp
     tests/test_status_reporting.cpp
+    tests/test_rs485_stub_logic.cpp
     tests/test_reboot_request.cpp
     tests/src/TimeProviderHost.cpp
     Alpha2MQTT/src/Scheduler.cpp

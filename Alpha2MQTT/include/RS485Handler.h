@@ -13,6 +13,10 @@ Handles Modbus requests and responses in a tidy class separate from main program
 #ifndef _RS485Handler_h
 #define _RS485Handler_h
 
+#if defined(RS485_STUB)
+#include "RS485HandlerStub.h"
+#else
+
 #include <Arduino.h>
 
 #include "Definitions.h"
@@ -99,3 +103,5 @@ class RS485Handler
 
 
 #endif
+
+#endif // !RS485_STUB

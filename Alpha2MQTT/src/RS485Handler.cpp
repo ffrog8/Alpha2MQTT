@@ -10,6 +10,9 @@ Notes
 
 Handles Modbus requests and responses in a tidy class separate from main program logic.
 */
+#if defined(RS485_STUB)
+// Stub backend compiles a header-only replacement; keep this translation unit empty.
+#else
 #include "../RS485Handler.h"
 #include "../include/ModbusCodec.h"
 
@@ -667,3 +670,5 @@ void RS485Handler::checkRS485IsQuiet()
 		delay(2);
 	}
 }
+
+#endif // RS485_STUB
