@@ -67,6 +67,10 @@ using HttpServer = WebServer;
 
 #define popcount __builtin_popcount
 
+#ifndef BUILD_TS_MS
+#define BUILD_TS_MS 0ULL
+#endif
+
 // Device parameters
 char _version[6] = "v2.67";
 char deviceSerialNumber[17]; // 8 registers = max 16 chars (usually 15)
@@ -405,13 +409,14 @@ publishBootEventOncePerBoot(void)
 	}
 
 	char bootTopic[128];
-	char payload[192];
+	char payload[256];
 	String resetReason = ESP.getResetReason();
 
 	snprintf(bootTopic, sizeof(bootTopic), "%s/boot", deviceName);
 	snprintf(payload, sizeof(payload),
-		 "{ \"boot_intent\": \"%s\", \"reset_reason\": \"%s\", \"ts_ms\": %lu }",
-		 bootIntentToString(bootIntentForPublish), resetReason.c_str(), millis());
+		 "{ \"boot_intent\": \"%s\", \"reset_reason\": \"%s\", \"ts_ms\": %lu, \"fw_build_ts_ms\": %llu }",
+		 bootIntentToString(bootIntentForPublish), resetReason.c_str(), millis(),
+		 static_cast<unsigned long long>(BUILD_TS_MS));
 
 	_mqtt.publish(bootTopic, payload, true);
 	bootEventPublished = true;

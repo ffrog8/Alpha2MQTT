@@ -14,5 +14,21 @@ arduino-cli lib install "Preferences"
 arduino-cli lib install PubSubClient
 
 cd /project
-arduino-cli  compile -e --build-property build.extra_flags="-DMP_ESP8266 -UMP_ESP32 -UMP_XIAO_ESP32C6" --fqbn esp8266:esp8266:d1_mini Alpha2MQTT
-mv Alpha2MQTT/build/esp8266.esp8266.d1_mini/Alpha2MQTT.ino.bin ./Alpha2MQTT.bin
+
+BUILD_TS_MS="$(date +%s%3N)"
+BUILD_FLAGS="-DMP_ESP8266 -UMP_ESP32 -UMP_XIAO_ESP32C6 -DBUILD_TS_MS=${BUILD_TS_MS}ULL"
+OUTDIR="Alpha2MQTT/build/firmware"
+OUTFILE="${OUTDIR}/Alpha2MQTT_${BUILD_TS_MS}.bin"
+
+mkdir -p "${OUTDIR}"
+
+arduino-cli compile -e --build-property build.extra_flags="${BUILD_FLAGS}" --fqbn esp8266:esp8266:d1_mini Alpha2MQTT
+mv Alpha2MQTT/build/esp8266.esp8266.d1_mini/Alpha2MQTT.ino.bin "${OUTFILE}"
+rm -f ./Alpha2MQTT.bin
+
+printf '%s\n' "$(basename "${OUTFILE}")" > "${OUTDIR}/Alpha2MQTT_latest.txt"
+
+# Keep only the latest 3 timestamped firmware artifacts.
+ls -1t "${OUTDIR}"/Alpha2MQTT_*.bin 2>/dev/null | tail -n +4 | xargs -r rm -f
+
+echo "Firmware: ${OUTFILE}"
