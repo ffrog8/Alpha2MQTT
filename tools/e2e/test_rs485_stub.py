@@ -63,6 +63,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -97,30 +98,36 @@ def _repo_root() -> Path:
     # tools/e2e/test_rs485_stub.py -> repo root two levels up from tools/
     return Path(__file__).resolve().parents[2]
 
+def _firmware_main_cpp() -> Path:
+    # Repo layout: <repo>/Alpha2MQTT/src/main.cpp
+    return _repo_root() / "Alpha2MQTT" / "src" / "main.cpp"
+
 
 def _discover_control_suffix_from_code() -> str:
-    main_cpp = _repo_root() / "Alpha2MQTT" / "src" / "main.cpp"
-    data = main_cpp.read_text(encoding="utf-8", errors="replace")
+    data = _firmware_main_cpp().read_text(encoding="utf-8", errors="replace")
     # Expect a format string like: "%s/debug/rs485_stub/set"
     m = re.search(r"\"%s(/debug/rs485_stub/set)\"", data)
     if not m:
         # Fallback: literal string present.
         if "/debug/rs485_stub/set" in data:
             return "/debug/rs485_stub/set"
-        raise E2EError("Could not discover RS485 stub control topic suffix from Alpha2MQTT/src/main.cpp")
+        raise E2EError("Could not discover RS485 stub control topic suffix from firmware main.cpp")
     return m.group(1)
 
 
 def _discover_status_poll_suffix_from_code() -> str:
-    main_cpp = _repo_root() / "Alpha2MQTT" / "src" / "main.cpp"
-    data = main_cpp.read_text(encoding="utf-8", errors="replace")
-    if "/status/poll" in data:
+    data = _firmware_main_cpp().read_text(encoding="utf-8", errors="replace")
+    # The firmware constructs:
+    #   statusTopic = "<device>/status"
+    #   pollTopic   = "<device>/status/poll"  via snprintf(pollTopic, "%s/poll", statusTopic)
+    has_status = re.search(r'snprintf\(\s*statusTopic\b.*"%s/status"', data) is not None
+    has_poll = re.search(r'snprintf\(\s*pollTopic\b.*"%s/poll"\s*,\s*statusTopic\s*\)', data) is not None
+    if has_status and has_poll:
         return "/status/poll"
-    raise E2EError("Could not confirm status poll topic suffix from Alpha2MQTT/src/main.cpp")
+    raise E2EError("Could not derive status poll topic suffix from firmware main.cpp")
 
 def _discover_reboot_wifi_path_from_code() -> Optional[str]:
-    main_cpp = _repo_root() / "Alpha2MQTT" / "src" / "main.cpp"
-    data = main_cpp.read_text(encoding="utf-8", errors="replace")
+    data = _firmware_main_cpp().read_text(encoding="utf-8", errors="replace")
     # NORMAL-mode HTTP control plane route.
     if 'httpServer.on("/reboot/wifi"' in data:
         return "/reboot/wifi"
@@ -172,7 +179,18 @@ class MqttClientShim:
         if not self.tools.use_docker_container:
             return args
         # Avoid printing password: it's passed via env into container.
-        return ["docker", "exec", "-i", "-e", "MQTT_PW", self.tools.use_docker_container, "sh", "-lc", " ".join(args)]
+        # Use robust shell quoting because payloads may contain spaces/quotes.
+        return [
+            "docker",
+            "exec",
+            "-i",
+            "-e",
+            "MQTT_PW",
+            self.tools.use_docker_container,
+            "sh",
+            "-lc",
+            " ".join(shlex.quote(a) for a in args),
+        ]
 
     def publish(self, topic: str, payload: str, retain: bool = False, timeout_s: int = 5) -> None:
         args = [self.tools.pub] + self._base_args() + ["-t", topic, "-m", payload]
@@ -181,7 +199,23 @@ class MqttClientShim:
         env = None
         if self.tools.use_docker_container:
             env = {"MQTT_PW": self.password}
-            args = [self.tools.pub, "-h", "127.0.0.1", "-p", str(self.port), "-u", self.user, "-P", "$MQTT_PW", "-t", topic, "-m", payload]
+            # Run the mosquitto tools *inside* the container, but still connect to MQTT_HOST.
+            # (Don't force 127.0.0.1; the broker may be external to the container.)
+            args = [
+                self.tools.pub,
+                "-h",
+                self.host,
+                "-p",
+                str(self.port),
+                "-u",
+                self.user,
+                "-P",
+                "$MQTT_PW",
+                "-t",
+                topic,
+                "-m",
+                payload,
+            ]
             if retain:
                 args.append("-r")
             args = self._wrap(args)
@@ -195,7 +229,24 @@ class MqttClientShim:
         env = None
         if self.tools.use_docker_container:
             env = {"MQTT_PW": self.password}
-            args = [self.tools.sub, "-h", "127.0.0.1", "-p", str(self.port), "-u", self.user, "-P", "$MQTT_PW", "-t", topic, "-v", "-C", "1", "-W", str(timeout_s)]
+            args = [
+                self.tools.sub,
+                "-h",
+                self.host,
+                "-p",
+                str(self.port),
+                "-u",
+                self.user,
+                "-P",
+                "$MQTT_PW",
+                "-t",
+                topic,
+                "-v",
+                "-C",
+                "1",
+                "-W",
+                str(timeout_s),
+            ]
             args = self._wrap(args)
         res = _run(args, timeout_s=timeout_s + 2, env=env)
         out = res.stdout.strip()
