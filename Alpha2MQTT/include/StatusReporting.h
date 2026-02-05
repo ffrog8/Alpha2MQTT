@@ -38,6 +38,7 @@ struct StatusCoreSnapshot {
 	const char *bootMode;
 	const char *bootIntent;
 	bool httpControlPlaneEnabled;
+	const char *haUniqueId;
 };
 
 struct StatusNetSnapshot {
@@ -70,10 +71,34 @@ struct StatusPollSnapshot {
 	uint32_t essSnapshotAttempts;
 	const char *rs485StubMode;
 	uint32_t rs485StubFailRemaining;
+	uint32_t rs485StubWriteCount;
+	uint16_t rs485StubLastWriteStartReg;
+	uint32_t rs485StubLastWriteMs;
 	uint32_t dispatchLastRunMs;
 	const char *dispatchLastSkipReason;
+};
+
+struct StatusStubSnapshot {
+	uint32_t stubReads;
+	uint32_t stubWrites;
+	uint32_t stubUnknownReads;
+	uint16_t lastReadStartReg;
+	uint8_t lastFn;
+	uint16_t lastFailStartReg;
+	uint8_t lastFailFn;
+	const char *lastFailType;
+	uint16_t latencyMs;
+	bool strictUnknown;
+	uint32_t failEveryN;
+	uint32_t failForMs;
+	uint32_t flapOnlineMs;
+	uint32_t flapOfflineMs;
+	uint32_t probeAttempts;
+	uint32_t probeSuccessAfterN;
+	int16_t socStepX10PerSnapshot;
 };
 
 bool buildStatusCoreJson(const StatusCoreSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusNetJson(const StatusNetSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSize);
+bool buildStatusStubJson(const StatusStubSnapshot &snapshot, char *out, size_t outSize);

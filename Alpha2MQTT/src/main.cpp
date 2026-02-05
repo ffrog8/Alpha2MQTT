@@ -75,7 +75,7 @@ using HttpServer = WebServer;
 char _version[6] = "v2.67";
 char deviceSerialNumber[17]; // 8 registers = max 16 chars (usually 15)
 char deviceBatteryType[32];
-char haUniqueId[32];
+char haUniqueId[32] = "A2M-UNKNOWN";
 char statusTopic[128];
 char deviceName[32];
 char configSetTopic[64];
@@ -405,6 +405,8 @@ setMqttIdentifiersFromSerial(const char *serial)
 
 	snprintf(haUniqueId, sizeof(haUniqueId), "A2M-%s", serial);
 	inverterReady = true;
+	// Subscriptions are bound to the HA unique id; if identity changes from unknown/persisted, resubscribe.
+	inverterSubscriptionsSet = false;
 }
 
 void
@@ -507,6 +509,10 @@ rs485TryReadIdentityOnce(void)
 
 	if (haUniqueId[0] == '\0') {
 		setMqttIdentifiersFromSerial(deviceSerialNumber);
+	} else if (strcmp(haUniqueId, "A2M-UNKNOWN") == 0) {
+		// Treat "unknown" as not-yet-identified so the stub backend (and fresh boots) can still
+		// promote to a real inverter identity once the serial is readable.
+		setMqttIdentifiersFromSerial(deviceSerialNumber);
 	}
 
 	{
@@ -594,7 +600,8 @@ rs485ProbeTick(void)
 		rs485LockedBaud = baud;
 		// If inverter identity was previously persisted, we can treat the connection as established immediately.
 		// Otherwise we must read the serial to determine haUniqueId and enable inverterReady-dependent paths.
-		rs485ConnectState = inverterReady ? Rs485ConnectState::Connected : Rs485ConnectState::ReadingIdentity;
+		const bool identityKnown = (haUniqueId[0] != '\0' && strcmp(haUniqueId, "A2M-UNKNOWN") != 0);
+		rs485ConnectState = identityKnown ? Rs485ConnectState::Connected : Rs485ConnectState::ReadingIdentity;
 		rs485AttemptsInCycle = 0;
 		rs485CycleBackoffMs = kRs485ProbeAttemptDelayMs;
 		rs485NextAttemptAtMs = now;
@@ -4072,9 +4079,13 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 		char stateAddition[256] = "";
 		char netAddition[256] = "";
 		char pollAddition[512] = "";
+		char stubAddition[512] = "";
 		StatusCoreSnapshot core{};
 		StatusNetSnapshot net{};
 		StatusPollSnapshot poll{};
+#if RS485_STUB
+		StatusStubSnapshot stub{};
+#endif
 	const char *gridStatusStr;
 	modbusRequestAndResponseStatusValues resultAddedToPayload;
 	String ssid = WiFi.SSID();
@@ -4110,6 +4121,7 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 	core.bootMode = bootModeToString(currentBootMode);
 	core.bootIntent = bootIntentToString(currentBootIntent);
 	core.httpControlPlaneEnabled = httpControlPlaneEnabled;
+	core.haUniqueId = haUniqueId;
 
 	net.uptimeS = getUptimeSeconds();
 	net.freeHeap = ESP.getFreeHeap();
@@ -4141,9 +4153,15 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 #if RS485_STUB
 			poll.rs485StubMode = _modBus ? _modBus->stubModeLabel() : "uninit";
 			poll.rs485StubFailRemaining = _modBus ? _modBus->stubFailRemaining() : 0;
+			poll.rs485StubWriteCount = _modBus ? _modBus->stubWriteCount() : 0;
+			poll.rs485StubLastWriteStartReg = _modBus ? _modBus->stubLastWriteStartReg() : 0;
+			poll.rs485StubLastWriteMs = _modBus ? _modBus->stubLastWriteMs() : 0;
 #else
 			poll.rs485StubMode = "";
 			poll.rs485StubFailRemaining = 0;
+			poll.rs485StubWriteCount = 0;
+			poll.rs485StubLastWriteStartReg = 0;
+			poll.rs485StubLastWriteMs = 0;
 #endif
 		poll.dispatchLastRunMs = dispatchLastRunMs;
 		poll.dispatchLastSkipReason = dispatchLastSkipReason;
@@ -4169,6 +4187,34 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 	if (buildStatusPollJson(poll, pollAddition, sizeof(pollAddition))) {
 		_mqtt.publish(pollTopic, pollAddition, true);
 	}
+
+#if RS485_STUB
+	if (_modBus != nullptr) {
+		stub.stubReads = _modBus->stubReadCount();
+		stub.stubWrites = _modBus->stubWriteCount();
+		stub.stubUnknownReads = _modBus->stubUnknownRegisterReads();
+		stub.lastReadStartReg = _modBus->stubLastReadStartReg();
+		stub.lastFn = _modBus->stubLastFn();
+		stub.lastFailStartReg = _modBus->stubLastFailStartReg();
+		stub.lastFailFn = _modBus->stubLastFailFn();
+		stub.lastFailType = _modBus->stubLastFailTypeLabel();
+		stub.latencyMs = _modBus->stubLatencyMs();
+		stub.strictUnknown = _modBus->stubStrictUnknown();
+		stub.failEveryN = _modBus->stubFailEveryN();
+		stub.failForMs = _modBus->stubFailForMs();
+		stub.flapOnlineMs = _modBus->stubFlapOnlineMs();
+		stub.flapOfflineMs = _modBus->stubFlapOfflineMs();
+		stub.probeAttempts = _modBus->stubProbeAttempts();
+		stub.probeSuccessAfterN = _modBus->stubProbeSuccessAfterN();
+		stub.socStepX10PerSnapshot = _modBus->stubSocStepX10PerSnapshot();
+
+		char stubTopic[160];
+		snprintf(stubTopic, sizeof(stubTopic), "%s/stub", statusTopic);
+		if (buildStatusStubJson(stub, stubAddition, sizeof(stubAddition))) {
+			_mqtt.publish(stubTopic, stubAddition, true);
+		}
+	}
+#endif
 }
 
 modbusRequestAndResponseStatusValues
@@ -5102,6 +5148,30 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 		Rs485StubMode mode = Rs485StubMode::OfflineForever;
 		uint32_t failN = 0;
 		uint16_t failReg = 0;
+		Rs485StubFailType failType = Rs485StubFailType::NoResponse;
+		uint16_t latencyMs = 0;
+		bool strictUnknown = false;
+		uint32_t failEveryN = 0;
+		bool failReads = true;
+		bool failWrites = true;
+		uint32_t failForMs = 0;
+		uint32_t flapOnlineMs = 0;
+		uint32_t flapOfflineMs = 0;
+		uint32_t probeSuccessAfterN = 0;
+		int16_t socStepX10PerSnapshot = 0;
+
+		bool hasVirtualEss = false;
+		uint16_t virtualSocPct = 65;
+		int16_t virtualBatteryPowerW = 0;
+		int32_t virtualGridPowerW = 0;
+		int32_t virtualPvCtPowerW = 0;
+		uint16_t virtualInverterMode = INVERTER_OPERATION_MODE_UPS_MODE;
+
+		bool hasVirtualDispatch = false;
+		uint16_t virtualDispatchStart = 0;
+		uint16_t virtualDispatchMode = DISPATCH_MODE_NORMAL_MODE;
+		int32_t virtualDispatchActivePower = DISPATCH_ACTIVE_POWER_OFFSET;
+		uint16_t virtualDispatchSoc = 0;
 
 		auto findNumberAfter = [&](const char *key) -> int32_t {
 			const char *pos = strstr(mqttIncomingPayload, key);
@@ -5111,14 +5181,54 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 			return static_cast<int32_t>(strtol(pos, nullptr, 10));
 		};
 
-		if (strstr(mqttIncomingPayload, "online") != nullptr || strstr(mqttIncomingPayload, "ONLINE") != nullptr) {
-			mode = Rs485StubMode::OnlineAlways;
+		bool explicitMode = false;
+		{
+			char modeBuf[24] = { 0 };
+			const char *pos = strstr(mqttIncomingPayload, "\"mode\"");
+			if (pos != nullptr) {
+				pos = strchr(pos, ':');
+				if (pos != nullptr) {
+					pos++;
+					while (*pos && (*pos == ' ' || *pos == '\"')) pos++;
+					size_t idx = 0;
+					while (*pos && *pos != '\"' && *pos != ',' && idx < sizeof(modeBuf) - 1) {
+						modeBuf[idx++] = *pos++;
+					}
+					modeBuf[idx] = '\0';
+					if (modeBuf[0] != '\0') {
+						explicitMode = true;
+						if (!strcmp(modeBuf, "online")) {
+							mode = Rs485StubMode::OnlineAlways;
+						} else if (!strcmp(modeBuf, "offline")) {
+							mode = Rs485StubMode::OfflineForever;
+						} else if (!strcmp(modeBuf, "fail") || !strcmp(modeBuf, "fail_then_recover")) {
+							mode = Rs485StubMode::FailFirstNThenRecover;
+						} else if (!strcmp(modeBuf, "flap")) {
+							mode = Rs485StubMode::FlapTime;
+						} else if (!strcmp(modeBuf, "probe_delayed")) {
+							mode = Rs485StubMode::ProbeDelayedOnline;
+						}
+					}
+				}
+			}
 		}
-		if (strstr(mqttIncomingPayload, "offline") != nullptr || strstr(mqttIncomingPayload, "OFFLINE") != nullptr) {
-			mode = Rs485StubMode::OfflineForever;
-		}
-		if (strstr(mqttIncomingPayload, "fail") != nullptr || strstr(mqttIncomingPayload, "FAIL") != nullptr) {
-			mode = Rs485StubMode::FailFirstNThenRecover;
+
+		if (!explicitMode) {
+			if (strstr(mqttIncomingPayload, "online") != nullptr || strstr(mqttIncomingPayload, "ONLINE") != nullptr) {
+				mode = Rs485StubMode::OnlineAlways;
+			}
+			if (strstr(mqttIncomingPayload, "offline") != nullptr || strstr(mqttIncomingPayload, "OFFLINE") != nullptr) {
+				mode = Rs485StubMode::OfflineForever;
+			}
+			if (strstr(mqttIncomingPayload, "fail") != nullptr || strstr(mqttIncomingPayload, "FAIL") != nullptr) {
+				mode = Rs485StubMode::FailFirstNThenRecover;
+			}
+			if (strstr(mqttIncomingPayload, "probe_delayed") != nullptr || strstr(mqttIncomingPayload, "PROBE_DELAYED") != nullptr) {
+				mode = Rs485StubMode::ProbeDelayedOnline;
+			}
+			if (strstr(mqttIncomingPayload, "flap") != nullptr || strstr(mqttIncomingPayload, "FLAP") != nullptr) {
+				mode = Rs485StubMode::FlapTime;
+			}
 		}
 
 		int32_t n = findNumberAfter("fail_n");
@@ -5139,7 +5249,145 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 			failReg = static_cast<uint16_t>(reg);
 		}
 
-		_modBus->applyStubControl(mode, failN, failReg);
+		if (strstr(mqttIncomingPayload, "slave_error") != nullptr ||
+		    strstr(mqttIncomingPayload, "SLAVE_ERROR") != nullptr) {
+			failType = Rs485StubFailType::SlaveError;
+		}
+		if (strstr(mqttIncomingPayload, "no_response") != nullptr ||
+		    strstr(mqttIncomingPayload, "NO_RESPONSE") != nullptr) {
+			failType = Rs485StubFailType::NoResponse;
+		}
+		int32_t ft = findNumberAfter("fail_type");
+		if (ft == 1) {
+			failType = Rs485StubFailType::SlaveError;
+		}
+
+		int32_t lat = findNumberAfter("latency_ms");
+		if (lat >= 0 && lat <= 60000) {
+			latencyMs = static_cast<uint16_t>(lat);
+		}
+
+		int32_t strict = findNumberAfter("strict_unknown");
+		if (strict < 0) strict = findNumberAfter("strict");
+		if (strict >= 0) {
+			strictUnknown = (strict != 0);
+		}
+
+		int32_t fen = findNumberAfter("fail_every_n");
+		if (fen >= 1) {
+			failEveryN = static_cast<uint32_t>(fen);
+		}
+
+		int32_t fr = findNumberAfter("fail_reads");
+		if (fr >= 0) {
+			failReads = (fr != 0);
+		}
+		int32_t fw = findNumberAfter("fail_writes");
+		if (fw >= 0) {
+			failWrites = (fw != 0);
+		}
+
+		int32_t ffm = findNumberAfter("fail_for_ms");
+		if (ffm >= 0) {
+			failForMs = static_cast<uint32_t>(ffm);
+		}
+
+		int32_t fon = findNumberAfter("flap_online_ms");
+		if (fon >= 0) {
+			flapOnlineMs = static_cast<uint32_t>(fon);
+		}
+		int32_t fof = findNumberAfter("flap_offline_ms");
+		if (fof >= 0) {
+			flapOfflineMs = static_cast<uint32_t>(fof);
+		}
+
+		int32_t psn = findNumberAfter("probe_success_after_n");
+		if (psn >= 0) {
+			probeSuccessAfterN = static_cast<uint32_t>(psn);
+		}
+
+		if (strstr(mqttIncomingPayload, "soc_step_x10_per_snapshot") != nullptr) {
+			int32_t socStep = findNumberAfter("soc_step_x10_per_snapshot");
+			if (socStep >= -32768 && socStep <= 32767) {
+				socStepX10PerSnapshot = static_cast<int16_t>(socStep);
+			}
+		}
+
+		int32_t soc = findNumberAfter("soc_pct");
+		if (soc < 0) soc = findNumberAfter("soc");
+		if (soc >= 0 && soc <= 100) {
+			virtualSocPct = static_cast<uint16_t>(soc);
+			hasVirtualEss = true;
+		}
+		int32_t batt = findNumberAfter("battery_power_w");
+		if (batt < -20000 || batt > 20000) batt = -1;
+		if (batt != -1) {
+			virtualBatteryPowerW = static_cast<int16_t>(batt);
+			hasVirtualEss = true;
+		}
+		int32_t grid = findNumberAfter("grid_power_w");
+		if (grid != -1) {
+			virtualGridPowerW = grid;
+			hasVirtualEss = true;
+		}
+		int32_t pv = findNumberAfter("pv_ct_power_w");
+		if (pv != -1) {
+			virtualPvCtPowerW = pv;
+			hasVirtualEss = true;
+		}
+		int32_t inv = findNumberAfter("inverter_mode");
+		if (inv > 0) {
+			virtualInverterMode = static_cast<uint16_t>(inv);
+			hasVirtualEss = true;
+		}
+
+		int32_t dstart = findNumberAfter("dispatch_start");
+		if (dstart >= 0) {
+			virtualDispatchStart = static_cast<uint16_t>(dstart);
+			hasVirtualDispatch = true;
+		}
+		int32_t dmode = findNumberAfter("dispatch_mode");
+		if (dmode >= 0) {
+			virtualDispatchMode = static_cast<uint16_t>(dmode);
+			hasVirtualDispatch = true;
+		}
+		int32_t dpwr = findNumberAfter("dispatch_active_power");
+		if (dpwr >= 0) {
+			virtualDispatchActivePower = dpwr;
+			hasVirtualDispatch = true;
+		}
+		int32_t dsoc = findNumberAfter("dispatch_soc");
+		if (dsoc >= 0) {
+			virtualDispatchSoc = static_cast<uint16_t>(dsoc);
+			hasVirtualDispatch = true;
+		}
+
+		_modBus->applyStubControl(mode, failN, failReg, failType, latencyMs);
+		_modBus->applyAdvancedControl(
+			strictUnknown,
+			failEveryN,
+			failReads,
+			failWrites,
+			failForMs,
+			flapOnlineMs,
+			flapOfflineMs,
+			probeSuccessAfterN,
+			socStepX10PerSnapshot);
+		if (hasVirtualEss) {
+			_modBus->applyVirtualInverterState(
+				virtualSocPct,
+				virtualBatteryPowerW,
+				virtualGridPowerW,
+				virtualPvCtPowerW,
+				virtualInverterMode);
+		}
+		if (hasVirtualDispatch) {
+			_modBus->applyVirtualDispatchState(
+				virtualDispatchStart,
+				virtualDispatchMode,
+				virtualDispatchActivePower,
+				virtualDispatchSoc);
+		}
 #ifdef DEBUG_OVER_SERIAL
 		snprintf(_debugOutput, sizeof(_debugOutput), "RS485 stub control applied: mode=%s fail_n=%lu fail_reg=%u",
 			 _modBus->stubModeLabel(), static_cast<unsigned long>(failN), static_cast<unsigned>(failReg));

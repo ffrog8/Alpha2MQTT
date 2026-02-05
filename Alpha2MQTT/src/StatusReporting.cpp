@@ -64,7 +64,8 @@ buildStatusCoreJson(const StatusCoreSnapshot &snapshot, char *out, size_t outSiz
 		"\"gridStatus\":\"%s\","
 		"\"boot_mode\":\"%s\","
 		"\"boot_intent\":\"%s\","
-		"\"http_control_plane_enabled\":%s"
+		"\"http_control_plane_enabled\":%s,"
+		"\"ha_unique_id\":\"%s\""
 		"}",
 		snapshot.presence ? snapshot.presence : "",
 		snapshot.a2mStatus ? snapshot.a2mStatus : "",
@@ -72,7 +73,8 @@ buildStatusCoreJson(const StatusCoreSnapshot &snapshot, char *out, size_t outSiz
 		snapshot.gridStatus ? snapshot.gridStatus : "",
 		snapshot.bootMode ? snapshot.bootMode : "",
 		snapshot.bootIntent ? snapshot.bootIntent : "",
-		snapshot.httpControlPlaneEnabled ? "true" : "false");
+		snapshot.httpControlPlaneEnabled ? "true" : "false",
+		snapshot.haUniqueId ? snapshot.haUniqueId : "");
 	if (written < 0 || static_cast<size_t>(written) >= outSize) {
 		return false;
 	}
@@ -129,6 +131,9 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		"\"rs485_backend\":\"%s\","
 		"\"rs485_stub_mode\":\"%s\","
 		"\"rs485_stub_fail_remaining\":%lu,"
+		"\"rs485_stub_writes\":%lu,"
+		"\"rs485_stub_last_write_reg\":%u,"
+		"\"rs485_stub_last_write_ms\":%lu,"
 		"\"ess_snapshot_last_ok\":%s,"
 		"\"ess_snapshot_attempts\":%lu,"
 		"\"dispatch_last_run_ms\":%lu,"
@@ -145,6 +150,9 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		snapshot.rs485Backend ? snapshot.rs485Backend : "",
 		snapshot.rs485StubMode ? snapshot.rs485StubMode : "",
 		static_cast<unsigned long>(snapshot.rs485StubFailRemaining),
+		static_cast<unsigned long>(snapshot.rs485StubWriteCount),
+		static_cast<unsigned>(snapshot.rs485StubLastWriteStartReg),
+		static_cast<unsigned long>(snapshot.rs485StubLastWriteMs),
 		snapshot.essSnapshotLastOk ? "true" : "false",
 		static_cast<unsigned long>(snapshot.essSnapshotAttempts),
 		static_cast<unsigned long>(snapshot.dispatchLastRunMs),
@@ -157,6 +165,57 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		snapshot.lastErrCode,
 		static_cast<unsigned long>(snapshot.rs485ProbeLastAttemptMs),
 		static_cast<unsigned long>(snapshot.rs485ProbeBackoffMs));
+	if (written < 0 || static_cast<size_t>(written) >= outSize) {
+		return false;
+	}
+	return true;
+}
+
+bool
+buildStatusStubJson(const StatusStubSnapshot &snapshot, char *out, size_t outSize)
+{
+	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+	int written = snprintf(
+		out,
+		outSize,
+		"{"
+		"\"stub_reads\":%lu,"
+		"\"stub_writes\":%lu,"
+		"\"stub_unknown_reads\":%lu,"
+		"\"last_read_reg\":%u,"
+		"\"last_fn\":%u,"
+		"\"last_fail_reg\":%u,"
+		"\"last_fail_fn\":%u,"
+		"\"last_fail_type\":\"%s\","
+		"\"latency_ms\":%u,"
+		"\"strict_unknown\":%s,"
+		"\"fail_every_n\":%lu,"
+		"\"fail_for_ms\":%lu,"
+		"\"flap_online_ms\":%lu,"
+		"\"flap_offline_ms\":%lu,"
+		"\"probe_attempts\":%lu,"
+		"\"probe_success_after_n\":%lu,"
+		"\"soc_step_x10_per_snapshot\":%d"
+		"}",
+		static_cast<unsigned long>(snapshot.stubReads),
+		static_cast<unsigned long>(snapshot.stubWrites),
+		static_cast<unsigned long>(snapshot.stubUnknownReads),
+		static_cast<unsigned>(snapshot.lastReadStartReg),
+		static_cast<unsigned>(snapshot.lastFn),
+		static_cast<unsigned>(snapshot.lastFailStartReg),
+		static_cast<unsigned>(snapshot.lastFailFn),
+		snapshot.lastFailType ? snapshot.lastFailType : "",
+		static_cast<unsigned>(snapshot.latencyMs),
+		snapshot.strictUnknown ? "true" : "false",
+		static_cast<unsigned long>(snapshot.failEveryN),
+		static_cast<unsigned long>(snapshot.failForMs),
+		static_cast<unsigned long>(snapshot.flapOnlineMs),
+		static_cast<unsigned long>(snapshot.flapOfflineMs),
+		static_cast<unsigned long>(snapshot.probeAttempts),
+		static_cast<unsigned long>(snapshot.probeSuccessAfterN),
+		static_cast<int>(snapshot.socStepX10PerSnapshot));
 	if (written < 0 || static_cast<size_t>(written) >= outSize) {
 		return false;
 	}
