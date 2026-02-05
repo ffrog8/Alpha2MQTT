@@ -171,11 +171,27 @@ def _discover_register_value(name: str) -> int:
     raw = m.group(1)
     return int(raw, 0)
 
+def _discover_define_value(name: str) -> int:
+    """
+    Like _discover_register_value, but for non-register #defines (e.g. DISPATCH_START_START).
+    """
+    data = _firmware_definitions_h().read_text(encoding="utf-8", errors="replace")
+    m = re.search(rf"^\s*#define\s+{re.escape(name)}\s+(0x[0-9A-Fa-f]+|\-?\d+)\b", data, flags=re.MULTILINE)
+    if not m:
+        raise E2EError(f"Could not discover #define value for {name} from Definitions.h")
+    return int(m.group(1), 0)
+
 def _discover_reboot_wifi_path_from_code() -> Optional[str]:
     data = _firmware_main_cpp().read_text(encoding="utf-8", errors="replace")
     # NORMAL-mode HTTP control plane route.
     if 'httpServer.on("/reboot/wifi"' in data:
         return "/reboot/wifi"
+    return None
+
+def _discover_reboot_normal_path_from_code() -> Optional[str]:
+    data = _firmware_main_cpp().read_text(encoding="utf-8", errors="replace")
+    if 'httpServer.on("/reboot/normal"' in data:
+        return "/reboot/normal"
     return None
 
 
@@ -248,6 +264,10 @@ class MqttClient:
         self._packet_id = 1
         self._pending_publishes: list[Tuple[str, str]] = []
         self._subscriptions: set[str] = set()
+        self._last_tx = time.time()
+        self._last_rx = time.time()
+        # Keepalive set in CONNECT is 30s; ping comfortably below that.
+        self._ping_interval_s = 10.0
 
     def connect(self, timeout_s: int = 10) -> None:
         _log(f"mqtt connect: tcp://{self.host}:{self.port} client_id={self.client_id}")
@@ -287,6 +307,9 @@ class MqttClient:
             raise E2EError(f"MQTT connect refused rc={rc}")
 
         self.sock = sock
+        now = time.time()
+        self._last_tx = now
+        self._last_rx = now
         _log("mqtt connect: CONNACK accepted")
 
     def close(self) -> None:
@@ -308,6 +331,7 @@ class MqttClient:
         fixed = 0x30 | flags  # PUBLISH QoS0
         body = _encode_utf8(topic) + payload.encode("utf-8")
         self.sock.sendall(bytes([fixed]) + _encode_varint(len(body)) + body)
+        self._last_tx = time.time()
         _log(f"mqtt publish: topic={topic} retain={int(retain)} bytes={len(payload)}")
 
     def subscribe(self, topic_filter: str, *, force: bool = False) -> None:
@@ -321,6 +345,7 @@ class MqttClient:
         payload = _encode_utf8(topic_filter) + bytes([0x00])  # QoS 0
         body = vh + payload
         self.sock.sendall(bytes([0x82]) + _encode_varint(len(body)) + body)
+        self._last_tx = time.time()
 
         # SUBACK (brokers may deliver retained PUBLISHes very quickly; accept interleaving).
         deadline = time.time() + 10
@@ -360,6 +385,7 @@ class MqttClient:
             raise E2EError("MQTT not connected")
         deadline = time.time() + float(timeout_s)
         while time.time() < deadline:
+            self.ping_if_needed()
             remaining = max(0.1, min(5.0, deadline - time.time()))
             pkt_type, _flags, data = self._read_packet(timeout_s=remaining)
             if pkt_type == 3:  # PUBLISH
@@ -368,6 +394,20 @@ class MqttClient:
                 return topic, payload
             # Ignore other packet types.
         raise E2EError("Timeout waiting for MQTT publish")
+
+    def ping_if_needed(self) -> None:
+        if not self.sock:
+            return
+        now = time.time()
+        last = max(self._last_tx, self._last_rx)
+        if (now - last) < self._ping_interval_s:
+            return
+        try:
+            self.sock.sendall(b"\xC0\x00")  # PINGREQ
+            self._last_tx = now
+            _log("mqtt pingreq")
+        except OSError:
+            raise E2EError("MQTT socket closed")
 
     def _read_packet(self, timeout_s: float) -> Tuple[int, int, bytes]:
         if not self.sock:
@@ -381,6 +421,7 @@ class MqttClient:
                 flags = b1 & 0x0F
                 rl = _read_varint(self.sock)
                 data = _read_exact(self.sock, rl)
+                self._last_rx = time.time()
                 return pkt_type, flags, data
             except TimeoutError as e:
                 raise E2EError("Timeout waiting for MQTT publish") from e
@@ -512,9 +553,16 @@ def _assert_eventually(
         time.sleep(poll_s)
     raise E2EError(f"Timeout waiting for: {name}. Last observed: {last_detail}")
 
-def _fetch_latest_json(mqtt: MqttClient, topic: str, label: str) -> dict[str, Any]:
+
+def _sleep_with_mqtt(mqtt: MqttClient, seconds: float) -> None:
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        mqtt.ping_if_needed()
+        time.sleep(1.0)
+
+def _fetch_latest_json(mqtt: MqttClient, topic: str, label: str, *, timeout_s: int = 15) -> dict[str, Any]:
     mqtt.subscribe(topic, force=True)
-    deadline = time.time() + 15
+    deadline = time.time() + timeout_s
     last_observed = ""
     held: list[Tuple[str, str]] = []
     while time.time() < deadline:
@@ -565,7 +613,9 @@ def _fetch_status_core(mqtt: MqttClient, topic: str) -> dict[str, Any]:
     return _fetch_latest_json(mqtt, topic, label="core")
 
 def _fetch_boot(mqtt: MqttClient, boot_topic: str) -> dict[str, Any]:
-    return _fetch_latest_json(mqtt, boot_topic, label="boot")
+    # Boot is retained, but if the broker has restarted (no retained state), we may need to
+    # wait for a device reboot to republish it.
+    return _fetch_latest_json(mqtt, boot_topic, label="boot", timeout_s=60)
 
 def _fetch_stub(mqtt: MqttClient, topic: str) -> dict[str, Any]:
     return _fetch_latest_json(mqtt, topic, label="stub")
@@ -629,12 +679,17 @@ def _device_is_latest_stub(
     expected_build_ts_ms: int,
     status_poll_suffix: str,
 ) -> Tuple[bool, str]:
-    boot = _fetch_boot(mqtt, f"{device_root}/boot")
-    fw_ts = boot.get("fw_build_ts_ms")
-    if not isinstance(fw_ts, int):
-        return False, f"boot.fw_build_ts_ms missing/invalid (keys={sorted(boot.keys())})"
-    if fw_ts != expected_build_ts_ms:
-        return False, f"fw_build_ts_ms={fw_ts} expected={expected_build_ts_ms}"
+    try:
+        boot = _fetch_boot(mqtt, f"{device_root}/boot")
+        fw_ts = boot.get("fw_build_ts_ms")
+        if not isinstance(fw_ts, int):
+            return False, f"boot.fw_build_ts_ms missing/invalid (keys={sorted(boot.keys())})"
+        if fw_ts != expected_build_ts_ms:
+            return False, f"fw_build_ts_ms={fw_ts} expected={expected_build_ts_ms}"
+    except E2EError as e:
+        # If the broker doesn't have retained boot state (e.g. broker restart), we can't verify build id
+        # until the device republishes /boot (usually on reboot). Treat as "not verified".
+        return False, f"boot_unavailable ({e})"
 
     poll = _fetch_poll(mqtt, f"{device_root}{status_poll_suffix}")
     backend = poll.get("rs485_backend")
@@ -654,6 +709,23 @@ def _ensure_latest_stub_via_ota(
     if ok:
         print("[e2e] device already on latest stub firmware")
         return
+
+    # If we can't read /boot (no retained), try a NORMAL reboot to force boot republish before doing OTA.
+    if detail.startswith("boot_unavailable"):
+        normal_path = os.environ.get("DEVICE_REBOOT_NORMAL_PATH") or _discover_reboot_normal_path_from_code()
+        if normal_path:
+            normal_url = http_base.rstrip("/") + normal_path
+            print(f"[e2e] boot topic unavailable; POST {normal_path} to force boot republish")
+            try:
+                _http_post_simple(normal_url, timeout_s=10)
+            except Exception as e:
+                print(f"[e2e] reboot-normal failed: {e}; continuing")
+            _sleep_with_mqtt(mqtt, 8)
+            ok2, detail2 = _device_is_latest_stub(mqtt, device_root, expected_ts, status_poll_suffix)
+            if ok2:
+                print("[e2e] device already on latest stub firmware (boot republished)")
+                return
+            detail = detail2
 
     print(f"[e2e] device not on latest stub ({detail}); performing OTA update")
 
@@ -679,7 +751,7 @@ def _ensure_latest_stub_via_ota(
         print("[e2e] reboot endpoint not found (old firmware or not in NORMAL); continuing with direct upload")
 
     # Give the device time to reboot and bring the portal up.
-    time.sleep(8)
+    _sleep_with_mqtt(mqtt, 8)
 
     print(f"[e2e] POST {upload_path} (upload firmware: {firmware_path.name})")
     status: Optional[int] = None
@@ -755,7 +827,23 @@ def main() -> int:
 
     def set_intervals(entity_to_freq: dict[str, str]) -> None:
         # Firmware expects a flat JSON object mapping entity name -> freq string.
-        mqtt.publish(f"{device_root}/config/set", json.dumps(entity_to_freq), retain=False)
+        # mqttCallback() has a fixed 512-byte buffer, so keep individual payloads comfortably below that.
+        items = list(entity_to_freq.items())
+        if not items:
+            return
+        max_payload_bytes = 420
+        chunk: dict[str, str] = {}
+        for key, value in items:
+            candidate = dict(chunk)
+            candidate[key] = value
+            payload = json.dumps(candidate)
+            if len(payload.encode("utf-8")) > max_payload_bytes and chunk:
+                mqtt.publish(f"{device_root}/config/set", json.dumps(chunk), retain=False)
+                chunk = {key: value}
+            else:
+                chunk = candidate
+        if chunk:
+            mqtt.publish(f"{device_root}/config/set", json.dumps(chunk), retain=False)
 
     def _wait_for_inverter_identity() -> str:
         def pred() -> Tuple[bool, str]:
@@ -829,6 +917,33 @@ def main() -> int:
 
         # Ensure we can assert on the actual dispatch start register value.
         reg_dispatch_start = _discover_register_value("REG_DISPATCH_RW_DISPATCH_START")
+        dispatch_start_start = _discover_define_value("DISPATCH_START_START")
+
+        # Also validate write -> read feedback via the existing Register_Number/Register_Value entities.
+        # Re-enable and speed up Register_Value in case prior runs changed intervals.
+        set_intervals({"Register_Value": "freqTenSec"})
+        regnum_topic = _state_topic(ha_unique, "Register_Number")
+        val_topic = _state_topic(ha_unique, "Register_Value")
+        mqtt.subscribe(regnum_topic, force=True)
+        mqtt.subscribe(val_topic, force=True)
+
+        # Point Register_Value at the dispatch-start register, and wait until the firmware confirms it.
+        def ensure_regnum_set() -> None:
+            deadline = time.time() + 30
+            last_seen = ""
+            while time.time() < deadline:
+                mqtt.publish(f"{base}/Register_Number/command", str(reg_dispatch_start), retain=False)
+                try:
+                    last_seen = _fetch_latest_text(mqtt, regnum_topic, label="reg_number_state")
+                    if last_seen.strip() == str(reg_dispatch_start):
+                        return
+                except E2EError:
+                    pass
+                time.sleep(1.0)
+            raise E2EError(f"Register_Number did not update to {reg_dispatch_start}; last_seen={last_seen!r}")
+
+        ensure_regnum_set()
+        before_val = _fetch_latest_text(mqtt, val_topic, label="dispatch_start_before")
 
         before = _fetch_poll(mqtt, poll_topic)
         before_writes = int(before.get("rs485_stub_writes", 0))
@@ -860,28 +975,159 @@ def main() -> int:
 
         _assert_eventually("dispatch write observed in stub backend", pred, timeout_s=45, poll_s=3.0)
 
+        # Now assert that subsequent reads/publishes reflect the effect of the write.
+        deadline = time.time() + 60
+        last_val = before_val
+        while time.time() < deadline:
+            last_val = _fetch_latest_text(mqtt, val_topic, label="dispatch_start_after")
+            normalized = last_val.strip().lower()
+            if normalized in ("start", "started") or last_val.strip() == str(dispatch_start_start):
+                return
+            time.sleep(1.0)
+        raise E2EError(
+            f"Register_Value did not reflect dispatch_start change; expected 'Start' (or {dispatch_start_start}) "
+            f"but got last={last_val!r} initial={before_val!r}"
+        )
+
+    def case_dispatch_write_feedback_via_register_value() -> None:
+        print("[e2e] case: dispatch write feedback (Register_Value reflects new dispatch state)")
+        # Coverage is now handled in case_dispatch_write_via_commands() to avoid duplicated, flaky sequencing.
+        return
+
+    def case_strict_unknown_snapshot_has_no_unknown_reads() -> None:
+        print("[e2e] case: strict unknown-register protection (snapshot path)")
+        # Strict mode should be safe for ESS snapshot: the stub must implement all snapshot registers.
+        # To keep this test scoped to the snapshot path (and not other entities that perform Modbus reads),
+        # temporarily disable known non-snapshot entities that read Modbus directly.
+        set_intervals(
+            {
+                "Inverter_version": "freqDisabled",
+                "Inverter_SN": "freqDisabled",
+                "EMS_version": "freqDisabled",
+                "EMS_SN": "freqDisabled",
+                "ESS_Energy_Charge": "freqDisabled",
+                "ESS_Energy_Discharge": "freqDisabled",
+                "Grid_Regulation": "freqDisabled",
+                "Grid_Energy_To": "freqDisabled",
+                "Grid_Energy_From": "freqDisabled",
+                "Battery_Capacity": "freqDisabled",
+                "Inverter_Temp": "freqDisabled",
+                "Battery_Temp": "freqDisabled",
+                "Battery_Faults": "freqDisabled",
+                "Battery_Warnings": "freqDisabled",
+                "Inverter_Faults": "freqDisabled",
+                "Inverter_Warnings": "freqDisabled",
+                "Solar_Energy": "freqDisabled",
+                "Frequency": "freqDisabled",
+                "System_Faults": "freqDisabled",
+                "Register_Value": "freqDisabled",
+            }
+        )
+
+        set_mode('{"mode":"online","strict_unknown":1}')
+        # Wait until strict_unknown is actually applied (status is asynchronous).
+        _assert_eventually(
+            "strict_unknown applied",
+            lambda: (
+                bool(_fetch_stub(mqtt, stub_topic).get("strict_unknown", False)),
+                "waiting",
+            ),
+            timeout_s=30,
+            poll_s=2.0,
+        )
+
+        # Baseline counters after strict mode is applied (firmware may reset counters on apply).
+        baseline_stub = _fetch_stub(mqtt, stub_topic)
+        baseline_unknown = int(baseline_stub.get("stub_unknown_reads", 0))
+        baseline_attempts = int(_fetch_poll(mqtt, poll_topic).get("ess_snapshot_attempts", 0))
+
+        def pred() -> Tuple[bool, str]:
+            cur_poll = _fetch_poll(mqtt, poll_topic)
+            cur_stub = _fetch_stub(mqtt, stub_topic)
+            attempts = int(cur_poll.get("ess_snapshot_attempts", 0))
+            ok = bool(cur_poll.get("ess_snapshot_last_ok", False))
+            unknown = int(cur_stub.get("stub_unknown_reads", 0))
+            last_read_reg = int(cur_stub.get("last_read_reg", 0))
+            last_fn = int(cur_stub.get("last_fn", 0))
+            last_fail_reg = int(cur_stub.get("last_fail_reg", 0))
+            last_fail_fn = int(cur_stub.get("last_fail_fn", 0))
+            last_fail_type = str(cur_stub.get("last_fail_type", ""))
+            detail = (
+                f"attempts={attempts} ok={ok} unknown={unknown} unknown_baseline={baseline_unknown} "
+                f"last_read_reg={last_read_reg} last_fn={last_fn} "
+                f"last_fail_reg={last_fail_reg} last_fail_fn={last_fail_fn} last_fail_type={last_fail_type}"
+            )
+            # Wait until at least one new snapshot attempt occurred and succeeded, and unknown reads did not increase.
+            return (attempts > baseline_attempts and ok and unknown == baseline_unknown), detail
+
+        _assert_eventually("strict_unknown keeps snapshot OK with zero unknown-register reads", pred, timeout_s=70, poll_s=5.0)
+
+    def case_scheduler_idle_does_not_add_reads() -> None:
+        print("[e2e] case: scheduler selectivity (no extra reads during idle window)")
+        set_mode('{"mode":"online"}')
+        # Align by waiting for a snapshot attempt boundary.
+        base_poll = _fetch_poll(mqtt, poll_topic)
+        base_attempts = int(base_poll.get("ess_snapshot_attempts", 0))
+        _assert_eventually(
+            "wait for next snapshot attempt",
+            lambda: (int(_fetch_poll(mqtt, poll_topic).get("ess_snapshot_attempts", 0)) > base_attempts, "waiting"),
+            timeout_s=60,
+            poll_s=3.0,
+        )
+        s1 = _fetch_stub(mqtt, stub_topic)
+        reads1 = int(s1.get("stub_reads", 0))
+
+        # For a window shorter than the 10s bucket, no ESS snapshot should run => no Modbus reads should occur.
+        time.sleep(4.0)
+        s2 = _fetch_stub(mqtt, stub_topic)
+        reads2 = int(s2.get("stub_reads", 0))
+        if reads2 != reads1:
+            raise E2EError(f"Expected no stub reads during idle window (<10s), but reads changed: {reads1} -> {reads2}")
+
     def case_strict_unknown_register_reads() -> None:
         print("[e2e] case: strict/loose unknown register reads via Register_Value")
         ha_unique = _wait_for_inverter_identity()
 
+        # Prior cases may temporarily disable Register_Value to keep snapshot tests scoped; re-enable it here
+        # and speed it up so we don't wait a full minute.
+        set_intervals({"Register_Value": "freqTenSec"})
+
         # Use a handled register that is not virtualized by the stub (so the stub sees it as unknown).
         reg = _discover_register_value("REG_INVERTER_HOME_R_INVERTER_TEMP")
+
+        # Make sure Register_Number is actually applied before we assert on Register_Value output.
+        regnum_topic = _state_topic(ha_unique, "Register_Number")
+        mqtt.subscribe(regnum_topic, force=True)
 
         val_topic = _state_topic(ha_unique, "Register_Value")
         mqtt.subscribe(val_topic, force=True)
 
+        def ensure_regnum_set() -> None:
+            deadline = time.time() + 30
+            last_seen = ""
+            while time.time() < deadline:
+                mqtt.publish(_command_topic(ha_unique, "Register_Number"), str(reg), retain=False)
+                try:
+                    last_seen = _fetch_latest_text(mqtt, regnum_topic, label="reg_number_state")
+                    if last_seen.strip() == str(reg):
+                        return
+                except E2EError:
+                    pass
+                time.sleep(1.0)
+            raise E2EError(f"Register_Number did not update to {reg}; last_seen={last_seen!r}")
+
+        ensure_regnum_set()
+
         before_stub = _fetch_stub(mqtt, stub_topic)
         before_unknown = int(before_stub.get("stub_unknown_reads", 0))
 
-        mqtt.publish(_command_topic(ha_unique, "Register_Number"), str(reg), retain=False)
-        # Force a schedule pass so Register_Value publishes promptly (it defaults to 1m frequency).
         set_mode('{"mode":"online","strict_unknown":0}')
         value_loose = _fetch_latest_text(mqtt, val_topic, label="reg_value")
         after_loose = _fetch_stub(mqtt, stub_topic)
 
         unknown_after = int(after_loose.get("stub_unknown_reads", 0))
         strict_after = bool(after_loose.get("strict_unknown", False))
-        if value_loose == "Slave Error" or unknown_after <= before_unknown or strict_after:
+        if value_loose in ("Slave Error", "Nothing read") or unknown_after <= before_unknown or strict_after:
             raise E2EError(
                 f"Expected loose unknown read (not Slave Error) and unknown_reads to increase. "
                 f"value={value_loose!r} unknown_before={before_unknown} unknown_after={unknown_after} strict={strict_after}"
@@ -1076,16 +1322,19 @@ def main() -> int:
             f2 = float(v2)
         except ValueError:
             raise E2EError(f"Unexpected SOC payloads (not floats): v1={v1!r} v2={v2!r}")
-        if f1 == f2:
+        if f2 <= f1:
             v3 = _wait_for_topic_change(mqtt, soc_topic, v2, timeout_s=45, label="soc")
             f3 = float(v3)
-            if f2 == f3:
-                raise E2EError(f"SOC did not drift across publishes: {v1!r} {v2!r} {v3!r}")
+            if f3 <= f2:
+                raise E2EError(f"SOC did not monotonically increase across publishes: {v1!r} {v2!r} {v3!r}")
 
     case_offline()
     case_fail_then_recover()
     case_online()
     case_dispatch_write_via_commands()
+    case_dispatch_write_feedback_via_register_value()
+    case_strict_unknown_snapshot_has_no_unknown_reads()
+    case_scheduler_idle_does_not_add_reads()
     case_strict_unknown_register_reads()
     case_fail_specific_snapshot_register_and_type()
     case_fail_every_n_snapshot_attempts()
