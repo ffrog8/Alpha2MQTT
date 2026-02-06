@@ -205,6 +205,17 @@ def _discover_define_value(name: str) -> int:
         raise E2EError(f"Could not discover #define value for {name} from Definitions.h")
     return int(m.group(1), 0)
 
+def _discover_define_string(name: str) -> str:
+    """
+    Extract string #defines from Definitions.h, e.g.:
+      #define OP_MODE_DESC_TARGET "Target SOC"
+    """
+    data = _firmware_definitions_h().read_text(encoding="utf-8", errors="replace")
+    m = re.search(rf"^\s*#define\s+{re.escape(name)}\s+\"([^\"]*)\"\s*$", data, flags=re.MULTILINE)
+    if not m:
+        raise E2EError(f"Could not discover string #define value for {name} from Definitions.h")
+    return m.group(1)
+
 def _discover_reboot_wifi_path_from_code() -> Optional[str]:
     data = _firmware_main_cpp().read_text(encoding="utf-8", errors="replace")
     # NORMAL-mode HTTP control plane route.
@@ -1054,17 +1065,43 @@ def main() -> int:
         before = _fetch_poll(mqtt, poll_topic)
         before_writes = int(before.get("rs485_stub_writes", 0))
 
+        op_mode_target = _discover_define_string("OP_MODE_DESC_TARGET")
+
         # Publish all required command knobs so the firmware considers A2M "ready".
         # Note: inverter command topics are only subscribed once inverter identity is known; to avoid a race where
         # we publish before subscriptions exist, we republish periodically while waiting.
         def publish_ready_commands() -> None:
-            mqtt.publish(f"{base}/Op_Mode/command", "target", retain=False)
+            mqtt.publish(f"{base}/Op_Mode/command", op_mode_target, retain=False)
             mqtt.publish(f"{base}/SOC_Target/command", "80", retain=False)
             mqtt.publish(f"{base}/Charge_Power/command", "1200", retain=False)
             mqtt.publish(f"{base}/Discharge_Power/command", "1200", retain=False)
             mqtt.publish(f"{base}/Push_Power/command", "500", retain=False)
 
+        # Subscribe to the state topics too, and wait until the firmware echoes these values back.
+        # This makes the test deterministic: it proves the callback/subscription path is active before we expect a dispatch write.
+        def wait_for_state(name: str, expected: str) -> None:
+            st = _state_topic(ha_unique, name)
+            mqtt.subscribe(st, force=True)
+            cmd = f"{base}/{name}/command"
+            deadline = time.time() + 35
+            last_seen = ""
+            while time.time() < deadline:
+                mqtt.publish(cmd, expected, retain=False)
+                try:
+                    last_seen = _fetch_latest_text(mqtt, st, label=f"{name}_state")
+                    if last_seen.strip().lower() == expected.strip().lower():
+                        return
+                except E2EError:
+                    pass
+                time.sleep(1.0)
+            raise E2EError(f"{name} did not update to {expected!r}; last_seen={last_seen!r}")
+
         publish_ready_commands()
+        wait_for_state("Op_Mode", op_mode_target)
+        wait_for_state("SOC_Target", "80")
+        wait_for_state("Charge_Power", "1200")
+        wait_for_state("Discharge_Power", "1200")
+        wait_for_state("Push_Power", "500")
         last_pub = time.time()
 
         def pred() -> Tuple[bool, str]:
