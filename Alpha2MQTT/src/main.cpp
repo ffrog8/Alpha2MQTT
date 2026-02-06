@@ -22,6 +22,7 @@ First, go and customise options at the top of Definitions.h!
 #include "../RS485Handler.h"
 #include "../Definitions.h"
 #include "../include/BootModes.h"
+#include "../include/BucketScheduler.h"
 #include "../include/MqttEntities.h"
 #include "../include/PortalConfig.h"
 #include "../include/RebootRequest.h"
@@ -130,6 +131,11 @@ uint32_t essSnapshotAttemptCount = 0;
 bool essSnapshotLastOk = false;
 uint32_t dispatchLastRunMs = 0;
 char dispatchLastSkipReason[48] = "";
+uint32_t schedTenSecLastRunMs = 0;
+uint32_t schedOneMinLastRunMs = 0;
+uint32_t schedFiveMinLastRunMs = 0;
+uint32_t schedOneHourLastRunMs = 0;
+uint32_t schedOneDayLastRunMs = 0;
 bool lastWifiConnected = false;
 bool lastMqttConnected = false;
 bool pendingWifiDisconnectEvent = false;
@@ -370,20 +376,6 @@ const char* wifiModeLabel(WiFiMode_t mode);
 void handlePortalStatusRequest(WiFiManager& wifiManager);
 bool portalHasPersistedWifiCredentials(void);
 void configHandlerSta(void);
-
-static inline bool mqttEntityUsesEssSnapshot(mqttEntityId id)
-{
-	switch (id) {
-	case mqttEntityId::entityInverterMode:
-	case mqttEntityId::entityPvPwr:
-	case mqttEntityId::entityGridPwr:
-	case mqttEntityId::entityBatPwr:
-	case mqttEntityId::entityBatSoc:
-		return true;
-	default:
-		return false;
-	}
-}
 
 void
 buildDeviceName(void)
@@ -4074,12 +4066,12 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 }
 
 	void
-	sendStatus(bool includeEssSnapshot)
-	{
-		char stateAddition[256] = "";
-		char netAddition[256] = "";
-		char pollAddition[512] = "";
-		char stubAddition[512] = "";
+		sendStatus(bool includeEssSnapshot)
+		{
+			char stateAddition[256] = "";
+			char netAddition[256] = "";
+			char pollAddition[768] = "";
+			char stubAddition[512] = "";
 		StatusCoreSnapshot core{};
 		StatusNetSnapshot net{};
 		StatusPollSnapshot poll{};
@@ -4163,12 +4155,17 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 			poll.rs485StubLastWriteStartReg = 0;
 			poll.rs485StubLastWriteMs = 0;
 #endif
-		poll.dispatchLastRunMs = dispatchLastRunMs;
-		poll.dispatchLastSkipReason = dispatchLastSkipReason;
+			poll.dispatchLastRunMs = dispatchLastRunMs;
+			poll.dispatchLastSkipReason = dispatchLastSkipReason;
+			poll.schedTenSecLastRunMs = schedTenSecLastRunMs;
+			poll.schedOneMinLastRunMs = schedOneMinLastRunMs;
+			poll.schedFiveMinLastRunMs = schedFiveMinLastRunMs;
+			poll.schedOneHourLastRunMs = schedOneHourLastRunMs;
+			poll.schedOneDayLastRunMs = schedOneDayLastRunMs;
 
-		if (!buildStatusCoreJson(core, stateAddition, sizeof(stateAddition))) {
-			return;
-		}
+			if (!buildStatusCoreJson(core, stateAddition, sizeof(stateAddition))) {
+				return;
+			}
 	resultAddedToPayload = addToPayload(stateAddition);
 	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
 		return;
@@ -4924,10 +4921,28 @@ sendData()
 	static unsigned long lastRunFiveMinutes = 0;
 	static unsigned long lastRunOneHour = 0;
 	static unsigned long lastRunOneDay = 0;
+	static bool membersInit = false;
+	static uint16_t *membersTenSec = nullptr;
+	static uint16_t *membersOneMin = nullptr;
+	static uint16_t *membersFiveMin = nullptr;
+	static uint16_t *membersOneHour = nullptr;
+	static uint16_t *membersOneDay = nullptr;
+	static size_t membersTenSecCount = 0;
+	static size_t membersOneMinCount = 0;
+	static size_t membersFiveMinCount = 0;
+	static size_t membersOneHourCount = 0;
+	static size_t membersOneDayCount = 0;
+	static bool tenSecHasEssSnapshot = false;
+	static bool oneMinHasEssSnapshot = false;
+	static bool fiveMinHasEssSnapshot = false;
+	static bool oneHourHasEssSnapshot = false;
+	static bool oneDayHasEssSnapshot = false;
 
 	if (resendAllData) {
 		resendAllData = false;
 		lastRunTenSeconds = lastRunOneMinute = lastRunFiveMinutes = lastRunOneHour = lastRunOneDay = 0;
+		// Polling config may have changed; rebuild bucket membership on the next due pass.
+		membersInit = false;
 	}
 
 	const bool dueTenSeconds = checkTimer(&lastRunTenSeconds, STATUS_INTERVAL_TEN_SECONDS);
@@ -4940,16 +4955,20 @@ sendData()
 		return;
 	}
 
-	// 10s bucket has a hard-coded prerequisite: refresh ESS snapshot (opData) immediately before publishing.
-	// Dispatch shares the same prerequisite boundary.
-	bool snapshotOkThisPass = false;
 	if (dueTenSeconds) {
-		if (bootPlan.inverter && inverterReady) {
-			snapshotOkThisPass = refreshEssSnapshot();
-		} else {
-			essSnapshotValid = false;
-		}
-		sendStatus(snapshotOkThisPass);
+		schedTenSecLastRunMs = lastRunTenSeconds;
+	}
+	if (dueOneMinute) {
+		schedOneMinLastRunMs = lastRunOneMinute;
+	}
+	if (dueFiveMinutes) {
+		schedFiveMinLastRunMs = lastRunFiveMinutes;
+	}
+	if (dueOneHour) {
+		schedOneHourLastRunMs = lastRunOneHour;
+	}
+	if (dueOneDay) {
+		schedOneDayLastRunMs = lastRunOneDay;
 	}
 
 	if (!inverterReady || !mqttEntitiesRtAvailable()) {
@@ -4960,13 +4979,77 @@ sendData()
 	const MqttEntityRuntime *rt = mqttEntitiesRt();
 	const int numberOfEntities = static_cast<int>(mqttEntitiesCount());
 
-	if (dueTenSeconds) {
-		for (int i = 0; i < numberOfEntities; i++) {
-			if (rt[i].effectiveFreq == mqttUpdateFreq::freqTenSec) {
-				sendDataFromMqttState(&entities[i], false);
-			}
+	// Build bucket membership once per boot (or after /config/set updates via resendAllData).
+	// This keeps the idle path O(1) and avoids full entity scans per bucket.
+	if (!membersInit) {
+		if (membersTenSec == nullptr) {
+			membersTenSec = new uint16_t[numberOfEntities];
+			membersOneMin = new uint16_t[numberOfEntities];
+			membersFiveMin = new uint16_t[numberOfEntities];
+			membersOneHour = new uint16_t[numberOfEntities];
+			membersOneDay = new uint16_t[numberOfEntities];
 		}
-		if (snapshotOkThisPass) {
+
+		BucketMembership membership = buildBucketMembership(
+			rt,
+			static_cast<size_t>(numberOfEntities),
+			membersTenSec,
+			membersOneMin,
+			membersFiveMin,
+			membersOneHour,
+			membersOneDay,
+			mqttEntityNeedsEssSnapshotByIndex);
+
+		membersTenSecCount = membership.tenSecCount;
+		membersOneMinCount = membership.oneMinCount;
+		membersFiveMinCount = membership.fiveMinCount;
+		membersOneHourCount = membership.oneHourCount;
+		membersOneDayCount = membership.oneDayCount;
+		tenSecHasEssSnapshot = membership.tenSecHasEssSnapshot;
+		oneMinHasEssSnapshot = membership.oneMinHasEssSnapshot;
+		fiveMinHasEssSnapshot = membership.fiveMinHasEssSnapshot;
+		oneHourHasEssSnapshot = membership.oneHourHasEssSnapshot;
+		oneDayHasEssSnapshot = membership.oneDayHasEssSnapshot;
+		membersInit = true;
+	}
+
+	// Bucket processing is runtime-driven: due buckets iterate their pre-built membership list.
+	// ESS snapshot is a bucket-scoped prerequisite and is refreshed once per scheduler pass
+	// (even if multiple buckets are due at the same time).
+	bool snapshotAttemptedThisPass = false;
+	bool snapshotOkThisPass = essSnapshotValid;
+
+	auto ensureSnapshotForBucket = [&](bool bucketNeedsSnapshot) -> bool {
+		if (!bucketNeedsSnapshot) {
+			return true;
+		}
+		if (!bootPlan.inverter || !inverterReady) {
+			essSnapshotValid = false;
+			snapshotOkThisPass = false;
+			return false;
+		}
+		if (!snapshotAttemptedThisPass) {
+			snapshotAttemptedThisPass = true;
+			snapshotOkThisPass = refreshEssSnapshot();
+		}
+		return snapshotOkThisPass;
+	};
+
+	if (dueTenSeconds) {
+		// 10s cadence also gates dispatch, which depends on the ESS snapshot.
+		const bool snapshotOkThisBucket = ensureSnapshotForBucket(true);
+
+		sendStatus(snapshotOkThisBucket);
+
+		for (size_t n = 0; n < membersTenSecCount; n++) {
+			const size_t idx = membersTenSec[n];
+			if (!shouldPublishEntityForBucket(mqttEntityNeedsEssSnapshotByIndex(idx), snapshotOkThisBucket)) {
+				continue;
+			}
+			sendDataFromMqttState(&entities[idx], false);
+		}
+
+		if (shouldRunDispatchForTenSecBucket(snapshotOkThisBucket)) {
 			checkAndSetDispatchMode();
 			dispatchLastSkipReason[0] = '\0';
 		} else {
@@ -4975,34 +5058,46 @@ sendData()
 	}
 
 	if (dueOneMinute) {
-		for (int i = 0; i < numberOfEntities; i++) {
-			if (rt[i].effectiveFreq == mqttUpdateFreq::freqOneMin) {
-				sendDataFromMqttState(&entities[i], false);
+		const bool snapshotOkThisBucket = ensureSnapshotForBucket(oneMinHasEssSnapshot);
+		for (size_t n = 0; n < membersOneMinCount; n++) {
+			const size_t idx = membersOneMin[n];
+			if (!shouldPublishEntityForBucket(mqttEntityNeedsEssSnapshotByIndex(idx), snapshotOkThisBucket)) {
+				continue;
 			}
+			sendDataFromMqttState(&entities[idx], false);
 		}
 	}
 
 	if (dueFiveMinutes) {
-		for (int i = 0; i < numberOfEntities; i++) {
-			if (rt[i].effectiveFreq == mqttUpdateFreq::freqFiveMin) {
-				sendDataFromMqttState(&entities[i], false);
+		const bool snapshotOkThisBucket = ensureSnapshotForBucket(fiveMinHasEssSnapshot);
+		for (size_t n = 0; n < membersFiveMinCount; n++) {
+			const size_t idx = membersFiveMin[n];
+			if (!shouldPublishEntityForBucket(mqttEntityNeedsEssSnapshotByIndex(idx), snapshotOkThisBucket)) {
+				continue;
 			}
+			sendDataFromMqttState(&entities[idx], false);
 		}
 	}
 
 	if (dueOneHour) {
-		for (int i = 0; i < numberOfEntities; i++) {
-			if (rt[i].effectiveFreq == mqttUpdateFreq::freqOneHour) {
-				sendDataFromMqttState(&entities[i], false);
+		const bool snapshotOkThisBucket = ensureSnapshotForBucket(oneHourHasEssSnapshot);
+		for (size_t n = 0; n < membersOneHourCount; n++) {
+			const size_t idx = membersOneHour[n];
+			if (!shouldPublishEntityForBucket(mqttEntityNeedsEssSnapshotByIndex(idx), snapshotOkThisBucket)) {
+				continue;
 			}
+			sendDataFromMqttState(&entities[idx], false);
 		}
 	}
 
 	if (dueOneDay) {
-		for (int i = 0; i < numberOfEntities; i++) {
-			if (rt[i].effectiveFreq == mqttUpdateFreq::freqOneDay) {
-				sendDataFromMqttState(&entities[i], false);
+		const bool snapshotOkThisBucket = ensureSnapshotForBucket(oneDayHasEssSnapshot);
+		for (size_t n = 0; n < membersOneDayCount; n++) {
+			const size_t idx = membersOneDay[n];
+			if (!shouldPublishEntityForBucket(mqttEntityNeedsEssSnapshotByIndex(idx), snapshotOkThisBucket)) {
+				continue;
 			}
+			sendDataFromMqttState(&entities[idx], false);
 		}
 	}
 }
@@ -5029,7 +5124,7 @@ sendDataFromMqttState(const mqttState *singleEntity, bool doHomeAssistant)
 	     effectiveFreq == mqttUpdateFreq::freqDisabled)) {
 		return;
 	}
-	if (!doHomeAssistant && mqttEntityUsesEssSnapshot(singleEntity->entityId) && !essSnapshotValid) {
+	if (!doHomeAssistant && mqttEntityNeedsEssSnapshotByIndex(idx) && !essSnapshotValid) {
 		return;
 	}
 

@@ -135,13 +135,18 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		"\"rs485_stub_last_write_reg\":%u,"
 		"\"rs485_stub_last_write_ms\":%lu,"
 		"\"ess_snapshot_last_ok\":%s,"
-		"\"ess_snapshot_attempts\":%lu,"
-		"\"dispatch_last_run_ms\":%lu,"
-		"\"dispatch_last_skip_reason\":\"%s\","
-		"\"poll_ok_count\":%lu,"
-		"\"poll_err_count\":%lu,"
-		"\"last_poll_ms\":%lu,"
-		"\"last_ok_ts_ms\":%lu,"
+			"\"ess_snapshot_attempts\":%lu,"
+			"\"dispatch_last_run_ms\":%lu,"
+			"\"dispatch_last_skip_reason\":\"%s\","
+			"\"sched_10s_last_run_ms\":%lu,"
+			"\"sched_1m_last_run_ms\":%lu,"
+			"\"sched_5m_last_run_ms\":%lu,"
+			"\"sched_1h_last_run_ms\":%lu,"
+			"\"sched_1d_last_run_ms\":%lu,"
+			"\"poll_ok_count\":%lu,"
+			"\"poll_err_count\":%lu,"
+			"\"last_poll_ms\":%lu,"
+			"\"last_ok_ts_ms\":%lu,"
 		"\"last_err_ts_ms\":%lu,"
 		"\"last_err_code\":%d,"
 		"\"rs485_probe_last_attempt_ms\":%lu,"
@@ -153,14 +158,19 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		static_cast<unsigned long>(snapshot.rs485StubWriteCount),
 		static_cast<unsigned>(snapshot.rs485StubLastWriteStartReg),
 		static_cast<unsigned long>(snapshot.rs485StubLastWriteMs),
-		snapshot.essSnapshotLastOk ? "true" : "false",
-		static_cast<unsigned long>(snapshot.essSnapshotAttempts),
-		static_cast<unsigned long>(snapshot.dispatchLastRunMs),
-		snapshot.dispatchLastSkipReason ? snapshot.dispatchLastSkipReason : "",
-		static_cast<unsigned long>(snapshot.pollOkCount),
-		static_cast<unsigned long>(snapshot.pollErrCount),
-		static_cast<unsigned long>(snapshot.lastPollMs),
-		static_cast<unsigned long>(snapshot.lastOkTsMs),
+			snapshot.essSnapshotLastOk ? "true" : "false",
+			static_cast<unsigned long>(snapshot.essSnapshotAttempts),
+			static_cast<unsigned long>(snapshot.dispatchLastRunMs),
+			snapshot.dispatchLastSkipReason ? snapshot.dispatchLastSkipReason : "",
+			static_cast<unsigned long>(snapshot.schedTenSecLastRunMs),
+			static_cast<unsigned long>(snapshot.schedOneMinLastRunMs),
+			static_cast<unsigned long>(snapshot.schedFiveMinLastRunMs),
+			static_cast<unsigned long>(snapshot.schedOneHourLastRunMs),
+			static_cast<unsigned long>(snapshot.schedOneDayLastRunMs),
+			static_cast<unsigned long>(snapshot.pollOkCount),
+			static_cast<unsigned long>(snapshot.pollErrCount),
+			static_cast<unsigned long>(snapshot.lastPollMs),
+			static_cast<unsigned long>(snapshot.lastOkTsMs),
 		static_cast<unsigned long>(snapshot.lastErrTsMs),
 		snapshot.lastErrCode,
 		static_cast<unsigned long>(snapshot.rs485ProbeLastAttemptMs),

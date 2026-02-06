@@ -15,6 +15,9 @@ struct MqttEntityRuntime {
 const mqttState *mqttEntitiesDesc();
 size_t mqttEntitiesCount();
 
+// Read-only metadata stored alongside the descriptor table.
+bool mqttEntityNeedsEssSnapshotByIndex(size_t idx);
+
 bool mqttEntitiesRtAvailable();
 MqttEntityRuntime *mqttEntitiesRt();
 

@@ -92,8 +92,13 @@ TEST_CASE("status poll JSON builder includes required keys")
 	snapshot.rs485StubLastWriteMs = 4242;
 	snapshot.dispatchLastRunMs = 0;
 	snapshot.dispatchLastSkipReason = "ess_snapshot_failed";
+	snapshot.schedTenSecLastRunMs = 0;
+	snapshot.schedOneMinLastRunMs = 0;
+	snapshot.schedFiveMinLastRunMs = 0;
+	snapshot.schedOneHourLastRunMs = 0;
+	snapshot.schedOneDayLastRunMs = 0;
 
-	char buffer[512];
+	char buffer[768];
 	CHECK(buildStatusPollJson(snapshot, buffer, sizeof(buffer)));
 
 	std::string payload(buffer);

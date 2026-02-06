@@ -43,3 +43,32 @@ TEST_CASE("mqtt entities: runtime is allocated only when enabled")
 	}
 }
 
+TEST_CASE("mqtt entities: ESS snapshot dependency metadata matches expected entities")
+{
+	initMqttEntitiesRtIfNeeded(true);
+	REQUIRE(mqttEntitiesRtAvailable());
+
+	const mqttState *desc = mqttEntitiesDesc();
+	const size_t count = mqttEntitiesCount();
+
+	auto findIndex = [&](const char *name) -> size_t {
+		for (size_t i = 0; i < count; ++i) {
+			if (std::strcmp(desc[i].mqttName, name) == 0) {
+				return i;
+			}
+		}
+		return count;
+	};
+
+	const size_t socIdx = findIndex("State_of_Charge");
+	REQUIRE(socIdx < count);
+	CHECK(mqttEntityNeedsEssSnapshotByIndex(socIdx));
+
+	const size_t essIdx = findIndex("ESS_Power");
+	REQUIRE(essIdx < count);
+	CHECK(mqttEntityNeedsEssSnapshotByIndex(essIdx));
+
+	const size_t uptimeIdx = findIndex("A2M_uptime");
+	REQUIRE(uptimeIdx < count);
+	CHECK_FALSE(mqttEntityNeedsEssSnapshotByIndex(uptimeIdx));
+}

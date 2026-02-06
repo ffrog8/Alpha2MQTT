@@ -8,3 +8,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /repo
+
+# Copy the repo into the image so tests can run even when the Docker daemon
+# cannot access local bind mounts (e.g., remote Docker socket).
+COPY . /repo

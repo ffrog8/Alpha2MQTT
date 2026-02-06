@@ -1,0 +1,17 @@
+.git
+.gitmodules
+.github
+
+# Local build artifacts
+Alpha2MQTT/build
+Alpha2MQTT/.pio
+Alpha2MQTT/.vscode
+
+# Host test build dir (if present)
+build
+cmake-build-*
+
+# OS/editor noise
+**/.DS_Store
+**/.idea
+**/.cache
