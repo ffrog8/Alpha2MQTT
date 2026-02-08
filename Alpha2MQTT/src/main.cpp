@@ -25,6 +25,8 @@ First, go and customise options at the top of Definitions.h!
 #include "../include/BucketScheduler.h"
 #include "../include/MqttEntities.h"
 #include "../include/PortalConfig.h"
+#include "../include/ConfigCodec.h"
+#include "../include/PollingConfig.h"
 #include "../include/RebootRequest.h"
 #include "../include/StatusReporting.h"
 #include "../include/Rs485ProbeLogic.h"
@@ -84,6 +86,9 @@ char rs485StubControlTopic[96];
 char lastResetReason[64] = "";
 HttpServer httpServer(80);
 bool httpControlPlaneEnabled = false;
+static bool inMqttCallback = false;
+static bool pendingPollingConfigSet = false;
+static char pendingPollingConfigPayload[512] = "";
 
 enum PortalStatus : uint8_t {
 	portalStatusIdle = 0,
@@ -105,6 +110,9 @@ unsigned long portalRebootAt = 0;
 const char kPreferenceBootIntent[] = "Boot_Intent";
 const char kPreferenceBootMode[] = "Boot_Mode";
 const char kPreferenceDeviceSerial[] = "Device_Serial";
+const char kPreferenceBucketMap[] = "Bucket_Map";
+const char kPreferencePollInterval[] = "poll_interval_s";
+const char kPreferenceBucketMapMigrated[] = "Bucket_Map_Migrated";
 BootIntent currentBootIntent = BootIntent::Normal;
 BootIntent bootIntentForPublish = BootIntent::Normal;
 BootMode currentBootMode = BootMode::Normal;
@@ -166,16 +174,32 @@ char* _mqttPayload;
 bool resendHaData = false;
 bool resendAllData = false;
 char _pollingLastChange[32] = "";
-// freqNever is reserved for legacy defaults and is not user-settable via /config/set.
+// Bucket ids accepted via /config/set mapping (legacy freq* aliases are still accepted).
 const char *_pollingAllowedIntervals[] = {
-	"freqTenSec",
-	"freqOneMin",
-	"freqFiveMin",
-	"freqOneHour",
-	"freqOneDay",
-	"freqDisabled"
+	"ten_sec",
+	"one_min",
+	"five_min",
+	"one_hour",
+	"one_day",
+	"user",
+	"disabled"
 };
 const size_t _pollingAllowedIntervalCount = sizeof(_pollingAllowedIntervals) / sizeof(_pollingAllowedIntervals[0]);
+
+uint32_t pollIntervalSeconds = kPollIntervalDefaultSeconds;
+uint32_t persistLoadOk = 0;
+uint32_t persistLoadErr = 0;
+uint32_t persistUnknownEntityCount = 0;
+uint32_t persistInvalidBucketCount = 0;
+uint32_t persistDuplicateEntityCount = 0;
+
+uint32_t schedUserLastRunMs = 0;
+uint16_t schedTenSecCount = 0;
+uint16_t schedOneMinCount = 0;
+uint16_t schedFiveMinCount = 0;
+uint16_t schedOneHourCount = 0;
+uint16_t schedOneDayCount = 0;
+uint16_t schedUserCount = 0;
 
 // OLED variables
 char _oledOperatingIndicator = '*';
@@ -337,11 +361,9 @@ void publishHaEntityDiscovery(const mqttState*);
 bool handlePollingConfigSet(const char*);
 const char* mqttUpdateFreqToString(mqttUpdateFreq);
 bool mqttUpdateFreqFromString(const char*, mqttUpdateFreq*);
-bool isValidMqttUpdateFreq(int);
 void updatePollingLastChange(void);
 void getPollingTimestamp(char*, size_t);
 void buildPollingKey(const mqttState*, char*, size_t);
-const mqttState* lookupEntityByName(const char*);
 void checkAndSetDispatchMode(void);
 void printWifiBars(int rssi);
 void getOpModeDesc(char *dest, size_t size, enum opMode mode);
@@ -464,7 +486,7 @@ pumpMqttDuringSetup(uint32_t durationMs)
 void
 serviceRs485Hooks(void)
 {
-	if (_mqtt.connected()) {
+	if (_mqtt.connected() && !inMqttCallback) {
 		_mqtt.loop();
 	}
 	if (httpControlPlaneEnabled) {
@@ -2075,6 +2097,11 @@ loop()
 		}
 	}
 
+	if (bootPlan.mqtt && pendingPollingConfigSet) {
+		pendingPollingConfigSet = false;
+		handlePollingConfigSet(pendingPollingConfigPayload);
+	}
+
 	if (httpControlPlaneEnabled) {
 		httpServer.handleClient();
 	}
@@ -2138,12 +2165,6 @@ getUptimeSeconds(void)
 	return uptimeSecondsSaved + uptimeSeconds;
 }
 
-bool
-isValidMqttUpdateFreq(int value)
-{
-	return value >= mqttUpdateFreq::freqTenSec && value <= mqttUpdateFreq::freqDisabled;
-}
-
 const char*
 mqttUpdateFreqToString(mqttUpdateFreq value)
 {
@@ -2158,6 +2179,8 @@ mqttUpdateFreqToString(mqttUpdateFreq value)
 		return "freqOneHour";
 	case mqttUpdateFreq::freqOneDay:
 		return "freqOneDay";
+	case mqttUpdateFreq::freqUser:
+		return "freqUser";
 	case mqttUpdateFreq::freqNever:
 		return "freqNever";
 	case mqttUpdateFreq::freqDisabled:
@@ -2206,6 +2229,10 @@ mqttUpdateFreqFromString(const char *value, mqttUpdateFreq *result)
 		*result = mqttUpdateFreq::freqOneDay;
 		return true;
 	}
+	if (strcmp(value, "freqUser") == 0) {
+		*result = mqttUpdateFreq::freqUser;
+		return true;
+	}
 	if (strcmp(value, "freqDisabled") == 0) {
 		*result = mqttUpdateFreq::freqDisabled;
 		return true;
@@ -2219,6 +2246,15 @@ buildPollingKey(const mqttState *entity, char *target, size_t size)
 	snprintf(target, size, "Freq_%u", static_cast<unsigned int>(entity->entityId));
 }
 
+static inline void
+maybeYield()
+{
+	if (!inMqttCallback) {
+		yield();
+	}
+}
+
+
 void
 getPollingTimestamp(char *target, size_t size)
 {
@@ -2230,8 +2266,18 @@ getPollingTimestamp(char *target, size_t size)
 		result = _registerHandler->readHandledRegister(REG_CUSTOM_SYSTEM_DATE_TIME, &response);
 		if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess &&
 		    response.dataValueFormatted[0] != 0) {
-			strlcpy(target, response.dataValueFormatted, size);
-			return;
+			bool printable = true;
+			for (size_t i = 0; response.dataValueFormatted[i] != '\0'; i++) {
+				const unsigned char ch = static_cast<unsigned char>(response.dataValueFormatted[i]);
+				if (ch < 0x20 || ch > 0x7e) {
+					printable = false;
+					break;
+				}
+			}
+			if (printable) {
+				strlcpy(target, response.dataValueFormatted, size);
+				return;
+			}
 		}
 	}
 
@@ -2250,6 +2296,59 @@ updatePollingLastChange(void)
 }
 
 void
+recomputeBucketCounts(void)
+{
+	if (!mqttEntitiesRtAvailable()) {
+		return;
+	}
+	const MqttEntityRuntime *rt = mqttEntitiesRt();
+	const size_t count = mqttEntitiesCount();
+	uint16_t tenSec = 0;
+	uint16_t oneMin = 0;
+	uint16_t fiveMin = 0;
+	uint16_t oneHour = 0;
+	uint16_t oneDay = 0;
+	uint16_t user = 0;
+
+	for (size_t i = 0; i < count; i++) {
+		switch (rt[i].bucketId) {
+		case BucketId::TenSec:
+			tenSec++;
+			break;
+		case BucketId::OneMin:
+			oneMin++;
+			break;
+		case BucketId::FiveMin:
+			fiveMin++;
+			break;
+		case BucketId::OneHour:
+			oneHour++;
+			break;
+		case BucketId::OneDay:
+			oneDay++;
+			break;
+		case BucketId::User:
+			user++;
+			break;
+		case BucketId::Disabled:
+		case BucketId::Unknown:
+		default:
+			break;
+		}
+		if ((i % 16) == 0) {
+			maybeYield();
+		}
+	}
+
+	schedTenSecCount = tenSec;
+	schedOneMinCount = oneMin;
+	schedFiveMinCount = fiveMin;
+	schedOneHourCount = oneHour;
+	schedOneDayCount = oneDay;
+	schedUserCount = user;
+}
+
+void
 loadPollingConfig(void)
 {
 	if (!mqttEntitiesRtAvailable()) {
@@ -2259,6 +2358,13 @@ loadPollingConfig(void)
 	const mqttState *entities = mqttEntitiesDesc();
 	MqttEntityRuntime *rt = mqttEntitiesRt();
 	int numberOfEntities = static_cast<int>(mqttEntitiesCount());
+	bool appliedBucketMap = false;
+
+	persistLoadOk = 0;
+	persistLoadErr = 0;
+	persistUnknownEntityCount = 0;
+	persistInvalidBucketCount = 0;
+	persistDuplicateEntityCount = 0;
 
 	preferences.begin(DEVICE_NAME, false);
 	{
@@ -2271,22 +2377,75 @@ loadPollingConfig(void)
 		}
 	}
 
+	uint32_t storedPollInterval = preferences.getUInt(kPreferencePollInterval, kPollIntervalDefaultSeconds);
+	pollIntervalSeconds = clampPollInterval(storedPollInterval);
+	if (pollIntervalSeconds != storedPollInterval) {
+		preferences.putUInt(kPreferencePollInterval, pollIntervalSeconds);
+	}
+
 	for (int i = 0; i < numberOfEntities; i++) {
-		char key[16];
-		int storedValue;
-
 		rt[i].defaultFreq = entities[i].updateFreq;
-		rt[i].effectiveFreq = entities[i].updateFreq;
+		applyBucketToRuntime(rt[i], bucketIdFromFreq(entities[i].updateFreq));
+	}
 
-		buildPollingKey(&entities[i], key, sizeof(key));
-		storedValue = preferences.getInt(key, static_cast<int>(rt[i].defaultFreq));
-
-		if (!isValidMqttUpdateFreq(storedValue)) {
-			rt[i].effectiveFreq = rt[i].defaultFreq;
-			preferences.putInt(key, static_cast<int>(rt[i].defaultFreq));
+	String bucketMap = preferences.getString(kPreferenceBucketMap, "");
+	const bool legacyMigrated = preferences.getBool(kPreferenceBucketMapMigrated, false);
+	if (bucketMap.length() > 0) {
+		appliedBucketMap = applyBucketMapString(bucketMap.c_str(),
+		                                        entities,
+		                                        static_cast<size_t>(numberOfEntities),
+		                                        rt,
+		                                        persistUnknownEntityCount,
+		                                        persistInvalidBucketCount,
+		                                        persistDuplicateEntityCount);
+		if (appliedBucketMap) {
+			persistLoadOk = 1;
 		} else {
-			rt[i].effectiveFreq = static_cast<mqttUpdateFreq>(storedValue);
+			persistLoadErr = 1;
 		}
+	} else if (!legacyMigrated) {
+		// One-time migration from legacy per-entity keys (Freq_<entityId>) to stable Bucket_Map.
+		// Legacy keys are removed after this pass and never consulted again.
+		int legacyValues[kMqttEntityMaxCount];
+		char key[16];
+		const size_t cappedCount = (numberOfEntities > static_cast<int>(kMqttEntityMaxCount))
+		                               ? kMqttEntityMaxCount
+		                               : static_cast<size_t>(numberOfEntities);
+		for (size_t i = 0; i < cappedCount; i++) {
+			buildPollingKey(&entities[i], key, sizeof(key));
+			legacyValues[i] = preferences.getInt(key, static_cast<int>(entities[i].updateFreq));
+		}
+		char mapBuf[2048];
+		size_t appliedCount = 0;
+		if (buildBucketMapFromLegacy(entities,
+		                             cappedCount,
+		                             legacyValues,
+		                             mapBuf,
+		                             sizeof(mapBuf),
+		                             appliedCount)) {
+			appliedBucketMap = applyBucketMapString(mapBuf,
+			                                        entities,
+			                                        cappedCount,
+			                                        rt,
+			                                        persistUnknownEntityCount,
+			                                        persistInvalidBucketCount,
+			                                        persistDuplicateEntityCount);
+			if (appliedBucketMap) {
+				preferences.putString(kPreferenceBucketMap, mapBuf);
+				persistLoadOk = 1;
+			} else {
+				persistLoadErr = 1;
+			}
+		} else {
+			persistLoadOk = 1;
+		}
+		preferences.putBool(kPreferenceBucketMapMigrated, true);
+		for (size_t i = 0; i < cappedCount; i++) {
+			buildPollingKey(&entities[i], key, sizeof(key));
+			preferences.remove(key);
+		}
+	} else {
+		persistLoadOk = 1;
 	}
 
 	preferences.end();
@@ -2296,36 +2455,44 @@ void
 savePollingConfig(const mqttState *entity)
 {
 	Preferences preferences;
-	char key[16];
+	const mqttState *entities = mqttEntitiesDesc();
+	MqttEntityRuntime *rt = mqttEntitiesRt();
+	int numberOfEntities = static_cast<int>(mqttEntitiesCount());
+	char map[2048];
+	size_t used = 0;
+	map[0] = '\0';
 
-	if (entity == NULL) {
+	if (entity == NULL || !mqttEntitiesRtAvailable()) {
 		return;
 	}
-	if (!mqttEntitiesRtAvailable()) {
-		return;
-	}
-	size_t idx = static_cast<size_t>(entity - mqttEntitiesDesc());
+	size_t idx = static_cast<size_t>(entity - entities);
 	if (idx >= mqttEntitiesCount()) {
 		return;
 	}
 
-	buildPollingKey(entity, key, sizeof(key));
-	preferences.begin(DEVICE_NAME, false);
-	preferences.putInt(key, static_cast<int>(mqttEntitiesRt()[idx].effectiveFreq));
-	preferences.end();
-}
-
-const mqttState *
-lookupEntityByName(const char *name)
-{
-	const mqttState *entities = mqttEntitiesDesc();
-	int numberOfEntities = static_cast<int>(mqttEntitiesCount());
 	for (int i = 0; i < numberOfEntities; i++) {
-		if (!strcmp(name, entities[i].mqttName)) {
-			return &entities[i];
+		BucketId defaultBucket = bucketIdFromFreq(entities[i].updateFreq);
+		if (rt[i].bucketId == defaultBucket) {
+			continue;
+		}
+		const int needed = snprintf(map + used,
+		                            sizeof(map) - used,
+		                            "%s=%s;",
+		                            entities[i].mqttName,
+		                            bucketIdToString(rt[i].bucketId));
+		if (needed < 0 || static_cast<size_t>(needed) >= (sizeof(map) - used)) {
+			// Too many overrides to fit into the stored map; avoid writing a truncated map.
+			return;
+		}
+		used += static_cast<size_t>(needed);
+		if ((i % 8) == 0) {
+			maybeYield();
 		}
 	}
-	return NULL;
+
+	preferences.begin(DEVICE_NAME, false);
+	preferences.putString(kPreferenceBucketMap, map);
+	preferences.end();
 }
 
 void
@@ -2348,7 +2515,8 @@ publishPollingConfig(void)
 		return;
 	}
 
-	snprintf(addition, sizeof(addition), "\"last_change\": \"%s\", \"allowed_intervals\": [", _pollingLastChange);
+	snprintf(addition, sizeof(addition), "\"last_change\": \"%s\", \"poll_interval_s\": %lu, \"allowed_intervals\": [",
+	         _pollingLastChange, static_cast<unsigned long>(pollIntervalSeconds));
 	resultAddedToPayload = addToPayload(addition);
 	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
 		return;
@@ -2373,11 +2541,14 @@ publishPollingConfig(void)
 		snprintf(addition, sizeof(addition), "%s\"%s\": \"%s\"",
 			 first ? "" : ", ",
 			 entities[i].mqttName,
-			 mqttUpdateFreqToString(rt[i].effectiveFreq));
+			 bucketIdToString(rt[i].bucketId));
 		first = false;
 		resultAddedToPayload = addToPayload(addition);
 		if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
 			return;
+		}
+		if ((i % 8) == 0) {
+			yield();
 		}
 	}
 
@@ -2511,6 +2682,7 @@ handlePollingConfigSet(const char *payload)
 	const char *cursor = payload;
 	bool anyChange = false;
 	bool payloadValid = false;
+	const mqttState *changedEntity = nullptr;
 
 	while (cursor && *cursor && isspace(static_cast<unsigned char>(*cursor))) {
 		cursor++;
@@ -2522,9 +2694,10 @@ handlePollingConfigSet(const char *payload)
 
 	while (cursor && *cursor) {
 		char key[64];
-		char value[32];
+		char value[512];
 		size_t keyIndex = 0;
 		size_t valueIndex = 0;
+		bool handled = false;
 
 		while (*cursor && isspace(static_cast<unsigned char>(*cursor))) {
 			cursor++;
@@ -2570,20 +2743,69 @@ handlePollingConfigSet(const char *payload)
 
 		payloadValid = true;
 
-		const mqttState *entity = lookupEntityByName(key);
-		if (entity != NULL && mqttEntitiesRtAvailable()) {
-			mqttUpdateFreq parsed;
-			if (mqttUpdateFreqFromString(value, &parsed)) {
-				size_t idx = static_cast<size_t>(entity - mqttEntitiesDesc());
-				if (idx < mqttEntitiesCount() && mqttEntitiesRt()[idx].effectiveFreq != parsed) {
-					mqttEntitiesRt()[idx].effectiveFreq = parsed;
-					savePollingConfig(entity);
-					publishHaEntityDiscovery(entity);
+		if (!strcmp(key, kPreferencePollInterval)) {
+			char *endPtr = nullptr;
+			errno = 0;
+			unsigned long parsed = strtoul(value, &endPtr, 10);
+			if (errno == 0 && endPtr != value && *endPtr == '\0') {
+				uint32_t clamped = clampPollInterval(static_cast<uint32_t>(parsed));
+				if (clamped != pollIntervalSeconds) {
+					pollIntervalSeconds = clamped;
+					Preferences preferences;
+					preferences.begin(DEVICE_NAME, false);
+					preferences.putUInt(kPreferencePollInterval, pollIntervalSeconds);
+					preferences.end();
 					anyChange = true;
+					resendAllData = true;
+				}
+			}
+			handled = true;
+		}
+
+		if (!strcmp(key, "bucket_map")) {
+			if (mqttEntitiesRtAvailable()) {
+				Preferences preferences;
+				preferences.begin(DEVICE_NAME, false);
+				preferences.putString(kPreferenceBucketMap, value);
+				preferences.end();
+				anyChange = true;
+				persistUnknownEntityCount = 0;
+				persistInvalidBucketCount = 0;
+				persistDuplicateEntityCount = 0;
+				const bool applied = applyBucketMapString(value,
+				                                          mqttEntitiesDesc(),
+				                                          mqttEntitiesCount(),
+				                                          mqttEntitiesRt(),
+				                                          persistUnknownEntityCount,
+				                                          persistInvalidBucketCount,
+				                                          persistDuplicateEntityCount);
+				persistLoadOk = applied ? 1 : 0;
+				persistLoadErr = applied ? 0 : 1;
+				resendHaData = true;
+				resendAllData = true;
+			}
+			handled = true;
+		}
+
+		if (!handled) {
+			const mqttState *entity = lookupEntityByName(key, mqttEntitiesDesc(), mqttEntitiesCount());
+			if (entity != NULL && mqttEntitiesRtAvailable()) {
+				BucketId bucket = bucketIdFromString(value);
+				if (bucket != BucketId::Unknown) {
+					size_t idx = static_cast<size_t>(entity - mqttEntitiesDesc());
+					if (idx < mqttEntitiesCount() && mqttEntitiesRt()[idx].bucketId != bucket) {
+						applyBucketToRuntime(mqttEntitiesRt()[idx], bucket);
+						if (changedEntity == nullptr) {
+							changedEntity = entity;
+						}
+						anyChange = true;
+						resendAllData = true;
+					}
 				}
 			}
 		}
 
+		maybeYield();
 		while (*cursor && isspace(static_cast<unsigned char>(*cursor))) {
 			cursor++;
 		}
@@ -2598,6 +2820,11 @@ handlePollingConfigSet(const char *payload)
 	}
 
 	if (anyChange) {
+		recomputeBucketCounts();
+		if (changedEntity != nullptr) {
+			savePollingConfig(changedEntity);
+			resendHaData = true;
+		}
 		updatePollingLastChange();
 		publishPollingConfig();
 		resendAllData = true;
@@ -4068,10 +4295,11 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 	void
 		sendStatus(bool includeEssSnapshot)
 		{
-			char stateAddition[256] = "";
-			char netAddition[256] = "";
-			char pollAddition[768] = "";
-			char stubAddition[512] = "";
+			// Keep large buffers out of the stack to avoid soft WDT resets on ESP8266.
+			static char stateAddition[256];
+			static char netAddition[256];
+			static char pollAddition[1024];
+			static char stubAddition[512];
 		StatusCoreSnapshot core{};
 		StatusNetSnapshot net{};
 		StatusPollSnapshot poll{};
@@ -4162,6 +4390,19 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 			poll.schedFiveMinLastRunMs = schedFiveMinLastRunMs;
 			poll.schedOneHourLastRunMs = schedOneHourLastRunMs;
 			poll.schedOneDayLastRunMs = schedOneDayLastRunMs;
+			poll.pollIntervalSeconds = pollIntervalSeconds;
+			poll.schedUserLastRunMs = schedUserLastRunMs;
+			poll.schedTenSecCount = schedTenSecCount;
+			poll.schedOneMinCount = schedOneMinCount;
+			poll.schedFiveMinCount = schedFiveMinCount;
+			poll.schedOneHourCount = schedOneHourCount;
+			poll.schedOneDayCount = schedOneDayCount;
+			poll.schedUserCount = schedUserCount;
+			poll.persistLoadOk = persistLoadOk;
+			poll.persistLoadErr = persistLoadErr;
+			poll.persistUnknownEntityCount = persistUnknownEntityCount;
+			poll.persistInvalidBucketCount = persistInvalidBucketCount;
+			poll.persistDuplicateEntityCount = persistDuplicateEntityCount;
 
 			if (!buildStatusCoreJson(core, stateAddition, sizeof(stateAddition))) {
 				return;
@@ -4172,17 +4413,20 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 	}
 
 	sendMqtt(statusTopic, MQTT_RETAIN);
+	yield();
 
 	char netTopic[160];
 	snprintf(netTopic, sizeof(netTopic), "%s/net", statusTopic);
 	if (buildStatusNetJson(net, netAddition, sizeof(netAddition))) {
 		_mqtt.publish(netTopic, netAddition, true);
+		yield();
 	}
 
 	char pollTopic[160];
 	snprintf(pollTopic, sizeof(pollTopic), "%s/poll", statusTopic);
 	if (buildStatusPollJson(poll, pollAddition, sizeof(pollAddition))) {
 		_mqtt.publish(pollTopic, pollAddition, true);
+		yield();
 	}
 
 #if RS485_STUB
@@ -4209,6 +4453,7 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 		snprintf(stubTopic, sizeof(stubTopic), "%s/stub", statusTopic);
 		if (buildStatusStubJson(stub, stubAddition, sizeof(stubAddition))) {
 			_mqtt.publish(stubTopic, stubAddition, true);
+			yield();
 		}
 	}
 #endif
@@ -4921,26 +5166,31 @@ sendData()
 	static unsigned long lastRunFiveMinutes = 0;
 	static unsigned long lastRunOneHour = 0;
 	static unsigned long lastRunOneDay = 0;
+	static unsigned long lastRunUser = 0;
 	static bool membersInit = false;
 	static uint16_t *membersTenSec = nullptr;
 	static uint16_t *membersOneMin = nullptr;
 	static uint16_t *membersFiveMin = nullptr;
 	static uint16_t *membersOneHour = nullptr;
 	static uint16_t *membersOneDay = nullptr;
+	static uint16_t *membersUser = nullptr;
 	static size_t membersTenSecCount = 0;
 	static size_t membersOneMinCount = 0;
 	static size_t membersFiveMinCount = 0;
 	static size_t membersOneHourCount = 0;
 	static size_t membersOneDayCount = 0;
+	static size_t membersUserCount = 0;
 	static bool tenSecHasEssSnapshot = false;
 	static bool oneMinHasEssSnapshot = false;
 	static bool fiveMinHasEssSnapshot = false;
 	static bool oneHourHasEssSnapshot = false;
 	static bool oneDayHasEssSnapshot = false;
+	static bool userHasEssSnapshot = false;
 
 	if (resendAllData) {
 		resendAllData = false;
 		lastRunTenSeconds = lastRunOneMinute = lastRunFiveMinutes = lastRunOneHour = lastRunOneDay = 0;
+		lastRunUser = 0;
 		// Polling config may have changed; rebuild bucket membership on the next due pass.
 		membersInit = false;
 	}
@@ -4950,8 +5200,10 @@ sendData()
 	const bool dueFiveMinutes = checkTimer(&lastRunFiveMinutes, STATUS_INTERVAL_FIVE_MINUTE);
 	const bool dueOneHour = checkTimer(&lastRunOneHour, STATUS_INTERVAL_ONE_HOUR);
 	const bool dueOneDay = checkTimer(&lastRunOneDay, STATUS_INTERVAL_ONE_DAY);
+	const bool dueUser = checkTimer(&lastRunUser, pollIntervalSeconds * 1000UL);
+	const bool anyDue = (dueTenSeconds || dueOneMinute || dueFiveMinutes || dueOneHour || dueOneDay || dueUser);
 
-	if (!dueTenSeconds && !dueOneMinute && !dueFiveMinutes && !dueOneHour && !dueOneDay) {
+	if (!anyDue && membersInit) {
 		return;
 	}
 
@@ -4970,8 +5222,11 @@ sendData()
 	if (dueOneDay) {
 		schedOneDayLastRunMs = lastRunOneDay;
 	}
+	if (dueUser) {
+		schedUserLastRunMs = lastRunUser;
+	}
 
-	if (!inverterReady || !mqttEntitiesRtAvailable()) {
+	if (!mqttEntitiesRtAvailable()) {
 		return;
 	}
 
@@ -4988,6 +5243,7 @@ sendData()
 			membersFiveMin = new uint16_t[numberOfEntities];
 			membersOneHour = new uint16_t[numberOfEntities];
 			membersOneDay = new uint16_t[numberOfEntities];
+			membersUser = new uint16_t[numberOfEntities];
 		}
 
 		BucketMembership membership = buildBucketMembership(
@@ -4998,6 +5254,7 @@ sendData()
 			membersFiveMin,
 			membersOneHour,
 			membersOneDay,
+			membersUser,
 			mqttEntityNeedsEssSnapshotByIndex);
 
 		membersTenSecCount = membership.tenSecCount;
@@ -5005,12 +5262,29 @@ sendData()
 		membersFiveMinCount = membership.fiveMinCount;
 		membersOneHourCount = membership.oneHourCount;
 		membersOneDayCount = membership.oneDayCount;
+		membersUserCount = membership.userCount;
 		tenSecHasEssSnapshot = membership.tenSecHasEssSnapshot;
 		oneMinHasEssSnapshot = membership.oneMinHasEssSnapshot;
 		fiveMinHasEssSnapshot = membership.fiveMinHasEssSnapshot;
 		oneHourHasEssSnapshot = membership.oneHourHasEssSnapshot;
 		oneDayHasEssSnapshot = membership.oneDayHasEssSnapshot;
+		userHasEssSnapshot = membership.userHasEssSnapshot;
 		membersInit = true;
+
+		schedTenSecCount = static_cast<uint16_t>(membersTenSecCount);
+		schedOneMinCount = static_cast<uint16_t>(membersOneMinCount);
+		schedFiveMinCount = static_cast<uint16_t>(membersFiveMinCount);
+		schedOneHourCount = static_cast<uint16_t>(membersOneHourCount);
+		schedOneDayCount = static_cast<uint16_t>(membersOneDayCount);
+		schedUserCount = static_cast<uint16_t>(membersUserCount);
+	}
+
+	if (!anyDue) {
+		return;
+	}
+
+	if (!inverterReady) {
+		return;
 	}
 
 	// Bucket processing is runtime-driven: due buckets iterate their pre-built membership list.
@@ -5037,7 +5311,7 @@ sendData()
 
 	if (dueTenSeconds) {
 		// 10s cadence also gates dispatch, which depends on the ESS snapshot.
-		const bool snapshotOkThisBucket = ensureSnapshotForBucket(true);
+		const bool snapshotOkThisBucket = ensureSnapshotForBucket(tenSecBucketRequiresSnapshot());
 
 		sendStatus(snapshotOkThisBucket);
 
@@ -5094,6 +5368,17 @@ sendData()
 		const bool snapshotOkThisBucket = ensureSnapshotForBucket(oneDayHasEssSnapshot);
 		for (size_t n = 0; n < membersOneDayCount; n++) {
 			const size_t idx = membersOneDay[n];
+			if (!shouldPublishEntityForBucket(mqttEntityNeedsEssSnapshotByIndex(idx), snapshotOkThisBucket)) {
+				continue;
+			}
+			sendDataFromMqttState(&entities[idx], false);
+		}
+	}
+
+	if (dueUser) {
+		const bool snapshotOkThisBucket = ensureSnapshotForBucket(userHasEssSnapshot);
+		for (size_t n = 0; n < membersUserCount; n++) {
+			const size_t idx = membersUser[n];
 			if (!shouldPublishEntityForBucket(mqttEntityNeedsEssSnapshotByIndex(idx), snapshotOkThisBucket)) {
 				continue;
 			}
@@ -5189,6 +5474,12 @@ sendDataFromMqttState(const mqttState *singleEntity, bool doHomeAssistant)
  */
 void mqttCallback(char* topic, byte* message, unsigned int length)
 {
+	struct MqttCallbackGuard {
+		bool &flag;
+		explicit MqttCallbackGuard(bool &f) : flag(f) { flag = true; }
+		~MqttCallbackGuard() { flag = false; }
+	} guard(inMqttCallback);
+
 	char mqttIncomingPayload[512] = ""; // Should be enough to cover command requests
 	const mqttState *mqttEntity = NULL;
 
@@ -5233,7 +5524,10 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 		}
 		return; // No further processing needed.
 	} else if (strcmp(topic, configSetTopic) == 0) {
-		handlePollingConfigSet(mqttIncomingPayload);
+		// Apply config outside of the MQTT callback to avoid calling yield() from a non-yieldable context
+		// (ESP8266 core can panic in __yield()). The main loop will process the update immediately.
+		strlcpy(pendingPollingConfigPayload, mqttIncomingPayload, sizeof(pendingPollingConfigPayload));
+		pendingPollingConfigSet = true;
 		return; // No further processing needed.
 #if RS485_STUB
 		} else if (strcmp(topic, rs485StubControlTopic) == 0) {

@@ -75,11 +75,16 @@ class E2EError(Exception):
 
 
 VERBOSE = False
+PROGRESS_INTERVAL_S = 10.0
 
 
 def _log(msg: str) -> None:
     if VERBOSE:
         print(f"[e2e] {msg}")
+
+
+def _announce(msg: str) -> None:
+    print(f"[e2e] {msg}", flush=True)
 
 
 def _read_pass() -> str:
@@ -582,11 +587,17 @@ def _assert_eventually(
 ) -> None:
     deadline = time.time() + timeout_s
     last_detail = ""
+    next_progress = time.time() + PROGRESS_INTERVAL_S
     while time.time() < deadline:
         ok, detail = fn()
         last_detail = detail
         if ok:
             return
+        now = time.time()
+        if now >= next_progress:
+            remaining = max(0, int(deadline - now))
+            print(f"[e2e] waiting for {name} ({remaining}s left) last={last_detail}")
+            next_progress = now + PROGRESS_INTERVAL_S
         time.sleep(poll_s)
     raise E2EError(f"Timeout waiting for: {name}. Last observed: {last_detail}")
 
@@ -621,7 +632,7 @@ def _mqtt_retry(mqtt: MqttClient, name: str, fn: Callable[[], Any]) -> Any:
 
 def _fetch_latest_json(mqtt: MqttClient, topic: str, label: str, *, timeout_s: int = 15) -> dict[str, Any]:
     def inner() -> dict[str, Any]:
-        mqtt.subscribe(topic)
+        mqtt.subscribe(topic, force=True)
         deadline = time.time() + timeout_s
         last_observed = ""
         while time.time() < deadline:
@@ -666,6 +677,9 @@ def _fetch_latest_json(mqtt: MqttClient, topic: str, label: str, *, timeout_s: i
 def _fetch_poll(mqtt: MqttClient, topic: str) -> dict[str, Any]:
     return _fetch_latest_json(mqtt, topic, label="poll")
 
+def _fetch_config(mqtt: MqttClient, topic: str) -> dict[str, Any]:
+    return _fetch_latest_json(mqtt, topic, label="config")
+
 def _fetch_status_core(mqtt: MqttClient, topic: str) -> dict[str, Any]:
     return _fetch_latest_json(mqtt, topic, label="core")
 
@@ -679,7 +693,7 @@ def _fetch_stub(mqtt: MqttClient, topic: str) -> dict[str, Any]:
 
 def _fetch_latest_text(mqtt: MqttClient, topic: str, label: str) -> str:
     def inner() -> str:
-        mqtt.subscribe(topic)
+        mqtt.subscribe(topic, force=True)
         deadline = time.time() + 20
         last_observed = ""
         while time.time() < deadline:
@@ -842,23 +856,29 @@ def main() -> int:
     port = int(os.environ.get("MQTT_PORT", "1883"))
     user = _require_env("MQTT_USER")
     password = _read_pass()
+    _announce(f"connecting to MQTT {host}:{port} as {user}")
     mqtt = MqttClient(host=host, port=port, user=user, password=password)
     mqtt.connect()
+    _announce("connected to MQTT")
 
     control_suffix = _discover_control_suffix_from_code()
     status_poll_suffix = _discover_status_poll_suffix_from_code()
     status_stub_suffix = _discover_status_stub_suffix_from_code()
+    _announce("discovering device topic root")
     device_root = _discover_device_topic(mqtt, status_poll_suffix)
+    _announce(f"discovered device_root={device_root}")
 
     poll_topic = f"{device_root}{status_poll_suffix}"
     stub_topic = f"{device_root}{status_stub_suffix}"
     status_core_topic = f"{device_root}/status"
+    config_topic = f"{device_root}/config"
     control_topic = f"{device_root}{control_suffix}"
 
     print(f"[e2e] device_root={device_root}")
     print(f"[e2e] poll_topic={poll_topic}")
     print(f"[e2e] stub_topic={stub_topic}")
     print(f"[e2e] status_core_topic={status_core_topic}")
+    print(f"[e2e] config_topic={config_topic}")
     print(f"[e2e] control_topic={control_topic}")
 
     if args.ota or args.ensure_stub:
@@ -883,6 +903,8 @@ def main() -> int:
         "sched_5m_last_run_ms",
         "sched_1h_last_run_ms",
         "sched_1d_last_run_ms",
+        "sched_user_last_run_ms",
+        "poll_interval_s",
     ):
         if k not in first:
             raise E2EError(f"Missing expected scheduler observability field in /status/poll: {k} (keys={sorted(first.keys())})")
@@ -909,6 +931,14 @@ def main() -> int:
                 chunk = candidate
         if chunk:
             mqtt.publish(f"{device_root}/config/set", json.dumps(chunk), retain=False)
+
+    def set_polling_config(poll_interval_s: int, bucket_map: str) -> None:
+        # Config-set parser expects string values, not numbers.
+        payload = json.dumps({
+            "poll_interval_s": str(poll_interval_s),
+            "bucket_map": bucket_map,
+        })
+        mqtt.publish(f"{device_root}/config/set", payload, retain=False)
 
     def _wait_for_inverter_identity() -> str:
         def pred() -> Tuple[bool, str]:
@@ -948,6 +978,16 @@ def main() -> int:
         print("[e2e] case: fail then recover (n=2)")
         set_mode('{"mode":"fail","fail_n":2}')
         # Expect at least one fail then eventually success.
+        _assert_eventually(
+            "fail_then_recover mode applied",
+            lambda: (
+                str(_fetch_poll(mqtt, poll_topic).get("rs485_stub_mode", "")) in ("fail_then_recover", "fail"),
+                f"mode={_fetch_poll(mqtt, poll_topic).get('rs485_stub_mode')}",
+            ),
+            timeout_s=30,
+            poll_s=2.0,
+        )
+
         def pred() -> Tuple[bool, str]:
             cur = _fetch_poll(mqtt, poll_topic)
             ok = bool(cur.get("ess_snapshot_last_ok", False))
@@ -1026,8 +1066,8 @@ def main() -> int:
 
     def case_dispatch_write_via_commands() -> None:
         print("[e2e] case: dispatch write via command topics (virtual inverter)")
-        # Make sure stub is online and in a known inverter state that will trigger a dispatch write.
-        set_mode('{"mode":"online","soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0,"dispatch_start":0,"dispatch_mode":0,"dispatch_soc":0}')
+        # Make sure stub is online and in a known inverter state.
+        set_mode('{"mode":"online","soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0}')
 
         ha_unique = _wait_for_inverter_identity()
         base = f"{device_root}/{ha_unique}"
@@ -1062,9 +1102,6 @@ def main() -> int:
         ensure_regnum_set()
         before_val = _fetch_latest_text(mqtt, val_topic, label="dispatch_start_before")
 
-        before = _fetch_poll(mqtt, poll_topic)
-        before_writes = int(before.get("rs485_stub_writes", 0))
-
         op_mode_target = _discover_define_string("OP_MODE_DESC_TARGET")
 
         # Publish all required command knobs so the firmware considers A2M "ready".
@@ -1096,6 +1133,14 @@ def main() -> int:
                 time.sleep(1.0)
             raise E2EError(f"{name} did not update to {expected!r}; last_seen={last_seen!r}")
 
+        # Capture baseline before publishing any readiness commands so we don't miss a fast dispatch write.
+        before = _fetch_poll(mqtt, poll_topic)
+        before_writes = int(before.get("rs485_stub_writes", 0))
+        before_last_ms = int(before.get("rs485_stub_last_write_ms", 0))
+
+        # Force a dispatch mismatch AFTER baseline so a new write is required.
+        set_mode('{"mode":"online","dispatch_start":0,"dispatch_mode":65535,"dispatch_active_power":0,"dispatch_soc":0}')
+
         publish_ready_commands()
         wait_for_state("Op_Mode", op_mode_target)
         wait_for_state("SOC_Target", "80")
@@ -1114,7 +1159,8 @@ def main() -> int:
             if time.time() - last_pub > 8.0:
                 publish_ready_commands()
                 last_pub = time.time()
-            return (writes > before_writes and last_reg == reg_dispatch_start and last_ms > 0), detail
+            wrote_after_baseline = (writes > before_writes) or (last_ms > before_last_ms)
+            return (wrote_after_baseline and last_reg == reg_dispatch_start and last_ms > 0), detail
 
         _assert_eventually("dispatch write observed in stub backend", pred, timeout_s=45, poll_s=3.0)
 
@@ -1139,6 +1185,7 @@ def main() -> int:
 
     def case_strict_unknown_snapshot_has_no_unknown_reads() -> None:
         print("[e2e] case: strict unknown-register protection (snapshot path)")
+        _wait_for_inverter_identity()
         # Strict mode should be safe for ESS snapshot: the stub must implement all snapshot registers.
         # To keep this test scoped to the snapshot path (and not other entities that perform Modbus reads),
         # temporarily disable known non-snapshot entities that read Modbus directly.
@@ -1167,7 +1214,7 @@ def main() -> int:
             }
         )
 
-        set_mode('{"mode":"online","strict_unknown":1}')
+        set_mode('{"mode":"online","strict_unknown":1,"strict":1}')
         # Wait until strict_unknown is actually applied (status is asynchronous).
         _assert_eventually(
             "strict_unknown applied",
@@ -1499,6 +1546,54 @@ def main() -> int:
             if f3 <= f2:
                 raise E2EError(f"SOC did not monotonically increase across publishes: {v1!r} {v2!r} {v3!r}")
 
+    def case_polling_config_persistence() -> None:
+        print("[e2e] case: polling config mapping + poll_interval_s takes effect")
+        config_before = _fetch_config(mqtt, config_topic)
+        intervals = config_before.get("entity_intervals", {})
+        if not isinstance(intervals, dict):
+            raise E2EError(f"config entity_intervals missing or invalid: {config_before}")
+
+        target = "State_of_Charge"
+        old_bucket = str(intervals.get(target, ""))
+        if not old_bucket:
+            raise E2EError(f"config missing {target} in entity_intervals")
+
+        new_bucket = "user" if old_bucket != "user" else "one_hour"
+        if new_bucket == old_bucket:
+            raise E2EError(f"unable to select alternate bucket for {target} (bucket={old_bucket})")
+
+        poll_before = _fetch_poll(mqtt, poll_topic)
+        bucket_to_count = {
+            "ten_sec": "sched_10s_count",
+            "one_min": "sched_1m_count",
+            "five_min": "sched_5m_count",
+            "one_hour": "sched_1h_count",
+            "one_day": "sched_1d_count",
+            "user": "sched_user_count",
+        }
+        old_field = bucket_to_count.get(old_bucket)
+        new_field = bucket_to_count.get(new_bucket)
+        old_count = int(poll_before.get(old_field, 0)) if old_field else None
+        new_count = int(poll_before.get(new_field, 0)) if new_field else None
+
+        poll_interval = 13
+        set_polling_config(poll_interval, f"{target}={new_bucket};")
+
+        def poll_pred() -> Tuple[bool, str]:
+            cur = _fetch_poll(mqtt, poll_topic)
+            cur_interval = int(cur.get("poll_interval_s", 0))
+            detail = f"poll_interval_s={cur_interval}"
+            if cur_interval != poll_interval:
+                return False, detail
+            if new_field:
+                cur_new = int(cur.get(new_field, 0))
+                detail += f" new={cur_new} expected>={new_count + 1}"
+                if cur_new < new_count + 1:
+                    return False, detail
+            return True, detail
+
+        _assert_eventually("bucket counts updated", poll_pred, timeout_s=60, poll_s=3.0)
+
     cases: list[Tuple[str, Callable[[], None]]] = [
         ("offline", case_offline),
         ("fail_then_recover", case_fail_then_recover),
@@ -1517,9 +1612,11 @@ def main() -> int:
         ("fail_writes_only", case_fail_writes_only_dispatch_write_fails),
         ("fail_for_ms", case_fail_for_ms_then_recover),
         ("soc_drift", case_soc_drift_over_time),
+        ("polling_config", case_polling_config_persistence),
     ]
 
     for name, fn in cases:
+        _announce(f"running case: {name}")
         _mqtt_retry(mqtt, f"case:{name}", lambda f=fn: f())
 
     print("[e2e] OK")

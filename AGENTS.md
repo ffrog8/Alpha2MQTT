@@ -24,6 +24,28 @@ If conflicts arise, **this file is the source of truth** for this repo.
   - Not executable due to environment constraints
 - If a blocking constraint is encountered, stop and report it clearly.
 
+
+## OOM prevention policy (all firmware changes)
+
+ESP8266 heap is tight; any change can trigger OOM even if it “looks small”.
+Therefore, **any firmware change must avoid increasing steady‑state RAM usage**
+or transient peak allocations without explicit justification.
+
+Rules:
+- Do not introduce new large static/global buffers or persistent objects.
+- Avoid heap allocations in hot paths and config/persistence paths; prefer bounded stack or pre‑allocated scratch.
+- If you must allocate dynamically, reserve once and reuse; do not grow Strings repeatedly.
+- Any added buffers/arrays must have a hard upper bound and be sized conservatively.
+- Without impacting performance ensure debug level of free and fragmentation are displayed perioidcally over serial
+
+Verification (required after any firmware change):
+- Confirm free heap does not regress at key points (boot, after Wi‑Fi, after MQTT).
+- If free heap regresses or fragmentation increases, treat it as a regression to fix
+  before proceeding—do not “accept” it as normal.
+
+If you can’t verify heap impact, explicitly state “Not verified” and avoid claiming stability.
+
+
 ## Arduino / arduino-cli usage policy
 
 ### Installation timing

@@ -76,11 +76,24 @@ struct StatusPollSnapshot {
 	uint32_t rs485StubLastWriteMs;
 	uint32_t dispatchLastRunMs;
 	const char *dispatchLastSkipReason;
+	uint32_t pollIntervalSeconds;
 	uint32_t schedTenSecLastRunMs;
 	uint32_t schedOneMinLastRunMs;
 	uint32_t schedFiveMinLastRunMs;
 	uint32_t schedOneHourLastRunMs;
 	uint32_t schedOneDayLastRunMs;
+	uint32_t schedUserLastRunMs;
+	uint16_t schedTenSecCount;
+	uint16_t schedOneMinCount;
+	uint16_t schedFiveMinCount;
+	uint16_t schedOneHourCount;
+	uint16_t schedOneDayCount;
+	uint16_t schedUserCount;
+	uint32_t persistLoadOk;
+	uint32_t persistLoadErr;
+	uint32_t persistUnknownEntityCount;
+	uint32_t persistInvalidBucketCount;
+	uint32_t persistDuplicateEntityCount;
 };
 
 struct StatusStubSnapshot {

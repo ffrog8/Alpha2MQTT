@@ -10,10 +10,13 @@
 struct MqttEntityRuntime {
 	mqttUpdateFreq defaultFreq;
 	mqttUpdateFreq effectiveFreq;
+	BucketId bucketId;
 };
 
 const mqttState *mqttEntitiesDesc();
 size_t mqttEntitiesCount();
+// Compile-time max for stack/static buffers used in polling config parsing.
+constexpr size_t kMqttEntityMaxCount = 64;
 
 // Read-only metadata stored alongside the descriptor table.
 bool mqttEntityNeedsEssSnapshotByIndex(size_t idx);

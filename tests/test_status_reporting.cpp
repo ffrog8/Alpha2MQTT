@@ -92,13 +92,26 @@ TEST_CASE("status poll JSON builder includes required keys")
 	snapshot.rs485StubLastWriteMs = 4242;
 	snapshot.dispatchLastRunMs = 0;
 	snapshot.dispatchLastSkipReason = "ess_snapshot_failed";
+	snapshot.pollIntervalSeconds = 30;
 	snapshot.schedTenSecLastRunMs = 0;
 	snapshot.schedOneMinLastRunMs = 0;
 	snapshot.schedFiveMinLastRunMs = 0;
 	snapshot.schedOneHourLastRunMs = 0;
 	snapshot.schedOneDayLastRunMs = 0;
+	snapshot.schedUserLastRunMs = 0;
+	snapshot.schedTenSecCount = 3;
+	snapshot.schedOneMinCount = 4;
+	snapshot.schedFiveMinCount = 5;
+	snapshot.schedOneHourCount = 6;
+	snapshot.schedOneDayCount = 7;
+	snapshot.schedUserCount = 8;
+	snapshot.persistLoadOk = 1;
+	snapshot.persistLoadErr = 0;
+	snapshot.persistUnknownEntityCount = 2;
+	snapshot.persistInvalidBucketCount = 3;
+	snapshot.persistDuplicateEntityCount = 4;
 
-	char buffer[768];
+	char buffer[1024];
 	CHECK(buildStatusPollJson(snapshot, buffer, sizeof(buffer)));
 
 	std::string payload(buffer);
@@ -112,6 +125,19 @@ TEST_CASE("status poll JSON builder includes required keys")
 	CHECK(payload.find("\"ess_snapshot_attempts\":3") != std::string::npos);
 	CHECK(payload.find("\"dispatch_last_run_ms\":0") != std::string::npos);
 	CHECK(payload.find("\"dispatch_last_skip_reason\":\"ess_snapshot_failed\"") != std::string::npos);
+	CHECK(payload.find("\"poll_interval_s\":30") != std::string::npos);
+	CHECK(payload.find("\"sched_user_last_run_ms\":0") != std::string::npos);
+	CHECK(payload.find("\"sched_10s_count\":3") != std::string::npos);
+	CHECK(payload.find("\"sched_1m_count\":4") != std::string::npos);
+	CHECK(payload.find("\"sched_5m_count\":5") != std::string::npos);
+	CHECK(payload.find("\"sched_1h_count\":6") != std::string::npos);
+	CHECK(payload.find("\"sched_1d_count\":7") != std::string::npos);
+	CHECK(payload.find("\"sched_user_count\":8") != std::string::npos);
+	CHECK(payload.find("\"persist_load_ok\":1") != std::string::npos);
+	CHECK(payload.find("\"persist_load_err\":0") != std::string::npos);
+	CHECK(payload.find("\"persist_unknown_entity_count\":2") != std::string::npos);
+	CHECK(payload.find("\"persist_invalid_bucket_count\":3") != std::string::npos);
+	CHECK(payload.find("\"persist_duplicate_entity_count\":4") != std::string::npos);
 	CHECK(payload.find("\"poll_err_count\":1") != std::string::npos);
 	CHECK(payload.find("\"last_err_code\":2") != std::string::npos);
 	CHECK(payload.find("\"rs485_probe_last_attempt_ms\":12345") != std::string::npos);

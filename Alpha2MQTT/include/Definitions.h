@@ -1354,8 +1354,21 @@ enum mqttUpdateFreq {
 	freqFiveMin,
 	freqOneHour,
 	freqOneDay,
+	freqUser,
 	freqNever,		// Reserved for legacy defaults; not user-settable.
 	freqDisabled		// User-settable disable that removes HA discovery and stops polling.
+};
+
+// Persisted schedule bucket ids. These are stable identifiers stored in Preferences.
+enum class BucketId : uint8_t {
+	TenSec,
+	OneMin,
+	FiveMin,
+	OneHour,
+	OneDay,
+	User,
+	Disabled,
+	Unknown
 };
 
 enum homeAssistantClass {

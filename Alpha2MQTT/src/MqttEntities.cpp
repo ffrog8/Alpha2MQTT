@@ -2,6 +2,7 @@
 // lazily-allocated runtime table for per-boot mutable fields (polling config).
 // Key dependency: `Definitions.h` for the entity enums and descriptor struct.
 #include "../include/MqttEntities.h"
+#include "../include/BucketScheduler.h"
 
 namespace {
 
@@ -124,6 +125,8 @@ static const bool kNeedsEssSnapshot[] = {
 constexpr size_t kMqttEntityCount = sizeof(kMqttEntities) / sizeof(kMqttEntities[0]);
 static_assert(sizeof(kNeedsEssSnapshot) / sizeof(kNeedsEssSnapshot[0]) == kMqttEntityCount,
               "kNeedsEssSnapshot must match kMqttEntities length");
+static_assert(kMqttEntityCount <= kMqttEntityMaxCount,
+              "kMqttEntityMaxCount must be >= number of MQTT entities");
 
 static MqttEntityRuntime *g_runtime = nullptr;
 
@@ -172,5 +175,6 @@ initMqttEntitiesRtIfNeeded(bool mqttEnabled)
 	for (size_t i = 0; i < kMqttEntityCount; ++i) {
 		g_runtime[i].defaultFreq = kMqttEntities[i].updateFreq;
 		g_runtime[i].effectiveFreq = kMqttEntities[i].updateFreq;
+		g_runtime[i].bucketId = bucketIdFromFreq(kMqttEntities[i].updateFreq);
 	}
 }

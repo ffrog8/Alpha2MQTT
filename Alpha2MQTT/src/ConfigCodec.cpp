@@ -44,7 +44,7 @@ bool parseUint64(const std::string &value, uint64_t *result)
 }
 } // namespace
 
-Config defaultConfig()
+struct A2mConfig defaultConfig()
 {
 	return { kPollIntervalDefaultSeconds, BootMode::Normal, BootIntent::Normal, 0 };
 }
@@ -60,7 +60,7 @@ uint32_t clampPollInterval(uint32_t valueSeconds)
 	return valueSeconds;
 }
 
-std::string serializeConfig(const Config &config)
+std::string serializeConfig(const A2mConfig &config)
 {
 	std::string output;
 	output.reserve(160);
@@ -71,9 +71,9 @@ std::string serializeConfig(const Config &config)
 	return output;
 }
 
-Config deserializeConfig(const std::string &payload)
+struct A2mConfig deserializeConfig(const std::string &payload)
 {
-	Config config = defaultConfig();
+	A2mConfig config = defaultConfig();
 
 	size_t start = 0;
 	while (start < payload.size()) {
@@ -109,7 +109,7 @@ Config deserializeConfig(const std::string &payload)
 	return config;
 }
 
-BootIntent consumeBootIntent(Config &config)
+BootIntent consumeBootIntent(A2mConfig &config)
 {
 	BootIntent prior = config.bootIntent;
 	config.bootIntent = BootIntent::Normal;
