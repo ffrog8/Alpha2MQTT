@@ -19,6 +19,8 @@ add_executable(host_tests
     tests/test_status_reporting.cpp
     tests/test_rs485_stub_logic.cpp
     tests/test_reboot_request.cpp
+    tests/test_wifi_guard.cpp
+    tests/test_memory_health.cpp
     tests/src/TimeProviderHost.cpp
     Alpha2MQTT/src/Scheduler.cpp
     Alpha2MQTT/src/BootModes.cpp
@@ -28,6 +30,7 @@ add_executable(host_tests
     Alpha2MQTT/src/PollingConfig.cpp
     Alpha2MQTT/src/PortalConfig.cpp
     Alpha2MQTT/src/StatusReporting.cpp
+    Alpha2MQTT/src/MemoryHealth.cpp
     Alpha2MQTT/src/RebootRequest.cpp
     Alpha2MQTT/src/ModbusCodec.cpp
 )

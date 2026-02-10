@@ -121,3 +121,26 @@ TEST_CASE("legacy bucket map builder fails when output buffer too small")
 	CHECK(!buildBucketMapFromLegacy(entities, 1, legacy, out, sizeof(out), applied));
 	CHECK(applied == 0);
 }
+
+TEST_CASE("assignment builder emits stable overrides and round-trips")
+{
+	mqttState entities[2]{};
+	entities[0] = { mqttEntityId::entityOpMode, "Op_Mode", mqttUpdateFreq::freqTenSec, false, false, homeAssistantClass::haClassSelect };
+	entities[1] = { mqttEntityId::entitySocTarget, "SOC_Target", mqttUpdateFreq::freqOneMin, false, false, homeAssistantClass::haClassNumber };
+
+	BucketId buckets[2] = { BucketId::TenSec, BucketId::User };
+	char out[128];
+	size_t applied = 0;
+
+	CHECK(buildBucketMapFromAssignments(entities, 2, buckets, out, sizeof(out), applied));
+	CHECK(applied == 1);
+	CHECK(std::string(out) == "SOC_Target=user;");
+
+	MqttEntityRuntime rt[2]{};
+	for (size_t i = 0; i < 2; ++i) {
+		applyBucketToRuntime(rt[i], bucketIdFromFreq(entities[i].updateFreq));
+	}
+	uint32_t unknown = 0, invalid = 0, dup = 0;
+	CHECK(applyBucketMapString(out, entities, 2, rt, unknown, invalid, dup));
+	CHECK(rt[1].bucketId == BucketId::User);
+}

@@ -58,6 +58,15 @@ struct StatusPollSnapshot {
 	const char *wifiStatus;
 	int wifiStatusCode;
 	uint32_t wifiReconnects;
+	uint32_t heapFreeB;
+	uint32_t heapMaxBlockB;
+	uint8_t heapFragPct;
+	uint8_t memLevel;
+	uint8_t bootHeapLevel;
+	uint8_t bootHeapStage;
+	uint32_t bootHeapFreeB;
+	uint32_t bootHeapMaxBlockB;
+	uint8_t bootHeapFragPct;
 	uint32_t pollOkCount;
 	uint32_t pollErrCount;
 	uint32_t lastPollMs;

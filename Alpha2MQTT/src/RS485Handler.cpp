@@ -15,6 +15,14 @@ Handles Modbus requests and responses in a tidy class separate from main program
 #else
 #include "../RS485Handler.h"
 #include "../include/ModbusCodec.h"
+#include "../include/diag.h"
+
+static inline void
+diagDelay(uint32_t ms)
+{
+	diag_note_yield(millis());
+	delay(ms);
+}
 
 /*
 Default Constructor
@@ -150,7 +158,7 @@ modbusRequestAndResponseStatusValues RS485Handler::sendModbus(uint8_t frame[], b
 	while (result == modbusRequestAndResponseStatusValues::preProcessing) {
 		// After some liaison with a user of Alpha2MQTT on a 115200 baud rate, this fixed inconsistent retrieval
 #ifdef REQUIRED_DELAY_DUE_TO_INCONSISTENT_RETRIEVAL
-		delay(REQUIRED_DELAY_DUE_TO_INCONSISTENT_RETRIEVAL);
+		diagDelay(REQUIRED_DELAY_DUE_TO_INCONSISTENT_RETRIEVAL);
 #endif
 
 		// Debug output the frame?
@@ -198,7 +206,7 @@ modbusRequestAndResponseStatusValues RS485Handler::sendModbus(uint8_t frame[], b
 		    result != modbusRequestAndResponseStatusValues::writeSingleRegisterSuccess &&
 		    result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
 			tries++;
-			delay(250);
+			diagDelay(250);
 			result = modbusRequestAndResponseStatusValues::preProcessing;
 		}
 	}
@@ -452,18 +460,21 @@ modbusRequestAndResponseStatusValues RS485Handler::listenResponse(modbusRequestA
 	if (timedOut)
 	{
 #ifdef DEBUG_OVER_SERIAL
-		sprintf(_debugOutput, "Timed Out (inByteNumZeroIndexed): %d", inByteNumZeroIndexed);
-		Serial.println(_debugOutput);
-		sprintf(_debugOutput, "Timed Out (gotSlaveID): %d", gotSlaveID);
-		Serial.println(_debugOutput);
-		sprintf(_debugOutput, "Timed Out (gotFunctionCode): %d", gotFunctionCode);
-		Serial.println(_debugOutput);
-		sprintf(_debugOutput, "Timed Out (resp->functionCode): %d", resp->functionCode);
-		Serial.println(_debugOutput);
-		sprintf(_debugOutput, "Timed Out (gotData): %d", gotData);
-		Serial.println(_debugOutput);
-		sprintf(_debugOutput, "Timed Out (resp->dataSize): %d", resp->dataSize);
-		Serial.println(_debugOutput);
+		static unsigned long lastTimeoutDetailLogMs = 0;
+		const unsigned long nowMs = millis();
+		if ((nowMs - lastTimeoutDetailLogMs) >= 2000) {
+			lastTimeoutDetailLogMs = nowMs;
+			snprintf(_debugOutput,
+				 128,
+				 "Timed Out: idx=%u slave=%u fn=%u rfn=%u data=%u ds=%u",
+				 inByteNumZeroIndexed,
+				 gotSlaveID ? 1 : 0,
+				 gotFunctionCode ? 1 : 0,
+				 resp->functionCode,
+				 gotData ? 1 : 0,
+				 resp->dataSize);
+			Serial.println(_debugOutput);
+		}
 #endif
 	}
 
@@ -634,12 +645,19 @@ bool RS485Handler::checkForData()
 		if (_serviceHook != nullptr) {
 			_serviceHook();
 		}
-		delay(50);
+		diagDelay(50);
 	}
 
 	if (tries >= RS485_TRIES)
 	{
-		Serial.println("Timeout waiting for RS485 response.  Likely no more data coming.");
+#ifdef DEBUG_OVER_SERIAL
+		static unsigned long lastNoDataLogMs = 0;
+		const unsigned long nowMs = millis();
+		if ((nowMs - lastNoDataLogMs) >= 2000) {
+			lastNoDataLogMs = nowMs;
+			Serial.println("Timeout waiting for RS485 response. Likely no more data coming.");
+		}
+#endif
 		return false;
 	}
 	else
@@ -667,7 +685,7 @@ void RS485Handler::checkRS485IsQuiet()
 		if (_serviceHook != nullptr) {
 			_serviceHook();
 		}
-		delay(2);
+		diagDelay(2);
 	}
 }
 

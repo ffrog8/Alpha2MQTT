@@ -24,6 +24,23 @@ If conflicts arise, **this file is the source of truth** for this repo.
   - Not executable due to environment constraints
 - If a blocking constraint is encountered, stop and report it clearly.
 
+## Boot-loop / unreachable-device policy (OTA safety)
+If the device is in a boot loop or is not stably reachable, **stop and ask for assistance**. Do not keep iterating on OTA/E2E as if it can self-recover.
+
+Definition (any of the following):
+- Repeated resets observed on serial during NORMAL boot (e.g., soft WDT resets / exceptions).
+- HTTP endpoints required for OTA (`/reboot/*`, `/u`, portal `/update`) consistently time out.
+- MQTT connectivity is intermittent or absent (no stable `<device>/boot` / status publishes).
+
+Required behavior for the agent:
+- Clearly state: “Device is not stably reachable; OTA/E2E cannot proceed.”
+- Ask the user to manually reflash or otherwise recover the device to a stable baseline (outside the agent).
+- Only resume OTA/E2E once the device remains up long enough to serve HTTP (for OTA) and/or publish MQTT status consistently.
+
+Notes (why this policy exists):
+- OTA flashing requires a stable runtime window to accept HTTP requests; a boot loop removes that window.
+- In this state, further “try another OTA” actions are counterproductive; the correct next step is manual recovery (USB serial flash / physical intervention).
+
 
 ## OOM prevention policy (all firmware changes)
 
@@ -44,6 +61,13 @@ Verification (required after any firmware change):
   before proceeding—do not “accept” it as normal.
 
 If you can’t verify heap impact, explicitly state “Not verified” and avoid claiming stability.
+
+## Memory health reporting (required for core changes)
+For any change that touches networking, webserver, MQTT, RS485, scheduling, or entity metadata:
+- Include the toolchain “RAM used … / 80192” and “IRAM used … / 65536” lines in your summary.
+- Capture `/status` memory health fields (heap free/max block/frag and boot/runtime levels) after boot.
+- Do not introduce new large globals or static buffers without justification; prefer flash/PROGMEM.
+These checks are required to prevent regressions like recent boot-time OOM failures.
 
 
 ## Arduino / arduino-cli usage policy
@@ -120,6 +144,27 @@ When a change affects firmware behavior, prefer this minimal verification set:
 
 If any item is not run, explicitly state “Not executed” and why.
 
+## ESP8266 panic stack decode playbook (required)
+When a user provides an ESP8266 panic/exception stack, decode it before proposing fixes.
+Do not rely on guesses from panic type alone.
+
+Required procedure:
+1. Extract firmware build timestamp from serial log:
+   - `Firmware build ts: <ts>`
+2. Select the matching ELF:
+   - `/home/coder/git/Alpha2MQTT/Alpha2MQTT/build/firmware/Alpha2MQTT_<ts>_real.elf`
+3. Decode inside the build container (`arduino-cli-build`) using the ESP8266 toolchain path:
+   - `tail -f /dev/null | docker exec -i arduino-cli-build bash -lc "/root/.arduino15/packages/esp8266/tools/xtensa-lx106-elf-gcc/3.1.0-gcc10.3-e5f9fec/bin/xtensa-lx106-elf-addr2line -e /project/Alpha2MQTT/build/firmware/Alpha2MQTT_<ts>_real.elf -f -C <pc1> <pc2> ..."`
+4. If that binary path changes, discover it in-container, then rerun decode:
+   - `tail -f /dev/null | docker exec -i arduino-cli-build bash -lc "find /root/.arduino15 -maxdepth 8 -type f | grep 'xtensa-lx106-elf-addr2line'"`
+5. Map decoded frames to exact source lines and report the concrete call chain.
+
+Reporting requirements for panic analysis:
+- Include the build timestamp used for decoding.
+- Include the ELF path used.
+- Include decoded function + file:line for each relevant PC.
+- Explicitly label any unresolved frame as unresolved (do not invent a location).
+
 ### RS485 probing liveness (headless, no inverter required)
 If RS485/inverter is offline, the firmware should continue background probing without blocking NORMAL-mode services.
 Verify probing is still active via MQTT using `status/poll` uptime fields:
@@ -133,6 +178,19 @@ How to check:
 
 Notes:
 - With no inverter connected, `poll_ok_count` may remain 0; treat `rs485_probe_*` fields as the liveness signal.
+
+## Preferences (NVS) non-volatile storage
+
+- **Preferences / NVS policy**
+  - `getString()` **must use buffer overloads only**; String-returning Preferences APIs are forbidden.
+  - All `put*()` / `remove()` calls **must occur only** inside:
+    - `persist_user_*()` (explicit user “Save / Apply”), or
+    - `persist_defaults_if_missing()` (one-time default seeding).
+  - **No NVS writes** from reconnect loops, polling loops, telemetry paths, background tasks, or periodic timers.
+  - `Preferences::begin()` / `end()` **must be paired in the same scope**; reads must use RO mode where supported.
+  - New string keys **must define explicit max lengths** and use bounded buffers; truncation is acceptable, overflow is not.
+  - Preferences are a **configuration store**, not a runtime state database.
+
 
 ## Local Developer Operations (not committed)
 This repository is public. Do not add environment-specific or secret-bearing content to tracked files:

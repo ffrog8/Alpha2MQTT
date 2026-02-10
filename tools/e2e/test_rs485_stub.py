@@ -559,6 +559,86 @@ def _http_post_multipart(url: str, field_name: str, file_path: Path, timeout_s: 
     status, _ = _http_request("POST", url, headers=headers, body=body, timeout_s=timeout_s)
     return status
 
+def _http_request_full(method: str, url: str, headers: dict[str, str], body: bytes, timeout_s: int = 20, max_bytes: int = 65536) -> Tuple[int, bytes]:
+    """
+    Read the full HTTP response body (up to max_bytes). Suitable for portal HTML pages.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "http":
+        raise E2EError(f"Only http:// URLs are supported (got: {url})")
+    host = parsed.hostname
+    if not host:
+        raise E2EError(f"Invalid URL: {url}")
+    port = parsed.port or 80
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+
+    conn = socket.create_connection((host, port), timeout=timeout_s)
+    conn.settimeout(timeout_s)
+    try:
+        request_lines = [
+            f"{method} {path} HTTP/1.1",
+            f"Host: {host}",
+            "Connection: close",
+        ]
+        for k, v in headers.items():
+            request_lines.append(f"{k}: {v}")
+        request_lines.append(f"Content-Length: {len(body)}")
+        request_lines.append("")
+        raw = ("\r\n".join(request_lines)).encode("utf-8") + b"\r\n" + body
+        conn.sendall(raw)
+
+        resp = b""
+        header_end = -1
+        deadline = time.time() + timeout_s
+        while header_end < 0:
+            if time.time() > deadline:
+                raise TimeoutError("timeout waiting for HTTP response headers")
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            resp += chunk
+            header_end = resp.find(b"\r\n\r\n")
+
+        if header_end < 0:
+            header_blob = resp
+            resp_body = b""
+        else:
+            header_blob = resp[:header_end]
+            resp_body = resp[header_end + 4 :]
+
+        status_line = header_blob.split(b"\r\n", 1)[0].decode("utf-8", errors="replace")
+        m = re.match(r"HTTP/\d\.\d\s+(\d+)", status_line)
+        if not m:
+            raise E2EError(f"Could not parse HTTP status line: {status_line!r}")
+        status = int(m.group(1))
+
+        body_bytes = resp_body
+        while len(body_bytes) < max_bytes:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            body_bytes += chunk
+        return status, body_bytes[:max_bytes]
+    finally:
+        conn.close()
+
+def _http_post_form(url: str, fields: dict[str, str], timeout_s: int = 20) -> int:
+    encoded = urllib.parse.urlencode(fields).encode("utf-8")
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    status, _ = _http_request("POST", url, headers=headers, body=encoded, timeout_s=timeout_s)
+    return status
+
+def _wait_for_http_ok(url: str, timeout_s: int = 30) -> None:
+    def pred() -> Tuple[bool, str]:
+        try:
+            status, _ = _http_request("GET", url, headers={}, body=b"", timeout_s=5)
+            return (status in (200, 302)), f"status={status}"
+        except Exception as e:
+            return False, f"err={e}"
+    _assert_eventually(f"HTTP reachable: {url}", pred, timeout_s=timeout_s, poll_s=2.0)
+
 
 def _discover_device_topic(mqtt: MqttClient, status_poll_suffix: str) -> str:
     configured = os.environ.get("DEVICE_TOPIC")
@@ -687,6 +767,46 @@ def _fetch_boot(mqtt: MqttClient, boot_topic: str) -> dict[str, Any]:
     # Boot is retained, but if the broker has restarted (no retained state), we may need to
     # wait for a device reboot to republish it.
     return _fetch_latest_json(mqtt, boot_topic, label="boot", timeout_s=60)
+
+def _wait_for_boot_fw_build_ts_ms(
+    mqtt: MqttClient,
+    boot_topic: str,
+    expected_build_ts_ms: int,
+    *,
+    timeout_s: int,
+) -> dict[str, Any]:
+    """
+    Wait until <device>/boot reports fw_build_ts_ms == expected_build_ts_ms.
+
+    Rationale:
+    - <device>/boot is retained and published once per boot.
+    - After OTA, the broker may immediately deliver the *old* retained message on subscribe,
+      so a single fetch is not sufficient to verify the new firmware.
+    - This helper waits for a changed publish that carries the expected build id.
+    """
+    mqtt.subscribe(boot_topic, force=True)
+    deadline = time.time() + timeout_s
+    last_observed = ""
+    while time.time() < deadline:
+        try:
+            got_topic, payload = mqtt.wait_for_publish(timeout_s=12.0)
+        except E2EError as e:
+            if "Timeout waiting for MQTT publish" in str(e):
+                continue
+            raise
+        last_observed = f"topic={got_topic} payload={payload!r}"
+        if got_topic != boot_topic:
+            continue
+        try:
+            parsed = _parse_json(payload)
+        except Exception:
+            continue
+        fw_ts = parsed.get("fw_build_ts_ms")
+        if fw_ts == expected_build_ts_ms:
+            return parsed
+    raise E2EError(
+        f"Timeout waiting for boot fw_build_ts_ms={expected_build_ts_ms} on {boot_topic}. Last observed: {last_observed}"
+    )
 
 def _fetch_stub(mqtt: MqttClient, topic: str) -> dict[str, Any]:
     return _fetch_latest_json(mqtt, topic, label="stub")
@@ -835,6 +955,10 @@ def _ensure_latest_stub_via_ota(
         print("[e2e] upload timed out waiting for HTTP response; verifying success via MQTT...")
 
     print("[e2e] waiting for device to reboot and report new fw_build_ts_ms over MQTT...")
+    # Ensure we observe a *new boot publish* with the new build id; otherwise the retained /boot
+    # message can remain stale during this run and make verification flaky.
+    _wait_for_boot_fw_build_ts_ms(mqtt, f"{device_root}/boot", expected_ts, timeout_s=120)
+
     def pred() -> Tuple[bool, str]:
         ok2, det2 = _device_is_latest_stub(mqtt, device_root, expected_ts, status_poll_suffix)
         return ok2, det2
@@ -1594,6 +1718,68 @@ def main() -> int:
 
         _assert_eventually("bucket counts updated", poll_pred, timeout_s=60, poll_s=3.0)
 
+    def case_portal_polling_ui() -> None:
+        print("[e2e] case: portal UI updates polling schedule (WiFiManager, paged)")
+        base = os.environ.get("DEVICE_HTTP_BASE", "").strip()
+        if not base:
+            raise E2EError("DEVICE_HTTP_BASE is required for portal UI test (set in tools/e2e/e2e.local.env)")
+
+        reboot_wifi_path = _discover_reboot_wifi_path_from_code()
+        if not reboot_wifi_path:
+            raise E2EError("Could not discover /reboot/wifi endpoint from firmware source")
+
+        reboot_url = base + reboot_wifi_path
+        print(f"[e2e] rebooting into wifi portal via {reboot_url}")
+        _http_post_simple(reboot_url, timeout_s=10)
+
+        # Portal is STA-only and should come back on the same IP.
+        _wait_for_http_ok(base + "/", timeout_s=40)
+
+        poll_url = base + "/config/polling?page=0"
+        status, body = _http_request_full("GET", poll_url, headers={}, body=b"", timeout_s=20)
+        if status != 200:
+            raise E2EError(f"portal polling page not reachable: status={status}")
+        html = body.decode("utf-8", errors="replace")
+        if "poll_interval_s" not in html or "/config/polling/save" not in html:
+            raise E2EError("portal polling page HTML missing expected form fields")
+
+        # Find which row index corresponds to a known stable mqttName.
+        target = "State_of_Charge"
+        m = re.search(rf'data-entity="{re.escape(target)}".*?name="b(\\d+)"', html, flags=re.DOTALL)
+        if not m:
+            raise E2EError(f"could not locate {target} row on portal polling page 0")
+        row = m.group(1)
+
+        # Change poll_interval_s and move target to user bucket.
+        fields = {
+            "page": "0",
+            "poll_interval_s": "13",
+            f"b{row}": "user",
+            "reboot": "1",  # hidden E2E-only arg; triggers reboot into normal
+        }
+        save_url = base + "/config/polling/save"
+        print(f"[e2e] POST {save_url} fields: page=0 poll_interval_s=13 b{row}=user reboot=1")
+        _http_post_form(save_url, fields, timeout_s=20)
+
+        # Wait for MQTT status to resume after reboot to NORMAL.
+        _assert_eventually(
+            "device publishes status/poll after portal save+reboot",
+            lambda: (True, "ok") if _fetch_poll(mqtt, poll_topic).get("poll_interval_s") else (False, "waiting"),
+            timeout_s=60,
+            poll_s=3.0,
+        )
+
+        poll = _fetch_poll(mqtt, poll_topic)
+        if int(poll.get("poll_interval_s", 0)) != 13:
+            raise E2EError(f"poll_interval_s did not persist via portal UI: {poll.get('poll_interval_s')}")
+
+        cfg = _fetch_config(mqtt, config_topic)
+        intervals = cfg.get("entity_intervals", {})
+        if not isinstance(intervals, dict):
+            raise E2EError(f"config entity_intervals missing: {cfg}")
+        if str(intervals.get(target, "")) != "user":
+            raise E2EError(f"{target} bucket not updated via portal UI (expected user): {intervals.get(target)!r}")
+
     cases: list[Tuple[str, Callable[[], None]]] = [
         ("offline", case_offline),
         ("fail_then_recover", case_fail_then_recover),
@@ -1613,6 +1799,7 @@ def main() -> int:
         ("fail_for_ms", case_fail_for_ms_then_recover),
         ("soc_drift", case_soc_drift_over_time),
         ("polling_config", case_polling_config_persistence),
+        ("portal_polling_ui", case_portal_polling_ui),
     ]
 
     for name, fn in cases:

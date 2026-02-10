@@ -75,6 +75,15 @@ TEST_CASE("status poll JSON builder includes required keys")
 {
 	StatusPollSnapshot snapshot{};
 	snapshot.pollOkCount = 10;
+	snapshot.heapFreeB = 5555;
+	snapshot.heapMaxBlockB = 4444;
+	snapshot.heapFragPct = 12;
+	snapshot.memLevel = 1;
+	snapshot.bootHeapLevel = 2;
+	snapshot.bootHeapStage = 3;
+	snapshot.bootHeapFreeB = 3333;
+	snapshot.bootHeapMaxBlockB = 2222;
+	snapshot.bootHeapFragPct = 34;
 	snapshot.pollErrCount = 1;
 	snapshot.lastPollMs = 250;
 	snapshot.lastOkTsMs = 10000;
@@ -121,6 +130,9 @@ TEST_CASE("status poll JSON builder includes required keys")
 	CHECK(payload.find("\"rs485_stub_writes\":3") != std::string::npos);
 	CHECK(payload.find("\"rs485_stub_last_write_reg\":4123") != std::string::npos);
 	CHECK(payload.find("\"rs485_stub_last_write_ms\":4242") != std::string::npos);
+	CHECK(payload.find("\"mem\":{\"f\":5555") != std::string::npos);
+	CHECK(payload.find("\"mem\":{\"f\":5555,\"m\":4444,\"g\":12,\"l\":1}") != std::string::npos);
+	CHECK(payload.find("\"boot_mem\":{\"l\":2,\"s\":3,\"f\":3333,\"m\":2222,\"g\":34}") != std::string::npos);
 	CHECK(payload.find("\"ess_snapshot_last_ok\":false") != std::string::npos);
 	CHECK(payload.find("\"ess_snapshot_attempts\":3") != std::string::npos);
 	CHECK(payload.find("\"dispatch_last_run_ms\":0") != std::string::npos);

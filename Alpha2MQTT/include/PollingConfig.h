@@ -31,3 +31,12 @@ bool buildBucketMapFromLegacy(const mqttState *entities,
                               char *out,
                               size_t outSize,
                               size_t &appliedCount);
+
+// Build a stable Bucket_Map string from explicit bucket assignments (indexed by entity index).
+// Returns true on success (even if appliedCount==0, which yields an empty map meaning "defaults").
+bool buildBucketMapFromAssignments(const mqttState *entities,
+                                   size_t entityCount,
+                                   const BucketId *buckets,
+                                   char *out,
+                                   size_t outSize,
+                                   size_t &appliedCount);

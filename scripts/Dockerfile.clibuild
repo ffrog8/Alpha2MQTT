@@ -1,0 +1,39 @@
+# Dockerfile.arduino-cli-serial
+#
+# Purpose:
+# - Keep your build.sh focused on building firmware.
+# - Bake in Python + pyserial so the same long-lived container can:
+#   - arduino-cli compile/upload
+#   - serial monitor via miniterm (incl. 74880 for ESP8266 boot ROM)
+#
+# Base:
+# - Your current build environment
+FROM arduinoci/ci-arduino-cli:v1.3.1
+
+SHELL ["/bin/bash", "-lc"]
+
+ARG ESP8266_CORE_VER="3.1.2"
+ARG ESP8266_URL="https://arduino.esp8266.com/stable/package_esp8266com_index.json"
+
+# Python + serial monitor support (no pip; avoid PEP 668)
+RUN set -euo pipefail; \
+    export DEBIAN_FRONTEND=noninteractive; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends python3 python3-serial; \
+    rm -rf /var/lib/apt/lists/*
+
+# Preinstall ESP8266 core + libraries used by Alpha2MQTT
+RUN set -euo pipefail; \
+    arduino-cli config init --overwrite; \
+    arduino-cli config set board_manager.additional_urls "${ESP8266_URL}"; \
+    arduino-cli core update-index; \
+    arduino-cli core install "esp8266:esp8266@${ESP8266_CORE_VER}"; \
+    arduino-cli lib install "Adafruit BusIO"; \
+    arduino-cli lib install "Adafruit SSD1306"; \
+    arduino-cli lib install "Adafruit GFX Library"; \
+    arduino-cli lib install "WiFiManager"; \
+    arduino-cli lib install "Preferences"; \
+    arduino-cli lib install "PubSubClient"
+
+# Default idle (you override with --entrypoint tail anyway)
+CMD ["bash", "-lc", "sleep infinity"]

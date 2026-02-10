@@ -2,6 +2,7 @@
 // Responsibilities: Map event codes, rate-limit publishes, and format status payloads.
 // Invariants: No Arduino dependencies or dynamic allocations.
 #include "../include/StatusReporting.h"
+#include "../include/MemoryHealth.h"
 
 #include <cstdio>
 #include <cstring>
@@ -134,6 +135,8 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		"\"rs485_stub_writes\":%lu,"
 		"\"rs485_stub_last_write_reg\":%u,"
 		"\"rs485_stub_last_write_ms\":%lu,"
+		"\"mem\":{\"f\":%lu,\"m\":%lu,\"g\":%u,\"l\":%u},"
+		"\"boot_mem\":{\"l\":%u,\"s\":%u,\"f\":%lu,\"m\":%lu,\"g\":%u},"
 		"\"ess_snapshot_last_ok\":%s,"
 		"\"ess_snapshot_attempts\":%lu,"
 		"\"dispatch_last_run_ms\":%lu,"
@@ -164,6 +167,9 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		"\"last_err_code\":%d,"
 		"\"rs485_probe_last_attempt_ms\":%lu,"
 		"\"rs485_probe_backoff_ms\":%lu"
+#if defined(DEBUG_OVER_SERIAL)
+		",\"mem_thr\":[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]"
+#endif
 		"}",
 		snapshot.rs485Backend ? snapshot.rs485Backend : "",
 		snapshot.rs485StubMode ? snapshot.rs485StubMode : "",
@@ -171,6 +177,15 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		static_cast<unsigned long>(snapshot.rs485StubWriteCount),
 		static_cast<unsigned>(snapshot.rs485StubLastWriteStartReg),
 		static_cast<unsigned long>(snapshot.rs485StubLastWriteMs),
+		static_cast<unsigned long>(snapshot.heapFreeB),
+		static_cast<unsigned long>(snapshot.heapMaxBlockB),
+		static_cast<unsigned>(snapshot.heapFragPct),
+		static_cast<unsigned>(snapshot.memLevel),
+		static_cast<unsigned>(snapshot.bootHeapLevel),
+		static_cast<unsigned>(snapshot.bootHeapStage),
+		static_cast<unsigned long>(snapshot.bootHeapFreeB),
+		static_cast<unsigned long>(snapshot.bootHeapMaxBlockB),
+		static_cast<unsigned>(snapshot.bootHeapFragPct),
 		snapshot.essSnapshotLastOk ? "true" : "false",
 		static_cast<unsigned long>(snapshot.essSnapshotAttempts),
 		static_cast<unsigned long>(snapshot.dispatchLastRunMs),
@@ -200,7 +215,27 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		static_cast<unsigned long>(snapshot.lastErrTsMs),
 		snapshot.lastErrCode,
 		static_cast<unsigned long>(snapshot.rs485ProbeLastAttemptMs),
-		static_cast<unsigned long>(snapshot.rs485ProbeBackoffMs));
+		static_cast<unsigned long>(snapshot.rs485ProbeBackoffMs)
+#if defined(DEBUG_OVER_SERIAL)
+		,
+		static_cast<unsigned>(kBoot0WarnFreeB),
+		static_cast<unsigned>(kBoot0WarnMaxBlockB),
+		static_cast<unsigned>(kBoot0CritFreeB),
+		static_cast<unsigned>(kBoot0CritMaxBlockB),
+		static_cast<unsigned>(kBootNWarnFreeB),
+		static_cast<unsigned>(kBootNWarnMaxBlockB),
+		static_cast<unsigned>(kBootNWarnFragPct),
+		static_cast<unsigned>(kBootNCritFreeB),
+		static_cast<unsigned>(kBootNCritMaxBlockB),
+		static_cast<unsigned>(kBootNCritFragPct),
+		static_cast<unsigned>(kRuntimeWarnFreeB),
+		static_cast<unsigned>(kRuntimeWarnMaxBlockB),
+		static_cast<unsigned>(kRuntimeWarnFragPct),
+		static_cast<unsigned>(kRuntimeCritFreeB),
+		static_cast<unsigned>(kRuntimeCritMaxBlockB),
+		static_cast<unsigned>(kRuntimeCritFragPct)
+#endif
+		);
 	if (written < 0 || static_cast<size_t>(written) >= outSize) {
 		return false;
 	}

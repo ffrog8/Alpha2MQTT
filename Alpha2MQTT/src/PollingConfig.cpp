@@ -158,3 +158,47 @@ buildBucketMapFromLegacy(const mqttState *entities,
 
 	return appliedCount > 0;
 }
+
+bool
+buildBucketMapFromAssignments(const mqttState *entities,
+                              size_t entityCount,
+                              const BucketId *buckets,
+                              char *out,
+                              size_t outSize,
+                              size_t &appliedCount)
+{
+	if (entities == nullptr || buckets == nullptr || out == nullptr || outSize == 0 || entityCount == 0) {
+		return false;
+	}
+	if (entityCount > kMqttEntityMaxCount) {
+		return false;
+	}
+
+	appliedCount = 0;
+	out[0] = '\0';
+	size_t used = 0;
+
+	for (size_t i = 0; i < entityCount; ++i) {
+		BucketId bucket = buckets[i];
+		if (bucket == BucketId::Unknown) {
+			continue;
+		}
+		BucketId defaultBucket = bucketIdFromFreq(entities[i].updateFreq);
+		if (bucket == defaultBucket) {
+			continue;
+		}
+		const char *bucketStr = bucketIdToString(bucket);
+		const int needed = snprintf(out + used,
+		                            outSize - used,
+		                            "%s=%s;",
+		                            entities[i].mqttName,
+		                            bucketStr);
+		if (needed < 0 || static_cast<size_t>(needed) >= (outSize - used)) {
+			return false;
+		}
+		used += static_cast<size_t>(needed);
+		appliedCount++;
+	}
+
+	return true;
+}

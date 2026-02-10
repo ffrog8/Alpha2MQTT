@@ -16,26 +16,29 @@ First, go and customise options at the top of Definitions.h!
 #include <cctype>
 #include <cstdarg>
 #include <cstdint>
-#include <iostream>
 // Supporting files
 #include "../RegisterHandler.h"
 #include "../RS485Handler.h"
 #include "../Definitions.h"
 #include "../include/BootModes.h"
+#include "../include/WifiGuard.h"
 #include "../include/BucketScheduler.h"
 #include "../include/MqttEntities.h"
 #include "../include/PortalConfig.h"
 #include "../include/ConfigCodec.h"
+#include "../include/MemoryHealth.h"
 #include "../include/PollingConfig.h"
 #include "../include/RebootRequest.h"
 #include "../include/StatusReporting.h"
 #include "../include/Rs485ProbeLogic.h"
 #include "../include/Scheduler.h"
 #include "../include/TimeProvider.h"
+#include "../include/diag.h"
 #include <Arduino.h>
 #if defined MP_ESP8266
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
+#include <coredecls.h>
 #elif defined MP_ESP32
 #include <WiFi.h>
 #include <WebServer.h>
@@ -74,8 +77,22 @@ using HttpServer = WebServer;
 #define BUILD_TS_MS 0ULL
 #endif
 
+static inline void
+diagDelay(uint32_t ms)
+{
+	diag_note_yield(millis());
+	delay(ms);
+}
+
+static inline void
+diagYield(void)
+{
+	diag_note_yield(millis());
+	yield();
+}
+
 // Device parameters
-char _version[6] = "v2.67";
+char _version[20] = "";
 char deviceSerialNumber[17]; // 8 registers = max 16 chars (usually 15)
 char deviceBatteryType[32];
 char haUniqueId[32] = "A2M-UNKNOWN";
@@ -113,15 +130,28 @@ const char kPreferenceDeviceSerial[] = "Device_Serial";
 const char kPreferenceBucketMap[] = "Bucket_Map";
 const char kPreferencePollInterval[] = "poll_interval_s";
 const char kPreferenceBucketMapMigrated[] = "Bucket_Map_Migrated";
+// Persisted "last polling-config change" timestamp published as polling-config last_change.
+const char kPreferencePollingLastChange[] = "polling_last_change";
+constexpr size_t kPrefBootIntentMaxLen = 24;
+constexpr size_t kPrefBootModeMaxLen = 24;
+constexpr size_t kPrefDeviceSerialMaxLen = 32;
+constexpr size_t kPrefWifiSsidMaxLen = 64;
+constexpr size_t kPrefWifiPasswordMaxLen = 64;
+constexpr size_t kPrefMqttServerMaxLen = 64;
+constexpr size_t kPrefMqttUsernameMaxLen = 64;
+constexpr size_t kPrefMqttPasswordMaxLen = 64;
+constexpr size_t kPrefBucketMapMaxLen = 2048;
+constexpr size_t kPrefPollingLastChangeMaxLen = 32;
 BootIntent currentBootIntent = BootIntent::Normal;
 BootIntent bootIntentForPublish = BootIntent::Normal;
 BootMode currentBootMode = BootMode::Normal;
 BootMode bootModeForDiagnostics = BootMode::Normal;
-bool bootIntentPendingClear = false;
 bool bootEventPublished = false;
 bool inverterReady = false;
 bool inverterSubscriptionsSet = false;
 SubsystemPlan bootPlan = { true, true, true };
+BootMemWorst bootMemWorst = { MemLevel::Ok, BootMemStage::Boot0, { 0, 0, 0 } };
+bool bootMemWarningEmitted = false;
 #if defined(MP_ESP8266)
 const int kSafeModePin = 0; // D3 (GPIO0) strap for safe mode.
 #endif
@@ -173,7 +203,8 @@ char* _mqttPayload;
 
 bool resendHaData = false;
 bool resendAllData = false;
-char _pollingLastChange[32] = "";
+// Human-readable timestamp of the most recent polling-config mutation.
+char _pollingConfigLastChange[32] = "";
 // Bucket ids accepted via /config/set mapping (legacy freq* aliases are still accepted).
 const char *_pollingAllowedIntervals[] = {
 	"ten_sec",
@@ -382,7 +413,16 @@ void publishStatusNow(void);
 void publishEvent(MqttEventCode code, const char *detail);
 MqttEventCode eventCodeFromResult(modbusRequestAndResponseStatusValues result);
 void noteRs485Error(modbusRequestAndResponseStatusValues result, const char *detail);
-void setBootIntentAndReboot(BootIntent intent);
+void setBootIntentAndReboot(BootIntent intent, bool persistIntent = false);
+static void persistUserBootIntent(BootIntent intent);
+static void persistUserBootMode(BootMode mode);
+static void persistUserMqttConfig(const char *server, int port, const char *user, const char *pass);
+static void persistUserWifiCredentials(const char *ssid, const char *pass);
+static void persistUserExtAntenna(bool enabled);
+static void persistUserPollingConfig(uint32_t intervalSeconds, const char *bucketMap);
+static void persistUserPollInterval(uint32_t intervalSeconds);
+static void persistUserBucketMap(const char *bucketMap);
+static void persistDefaultsIfMissing(void);
 void setupHttpControlPlane(void);
 void handleHttpRoot(void);
 void handleRebootNormal(void);
@@ -442,14 +482,6 @@ publishBootEventOncePerBoot(void)
 
 	_mqtt.publish(bootTopic, payload, true);
 	bootEventPublished = true;
-
-	if (bootIntentPendingClear) {
-		Preferences preferences;
-		preferences.begin(DEVICE_NAME, false);
-		preferences.putString(kPreferenceBootIntent, bootIntentToString(BootIntent::Normal));
-		preferences.end();
-		bootIntentPendingClear = false;
-	}
 }
 
 #if defined(DEBUG_OVER_SERIAL)
@@ -470,6 +502,50 @@ logHeap(const char *label)
 }
 #endif
 
+static MemSample
+readMemSample()
+{
+	MemSample sample{};
+	sample.freeB = ESP.getFreeHeap();
+#if defined(MP_ESP8266)
+	sample.maxBlockB = ESP.getMaxFreeBlockSize();
+	sample.fragPct = static_cast<uint8_t>(ESP.getHeapFragmentation());
+#else
+	sample.maxBlockB = 0;
+	sample.fragPct = 0;
+#endif
+	return sample;
+}
+
+static void
+recordBootMemStage(BootMemStage stage)
+{
+	const MemSample sample = readMemSample();
+	const MemLevel level = evaluateBootMem(stage, sample);
+	updateBootMemWorst(bootMemWorst, stage, sample, level);
+#ifdef DEBUG_OVER_SERIAL
+	if (!bootMemWarningEmitted && level != MemLevel::Ok) {
+		Serial.print(F("BOOT MEM "));
+		Serial.print(static_cast<uint8_t>(level));
+		Serial.print(F(" S"));
+		Serial.print(static_cast<uint8_t>(stage));
+		Serial.print(F(" free="));
+		Serial.print(sample.freeB);
+		Serial.print(F(" max="));
+		Serial.print(sample.maxBlockB);
+		Serial.print(F(" frag="));
+		Serial.print(sample.fragPct);
+		if (stage == BootMemStage::Boot0) {
+			Serial.print(F(" thr b0 w14000/14000 c12000/12000"));
+		} else {
+			Serial.print(F(" thr bN w6000/4096/25 c4000/2048/35"));
+		}
+		Serial.println();
+		bootMemWarningEmitted = true;
+	}
+#endif
+}
+
 void
 pumpMqttDuringSetup(uint32_t durationMs)
 {
@@ -479,7 +555,7 @@ pumpMqttDuringSetup(uint32_t durationMs)
 		if (_mqtt.connected()) {
 			_mqtt.loop();
 		}
-		delay(5);
+		diagDelay(5);
 	}
 }
 
@@ -527,16 +603,6 @@ rs485TryReadIdentityOnce(void)
 		// Treat "unknown" as not-yet-identified so the stub backend (and fresh boots) can still
 		// promote to a real inverter identity once the serial is readable.
 		setMqttIdentifiersFromSerial(deviceSerialNumber);
-	}
-
-	{
-		Preferences preferences;
-		preferences.begin(DEVICE_NAME, false);
-		String storedSerial = preferences.getString(kPreferenceDeviceSerial, "");
-		if (storedSerial != deviceSerialNumber) {
-			preferences.putString(kPreferenceDeviceSerial, deviceSerialNumber);
-		}
-		preferences.end();
 	}
 
 #ifdef DEBUG_OVER_SERIAL
@@ -595,6 +661,7 @@ rs485ProbeTick(void)
 	Serial.println(_debugOutput);
 	logHeap("before RS485 probe");
 #endif
+	recordBootMemStage(BootMemStage::Boot4);
 
 	_modBus->setBaudRate(baud);
 
@@ -649,18 +716,12 @@ class PreferencesBootStore : public RebootRequestStore {
 public:
 	void writeBootIntent(BootIntent intent) override
 	{
-		Preferences preferences;
-		preferences.begin(DEVICE_NAME, false);
-		preferences.putString(kPreferenceBootIntent, bootIntentToString(intent));
-		preferences.end();
+		persistUserBootIntent(intent);
 	}
 
 	void writeBootMode(BootMode mode) override
 	{
-		Preferences preferences;
-		preferences.begin(DEVICE_NAME, false);
-		preferences.putString(kPreferenceBootMode, bootModeToString(mode));
-		preferences.end();
+		persistUserBootMode(mode);
 	}
 };
 
@@ -774,7 +835,7 @@ handleRebootWifi(void)
 		"</body></html>");
 
 	// Give the HTTP response a moment to flush before restarting.
-	delay(100);
+	diagDelay(100);
 	requestReboot(rebootStore, BootMode::WifiConfig, BootIntent::WifiConfig, triggerRestart);
 }
 
@@ -883,15 +944,107 @@ noteRs485Error(modbusRequestAndResponseStatusValues result, const char *detail)
 	publishEvent(code, detail);
 }
 
-void
-setBootIntentAndReboot(BootIntent intent)
+static void
+persistUserBootIntent(BootIntent intent)
 {
 	Preferences preferences;
-
-	// ESP8266 doesn't provide reset intent; persist requested reboot reason for next boot.
 	preferences.begin(DEVICE_NAME, false);
 	preferences.putString(kPreferenceBootIntent, bootIntentToString(intent));
 	preferences.end();
+}
+
+static void
+persistUserBootMode(BootMode mode)
+{
+	Preferences preferences;
+	preferences.begin(DEVICE_NAME, false);
+	preferences.putString(kPreferenceBootMode, bootModeToString(mode));
+	preferences.end();
+}
+
+static void
+persistUserMqttConfig(const char *server, int port, const char *user, const char *pass)
+{
+	Preferences preferences;
+	preferences.begin(DEVICE_NAME, false);
+	preferences.putString("MQTT_Server", server);
+	preferences.putInt("MQTT_Port", port);
+	preferences.putString("MQTT_Username", user);
+	preferences.putString("MQTT_Password", pass);
+	preferences.end();
+}
+
+static void
+persistUserWifiCredentials(const char *ssid, const char *pass)
+{
+	Preferences preferences;
+	preferences.begin(DEVICE_NAME, false);
+	preferences.putString("WiFi_SSID", ssid);
+	preferences.putString("WiFi_Password", pass);
+	preferences.end();
+}
+
+static void
+persistUserExtAntenna(bool enabled)
+{
+	Preferences preferences;
+	preferences.begin(DEVICE_NAME, false);
+	preferences.putBool("Ext_Antenna", enabled);
+	preferences.end();
+}
+
+static void
+persistUserPollingConfig(uint32_t intervalSeconds, const char *bucketMap)
+{
+	Preferences preferences;
+	preferences.begin(DEVICE_NAME, false);
+	preferences.putUInt(kPreferencePollInterval, intervalSeconds);
+	preferences.putString(kPreferenceBucketMap, bucketMap);
+	preferences.end();
+}
+
+static void
+persistUserPollInterval(uint32_t intervalSeconds)
+{
+	Preferences preferences;
+	preferences.begin(DEVICE_NAME, false);
+	preferences.putUInt(kPreferencePollInterval, intervalSeconds);
+	preferences.end();
+}
+
+static void
+persistUserBucketMap(const char *bucketMap)
+{
+	Preferences preferences;
+	preferences.begin(DEVICE_NAME, false);
+	preferences.putString(kPreferenceBucketMap, bucketMap);
+	preferences.end();
+}
+
+static void
+persistDefaultsIfMissing(void)
+{
+	Preferences preferences;
+	preferences.begin(DEVICE_NAME, false);
+	if (!preferences.isKey(kPreferencePollInterval)) {
+		preferences.putUInt(kPreferencePollInterval, kPollIntervalDefaultSeconds);
+	} else {
+		const uint32_t stored = preferences.getUInt(kPreferencePollInterval, kPollIntervalDefaultSeconds);
+		const uint32_t clamped = clampPollInterval(stored);
+		if (clamped != stored) {
+			preferences.putUInt(kPreferencePollInterval, clamped);
+		}
+	}
+	preferences.end();
+}
+
+void
+setBootIntentAndReboot(BootIntent intent, bool persistIntent)
+{
+	if (persistIntent) {
+		// ESP8266 doesn't provide reset intent; persist requested reboot reason for next boot.
+		persistUserBootIntent(intent);
+	}
 	ESP.restart();
 }
 
@@ -1133,6 +1286,255 @@ handlePortalStatusRequest(WiFiManager& wifiManager)
 	wifiManager.server->sendContent("<p>Page refreshes every second.</p></body></html>");
 }
 
+static constexpr uint8_t kPollingPortalPageSize = 16;
+
+static void
+portalLogHeap(const char *label)
+{
+#ifdef DEBUG_OVER_SERIAL
+	logHeap(label);
+#else
+	(void)label;
+#endif
+}
+
+static bool
+loadPollingBucketsForPortal(const mqttState *entities,
+                            size_t entityCount,
+                            BucketId *outBuckets,
+                            uint32_t &outPollIntervalSeconds)
+{
+	if (!entities || !outBuckets || entityCount == 0 || entityCount > kMqttEntityMaxCount) {
+		return false;
+	}
+
+	Preferences preferences;
+	preferences.begin(DEVICE_NAME, true); // RO
+	uint32_t storedPollInterval = preferences.getUInt(kPreferencePollInterval, kPollIntervalDefaultSeconds);
+	outPollIntervalSeconds = clampPollInterval(storedPollInterval);
+
+	char bucketMap[kPrefBucketMapMaxLen];
+	bucketMap[0] = '\0';
+	preferences.getString(kPreferenceBucketMap, bucketMap, sizeof(bucketMap));
+	preferences.end();
+
+	MqttEntityRuntime rt[kMqttEntityMaxCount]{};
+	for (size_t i = 0; i < entityCount; ++i) {
+		applyBucketToRuntime(rt[i], bucketIdFromFreq(entities[i].updateFreq));
+		outBuckets[i] = rt[i].bucketId;
+	}
+
+	if (bucketMap[0] != '\0') {
+		uint32_t unknown = 0;
+		uint32_t invalid = 0;
+		uint32_t dup = 0;
+		(void)applyBucketMapString(bucketMap, entities, entityCount, rt, unknown, invalid, dup);
+		for (size_t i = 0; i < entityCount; ++i) {
+			outBuckets[i] = rt[i].bucketId;
+		}
+	}
+
+	return true;
+}
+
+static uint16_t
+portalArgToU16(const String &arg, uint16_t defaultValue)
+{
+	if (arg.length() == 0) {
+		return defaultValue;
+	}
+	char *endPtr = nullptr;
+	errno = 0;
+	unsigned long parsed = strtoul(arg.c_str(), &endPtr, 10);
+	if (errno != 0 || endPtr == arg.c_str()) {
+		return defaultValue;
+	}
+	return static_cast<uint16_t>(parsed);
+}
+
+static void
+handlePortalPollingPage(WiFiManager &wifiManager)
+{
+	if (!wifiManager.server) {
+		return;
+	}
+
+	portalLogHeap("portal polling page: before render");
+
+	const mqttState *entities = mqttEntitiesDesc();
+	const size_t entityCount = mqttEntitiesCount();
+	BucketId buckets[kMqttEntityMaxCount];
+	uint32_t storedIntervalSeconds = kPollIntervalDefaultSeconds;
+	(void)loadPollingBucketsForPortal(entities, entityCount, buckets, storedIntervalSeconds);
+
+	const uint16_t page = portalArgToU16(wifiManager.server->arg("page"), 0);
+	const uint16_t maxPage = (entityCount == 0) ? 0 : static_cast<uint16_t>((entityCount - 1) / kPollingPortalPageSize);
+	const uint16_t safePage = (page > maxPage) ? maxPage : page;
+	const size_t startIdx = static_cast<size_t>(safePage) * kPollingPortalPageSize;
+	const size_t endIdx = std::min(entityCount, startIdx + kPollingPortalPageSize);
+
+	const bool saved = wifiManager.server->hasArg("saved") && wifiManager.server->arg("saved") == "1";
+	const bool err = wifiManager.server->hasArg("err") && wifiManager.server->arg("err") == "1";
+
+	wifiManager.server->setContentLength(CONTENT_LENGTH_UNKNOWN);
+	wifiManager.server->send(200, "text/html", "");
+
+	char buf[256];
+	wifiManager.server->sendContent("<!DOCTYPE html><html><head>");
+	wifiManager.server->sendContent("<meta charset=\"utf-8\">");
+	wifiManager.server->sendContent("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
+	wifiManager.server->sendContent("<title>Polling Schedule</title>");
+	wifiManager.server->sendContent("</head><body>");
+	wifiManager.server->sendContent("<h2>Polling schedule</h2>");
+	wifiManager.server->sendContent("<p><a href=\"/param\">Back to MQTT settings</a></p>");
+
+	if (saved) {
+		wifiManager.server->sendContent("<p><strong>Saved.</strong></p>");
+	}
+	if (err) {
+		wifiManager.server->sendContent("<p><strong>Some values were invalid and were ignored.</strong></p>");
+	}
+
+	snprintf(buf, sizeof(buf), "<p>Page %u of %u</p>", static_cast<unsigned>(safePage + 1), static_cast<unsigned>(maxPage + 1));
+	wifiManager.server->sendContent(buf);
+
+	wifiManager.server->sendContent("<form method=\"POST\" action=\"/config/polling/save\">");
+	snprintf(buf, sizeof(buf),
+	         "<input type=\"hidden\" name=\"page\" value=\"%u\">"
+	         "<label>poll_interval_s <input name=\"poll_interval_s\" type=\"number\" min=\"1\" max=\"86400\" value=\"%lu\"></label><br><br>",
+	         static_cast<unsigned>(safePage),
+	         static_cast<unsigned long>(storedIntervalSeconds));
+	wifiManager.server->sendContent(buf);
+
+	wifiManager.server->sendContent("<table border=\"1\" cellpadding=\"4\" cellspacing=\"0\">");
+	wifiManager.server->sendContent("<tr><th>Entity</th><th>Bucket</th></tr>");
+	for (size_t idx = startIdx; idx < endIdx; ++idx) {
+		const size_t row = idx - startIdx;
+		const BucketId cur = buckets[idx];
+		snprintf(buf, sizeof(buf), "<tr data-entity=\"%s\"><td>%s</td><td>", entities[idx].mqttName, entities[idx].mqttName);
+		wifiManager.server->sendContent(buf);
+		snprintf(buf, sizeof(buf), "<select name=\"b%u\">", static_cast<unsigned>(row));
+		wifiManager.server->sendContent(buf);
+
+		auto opt = [&](BucketId id, const char *label) {
+			snprintf(buf, sizeof(buf), "<option value=\"%s\"%s>%s</option>",
+			         bucketIdToString(id),
+			         (cur == id) ? " selected" : "",
+			         label);
+			wifiManager.server->sendContent(buf);
+		};
+
+		opt(BucketId::TenSec, "10s");
+		opt(BucketId::OneMin, "1m");
+		opt(BucketId::FiveMin, "5m");
+		opt(BucketId::OneHour, "1h");
+		opt(BucketId::OneDay, "1d");
+		opt(BucketId::User, "usr");
+		opt(BucketId::Disabled, "off");
+
+		wifiManager.server->sendContent("</select></td></tr>");
+		if ((row % 4) == 0) {
+			diagYield();
+		}
+	}
+	wifiManager.server->sendContent("</table><br>");
+	wifiManager.server->sendContent("<button type=\"submit\">Save</button>");
+	wifiManager.server->sendContent("</form>");
+
+	const int prevPage = static_cast<int>(safePage) - 1;
+	const int nextPage = static_cast<int>(safePage) + 1;
+	wifiManager.server->sendContent("<p>");
+	if (prevPage >= 0) {
+		snprintf(buf, sizeof(buf), "<a href=\"/config/polling?page=%d\">&laquo; Prev</a> ", prevPage);
+		wifiManager.server->sendContent(buf);
+	}
+	if (nextPage <= static_cast<int>(maxPage)) {
+		snprintf(buf, sizeof(buf), "<a href=\"/config/polling?page=%d\">Next &raquo;</a>", nextPage);
+		wifiManager.server->sendContent(buf);
+	}
+	wifiManager.server->sendContent("</p>");
+	wifiManager.server->sendContent("</body></html>");
+
+	portalLogHeap("portal polling page: after render");
+}
+
+static void
+handlePortalPollingSave(WiFiManager &wifiManager)
+{
+	if (!wifiManager.server) {
+		return;
+	}
+
+	portalLogHeap("portal polling save: before apply");
+
+	const mqttState *entities = mqttEntitiesDesc();
+	const size_t entityCount = mqttEntitiesCount();
+	BucketId buckets[kMqttEntityMaxCount];
+	uint32_t storedIntervalSeconds = kPollIntervalDefaultSeconds;
+	(void)loadPollingBucketsForPortal(entities, entityCount, buckets, storedIntervalSeconds);
+
+	const uint16_t page = portalArgToU16(wifiManager.server->arg("page"), 0);
+	const uint16_t maxPage = (entityCount == 0) ? 0 : static_cast<uint16_t>((entityCount - 1) / kPollingPortalPageSize);
+	const uint16_t safePage = (page > maxPage) ? maxPage : page;
+	const size_t startIdx = static_cast<size_t>(safePage) * kPollingPortalPageSize;
+	const size_t endIdx = std::min(entityCount, startIdx + kPollingPortalPageSize);
+
+	bool hadError = false;
+
+	// poll_interval_s
+	if (wifiManager.server->hasArg("poll_interval_s")) {
+		char *endPtr = nullptr;
+		errno = 0;
+		unsigned long parsed = strtoul(wifiManager.server->arg("poll_interval_s").c_str(), &endPtr, 10);
+		if (errno == 0 && endPtr != nullptr && *endPtr == '\0') {
+			storedIntervalSeconds = clampPollInterval(static_cast<uint32_t>(parsed));
+		} else {
+			hadError = true;
+		}
+	}
+
+	for (size_t idx = startIdx; idx < endIdx; ++idx) {
+		const size_t row = idx - startIdx;
+		char argName[8];
+		snprintf(argName, sizeof(argName), "b%u", static_cast<unsigned>(row));
+		if (!wifiManager.server->hasArg(argName)) {
+			continue;
+		}
+		const String argVal = wifiManager.server->arg(argName);
+		BucketId bucket = bucketIdFromString(argVal.c_str());
+		if (bucket == BucketId::Unknown) {
+			hadError = true;
+			continue;
+		}
+		buckets[idx] = bucket;
+		diagYield();
+	}
+
+	char outMap[2048];
+	size_t appliedCount = 0;
+	if (!buildBucketMapFromAssignments(entities, entityCount, buckets, outMap, sizeof(outMap), appliedCount)) {
+		hadError = true;
+		outMap[0] = '\0';
+	}
+
+	persistUserPollingConfig(storedIntervalSeconds, outMap);
+
+	portalLogHeap("portal polling save: after apply");
+
+	// Optional hidden reboot for E2E; not shown in UI.
+	if (wifiManager.server->hasArg("reboot") && wifiManager.server->arg("reboot") == "1") {
+		setBootIntentAndReboot(BootIntent::Normal);
+		return;
+	}
+
+	char location[96];
+	snprintf(location, sizeof(location), "/config/polling?page=%u&saved=1%s",
+	         static_cast<unsigned>(safePage),
+	         hadError ? "&err=1" : "");
+	wifiManager.server->sendHeader("Location", location);
+	wifiManager.server->send(302, "text/plain", "");
+}
+
 /*
  * setup
  *
@@ -1146,10 +1548,13 @@ void setup()
 	// See Definitions.h for this.
 	Serial.begin(9600);
 #ifdef DEBUG_OVER_SERIAL
-	delay(100);
+	logHeap("very-early");
+	diagDelay(100);
 	logHeap("boot");
 #endif
 #endif // DEBUG_OVER_SERIAL || DEBUG_LEVEL2 || DEBUG_OUTPUT_TX_RX
+
+	recordBootMemStage(BootMemStage::Boot0);
 
 		// RS485/inverter probing runs in loop() (background) so NORMAL-mode services (MQTT/http/scheduler)
 		// continue to operate even when the inverter is offline.
@@ -1175,9 +1580,12 @@ void setup()
 
 	// Wire.setClock(10000);
 #ifdef MP_ESPUNO_ESP32C6
-	delay(1000);          // give USB boot time to settle
+	diagDelay(1000);          // give USB boot time to settle
 	Wire.begin(6, 7);
 #endif // MP_ESPUNO_ESP32C6
+
+	snprintf(_version, sizeof(_version), "%llu", static_cast<unsigned long long>(BUILD_TS_MS));
+	diag_init();
 
 	// Display time
 #ifndef DISABLE_DISPLAY
@@ -1188,7 +1596,7 @@ void setup()
 #endif
 
 	// Bit of a delay to give things time to kick in
-	delay(500);
+	diagDelay(500);
 
 #if defined(MP_ESP8266)
 	pinMode(kSafeModePin, INPUT_PULLUP);
@@ -1198,6 +1606,8 @@ void setup()
 	sprintf(_debugOutput, "Starting.");
 	Serial.println(_debugOutput);
 #endif
+	Serial.printf("Firmware build ts: %llu\r\n", static_cast<unsigned long long>(BUILD_TS_MS));
+	Serial.printf("Firmware version: %s\r\n", _version);
 
 	buildDeviceName();
 	{
@@ -1205,36 +1615,48 @@ void setup()
 		strlcpy(lastResetReason, resetReason.c_str(), sizeof(lastResetReason));
 	}
 
-	preferences.begin(DEVICE_NAME, false); // RW
-	// ESP8266 doesn't provide reset intent; read once and clear so we can distinguish intentional reboots.
-	{
-		String storedIntent = preferences.getString(kPreferenceBootIntent, "");
-		currentBootIntent = bootIntentFromString(storedIntent.c_str());
-		bootIntentForPublish = currentBootIntent;
-		bootIntentPendingClear = (currentBootIntent != BootIntent::Normal);
-	}
-		{
-			String storedMode = preferences.getString(kPreferenceBootMode, "");
-			currentBootMode = bootModeFromString(storedMode.c_str());
-		}
-		bootModeForDiagnostics = currentBootMode;
-	String storedSerial = preferences.getString(kPreferenceDeviceSerial, "");
-	appConfig.wifiSSID = preferences.getString("WiFi_SSID", "");
-	appConfig.wifiPass = preferences.getString("WiFi_Password", "");
-	appConfig.mqttSrvr = preferences.getString("MQTT_Server", "");
+	char storedIntent[kPrefBootIntentMaxLen] = "";
+	char storedMode[kPrefBootModeMaxLen] = "";
+	char storedSerial[kPrefDeviceSerialMaxLen] = "";
+	char wifiSsid[kPrefWifiSsidMaxLen] = "";
+	char wifiPass[kPrefWifiPasswordMaxLen] = "";
+	char mqttServer[kPrefMqttServerMaxLen] = "";
+	char mqttUser[kPrefMqttUsernameMaxLen] = "";
+	char mqttPass[kPrefMqttPasswordMaxLen] = "";
+
+	preferences.begin(DEVICE_NAME, true); // RO
+	preferences.getString(kPreferenceBootIntent, storedIntent, sizeof(storedIntent));
+	preferences.getString(kPreferenceBootMode, storedMode, sizeof(storedMode));
+	preferences.getString(kPreferenceDeviceSerial, storedSerial, sizeof(storedSerial));
+	preferences.getString("WiFi_SSID", wifiSsid, sizeof(wifiSsid));
+	preferences.getString("WiFi_Password", wifiPass, sizeof(wifiPass));
+	preferences.getString("MQTT_Server", mqttServer, sizeof(mqttServer));
 	appConfig.mqttPort = preferences.getInt("MQTT_Port", 0);
-	appConfig.mqttUser = preferences.getString("MQTT_Username", "");
-	appConfig.mqttPass = preferences.getString("MQTT_Password", "");
+	preferences.getString("MQTT_Username", mqttUser, sizeof(mqttUser));
+	preferences.getString("MQTT_Password", mqttPass, sizeof(mqttPass));
 #if defined(MP_XIAO_ESP32C6)
 	appConfig.extAntenna = preferences.getBool("Ext_Antenna", false);
 #elif defined(MP_ESPUNO_ESP32C6)
 	appConfig.extAntenna = preferences.getBool("Ext_Antenna", false);
 #endif // MP_XIAO_ESP32C6
-		preferences.end();
-		if (storedSerial.length() > 0) {
-			strlcpy(deviceSerialNumber, storedSerial.c_str(), sizeof(deviceSerialNumber));
-			setMqttIdentifiersFromSerial(storedSerial.c_str());
-		}
+	preferences.end();
+	persistDefaultsIfMissing();
+
+	currentBootIntent = bootIntentFromString(storedIntent);
+	bootIntentForPublish = currentBootIntent;
+	currentBootMode = bootModeFromString(storedMode);
+	bootModeForDiagnostics = currentBootMode;
+
+	appConfig.wifiSSID = wifiSsid;
+	appConfig.wifiPass = wifiPass;
+	appConfig.mqttSrvr = mqttServer;
+	appConfig.mqttUser = mqttUser;
+	appConfig.mqttPass = mqttPass;
+
+	if (storedSerial[0] != '\0') {
+		strlcpy(deviceSerialNumber, storedSerial, sizeof(deviceSerialNumber));
+		setMqttIdentifiersFromSerial(storedSerial);
+	}
 	bootPlan = planForBootMode(currentBootMode);
 	BootMode startupMode = currentBootMode;
 
@@ -1305,17 +1727,21 @@ void setup()
 			setBootIntentAndReboot(BootIntent::WifiConfig);
 		} else {
 			updateOLED(false, "Found", "config", _version);
-			delay(250);
+			diagDelay(250);
 		}
 	}
 
 	if (bootPlan.wifiSta) {
 		// Configure WIFI
+#ifdef DEBUG_OVER_SERIAL
+		logHeap("pre-wifi");
+#endif
 		setupWifi(true);
 		lastWifiConnected = true;
 #ifdef DEBUG_OVER_SERIAL
 		logHeap("after WiFi");
 #endif
+		recordBootMemStage(BootMemStage::Boot1);
 		setupHttpControlPlane();
 	}
 
@@ -1323,6 +1749,9 @@ void setup()
 		// Configure MQTT to the address and port specified above
 		_mqtt.setServer(appConfig.mqttSrvr.c_str(), appConfig.mqttPort);
 		_mqtt.setKeepAlive(60);
+		// PubSubClient connect() waits for CONNACK in a tight loop without yielding. Keep this well
+		// below the ESP8266 WDT window to avoid soft WDT resets if the broker is slow/unreachable.
+		_mqtt.setSocketTimeout(1);
 #ifdef DEBUG_OVER_SERIAL
 		sprintf(_debugOutput, "About to request buffer");
 		Serial.println(_debugOutput);
@@ -1344,9 +1773,10 @@ void setup()
 			if (_mqttPayload != NULL) {
 				emptyPayload();
 #ifdef DEBUG_OVER_SERIAL
-				logHeap("after MQTT payload");
+					logHeap("after MQTT payload");
 #endif
-				break;
+					recordBootMemStage(BootMemStage::Boot2);
+					break;
 			} else {
 #ifdef DEBUG_OVER_SERIAL
 				sprintf(_debugOutput, "Couldn't allocate payload of %d bytes", _maxPayloadSize);
@@ -1362,12 +1792,12 @@ void setup()
 		}
 
 		// And any messages we are subscribed to will be pushed to the mqttCallback function for processing
-		_mqtt.setCallback(mqttCallback);
+			_mqtt.setCallback(mqttCallback);
 
-		// Connect to MQTT before any RS485 probing so boot intent is observable even if RS485 stalls.
-		mqttReconnect();
-		publishBootEventOncePerBoot();
-	}
+			// Connect to MQTT before any RS485 probing so boot intent is observable even if RS485 stalls.
+			mqttReconnect();
+			publishBootEventOncePerBoot();
+		}
 
 		if (bootPlan.inverter) {
 		// Set up the serial for communicating with the MAX
@@ -1400,6 +1830,7 @@ void setup()
 #if defined(DEBUG_OVER_SERIAL)
 			logHeap("after RS485 init");
 #endif
+			recordBootMemStage(BootMemStage::Boot3);
 
 			rs485UartInfo = _modBus->uartInfo();
 
@@ -1421,17 +1852,12 @@ void setup()
 void
 configHandlerSta(void)
 {
-	Preferences preferences;
 	WiFiManager wifiManager;
 
 	// MODE_WIFI_CONFIG is STA-only (no SoftAP, no DNS). This avoids interfering with the LAN and
 	// keeps heap usage lower, but requires the user to reach the device on its STA IP.
 	WiFi.mode(WIFI_STA);
 
-	// Clear persisted boot_mode so a power cycle returns to normal unless explicitly requested again.
-	preferences.begin(DEVICE_NAME, false); // RW
-	preferences.putString(kPreferenceBootMode, bootModeToString(BootMode::Normal));
-	preferences.end();
 	currentBootMode = BootMode::Normal;
 
 #ifdef DEBUG_OVER_SERIAL
@@ -1443,16 +1869,13 @@ configHandlerSta(void)
 
 	const unsigned long start = millis();
 	while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {
-		delay(50);
+		diagDelay(50);
 	}
 
 	if (WiFi.status() != WL_CONNECTED) {
 #ifdef DEBUG_OVER_SERIAL
 		portalLog("STA portal: connect failed; rebooting into normal. Hold D3/GPIO0 LOW at boot for AP portal.");
 #endif
-		preferences.begin(DEVICE_NAME, false); // RW
-		preferences.putString(kPreferenceBootMode, bootModeToString(BootMode::Normal));
-		preferences.end();
 		setBootIntentAndReboot(BootIntent::Normal);
 		return;
 	}
@@ -1493,12 +1916,14 @@ configHandlerSta(void)
 	WiFiManagerParameter custom_mqtt_port("port", "MQTT port", mqttPortDefault.c_str(), 6);
 	WiFiManagerParameter custom_mqtt_user("user", "MQTT user", appConfig.mqttUser.c_str(), 32);
 	WiFiManagerParameter custom_mqtt_pass("mpass", "MQTT password", appConfig.mqttPass.c_str(), 32);
+	WiFiManagerParameter p_polling_link("<p><a href=\"/config/polling\">Polling schedule</a></p>");
 
 	wifiManager.addParameter(&p_lineBreak_text);
 	wifiManager.addParameter(&custom_mqtt_server);
 	wifiManager.addParameter(&custom_mqtt_port);
 	wifiManager.addParameter(&custom_mqtt_user);
 	wifiManager.addParameter(&custom_mqtt_pass);
+	wifiManager.addParameter(&p_polling_link);
 
 	portalStatus = portalStatusIdle;
 	portalStatusReason[0] = '\0';
@@ -1521,6 +1946,12 @@ configHandlerSta(void)
 #endif
 			wifiManager.server->on("/status", [&]() {
 				handlePortalStatusRequest(wifiManager);
+			});
+			wifiManager.server->on("/config/polling", HTTP_GET, [&]() {
+				handlePortalPollingPage(wifiManager);
+			});
+			wifiManager.server->on("/config/polling/save", HTTP_POST, [&]() {
+				handlePortalPollingSave(wifiManager);
 			});
 		}
 	});
@@ -1546,18 +1977,11 @@ configHandlerSta(void)
 	});
 
 	wifiManager.setSaveParamsCallback([&]() {
-		preferences.begin(DEVICE_NAME, false); // RW
-		preferences.putString("MQTT_Server", custom_mqtt_server.getValue());
-		{
-			int port = strtol(custom_mqtt_port.getValue(), NULL, 10);
-			if (port < 0 || port > SHRT_MAX) {
-				port = 0;
-			}
-			preferences.putInt("MQTT_Port", port);
+		int port = strtol(custom_mqtt_port.getValue(), NULL, 10);
+		if (port < 0 || port > SHRT_MAX) {
+			port = 0;
 		}
-		preferences.putString("MQTT_Username", custom_mqtt_user.getValue());
-		preferences.putString("MQTT_Password", custom_mqtt_pass.getValue());
-		preferences.end();
+		persistUserMqttConfig(custom_mqtt_server.getValue(), port, custom_mqtt_user.getValue(), custom_mqtt_pass.getValue());
 
 		portalMqttSaved = true;
 		portalNeedsMqttConfig = mqttServerIsBlank(custom_mqtt_server.getValue());
@@ -1621,22 +2045,23 @@ configHandlerSta(void)
 #endif
 				updateOLED(false, "Web", "config", "succeeded");
 
-				preferences.begin(DEVICE_NAME, false); // RW
-				preferences.putString("WiFi_SSID", wifiManager.getWiFiSSID());
-				preferences.putString("WiFi_Password", wifiManager.getWiFiPass());
-				String storedMqttServer = preferences.getString("MQTT_Server", "");
-				PortalPostWifiAction postWifiAction = portalPostWifiActionAfterWifiSave(storedMqttServer.c_str());
+				persistUserWifiCredentials(wifiManager.getWiFiSSID().c_str(), wifiManager.getWiFiPass().c_str());
+				{
+					Preferences prefsRo;
+					prefsRo.begin(DEVICE_NAME, true);
+				char storedMqttServer[kPrefMqttServerMaxLen] = "";
+					prefsRo.getString("MQTT_Server", storedMqttServer, sizeof(storedMqttServer));
+					prefsRo.end();
+				PortalPostWifiAction postWifiAction = portalPostWifiActionAfterWifiSave(storedMqttServer);
 				portalNeedsMqttConfig = (postWifiAction == PortalPostWifiAction::RedirectToMqttParams);
-				preferences.putString(kPreferenceBootMode, bootModeToString(BootMode::Normal));
-				preferences.end();
-
 				if (postWifiAction == PortalPostWifiAction::Reboot) {
 					unsigned long statusStart = millis();
 					while (millis() - statusStart < 3000) {
 						wifiManager.process();
-						delay(50);
+						diagDelay(50);
 					}
 					setBootIntentAndReboot(BootIntent::Normal);
+				}
 				}
 			}
 
@@ -1670,13 +2095,10 @@ configHandlerSta(void)
 			}
 		}
 		if (portalRebootScheduled && static_cast<long>(millis() - portalRebootAt) >= 0) {
-			preferences.begin(DEVICE_NAME, false); // RW
-			preferences.putString(kPreferenceBootMode, bootModeToString(BootMode::Normal));
-			preferences.end();
 			setBootIntentAndReboot(BootIntent::Normal);
 		}
 
-		delay(50);
+		diagDelay(50);
 	}
 }
 
@@ -1710,7 +2132,7 @@ configLoop(void)
 			break;
 		}
 
-		delay(300);
+		diagDelay(300);
 	}
 #endif // BUTTON_PIN
 	configHandler();
@@ -1719,19 +2141,14 @@ configLoop(void)
 void
 configHandler(void)
 {
-	Preferences preferences;
 	WiFiManager wifiManager;
 
 	// Config portal is intended to be a temporary recovery/config state, not a persistent "mode".
-	// Reset boot_mode back to normal as soon as we enter the portal so the next reboot attempts
-	// a normal boot (and falls back into the portal again if config is still missing/invalid).
+	// Keep boot-mode transitions user-driven only; runtime portal entry updates only in-RAM state.
 	if (currentBootMode != BootMode::Normal) {
-		preferences.begin(DEVICE_NAME, false); // RW
-		preferences.putString(kPreferenceBootMode, bootModeToString(BootMode::Normal));
-		preferences.end();
 		currentBootMode = BootMode::Normal;
 #ifdef DEBUG_OVER_SERIAL
-		Serial.println("Config portal entry: boot_mode reset to normal.");
+		Serial.println("Config portal entry: boot_mode set to normal (runtime only).");
 #endif
 	}
 
@@ -1759,6 +2176,7 @@ configHandler(void)
 	WiFiManagerParameter custom_mqtt_port("port", "MQTT port", mqttPortDefault.c_str(), 6);
 	WiFiManagerParameter custom_mqtt_user("user", "MQTT user", appConfig.mqttUser.c_str(), 32);
 	WiFiManagerParameter custom_mqtt_pass("mpass", "MQTT password", appConfig.mqttPass.c_str(), 32);
+	WiFiManagerParameter p_polling_link("<p><a href=\"/config/polling\">Polling schedule</a></p>");
 #ifdef MP_XIAO_ESP32C6
 	const char _customHtml_checkbox[] = "type=\"checkbox\"";
 	WiFiManagerParameter custom_ext_ant("ext_antenna", "Use external WiFi antenna\n", "T", 2, _customHtml_checkbox, WFM_LABEL_AFTER);
@@ -1788,6 +2206,7 @@ configHandler(void)
 	wifiManager.addParameter(&custom_mqtt_port);
 	wifiManager.addParameter(&custom_mqtt_user);
 	wifiManager.addParameter(&custom_mqtt_pass);
+	wifiManager.addParameter(&p_polling_link);
 
 	portalStatus = portalStatusIdle;
 	portalStatusReason[0] = '\0';
@@ -1857,6 +2276,12 @@ configHandler(void)
 			wifiManager.server->on("/status", [&]() {
 				handlePortalStatusRequest(wifiManager);
 			});
+			wifiManager.server->on("/config/polling", HTTP_GET, [&]() {
+				handlePortalPollingPage(wifiManager);
+			});
+			wifiManager.server->on("/config/polling/save", HTTP_POST, [&]() {
+				handlePortalPollingSave(wifiManager);
+			});
 		}
 	});
 	// Called before WiFiManager begins the connect-on-save attempt.
@@ -1882,18 +2307,11 @@ configHandler(void)
 	// Persist MQTT parameters when /paramsave is used, independent of WiFi success/failure.
 	// Keeping this separate avoids WiFi saves clobbering MQTT values.
 	wifiManager.setSaveParamsCallback([&]() {
-		preferences.begin(DEVICE_NAME, false); // RW
-		preferences.putString("MQTT_Server", custom_mqtt_server.getValue());
-		{
-			int port = strtol(custom_mqtt_port.getValue(), NULL, 10);
-			if (port < 0 || port > SHRT_MAX) {
-				port = 0;
-			}
-			preferences.putInt("MQTT_Port", port);
+		int port = strtol(custom_mqtt_port.getValue(), NULL, 10);
+		if (port < 0 || port > SHRT_MAX) {
+			port = 0;
 		}
-		preferences.putString("MQTT_Username", custom_mqtt_user.getValue());
-		preferences.putString("MQTT_Password", custom_mqtt_pass.getValue());
-		preferences.end();
+		persistUserMqttConfig(custom_mqtt_server.getValue(), port, custom_mqtt_user.getValue(), custom_mqtt_pass.getValue());
 
 		portalMqttSaved = true;
 		portalNeedsMqttConfig = mqttServerIsBlank(custom_mqtt_server.getValue());
@@ -1960,31 +2378,29 @@ configHandler(void)
 #endif
 				updateOLED(false, "Web", "config", "succeeded");
 
-				preferences.begin(DEVICE_NAME, false); // RW
 				// Save WiFi settings only here. MQTT settings are saved via setSaveParamsCallback (/paramsave).
-				preferences.putString("WiFi_SSID", wifiManager.getWiFiSSID());
-				preferences.putString("WiFi_Password", wifiManager.getWiFiPass());
-				String storedMqttServer = preferences.getString("MQTT_Server", "");
-				PortalPostWifiAction postWifiAction = portalPostWifiActionAfterWifiSave(storedMqttServer.c_str());
+				persistUserWifiCredentials(wifiManager.getWiFiSSID().c_str(), wifiManager.getWiFiPass().c_str());
+				char storedMqttServer[kPrefMqttServerMaxLen] = "";
+				{
+					Preferences prefsRo;
+					prefsRo.begin(DEVICE_NAME, true);
+					prefsRo.getString("MQTT_Server", storedMqttServer, sizeof(storedMqttServer));
+					prefsRo.end();
+				}
+				PortalPostWifiAction postWifiAction = portalPostWifiActionAfterWifiSave(storedMqttServer);
 				portalNeedsMqttConfig = (postWifiAction == PortalPostWifiAction::RedirectToMqttParams);
-#ifdef DEBUG_OVER_SERIAL
-				Serial.println("Config saved; returning boot_mode to normal after portal success.");
-#endif
-				// Return to normal after a successful portal save so later boots follow legacy behavior.
-				preferences.putString(kPreferenceBootMode, bootModeToString(bootModeAfterPortalSuccess(currentBootMode)));
 #ifdef MP_XIAO_ESP32C6
 				{
 					const char *extAnt = custom_ext_ant.getValue();
-					preferences.putBool("Ext_Antenna", extAnt[0] == 'T');
+					persistUserExtAntenna(extAnt[0] == 'T');
 				}
 #endif // MP_XIAO_ESP32C6
 #ifdef MP_ESPUNO_ESP32C6
 				{
 					const char *extAnt = custom_ext_ant.getValue();
-					preferences.putBool("Ext_Antenna", extAnt[0] == 'T');
+					persistUserExtAntenna(extAnt[0] == 'T');
 				}
 #endif // MP_ESPUNO_ESP32C6
-				preferences.end();
 
 				// If WiFi saved/connected but MQTT is blank, keep the portal alive and redirect to /param.
 				// Otherwise keep the legacy behavior: short status display then reboot into normal.
@@ -1992,7 +2408,7 @@ configHandler(void)
 						unsigned long statusStart = millis();
 						while (millis() - statusStart < 3000) {
 							wifiManager.process();
-							delay(50);
+							diagDelay(50);
 						}
 						setBootIntentAndReboot(BootIntent::Normal);
 					}
@@ -2034,13 +2450,9 @@ configHandler(void)
 				}
 			}
 			if (portalRebootScheduled && static_cast<long>(millis() - portalRebootAt) >= 0) {
-				// Ensure the reboot exits into a normal boot attempt.
-				preferences.begin(DEVICE_NAME, false); // RW
-				preferences.putString(kPreferenceBootMode, bootModeToString(BootMode::Normal));
-				preferences.end();
 				setBootIntentAndReboot(BootIntent::Normal);
 			}
-			delay(50);
+			diagDelay(50);
 		}
 	}
 
@@ -2062,6 +2474,10 @@ loop()
 		configHandler();
 	}
 #endif // BUTTON_PIN
+
+	const uint32_t loopNowMs = millis();
+	diag_loop_tick(loopNowMs);
+	diag_wifi_status(static_cast<int16_t>(WiFi.status()), loopNowMs);
 
 	// Refresh LED Screen, will cause the status asterisk to flicker
 	updateOLED(true, "", "", "");
@@ -2121,7 +2537,7 @@ loop()
 	updateRunstate();
 
 	// Send HA auto-discovery info
-	if (bootPlan.mqtt && resendHaData == true) {
+	if (bootPlan.mqtt && resendHaData == true && _mqtt.connected()) {
 		sendHaData();
 	}
 
@@ -2194,7 +2610,7 @@ bool
 portalHasPersistedWifiCredentials(void)
 {
 	Preferences preferences;
-	char ssid[33] = "";
+	char ssid[kPrefWifiSsidMaxLen] = "";
 
 	preferences.begin(DEVICE_NAME, true); // RO
 	preferences.getString("WiFi_SSID", ssid, sizeof(ssid));
@@ -2249,10 +2665,23 @@ buildPollingKey(const mqttState *entity, char *target, size_t size)
 static inline void
 maybeYield()
 {
-	if (!inMqttCallback) {
-		yield();
+	if (inMqttCallback) {
+		return;
 	}
+#if defined(MP_ESP8266)
+	if (!can_yield()) {
+		return;
+	}
+#endif
+	diagYield();
 }
+
+#if defined(MP_ESP8266)
+static void
+wifiScanCompleteNoop(int)
+{
+}
+#endif
 
 
 void
@@ -2287,12 +2716,7 @@ getPollingTimestamp(char *target, size_t size)
 void
 updatePollingLastChange(void)
 {
-	Preferences preferences;
-
-	getPollingTimestamp(_pollingLastChange, sizeof(_pollingLastChange));
-	preferences.begin(DEVICE_NAME, false);
-	preferences.putString("Freq_Last", _pollingLastChange);
-	preferences.end();
+	getPollingTimestamp(_pollingConfigLastChange, sizeof(_pollingConfigLastChange));
 }
 
 void
@@ -2366,32 +2790,32 @@ loadPollingConfig(void)
 	persistInvalidBucketCount = 0;
 	persistDuplicateEntityCount = 0;
 
-	preferences.begin(DEVICE_NAME, false);
-	{
-		String lastChange = preferences.getString("Freq_Last", "");
-		if (lastChange.length() == 0) {
-			getPollingTimestamp(_pollingLastChange, sizeof(_pollingLastChange));
-			preferences.putString("Freq_Last", _pollingLastChange);
-		} else {
-			strlcpy(_pollingLastChange, lastChange.c_str(), sizeof(_pollingLastChange));
-		}
+	preferences.begin(DEVICE_NAME, true);
+
+	char lastChange[kPrefPollingLastChangeMaxLen] = "";
+	const size_t lastChangeLen = preferences.getString(kPreferencePollingLastChange,
+	                                                  lastChange,
+	                                                  sizeof(lastChange));
+	if (lastChangeLen == 0) {
+		getPollingTimestamp(_pollingConfigLastChange, sizeof(_pollingConfigLastChange));
+	} else {
+		strlcpy(_pollingConfigLastChange, lastChange, sizeof(_pollingConfigLastChange));
 	}
 
-	uint32_t storedPollInterval = preferences.getUInt(kPreferencePollInterval, kPollIntervalDefaultSeconds);
+	const uint32_t storedPollInterval = preferences.getUInt(kPreferencePollInterval, kPollIntervalDefaultSeconds);
 	pollIntervalSeconds = clampPollInterval(storedPollInterval);
-	if (pollIntervalSeconds != storedPollInterval) {
-		preferences.putUInt(kPreferencePollInterval, pollIntervalSeconds);
-	}
 
 	for (int i = 0; i < numberOfEntities; i++) {
 		rt[i].defaultFreq = entities[i].updateFreq;
 		applyBucketToRuntime(rt[i], bucketIdFromFreq(entities[i].updateFreq));
 	}
 
-	String bucketMap = preferences.getString(kPreferenceBucketMap, "");
+	char bucketMap[kPrefBucketMapMaxLen];
+	bucketMap[0] = '\0';
+	preferences.getString(kPreferenceBucketMap, bucketMap, sizeof(bucketMap));
 	const bool legacyMigrated = preferences.getBool(kPreferenceBucketMapMigrated, false);
-	if (bucketMap.length() > 0) {
-		appliedBucketMap = applyBucketMapString(bucketMap.c_str(),
+	if (bucketMap[0] != '\0') {
+		appliedBucketMap = applyBucketMapString(bucketMap,
 		                                        entities,
 		                                        static_cast<size_t>(numberOfEntities),
 		                                        rt,
@@ -2404,8 +2828,7 @@ loadPollingConfig(void)
 			persistLoadErr = 1;
 		}
 	} else if (!legacyMigrated) {
-		// One-time migration from legacy per-entity keys (Freq_<entityId>) to stable Bucket_Map.
-		// Legacy keys are removed after this pass and never consulted again.
+		// Legacy per-entity keys are read-only fallback when Bucket_Map is absent.
 		int legacyValues[kMqttEntityMaxCount];
 		char key[16];
 		const size_t cappedCount = (numberOfEntities > static_cast<int>(kMqttEntityMaxCount))
@@ -2431,18 +2854,12 @@ loadPollingConfig(void)
 			                                        persistInvalidBucketCount,
 			                                        persistDuplicateEntityCount);
 			if (appliedBucketMap) {
-				preferences.putString(kPreferenceBucketMap, mapBuf);
 				persistLoadOk = 1;
 			} else {
 				persistLoadErr = 1;
 			}
 		} else {
 			persistLoadOk = 1;
-		}
-		preferences.putBool(kPreferenceBucketMapMigrated, true);
-		for (size_t i = 0; i < cappedCount; i++) {
-			buildPollingKey(&entities[i], key, sizeof(key));
-			preferences.remove(key);
 		}
 	} else {
 		persistLoadOk = 1;
@@ -2454,7 +2871,6 @@ loadPollingConfig(void)
 void
 savePollingConfig(const mqttState *entity)
 {
-	Preferences preferences;
 	const mqttState *entities = mqttEntitiesDesc();
 	MqttEntityRuntime *rt = mqttEntitiesRt();
 	int numberOfEntities = static_cast<int>(mqttEntitiesCount());
@@ -2490,9 +2906,7 @@ savePollingConfig(const mqttState *entity)
 		}
 	}
 
-	preferences.begin(DEVICE_NAME, false);
-	preferences.putString(kPreferenceBucketMap, map);
-	preferences.end();
+	persistUserBucketMap(map);
 }
 
 void
@@ -2516,7 +2930,7 @@ publishPollingConfig(void)
 	}
 
 	snprintf(addition, sizeof(addition), "\"last_change\": \"%s\", \"poll_interval_s\": %lu, \"allowed_intervals\": [",
-	         _pollingLastChange, static_cast<unsigned long>(pollIntervalSeconds));
+	         _pollingConfigLastChange, static_cast<unsigned long>(pollIntervalSeconds));
 	resultAddedToPayload = addToPayload(addition);
 	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
 		return;
@@ -2548,7 +2962,7 @@ publishPollingConfig(void)
 			return;
 		}
 		if ((i % 8) == 0) {
-			yield();
+			diagYield();
 		}
 	}
 
@@ -2751,10 +3165,7 @@ handlePollingConfigSet(const char *payload)
 				uint32_t clamped = clampPollInterval(static_cast<uint32_t>(parsed));
 				if (clamped != pollIntervalSeconds) {
 					pollIntervalSeconds = clamped;
-					Preferences preferences;
-					preferences.begin(DEVICE_NAME, false);
-					preferences.putUInt(kPreferencePollInterval, pollIntervalSeconds);
-					preferences.end();
+					persistUserPollInterval(pollIntervalSeconds);
 					anyChange = true;
 					resendAllData = true;
 				}
@@ -2764,10 +3175,7 @@ handlePollingConfigSet(const char *payload)
 
 		if (!strcmp(key, "bucket_map")) {
 			if (mqttEntitiesRtAvailable()) {
-				Preferences preferences;
-				preferences.begin(DEVICE_NAME, false);
-				preferences.putString(kPreferenceBucketMap, value);
-				preferences.end();
+				persistUserBucketMap(value);
 				anyChange = true;
 				persistUnknownEntityCount = 0;
 				persistInvalidBucketCount = 0;
@@ -2855,7 +3263,7 @@ setupWifi(bool initialConnect)
 #endif
 	if (initialConnect) {
 		WiFi.disconnect(); // If it auto-started, restart it our way.
-		delay(100);
+		diagDelay(100);
 #if defined(MP_XIAO_ESP32C6) || defined(MP_ESPUNO_ESP32C6)
 		bool useExtAntenna = false;
 #ifdef MP_XIAO_ESP32C6
@@ -2866,7 +3274,7 @@ setupWifi(bool initialConnect)
 #ifdef WIFI_ENABLE
 		pinMode(WIFI_ENABLE, OUTPUT);
 		digitalWrite(WIFI_ENABLE, LOW);
-		delay(100);
+		diagDelay(100);
 #endif // WIFI_ENABLE
 #ifdef WIFI_ANT_CONFIG
 		pinMode(WIFI_ANT_CONFIG, OUTPUT);
@@ -2956,7 +3364,7 @@ setupWifi(bool initialConnect)
 		} else {
 			updateOLED(false, "Reconnect", line3, line4);
 		}
-		delay(500);
+		diagDelay(500);
 	}
 
 	// Output some debug information
@@ -2968,6 +3376,14 @@ setupWifi(bool initialConnect)
 	Serial.println(_debugOutput);
 	Serial.print("WiFi RSSI: ");
 	Serial.println(WiFi.RSSI());
+#endif
+
+#if defined(MP_ESP8266)
+	// Free any retained scan results to reduce heap pressure in NORMAL mode.
+	WiFi.scanDelete();
+#ifdef DEBUG_OVER_SERIAL
+	Serial.println(F("WiFi scan results cleared."));
+#endif
 #endif
 
 	// Connected, so ditch out with blank screen
@@ -3155,6 +3571,7 @@ getSerialNumber()
 	modbusRequestAndResponse response;
 #ifndef DEBUG_NO_RS485
 	uint32_t tries = 0;
+	const uint8_t kMaxIdentityReadAttempts = 4;
 #endif
 	char oledLine3[OLED_CHARACTER_WIDTH];
 	char oledLine4[OLED_CHARACTER_WIDTH];
@@ -3166,20 +3583,36 @@ getSerialNumber()
 	// Get the serial number
 	result = _registerHandler->readHandledRegister(REG_SYSTEM_INFO_R_EMS_SN_BYTE_1_2, &response);
 
-	// Loop forever until we get this!
-	while ((result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) ||
-	       (strlen(response.dataValueFormatted) < 15)) {
+	// Keep retries bounded so startup cannot stall indefinitely when RS485 is unavailable.
+	uint8_t serialAttempts = 0;
+	while (((result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) ||
+	       (strlen(response.dataValueFormatted) < 15)) &&
+	       (serialAttempts++ < kMaxIdentityReadAttempts)) {
 		tries++;
 #ifdef DEBUG_RS485
 		rs485Errors++;
 #endif // DEBUG_RS485
 		snprintf(oledLine4, sizeof(oledLine4), "%ld", tries);
 		updateOLED(false, "Alpha sys", "not known", oledLine4);
-		pumpMqttDuringSetup(1000);
+		pumpMqttDuringSetup(250);
 		result = _registerHandler->readHandledRegister(REG_SYSTEM_INFO_R_EMS_SN_BYTE_1_2, &response);
 	}
 #endif // DEBUG_NO_RS485
-	strlcpy(deviceSerialNumber, response.dataValueFormatted, 16);
+	if ((result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) &&
+	    (strlen(response.dataValueFormatted) >= 15)) {
+		strlcpy(deviceSerialNumber, response.dataValueFormatted, sizeof(deviceSerialNumber));
+	} else {
+		Preferences preferences;
+		char storedSerial[kPrefDeviceSerialMaxLen] = "";
+		preferences.begin(DEVICE_NAME, true);
+		preferences.getString(kPreferenceDeviceSerial, storedSerial, sizeof(storedSerial));
+		preferences.end();
+		if (storedSerial[0] != '\0') {
+			strlcpy(deviceSerialNumber, storedSerial, sizeof(deviceSerialNumber));
+		} else {
+			strlcpy(deviceSerialNumber, "UNKNOWN", sizeof(deviceSerialNumber));
+		}
+	}
 
 #ifdef DEBUG_NO_RS485
 	result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
@@ -3187,19 +3620,25 @@ getSerialNumber()
 #else // DEBUG_NO_RS485
 	// Get the Battery Type
 	result = _registerHandler->readHandledRegister(REG_BATTERY_HOME_R_BATTERY_TYPE, &response);
-	// Loop forever until we get this!
-	while (result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
+	// Keep retries bounded so startup cannot stall indefinitely when RS485 is unavailable.
+	uint8_t batteryAttempts = 0;
+	while ((result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) &&
+	       (batteryAttempts++ < kMaxIdentityReadAttempts)) {
 		tries++;
 #ifdef DEBUG_RS485
 		rs485Errors++;
 #endif // DEBUG_RS485
 		snprintf(oledLine4, sizeof(oledLine4), "%ld", tries);
 		updateOLED(false, "Bat type", "not known", oledLine4);
-		pumpMqttDuringSetup(1000);
+		pumpMqttDuringSetup(250);
 		result = _registerHandler->readHandledRegister(REG_BATTERY_HOME_R_BATTERY_TYPE, &response);
 	}
 #endif // DEBUG_NO_RS485
-	strlcpy(deviceBatteryType, response.dataValueFormatted, sizeof(deviceBatteryType));
+	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
+		strlcpy(deviceBatteryType, response.dataValueFormatted, sizeof(deviceBatteryType));
+	} else {
+		strlcpy(deviceBatteryType, "UNKNOWN", sizeof(deviceBatteryType));
+	}
 
 #ifndef DISABLE_DISPLAY
 #ifdef LARGE_DISPLAY
@@ -3221,21 +3660,12 @@ getSerialNumber()
 	if (haUniqueId[0] == '\0') {
 		setMqttIdentifiersFromSerial(deviceSerialNumber);
 	}
-	{
-		Preferences preferences;
-		preferences.begin(DEVICE_NAME, false);
-		String storedSerial = preferences.getString(kPreferenceDeviceSerial, "");
-		if (storedSerial != deviceSerialNumber) {
-			preferences.putString(kPreferenceDeviceSerial, deviceSerialNumber);
-		}
-		preferences.end();
-	}
 
 	pumpMqttDuringSetup(4000);
 
 	//Flash the LED
 	setStatusLed(true);
-	delay(4);
+	diagDelay(4);
 	setStatusLed(false);
 
 	return result;
@@ -3270,7 +3700,7 @@ updateRunstate()
 	if (checkTimer(&lastRun, RUNSTATE_INTERVAL)) {
 		//Flash the LED
 		setStatusLed(true);
-		delay(4);
+		diagDelay(4);
 		setStatusLed(false);
 
 		if (!opData.essRs485Connected) {
@@ -3425,7 +3855,7 @@ void updateRunstate()
 	if (checkTimer(&lastRun, RUNSTATE_INTERVAL)) {
 		//Flash the LED
 		setStatusLed(true);
-		delay(4);
+		diagDelay(4);
 		setStatusLed(false);
 
 		if (!opData.essRs485Connected) {
@@ -3524,20 +3954,63 @@ void updateRunstate()
 void
 mqttReconnect(void)
 {
+	static unsigned long lastAttemptMs = 0;
+	static int tries = 0;
+	static bool mqttTargetLogged = false;
+
 	initMqttEntitiesRtIfNeeded(true);
 	loadPollingConfig();
 	bool subscribed = false;
-	char subscriptionDef[100];
+	char subscriptionDef[192];
 	char line3[OLED_CHARACTER_WIDTH];
-	int tries = 0;
 	bool inverterSubscriptionsAdded = false;
 
-	// Loop until we're reconnected
-	while (true) {
-		tries++;
+#if defined(MP_ESP8266)
+	// Defensive: avoid rare soft-WDT crashes in ESP8266WiFiScanClass::_scanDone calling a stale std::function
+	// callback when an async scan is in progress. We do not rely on async scans in NORMAL mode; if one is
+	// running, replace the completion callback with a safe no-op so the core can finish the scan without
+	// calling into a dangling target.
+	auto guardAsyncWifiScanCallback = []() {
+		const int8_t scanState = WiFi.scanComplete();
+#ifdef DEBUG_OVER_SERIAL
+		Serial.printf("WiFi guard scan state %d\r\n", scanState);
+#endif
+		if (scanState == WIFI_SCAN_RUNNING) {
+			if (shouldStartWifiScan(currentBootMode)) {
+				WiFi.scanNetworksAsync(wifiScanCompleteNoop, false);
+			}
+			return;
+		}
+		if (scanState >= 0 || scanState == WIFI_SCAN_FAILED) {
+			WiFi.scanDelete();
+		}
+	};
+#endif
+
+	// Throttle reconnect attempts; do not block the main loop.
+	const unsigned long nowMs = millis();
+	if ((nowMs - lastAttemptMs) < 5000) {
+		return;
+	}
+	lastAttemptMs = nowMs;
+
+	unsigned long attemptStart = nowMs;
+	// Keep the ESP8266 watchdog happy even if the broker is unreachable.
+	diagDelay(0);
+	tries++;
+#ifdef DEBUG_OVER_SERIAL
+	Serial.printf("mqttReconnect attempt %d start @ %lu ms\r\n", tries, attemptStart);
+	if (!mqttTargetLogged) {
+		Serial.printf("MQTT target: user=%s host=%s:%u\r\n",
+			      appConfig.mqttUser.c_str(),
+			      appConfig.mqttSrvr.c_str(),
+			      static_cast<unsigned>(appConfig.mqttPort));
+		mqttTargetLogged = true;
+	}
+#endif
 
 		_mqtt.disconnect();		// Just in case.
-		delay(200);
+		diagDelay(200);
 
 #ifdef BUTTON_PIN
 		// Read button state
@@ -3548,6 +4021,24 @@ mqttReconnect(void)
 		if (WiFi.status() != WL_CONNECTED) {
 			setupWifi(false);
 		}
+		diag_wifi_status(static_cast<int16_t>(WiFi.status()), millis());
+
+#if defined(MP_ESP8266)
+#ifdef DEBUG_OVER_SERIAL
+		logHeap("before WiFi guard");
+#endif
+		if (shouldStartWifiScan(currentBootMode)) {
+			guardAsyncWifiScanCallback();
+		} else {
+#ifdef DEBUG_OVER_SERIAL
+			Serial.println(F("WiFi guard: scans disabled in NORMAL; clearing results."));
+#endif
+			WiFi.scanDelete();
+		}
+#ifdef DEBUG_OVER_SERIAL
+		logHeap("after WiFi guard");
+#endif
+#endif
 
 #ifdef DEBUG_OVER_SERIAL
 		Serial.print("Attempting MQTT connection...");
@@ -3555,11 +4046,61 @@ mqttReconnect(void)
 
 		snprintf(line3, sizeof(line3), "MQTT %d ...", tries);
 		updateOLED(false, "Connecting", line3, _version);
-		delay(100);
+		diagDelay(100);
 
-		// Attempt to connect
-		if (_mqtt.connect(deviceName, appConfig.mqttUser.c_str(), appConfig.mqttPass.c_str(), statusTopic, 0, true,
-				  "{ \"presence\": \"offline\", \"a2mStatus\": \"offline\", \"rs485Status\": \"unavailable\", \"gridStatus\": \"unavailable\" }")) {
+#ifdef DEBUG_OVER_SERIAL
+		{
+			const char *mqttHost = appConfig.mqttSrvr.c_str();
+			const uint16_t mqttPort = static_cast<uint16_t>(appConfig.mqttPort);
+			const size_t mqttHostLen = strlen(mqttHost);
+			const size_t mqttUserLen = appConfig.mqttUser.length();
+			const size_t mqttPassLen = appConfig.mqttPass.length();
+
+			Serial.printf("MQTT diag: host_len=%u user_len=%u pass_len=%u port=%u wifi=%d ip=%s rssi=%d\r\n",
+			              static_cast<unsigned>(mqttHostLen),
+			              static_cast<unsigned>(mqttUserLen),
+			              static_cast<unsigned>(mqttPassLen),
+			              static_cast<unsigned>(mqttPort),
+			              static_cast<int>(WiFi.status()),
+			              WiFi.localIP().toString().c_str(),
+			              WiFi.RSSI());
+
+			Serial.print("MQTT host bytes:");
+			for (size_t i = 0; i < mqttHostLen; i++) {
+				Serial.printf(" %02X", static_cast<unsigned>(static_cast<uint8_t>(mqttHost[i])));
+			}
+			Serial.println();
+
+			WiFiClient mqttProbe;
+			mqttProbe.setTimeout(2000);
+			const unsigned long probeStartMs = millis();
+			const bool probeOk = mqttProbe.connect(mqttHost, mqttPort);
+			const unsigned long probeElapsedMs = millis() - probeStartMs;
+			Serial.printf("MQTT TCP probe: ok=%d elapsed_ms=%lu\r\n", probeOk ? 1 : 0, probeElapsedMs);
+			if (probeOk) {
+				mqttProbe.stop();
+			}
+			}
+	#endif
+
+		// Attempt to connect.
+		diag_mqtt_attempt(millis());
+#if defined(MP_ESP8266)
+			ESP.wdtDisable();
+#endif
+		const bool mqttConnected = _mqtt.connect(
+			deviceName,
+			appConfig.mqttUser.c_str(),
+			appConfig.mqttPass.c_str(),
+			statusTopic,
+			0,
+			true,
+				"{ \"presence\": \"offline\", \"a2mStatus\": \"offline\", \"rs485Status\": \"unavailable\", \"gridStatus\": \"unavailable\" }");
+#if defined(MP_ESP8266)
+			ESP.wdtEnable(0);
+#endif
+			diag_mqtt_result(mqttConnected, static_cast<int16_t>(_mqtt.state()), millis());
+			if (mqttConnected) {
 			const mqttState *entities = mqttEntitiesDesc();
 			int numberOfEntities = static_cast<int>(mqttEntitiesCount());
 #ifdef DEBUG_OVER_SERIAL
@@ -3586,11 +4127,11 @@ mqttReconnect(void)
 			snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", subscriptionDef, subscribed);
 			Serial.println(_debugOutput);
 #endif
-			sprintf(subscriptionDef, "%s/config/set", deviceName);
-			subscribed = subscribed && _mqtt.subscribe(subscriptionDef, MQTT_SUBSCRIBE_QOS);
+				sprintf(subscriptionDef, "%s/config/set", deviceName);
+				subscribed = subscribed && _mqtt.subscribe(subscriptionDef, MQTT_SUBSCRIBE_QOS);
 #ifdef DEBUG_OVER_SERIAL
-			snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", subscriptionDef, subscribed);
-			Serial.println(_debugOutput);
+				snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", subscriptionDef, subscribed);
+				Serial.println(_debugOutput);
 #endif
 
 #if RS485_STUB
@@ -3601,41 +4142,48 @@ mqttReconnect(void)
 #endif
 #endif
 
-			if (inverterReady) {
-				for (int i = 0; i < numberOfEntities; i++) {
-					if (entities[i].subscribe) {
-						sprintf(subscriptionDef, "%s/%s/%s/command", deviceName, haUniqueId, entities[i].mqttName);
-						subscribed = subscribed && _mqtt.subscribe(subscriptionDef, MQTT_SUBSCRIBE_QOS);
+				if (inverterReady) {
+					for (int i = 0; i < numberOfEntities; i++) {
+						if (entities[i].subscribe) {
+							snprintf(subscriptionDef,
+							         sizeof(subscriptionDef),
+							         "%s/%s/%s/command",
+							         deviceName,
+							         haUniqueId,
+							         entities[i].mqttName);
+							subscribed = subscribed && _mqtt.subscribe(subscriptionDef, MQTT_SUBSCRIBE_QOS);
 #ifdef DEBUG_OVER_SERIAL
-						snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", subscriptionDef, subscribed);
-						Serial.println(_debugOutput);
+							snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", subscriptionDef, subscribed);
+							Serial.println(_debugOutput);
 #endif
-					}
+						}
 				}
 				inverterSubscriptionsAdded = true;
 			}
 
 			// Subscribe or resubscribe to topics.
 			if (subscribed) {
+#ifdef DEBUG_OVER_SERIAL
+				Serial.printf("mqttReconnect attempt %d succeeded after %lu ms\r\n", tries, millis() - attemptStart);
+#endif
+				setStatusLedColor(0, 255, 0);
+				updateRunstate();
 				publishPollingConfig();
 				if (inverterSubscriptionsAdded) {
 					inverterSubscriptionsSet = true;
 				}
-				break;
+				return;
 			}
 		}
 
 #ifdef DEBUG_OVER_SERIAL
 		sprintf(_debugOutput, "MQTT Failed: RC is %d\r\nTrying again in five seconds...", _mqtt.state());
 		Serial.println(_debugOutput);
+		Serial.printf("mqttReconnect attempt %d failed after %lu ms\r\n", tries, millis() - attemptStart);
 #endif
-
-		// Wait 5 seconds before retrying
-		delay(5000);
-	}
-	// Connected, so ditch out with runstate on the screen, update some diags
-	setStatusLedColor(0, 255, 0);
-	updateRunstate();
+		// Ensure we don't hold onto a half-open TCP session between attempts.
+		_wifi.stop();
+		return;
 }
 
 const mqttState *
@@ -4355,6 +4903,19 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 	net.wifiReconnects = wifiReconnectCount;
 
 	poll.pollOkCount = pollOkCount;
+	{
+		const MemSample sample = readMemSample();
+		const MemLevel runtimeLevel = evaluateRuntimeMem(sample);
+		poll.heapFreeB = sample.freeB;
+		poll.heapMaxBlockB = sample.maxBlockB;
+		poll.heapFragPct = sample.fragPct;
+		poll.memLevel = static_cast<uint8_t>(runtimeLevel);
+		poll.bootHeapLevel = static_cast<uint8_t>(bootMemWorst.level);
+		poll.bootHeapStage = static_cast<uint8_t>(bootMemWorst.stage);
+		poll.bootHeapFreeB = bootMemWorst.sample.freeB;
+		poll.bootHeapMaxBlockB = bootMemWorst.sample.maxBlockB;
+		poll.bootHeapFragPct = bootMemWorst.sample.fragPct;
+	}
 		poll.pollErrCount = pollErrCount;
 		poll.lastPollMs = lastPollMs;
 		poll.lastOkTsMs = lastOkTsMs;
@@ -4413,20 +4974,20 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 	}
 
 	sendMqtt(statusTopic, MQTT_RETAIN);
-	yield();
+	maybeYield();
 
 	char netTopic[160];
 	snprintf(netTopic, sizeof(netTopic), "%s/net", statusTopic);
 	if (buildStatusNetJson(net, netAddition, sizeof(netAddition))) {
 		_mqtt.publish(netTopic, netAddition, true);
-		yield();
+		maybeYield();
 	}
 
 	char pollTopic[160];
 	snprintf(pollTopic, sizeof(pollTopic), "%s/poll", statusTopic);
 	if (buildStatusPollJson(poll, pollAddition, sizeof(pollAddition))) {
 		_mqtt.publish(pollTopic, pollAddition, true);
-		yield();
+		maybeYield();
 	}
 
 #if RS485_STUB
@@ -4453,7 +5014,7 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 		snprintf(stubTopic, sizeof(stubTopic), "%s/stub", statusTopic);
 		if (buildStatusStubJson(stub, stubAddition, sizeof(stubAddition))) {
 			_mqtt.publish(stubTopic, stubAddition, true);
-			yield();
+			maybeYield();
 		}
 	}
 #endif
@@ -4950,7 +5511,7 @@ addToPayload(const char* addition)
 void
 sendHaData()
 {
-	if (!inverterReady || !mqttEntitiesRtAvailable()) {
+	if (!inverterReady || !mqttEntitiesRtAvailable() || !_mqtt.connected()) {
 		return;
 	}
 	const mqttState *entities = mqttEntitiesDesc();
@@ -4974,7 +5535,19 @@ refreshEssSnapshot(void)
 {
 	int gotError = 0;
 	uint32_t pollStartMs = millis();
+	bool rs485TimedOut = false;
+	diag_rs485_poll_begin(pollStartMs);
 	essSnapshotAttemptCount++;
+
+	// Do not issue snapshot register reads until RS485 link is actually established.
+	// Inverter identity may be known from persisted metadata, but that is not proof of a live bus.
+	if (rs485ConnectState != Rs485ConnectState::Connected || _registerHandler == NULL) {
+		essSnapshotValid = false;
+		essSnapshotLastOk = false;
+		lastErrCode = static_cast<int>(MqttEventCode::Rs485Timeout);
+		diag_rs485_poll_end(millis(), false);
+		return false;
+	}
 
 #if RS485_STUB
 		if (_modBus != nullptr) {
@@ -5048,6 +5621,7 @@ refreshEssSnapshot(void)
 		opData.essDispatchStart = response.unsignedShortValue;
 	} else {
 		opData.essDispatchStart = UINT16_MAX;
+		rs485TimedOut = rs485TimedOut || (result == modbusRequestAndResponseStatusValues::noResponse);
 		noteRs485Error(result, response.statusMqttMessage);
 		gotError++;
 	}
@@ -5056,6 +5630,7 @@ refreshEssSnapshot(void)
 		opData.essDispatchMode = response.unsignedShortValue;
 	} else {
 		opData.essDispatchMode = UINT16_MAX;
+		rs485TimedOut = rs485TimedOut || (result == modbusRequestAndResponseStatusValues::noResponse);
 		noteRs485Error(result, response.statusMqttMessage);
 		gotError++;
 	}
@@ -5064,6 +5639,7 @@ refreshEssSnapshot(void)
 		opData.essDispatchActivePower = response.signedIntValue;
 	} else {
 		opData.essDispatchActivePower = INT32_MAX;
+		rs485TimedOut = rs485TimedOut || (result == modbusRequestAndResponseStatusValues::noResponse);
 		noteRs485Error(result, response.statusMqttMessage);
 		gotError++;
 	}
@@ -5072,6 +5648,7 @@ refreshEssSnapshot(void)
 		opData.essDispatchSoc = response.unsignedShortValue;
 	} else {
 		opData.essDispatchSoc = UINT16_MAX;
+		rs485TimedOut = rs485TimedOut || (result == modbusRequestAndResponseStatusValues::noResponse);
 		noteRs485Error(result, response.statusMqttMessage);
 		gotError++;
 	}
@@ -5080,6 +5657,7 @@ refreshEssSnapshot(void)
 		opData.essBatterySoc = response.unsignedShortValue;
 	} else {
 		opData.essBatterySoc = UINT16_MAX;
+		rs485TimedOut = rs485TimedOut || (result == modbusRequestAndResponseStatusValues::noResponse);
 		noteRs485Error(result, response.statusMqttMessage);
 		gotError++;
 	}
@@ -5088,6 +5666,7 @@ refreshEssSnapshot(void)
 		opData.essBatteryPower = response.signedShortValue;
 	} else {
 		opData.essBatteryPower = INT16_MAX;
+		rs485TimedOut = rs485TimedOut || (result == modbusRequestAndResponseStatusValues::noResponse);
 		noteRs485Error(result, response.statusMqttMessage);
 		gotError++;
 	}
@@ -5096,6 +5675,7 @@ refreshEssSnapshot(void)
 		opData.essGridPower = response.signedIntValue;
 	} else {
 		opData.essGridPower = INT32_MAX;
+		rs485TimedOut = rs485TimedOut || (result == modbusRequestAndResponseStatusValues::noResponse);
 		noteRs485Error(result, response.statusMqttMessage);
 		gotError++;
 	}
@@ -5104,6 +5684,7 @@ refreshEssSnapshot(void)
 		opData.essPvPower = response.signedIntValue;
 	} else {
 		opData.essPvPower = INT32_MAX;
+		rs485TimedOut = rs485TimedOut || (result == modbusRequestAndResponseStatusValues::noResponse);
 		noteRs485Error(result, response.statusMqttMessage);
 		gotError++;
 	}
@@ -5112,6 +5693,7 @@ refreshEssSnapshot(void)
 		opData.essInverterMode = response.unsignedShortValue;
 	} else {
 		opData.essInverterMode = UINT16_MAX;
+		rs485TimedOut = rs485TimedOut || (result == modbusRequestAndResponseStatusValues::noResponse);
 		noteRs485Error(result, response.statusMqttMessage);
 		gotError++;
 	}
@@ -5148,6 +5730,7 @@ refreshEssSnapshot(void)
 			_modBus->endSnapshotAttempt();
 		}
 #endif
+	diag_rs485_poll_end(millis(), rs485TimedOut);
 
 	return essSnapshotValid;
 }
@@ -5168,12 +5751,12 @@ sendData()
 	static unsigned long lastRunOneDay = 0;
 	static unsigned long lastRunUser = 0;
 	static bool membersInit = false;
-	static uint16_t *membersTenSec = nullptr;
-	static uint16_t *membersOneMin = nullptr;
-	static uint16_t *membersFiveMin = nullptr;
-	static uint16_t *membersOneHour = nullptr;
-	static uint16_t *membersOneDay = nullptr;
-	static uint16_t *membersUser = nullptr;
+	static uint16_t membersTenSec[kMqttEntityMaxCount];
+	static uint16_t membersOneMin[kMqttEntityMaxCount];
+	static uint16_t membersFiveMin[kMqttEntityMaxCount];
+	static uint16_t membersOneHour[kMqttEntityMaxCount];
+	static uint16_t membersOneDay[kMqttEntityMaxCount];
+	static uint16_t membersUser[kMqttEntityMaxCount];
 	static size_t membersTenSecCount = 0;
 	static size_t membersOneMinCount = 0;
 	static size_t membersFiveMinCount = 0;
@@ -5232,23 +5815,22 @@ sendData()
 
 	const mqttState *entities = mqttEntitiesDesc();
 	const MqttEntityRuntime *rt = mqttEntitiesRt();
-	const int numberOfEntities = static_cast<int>(mqttEntitiesCount());
+	const size_t entityCount = mqttEntitiesCount();
+	const int numberOfEntities = static_cast<int>(entityCount);
+
+	if (entityCount > kMqttEntityMaxCount) {
+#ifdef DEBUG_OVER_SERIAL
+		Serial.println("MQTT entity count exceeds max; skipping scheduler.");
+#endif
+		return;
+	}
 
 	// Build bucket membership once per boot (or after /config/set updates via resendAllData).
 	// This keeps the idle path O(1) and avoids full entity scans per bucket.
 	if (!membersInit) {
-		if (membersTenSec == nullptr) {
-			membersTenSec = new uint16_t[numberOfEntities];
-			membersOneMin = new uint16_t[numberOfEntities];
-			membersFiveMin = new uint16_t[numberOfEntities];
-			membersOneHour = new uint16_t[numberOfEntities];
-			membersOneDay = new uint16_t[numberOfEntities];
-			membersUser = new uint16_t[numberOfEntities];
-		}
-
 		BucketMembership membership = buildBucketMembership(
 			rt,
-			static_cast<size_t>(numberOfEntities),
+			entityCount,
 			membersTenSec,
 			membersOneMin,
 			membersFiveMin,
@@ -5297,7 +5879,10 @@ sendData()
 		if (!bucketNeedsSnapshot) {
 			return true;
 		}
-		if (!bootPlan.inverter || !inverterReady) {
+		if (!bootPlan.inverter ||
+		    !inverterReady ||
+		    _registerHandler == NULL ||
+		    rs485ConnectState != Rs485ConnectState::Connected) {
 			essSnapshotValid = false;
 			snapshotOkThisPass = false;
 			return false;
@@ -5524,7 +6109,7 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 		}
 		return; // No further processing needed.
 	} else if (strcmp(topic, configSetTopic) == 0) {
-		// Apply config outside of the MQTT callback to avoid calling yield() from a non-yieldable context
+		// Apply config outside of the MQTT callback to avoid calling diagYield() from a non-yieldable context
 		// (ESP8266 core can panic in __yield()). The main loop will process the update immediately.
 		strlcpy(pendingPollingConfigPayload, mqttIncomingPayload, sizeof(pendingPollingConfigPayload));
 		pendingPollingConfigSet = true;
@@ -5957,13 +6542,39 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
  */
 void sendMqtt(const char *topic, bool retain)
 {
+	static unsigned long lastFailureLogMs = 0;
+	const unsigned long nowMs = millis();
+	const size_t payloadLen = _mqttPayload ? strlen(_mqttPayload) : 0;
+
+	// Avoid expensive publish attempts and large serial writes while disconnected.
+	if (!_mqtt.connected()) {
+#ifdef DEBUG_OVER_SERIAL
+		if ((nowMs - lastFailureLogMs) >= 3000) {
+			lastFailureLogMs = nowMs;
+			Serial.printf("MQTT publish skipped (disconnected): topic=%s bytes=%u\r\n",
+				      topic,
+				      static_cast<unsigned>(payloadLen));
+		}
+#endif
+		maybeYield();
+		emptyPayload();
+		return;
+	}
+
 	// Attempt a send
 	if (!_mqtt.publish(topic, _mqttPayload, retain)) {
 #ifdef DEBUG_OVER_SERIAL
-		snprintf(_debugOutput, sizeof(_debugOutput), "MQTT publish failed to %s", topic);
-		Serial.println(_debugOutput);
-		Serial.println(_mqttPayload);
+		if ((nowMs - lastFailureLogMs) >= 3000) {
+			const size_t previewLen = (payloadLen < 96) ? payloadLen : 96;
+			lastFailureLogMs = nowMs;
+			Serial.printf("MQTT publish failed: topic=%s bytes=%u preview=%.*s\r\n",
+				      topic,
+				      static_cast<unsigned>(payloadLen),
+				      static_cast<int>(previewLen),
+				      _mqttPayload ? _mqttPayload : "");
+		}
 #endif
+		maybeYield();
 	} else {
 #ifdef DEBUG_OVER_SERIAL
 		//sprintf(_debugOutput, "MQTT publish success");
@@ -6217,92 +6828,82 @@ getA2mOpDataFromEss(void)
 #else // DEBUG_NO_RS485
 	modbusRequestAndResponseStatusValues result;
 	modbusRequestAndResponse response;
-	bool found;
+	// Defaults keep control logic in a safe, bounded state if ESS reads fail repeatedly.
+	opData.a2mOpMode = opMode::opModeNoCharge;
+	opData.a2mSocTarget = SOC_TARGET_MAX;
+	opData.a2mPwrCharge = INVERTER_POWER_MAX;
+	opData.a2mPwrDischarge = INVERTER_POWER_MAX;
 
-	found = false;
-	while (!found) {
-		result = _registerHandler->readHandledRegister(REG_DISPATCH_RW_DISPATCH_MODE, &response);
-		if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
-			switch (response.unsignedShortValue) {
-			case DISPATCH_MODE_BATTERY_ONLY_CHARGED_VIA_PV:
-				opData.a2mOpMode = opMode::opModePvCharge;
-				break;
-			case DISPATCH_MODE_STATE_OF_CHARGE_CONTROL:
-				opData.a2mOpMode = opMode::opModeTarget;
-				break;
-			case DISPATCH_MODE_LOAD_FOLLOWING:
-			case DISPATCH_MODE_NORMAL_MODE:
-				opData.a2mOpMode = opMode::opModeLoadFollow;
-				break;
-			case DISPATCH_MODE_OPTIMISE_CONSUMPTION:
-			case DISPATCH_MODE_MAXIMISE_OUTPUT:
-			case DISPATCH_MODE_MAXIMISE_CONSUMPTION:
-				opData.a2mOpMode = opMode::opModeMaxCharge;
-				break;
-			case DISPATCH_MODE_NO_BATTERY_CHARGE:
-				opData.a2mOpMode = opMode::opModeNoCharge;
-				break;
-			default:
-#ifdef DEBUG_OVER_SERIAL
-				snprintf(_debugOutput, sizeof(_debugOutput), "getA2mOpDataFromEss: Unhandled Dispatch Mode: %u/", response.unsignedShortValue);
-				Serial.print(_debugOutput);
-				Serial.println(response.dataValueFormatted);
-#endif
-				opData.a2mOpMode = opMode::opModeLoadFollow; // Just set to a "default" value.
-				break;
+	const uint8_t kMaxReadAttempts = 4;
+	auto readWithRetries = [&](uint16_t reg, const char *name) -> bool {
+		for (uint8_t attempt = 0; attempt < kMaxReadAttempts; attempt++) {
+			result = _registerHandler->readHandledRegister(reg, &response);
+			if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
+				return true;
 			}
-			found = true;
-		} else {
 #ifdef DEBUG_RS485
 			rs485Errors++;
 #endif // DEBUG_RS485
 #ifdef DEBUG_OVER_SERIAL
-			snprintf(_debugOutput, sizeof(_debugOutput), "getA2mOpDataFromEss: read failed");
-			Serial.println(_debugOutput);
+			if (attempt == 0 || (attempt + 1) == kMaxReadAttempts) {
+				snprintf(_debugOutput, sizeof(_debugOutput),
+					 "getA2mOpDataFromEss: %s read failed (%u/%u)",
+					 name,
+					 static_cast<unsigned>(attempt + 1),
+					 static_cast<unsigned>(kMaxReadAttempts));
+				Serial.println(_debugOutput);
+			}
+#endif // DEBUG_OVER_SERIAL
+			diagDelay(10);
+		}
+		return false;
+	};
+
+	if (readWithRetries(REG_DISPATCH_RW_DISPATCH_MODE, "dispatch_mode")) {
+		switch (response.unsignedShortValue) {
+		case DISPATCH_MODE_BATTERY_ONLY_CHARGED_VIA_PV:
+			opData.a2mOpMode = opMode::opModePvCharge;
+			break;
+		case DISPATCH_MODE_STATE_OF_CHARGE_CONTROL:
+			opData.a2mOpMode = opMode::opModeTarget;
+			break;
+		case DISPATCH_MODE_LOAD_FOLLOWING:
+		case DISPATCH_MODE_NORMAL_MODE:
+			opData.a2mOpMode = opMode::opModeLoadFollow;
+			break;
+		case DISPATCH_MODE_OPTIMISE_CONSUMPTION:
+		case DISPATCH_MODE_MAXIMISE_OUTPUT:
+		case DISPATCH_MODE_MAXIMISE_CONSUMPTION:
+			opData.a2mOpMode = opMode::opModeMaxCharge;
+			break;
+		case DISPATCH_MODE_NO_BATTERY_CHARGE:
+			opData.a2mOpMode = opMode::opModeNoCharge;
+			break;
+		default:
+#ifdef DEBUG_OVER_SERIAL
+			snprintf(_debugOutput, sizeof(_debugOutput), "getA2mOpDataFromEss: Unhandled Dispatch Mode: %u/", response.unsignedShortValue);
+			Serial.print(_debugOutput);
+			Serial.println(response.dataValueFormatted);
 #endif
+			opData.a2mOpMode = opMode::opModeLoadFollow;
+			break;
 		}
 	}
 
-	found = false;
-	while (!found) {
-		result = _registerHandler->readHandledRegister(REG_DISPATCH_RW_DISPATCH_SOC, &response);
-		if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
-			opData.a2mSocTarget = response.unsignedShortValue * DISPATCH_SOC_MULTIPLIER;
-			found = true;
-		} else {
-#ifdef DEBUG_OVER_SERIAL
-			snprintf(_debugOutput, sizeof(_debugOutput), "getA2mOpDataFromEss: read failed");
-			Serial.println(_debugOutput);
-#endif // DEBUG_OVER_SERIAL
-#ifdef DEBUG_RS485
-			rs485Errors++;
-#endif // DEBUG_RS485
-		}
+	if (readWithRetries(REG_DISPATCH_RW_DISPATCH_SOC, "dispatch_soc")) {
+		opData.a2mSocTarget = response.unsignedShortValue * DISPATCH_SOC_MULTIPLIER;
 	}
 
-	found = false;
-	while (!found) {
-		result = _registerHandler->readHandledRegister(REG_DISPATCH_RW_ACTIVE_POWER_1, &response);
-		if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
-			if (response.signedIntValue > DISPATCH_ACTIVE_POWER_OFFSET) {
-				opData.a2mPwrCharge = INVERTER_POWER_MAX;
-				opData.a2mPwrDischarge = response.signedIntValue - DISPATCH_ACTIVE_POWER_OFFSET;
-			} else if (response.signedIntValue < DISPATCH_ACTIVE_POWER_OFFSET) {
-				opData.a2mPwrCharge = DISPATCH_ACTIVE_POWER_OFFSET - response.signedIntValue;
-				opData.a2mPwrDischarge = INVERTER_POWER_MAX;
-			} else {
-				opData.a2mPwrCharge = INVERTER_POWER_MAX;
-				opData.a2mPwrDischarge = INVERTER_POWER_MAX;
-			}
-			found = true;
+	if (readWithRetries(REG_DISPATCH_RW_ACTIVE_POWER_1, "active_power")) {
+		if (response.signedIntValue > DISPATCH_ACTIVE_POWER_OFFSET) {
+			opData.a2mPwrCharge = INVERTER_POWER_MAX;
+			opData.a2mPwrDischarge = response.signedIntValue - DISPATCH_ACTIVE_POWER_OFFSET;
+		} else if (response.signedIntValue < DISPATCH_ACTIVE_POWER_OFFSET) {
+			opData.a2mPwrCharge = DISPATCH_ACTIVE_POWER_OFFSET - response.signedIntValue;
+			opData.a2mPwrDischarge = INVERTER_POWER_MAX;
 		} else {
-#ifdef DEBUG_OVER_SERIAL
-			snprintf(_debugOutput, sizeof(_debugOutput), "getA2mOpDataFromEss: read failed");
-			Serial.println(_debugOutput);
-#endif // DEBUG_OVER_SERIAL
-#ifdef DEBUG_RS485
-			rs485Errors++;
-#endif // DEBUG_RS485
+			opData.a2mPwrCharge = INVERTER_POWER_MAX;
+			opData.a2mPwrDischarge = INVERTER_POWER_MAX;
 		}
 	}
 #endif // DEBUG_NO_RS485
