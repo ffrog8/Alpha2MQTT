@@ -1,0 +1,10 @@
+{
+  "env": {
+    "MQTT_HOST": "192.168.11.5",
+    "MQTT_PORT": 1883,
+    "MQTT_USER": "codex",
+    "MQTT_PASSFILE": "/home/coder/tmp/mqtt_pass.txt",
+    "DEVICE_HTTP_BASE": "http://192.168.11.168",
+    "DEVICE_TOPIC": "Alpha2MQTT-0F8626"
+  }
+}

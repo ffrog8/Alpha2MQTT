@@ -128,4 +128,5 @@ struct StatusStubSnapshot {
 bool buildStatusCoreJson(const StatusCoreSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusNetJson(const StatusNetSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSize);
+bool buildStatusPollJsonCompact(const StatusPollSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusStubJson(const StatusStubSnapshot &snapshot, char *out, size_t outSize);

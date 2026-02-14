@@ -51,8 +51,8 @@ and asserts on keys emitted by the firmware:
 
 Usage
   python3 tools/e2e/test_rs485_stub.py
-  python3 tools/e2e/test_rs485_stub.py --ota
-  python3 tools/e2e/test_rs485_stub.py --ensure-stub
+  python3 tools/e2e/test_rs485_stub.py --no-flash
+  python3 tools/e2e/test_rs485_stub.py --force-flash
 """
 
 from __future__ import annotations
@@ -111,6 +111,35 @@ def _repo_root() -> Path:
 def _default_env_file() -> Path:
     # tools/e2e/e2e.local.env next to this script.
     return Path(__file__).resolve().parent / "e2e.local.env"
+
+def _default_json_file() -> Path:
+    # Preferred local config file (gitignored).
+    return Path(__file__).resolve().parent / "e2e.local.json"
+
+def _load_json_file_defaults(path: Path) -> None:
+    """
+    Load config defaults from JSON into os.environ (without overriding existing env vars).
+    Accepted shapes:
+      - { "MQTT_HOST": "...", ... }
+      - { "env": { "MQTT_HOST": "...", ... } }
+    """
+    if not path.exists():
+        return
+    data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    if not isinstance(data, dict):
+        raise E2EError(f"Expected JSON object in {path}")
+    env_map = data.get("env", data)
+    if not isinstance(env_map, dict):
+        raise E2EError(f"Expected object for env map in {path}")
+    for key, value in env_map.items():
+        if not isinstance(key, str) or not key or key in os.environ:
+            continue
+        if isinstance(value, bool):
+            os.environ[key] = "1" if value else "0"
+        elif isinstance(value, (int, float)):
+            os.environ[key] = str(value)
+        elif isinstance(value, str):
+            os.environ[key] = value
 
 def _load_env_file_defaults(path: Path) -> None:
     """
@@ -884,6 +913,15 @@ def _device_is_latest_stub(
     backend = poll.get("rs485_backend")
     if backend != "stub":
         return False, f"rs485_backend={backend!r}"
+
+    # Retained MQTT state can be stale after crashes/reboots. Require at least one fresh status/net
+    # publish before declaring "already latest" so test flow does not run against dead retained data.
+    net_topic = f"{device_root}/status/net"
+    try:
+        prev_net = _fetch_latest_text(mqtt, net_topic, label="status_net_liveness")
+        _wait_for_topic_change(mqtt, net_topic, prev_net, timeout_s=15, label="status/net liveness")
+    except E2EError as e:
+        return False, f"status_net_stale ({e})"
     return True, "ok"
 
 def _ensure_latest_stub_via_ota(
@@ -967,12 +1005,18 @@ def _ensure_latest_stub_via_ota(
 
 
 def main() -> int:
+    _load_json_file_defaults(_default_json_file())
     _load_env_file_defaults(_default_env_file())
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ota", action="store_true", help="Perform one OTA upload before running tests (requires DEVICE_HTTP_BASE).")
-    ap.add_argument("--ensure-stub", action="store_true", help="Ensure the device is running the latest stub firmware (OTA if needed), then run tests.")
+    ap.add_argument("--no-flash", action="store_true", help="Never flash. Fail if device backend/build does not match expected stub firmware.")
+    ap.add_argument("--force-flash", action="store_true", help="Always flash expected stub firmware before running tests.")
+    # Back-compat aliases
+    ap.add_argument("--ota", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--ensure-stub", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--verbose", action="store_true", help="Verbose logging (MQTT rx/tx and filtering).")
     args = ap.parse_args()
+    if args.no_flash and args.force_flash:
+        raise E2EError("--no-flash and --force-flash are mutually exclusive")
     global VERBOSE
     VERBOSE = args.verbose
 
@@ -1005,9 +1049,15 @@ def main() -> int:
     print(f"[e2e] config_topic={config_topic}")
     print(f"[e2e] control_topic={control_topic}")
 
-    if args.ota or args.ensure_stub:
+    firmware_path = Path(os.environ.get("FIRMWARE_BIN") or _latest_stub_firmware_path())
+    expected_ts = _firmware_build_ts_ms_from_filename(firmware_path)
+    policy_force = bool(args.force_flash or args.ota)
+    policy_no_flash = bool(args.no_flash)
+    status_ok, status_detail = _device_is_latest_stub(mqtt, device_root, expected_ts, status_poll_suffix)
+
+    if policy_force:
+        _announce("flash policy: force")
         http_base = _require_env("DEVICE_HTTP_BASE")
-        firmware_path = Path(os.environ.get("FIRMWARE_BIN") or _latest_stub_firmware_path())
         _ensure_latest_stub_via_ota(
             mqtt=mqtt,
             device_root=device_root,
@@ -1015,26 +1065,82 @@ def main() -> int:
             http_base=http_base,
             firmware_path=firmware_path,
         )
+    elif policy_no_flash:
+        _announce("flash policy: no-flash")
+        if not status_ok:
+            raise E2EError(f"Device backend/build mismatch and --no-flash was set: {status_detail}")
+        _announce("device already on expected stub backend/build; skipping flash")
+    else:
+        _announce("flash policy: smart")
+        if status_ok:
+            _announce("device already on expected stub backend/build; skipping flash")
+        else:
+            http_base = _require_env("DEVICE_HTTP_BASE")
+            _ensure_latest_stub_via_ota(
+                mqtt=mqtt,
+                device_root=device_root,
+                status_poll_suffix=status_poll_suffix,
+                http_base=http_base,
+                firmware_path=firmware_path,
+            )
 
     # Verify stub backend is actually active (after optional ensure/update).
     first = _fetch_poll(mqtt, poll_topic)
     rs485_backend = first.get("rs485_backend")
     if rs485_backend != "stub":
         raise E2EError(f"Expected rs485_backend=stub but got: {rs485_backend!r} keys={sorted(first.keys())}")
-    for k in (
-        "sched_10s_last_run_ms",
-        "sched_1m_last_run_ms",
-        "sched_5m_last_run_ms",
-        "sched_1h_last_run_ms",
-        "sched_1d_last_run_ms",
-        "sched_user_last_run_ms",
-        "poll_interval_s",
-    ):
+    scheduler_keys = ("s10_ms", "s60_ms", "s300_ms", "s3600_ms", "s86400_ms", "su_ms")
+    for k in scheduler_keys:
         if k not in first:
             raise E2EError(f"Missing expected scheduler observability field in /status/poll: {k} (keys={sorted(first.keys())})")
+        val = first.get(k)
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            raise E2EError(f"Scheduler field must be numeric: {k}={val!r}")
+    if "poll_interval_s" not in first:
+        raise E2EError(f"Missing expected field in /status/poll: poll_interval_s (keys={sorted(first.keys())})")
+
+    # Rule check: scheduler fields should be monotonic/non-decreasing across poll samples.
+    second = _fetch_poll(mqtt, poll_topic)
+    for k in scheduler_keys:
+        a = int(first.get(k, 0))
+        b = int(second.get(k, 0))
+        if b < a:
+            raise E2EError(f"Scheduler field is not monotonic: {k} {a}->{b}")
 
     def set_mode(payload: str) -> None:
         mqtt.publish(control_topic, payload, retain=False)
+
+    def set_mode_and_wait(
+        payload: str,
+        accepted_modes: tuple[str, ...],
+        *,
+        timeout_s: int = 45,
+        poll_s: float = 2.0,
+        republish_s: float = 6.0,
+    ) -> None:
+        # Stub mode updates are asynchronous. Publish immediately and then republish periodically
+        # until /status/poll confirms one of the accepted mode labels.
+        set_mode(payload)
+        last_pub = time.time()
+
+        def pred() -> Tuple[bool, str]:
+            nonlocal last_pub
+            cur = _fetch_poll(mqtt, poll_topic)
+            mode = str(cur.get("rs485_stub_mode", ""))
+            detail = f"mode={mode}"
+            if mode in accepted_modes:
+                return True, detail
+            if (time.time() - last_pub) >= republish_s:
+                set_mode(payload)
+                last_pub = time.time()
+            return False, detail
+
+        _assert_eventually(
+            f"mode applied ({'/'.join(accepted_modes)})",
+            pred,
+            timeout_s=timeout_s,
+            poll_s=poll_s,
+        )
 
     def set_intervals(entity_to_freq: dict[str, str]) -> None:
         # Firmware expects a flat JSON object mapping entity name -> freq string.
@@ -1086,31 +1192,22 @@ def main() -> int:
         print("[e2e] case: stub offline")
         before = _fetch_poll(mqtt, poll_topic)
         before_attempts = int(before.get("ess_snapshot_attempts", 0))
-        set_mode('{"mode":"offline"}')
+        set_mode_and_wait('{"mode":"offline"}', ("offline",))
 
         def pred() -> Tuple[bool, str]:
             cur = _fetch_poll(mqtt, poll_topic)
             attempts = int(cur.get("ess_snapshot_attempts", 0))
             ok = bool(cur.get("ess_snapshot_last_ok", False))
             skip = str(cur.get("dispatch_last_skip_reason", ""))
-            detail = f"attempts={attempts} ok={ok} skip={skip} mode={cur.get('rs485_stub_mode')}"
-            return (attempts > before_attempts and (not ok) and skip == "ess_snapshot_failed"), detail
+            mode = str(cur.get("rs485_stub_mode", ""))
+            detail = f"attempts={attempts} ok={ok} skip={skip} mode={mode}"
+            return (mode == "offline" and attempts > before_attempts and (not ok) and skip == "ess_snapshot_failed"), detail
 
         _assert_eventually("offline causes snapshot fail + dispatch suppressed", pred, timeout_s=45)
 
     def case_fail_then_recover() -> None:
         print("[e2e] case: fail then recover (n=2)")
-        set_mode('{"mode":"fail","fail_n":2}')
-        # Expect at least one fail then eventually success.
-        _assert_eventually(
-            "fail_then_recover mode applied",
-            lambda: (
-                str(_fetch_poll(mqtt, poll_topic).get("rs485_stub_mode", "")) in ("fail_then_recover", "fail"),
-                f"mode={_fetch_poll(mqtt, poll_topic).get('rs485_stub_mode')}",
-            ),
-            timeout_s=30,
-            poll_s=2.0,
-        )
+        set_mode_and_wait('{"mode":"fail","fail_n":2}', ("fail_then_recover", "fail"))
 
         def pred() -> Tuple[bool, str]:
             cur = _fetch_poll(mqtt, poll_topic)
@@ -1125,7 +1222,7 @@ def main() -> int:
 
     def case_online() -> None:
         print("[e2e] case: stub online")
-        set_mode('{"mode":"online"}')
+        set_mode_and_wait('{"mode":"online"}', ("online",))
         def pred() -> Tuple[bool, str]:
             cur = _fetch_poll(mqtt, poll_topic)
             ok = bool(cur.get("ess_snapshot_last_ok", False))
@@ -1141,37 +1238,48 @@ def main() -> int:
 
         # Keep this test lightweight: prove that non-snapshot status continues to publish while
         # ESS snapshot (and dispatch) is suppressed.
-        set_mode('{"mode":"online"}')
+        set_mode_and_wait('{"mode":"online"}', ("online",))
         net_topic = f"{device_root}/status/net"
-        mqtt.subscribe(net_topic)
-        net1 = _fetch_latest_json(mqtt, net_topic, label="net")
-        u1 = int(net1.get("uptime_s", 0))
+        mqtt.subscribe(net_topic, force=True)
+        net1_text = _fetch_latest_text(mqtt, net_topic, label="net")
+        u1 = int(_parse_json(net1_text).get("uptime_s", 0))
+        before = _fetch_poll(mqtt, poll_topic)
+        before_attempts = int(before.get("ess_snapshot_attempts", 0))
 
         # Force snapshot failure and confirm:
         # - net uptime continues (non-snapshot publish)
         # - dispatch is suppressed
-        set_mode('{"mode":"offline"}')
+        set_mode_and_wait('{"mode":"offline"}', ("offline",))
         _assert_eventually(
             "offline triggers dispatch suppression",
             lambda: (
-                str(_fetch_poll(mqtt, poll_topic).get("dispatch_last_skip_reason", "")) == "ess_snapshot_failed",
-                f"skip={_fetch_poll(mqtt, poll_topic).get('dispatch_last_skip_reason')}",
+                (
+                    str(_fetch_poll(mqtt, poll_topic).get("dispatch_last_skip_reason", "")) == "ess_snapshot_failed"
+                    and str(_fetch_poll(mqtt, poll_topic).get("rs485_stub_mode", "")) == "offline"
+                    and int(_fetch_poll(mqtt, poll_topic).get("ess_snapshot_attempts", 0)) > before_attempts
+                ),
+                (
+                    f"skip={_fetch_poll(mqtt, poll_topic).get('dispatch_last_skip_reason')} "
+                    f"mode={_fetch_poll(mqtt, poll_topic).get('rs485_stub_mode')} "
+                    f"attempts={_fetch_poll(mqtt, poll_topic).get('ess_snapshot_attempts')}"
+                ),
             ),
             timeout_s=45,
             poll_s=3.0,
         )
 
-        net2 = _fetch_latest_json(mqtt, net_topic, label="net")
-        u2 = int(net2.get("uptime_s", 0))
+        # Require a changed status/net payload (not a retained replay), then compare uptime.
+        net2_text = _wait_for_topic_change(mqtt, net_topic, net1_text, timeout_s=25, label="status/net while offline")
+        u2 = int(_parse_json(net2_text).get("uptime_s", 0))
         if u2 <= u1:
-            # Wait one more cycle to avoid flaking on same-sample reads.
-            net3 = _fetch_latest_json(mqtt, net_topic, label="net")
-            u3 = int(net3.get("uptime_s", 0))
+            # Wait one more changed payload to avoid phase-edge flake near publish boundaries.
+            net3_text = _wait_for_topic_change(mqtt, net_topic, net2_text, timeout_s=25, label="status/net second change while offline")
+            u3 = int(_parse_json(net3_text).get("uptime_s", 0))
             if u3 <= u2:
                 raise E2EError(f"Expected uptime_s to increase while snapshot is failing, got {u1}->{u2}->{u3}")
 
         # Recover and confirm SOC resumes.
-        set_mode('{"mode":"online"}')
+        set_mode_and_wait('{"mode":"online"}', ("online",))
         _assert_eventually(
             "snapshot recovers after online",
             lambda: (bool(_fetch_poll(mqtt, poll_topic).get("ess_snapshot_last_ok", False)), "waiting"),
@@ -1191,7 +1299,7 @@ def main() -> int:
     def case_dispatch_write_via_commands() -> None:
         print("[e2e] case: dispatch write via command topics (virtual inverter)")
         # Make sure stub is online and in a known inverter state.
-        set_mode('{"mode":"online","soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0}')
+        set_mode_and_wait('{"mode":"online","soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0}', ("online",))
 
         ha_unique = _wait_for_inverter_identity()
         base = f"{device_root}/{ha_unique}"
@@ -1207,6 +1315,17 @@ def main() -> int:
         val_topic = _state_topic(ha_unique, "Register_Value")
         mqtt.subscribe(regnum_topic, force=True)
         mqtt.subscribe(val_topic, force=True)
+
+        def fetch_value_text(label: str, timeout_s: int = 80) -> str:
+            deadline = time.time() + timeout_s
+            last_err = "no attempts"
+            while time.time() < deadline:
+                try:
+                    return _fetch_latest_text(mqtt, val_topic, label=label)
+                except E2EError as e:
+                    last_err = str(e)
+                    time.sleep(1.5)
+            raise E2EError(f"Timeout waiting for {label} text on {val_topic}. Last observed: {last_err}")
 
         # Point Register_Value at the dispatch-start register, and wait until the firmware confirms it.
         def ensure_regnum_set() -> None:
@@ -1224,7 +1343,7 @@ def main() -> int:
             raise E2EError(f"Register_Number did not update to {reg_dispatch_start}; last_seen={last_seen!r}")
 
         ensure_regnum_set()
-        before_val = _fetch_latest_text(mqtt, val_topic, label="dispatch_start_before")
+        before_val = fetch_value_text("dispatch_start_before")
 
         op_mode_target = _discover_define_string("OP_MODE_DESC_TARGET")
 
@@ -1263,7 +1382,7 @@ def main() -> int:
         before_last_ms = int(before.get("rs485_stub_last_write_ms", 0))
 
         # Force a dispatch mismatch AFTER baseline so a new write is required.
-        set_mode('{"mode":"online","dispatch_start":0,"dispatch_mode":65535,"dispatch_active_power":0,"dispatch_soc":0}')
+        set_mode_and_wait('{"mode":"online","dispatch_start":0,"dispatch_mode":65535,"dispatch_active_power":0,"dispatch_soc":0}', ("online",))
 
         publish_ready_commands()
         wait_for_state("Op_Mode", op_mode_target)
@@ -1292,7 +1411,7 @@ def main() -> int:
         deadline = time.time() + 60
         last_val = before_val
         while time.time() < deadline:
-            last_val = _fetch_latest_text(mqtt, val_topic, label="dispatch_start_after")
+            last_val = fetch_value_text("dispatch_start_after", timeout_s=30)
             normalized = last_val.strip().lower()
             if normalized in ("start", "started") or last_val.strip() == str(dispatch_start_start):
                 return
@@ -1338,15 +1457,29 @@ def main() -> int:
             }
         )
 
-        set_mode('{"mode":"online","strict_unknown":1,"strict":1}')
-        # Wait until strict_unknown is actually applied (status is asynchronous).
+        # When already in online mode, mode-only acknowledgement is insufficient; keep publishing
+        # until the strict flag itself is observed in status/stub.
+        strict_payload = '{"mode":"online","strict_unknown":1,"strict":1}'
+        last_pub = 0.0
+        def strict_applied_pred() -> Tuple[bool, str]:
+            nonlocal last_pub
+            now = time.time()
+            if (now - last_pub) >= 6.0:
+                set_mode(strict_payload)
+                last_pub = now
+
+            cur_poll = _fetch_poll(mqtt, poll_topic)
+            cur_stub = _fetch_stub(mqtt, stub_topic)
+            mode = str(cur_poll.get("rs485_stub_mode", ""))
+            strict_val = cur_stub.get("strict_unknown", False)
+            strict_on = strict_val is True or strict_val == 1 or str(strict_val).lower() == "true"
+            detail = f"mode={mode} strict={strict_val!r}"
+            return (mode == "online" and strict_on), detail
+
         _assert_eventually(
             "strict_unknown applied",
-            lambda: (
-                bool(_fetch_stub(mqtt, stub_topic).get("strict_unknown", False)),
-                "waiting",
-            ),
-            timeout_s=30,
+            strict_applied_pred,
+            timeout_s=45,
             poll_s=2.0,
         )
 
@@ -1378,7 +1511,7 @@ def main() -> int:
 
     def case_scheduler_idle_does_not_add_reads() -> None:
         print("[e2e] case: scheduler selectivity (no extra reads during idle window)")
-        set_mode('{"mode":"online"}')
+        set_mode_and_wait('{"mode":"online"}', ("online",))
         _assert_eventually(
             "wait for inverter identity/probe to settle",
             lambda: (
@@ -1444,6 +1577,17 @@ def main() -> int:
         val_topic = _state_topic(ha_unique, "Register_Value")
         mqtt.subscribe(val_topic, force=True)
 
+        def fetch_value_text(label: str, timeout_s: int = 80) -> str:
+            deadline = time.time() + timeout_s
+            last_err = "no attempts"
+            while time.time() < deadline:
+                try:
+                    return _fetch_latest_text(mqtt, val_topic, label=label)
+                except E2EError as e:
+                    last_err = str(e)
+                    time.sleep(1.5)
+            raise E2EError(f"Timeout waiting for {label} text on {val_topic}. Last observed: {last_err}")
+
         def ensure_regnum_set() -> None:
             deadline = time.time() + 30
             last_seen = ""
@@ -1463,8 +1607,17 @@ def main() -> int:
         before_stub = _fetch_stub(mqtt, stub_topic)
         before_unknown = int(before_stub.get("stub_unknown_reads", 0))
 
-        set_mode('{"mode":"online","strict_unknown":0}')
-        value_loose = _fetch_latest_text(mqtt, val_topic, label="reg_value")
+        set_mode_and_wait('{"mode":"online","strict_unknown":0}', ("online",))
+        _assert_eventually(
+            "strict_unknown disabled",
+            lambda: (
+                not bool(_fetch_stub(mqtt, stub_topic).get("strict_unknown", False)),
+                f"strict={_fetch_stub(mqtt, stub_topic).get('strict_unknown')}",
+            ),
+            timeout_s=30,
+            poll_s=2.0,
+        )
+        value_loose = fetch_value_text("reg_value_loose")
         after_loose = _fetch_stub(mqtt, stub_topic)
 
         unknown_after = int(after_loose.get("stub_unknown_reads", 0))
@@ -1475,7 +1628,16 @@ def main() -> int:
                 f"value={value_loose!r} unknown_before={before_unknown} unknown_after={unknown_after} strict={strict_after}"
             )
 
-        set_mode('{"mode":"online","strict_unknown":1}')
+        set_mode_and_wait('{"mode":"online","strict_unknown":1}', ("online",))
+        _assert_eventually(
+            "strict_unknown enabled",
+            lambda: (
+                bool(_fetch_stub(mqtt, stub_topic).get("strict_unknown", False)),
+                f"strict={_fetch_stub(mqtt, stub_topic).get('strict_unknown')}",
+            ),
+            timeout_s=30,
+            poll_s=2.0,
+        )
         value_strict = _wait_for_topic_change(mqtt, val_topic, value_loose, timeout_s=30, label="reg_value")
         if value_strict != "Slave Error":
             raise E2EError(f"Expected Slave Error in strict mode but got: {value_strict!r}")
@@ -1492,7 +1654,7 @@ def main() -> int:
     def case_fail_specific_snapshot_register_and_type() -> None:
         print("[e2e] case: fail specific snapshot register + fail type reporting")
         reg_soc = _discover_register_value("REG_BATTERY_HOME_R_SOC")
-        set_mode(f'{{"mode":"online","fail_n":0,"reg":{reg_soc},"fail_type":1}}')
+        set_mode_and_wait(f'{{"mode":"online","fail_n":0,"reg":{reg_soc},"fail_type":1}}', ("online",))
 
         def pred() -> Tuple[bool, str]:
             cur = _fetch_poll(mqtt, poll_topic)
@@ -1507,13 +1669,13 @@ def main() -> int:
         _assert_eventually("failing SOC register forces snapshot failure with slave_error", pred, timeout_s=60, poll_s=3.0)
 
         # Clear failure and confirm recovery.
-        set_mode('{"mode":"online"}')
+        set_mode_and_wait('{"mode":"online"}', ("online",))
         _assert_eventually("snapshot recovers after clearing failure", lambda: (bool(_fetch_poll(mqtt, poll_topic).get("ess_snapshot_last_ok", False)), "waiting"), timeout_s=60, poll_s=3.0)
 
     def case_fail_every_n_snapshot_attempts() -> None:
         print("[e2e] case: fail every N snapshot attempts (N=2)")
         # Use slave_error (not no_response) so RS485 stays "online" and we observe clean fail/ok alternation.
-        set_mode('{"mode":"online","fail_every_n":2,"fail_type":1}')
+        set_mode_and_wait('{"mode":"online","fail_every_n":2,"fail_type":1}', ("online",))
 
         # Observe a fail at least once (2nd attempt) and a success afterwards.
         seen_fail = False
@@ -1536,7 +1698,7 @@ def main() -> int:
 
     def case_latency_does_not_break_status() -> None:
         print("[e2e] case: latency injection keeps status flowing")
-        set_mode('{"mode":"online","latency_ms":200}')
+        set_mode_and_wait('{"mode":"online","latency_ms":200}', ("online",))
         before = _fetch_poll(mqtt, poll_topic)
         before_attempts = int(before.get("ess_snapshot_attempts", 0))
 
@@ -1556,7 +1718,7 @@ def main() -> int:
         print("[e2e] case: flapping online/offline toggles snapshot result")
         # The scheduler's snapshot cadence is ~10s. Choose a flap period that is NOT a divisor of 10s,
         # otherwise every snapshot lands in the same phase and you never observe a toggle.
-        set_mode('{"mode":"flap","flap_online_ms":3500,"flap_offline_ms":3500}')
+        set_mode_and_wait('{"mode":"flap","flap_online_ms":3500,"flap_offline_ms":3500}', ("flap",))
 
         seen_ok = False
         seen_fail = False
@@ -1578,7 +1740,7 @@ def main() -> int:
 
     def case_probe_delayed_online() -> None:
         print("[e2e] case: probe_delayed becomes online after N attempts")
-        set_mode('{"mode":"probe_delayed","probe_success_after_n":3}')
+        set_mode_and_wait('{"mode":"probe_delayed","probe_success_after_n":3}', ("probe_delayed",))
         before_stub = _fetch_stub(mqtt, stub_topic)
         before_attempts = int(before_stub.get("probe_attempts", 0))
 
@@ -1596,9 +1758,10 @@ def main() -> int:
     def case_fail_writes_only_dispatch_write_fails() -> None:
         print("[e2e] case: fail writes only (dispatch write fails, snapshot reads still ok)")
         reg_dispatch_start = _discover_register_value("REG_DISPATCH_RW_DISPATCH_START")
-        set_mode(
+        set_mode_and_wait(
             f'{{"mode":"online","reg":{reg_dispatch_start},"fail_writes":1,"fail_reads":0,"fail_type":1,'
-            '"soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0,"dispatch_start":0,"dispatch_mode":0,"dispatch_soc":0}}'
+            '"soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0,"dispatch_start":0,"dispatch_mode":0,"dispatch_soc":0}}',
+            ("online",),
         )
         ha_unique = _wait_for_inverter_identity()
         base = f"{device_root}/{ha_unique}"
@@ -1632,7 +1795,7 @@ def main() -> int:
 
     def case_fail_for_ms_then_recover() -> None:
         print("[e2e] case: fail for N ms then recover")
-        set_mode('{"mode":"online","fail_for_ms":5000}')
+        set_mode_and_wait('{"mode":"online","fail_for_ms":5000}', ("online",))
         # Expect at least one fail early and eventual recovery.
         seen_fail = False
         deadline = time.time() + 40
@@ -1651,14 +1814,19 @@ def main() -> int:
 
     def case_soc_drift_over_time() -> None:
         print("[e2e] case: virtual SOC drifts per snapshot attempt")
-        set_mode('{"mode":"online","soc_pct":50,"soc_step_x10_per_snapshot":10}')
+        set_mode_and_wait('{"mode":"online","soc_pct":50,"soc_step_x10_per_snapshot":10}', ("online",))
         ha_unique = _wait_for_inverter_identity()
         set_intervals({"State_of_Charge": "freqTenSec"})
         soc_topic = _state_topic(ha_unique, "State_of_Charge")
-        mqtt.subscribe(soc_topic)
+        mqtt.subscribe(soc_topic, force=True)
 
         v1 = _fetch_latest_text(mqtt, soc_topic, label="soc")
-        v2 = _wait_for_topic_change(mqtt, soc_topic, v1, timeout_s=45, label="soc")
+        try:
+            v2 = _wait_for_topic_change(mqtt, soc_topic, v1, timeout_s=70, label="soc")
+        except E2EError:
+            # Re-apply desired cadence once in case the previous config message was dropped.
+            set_intervals({"State_of_Charge": "freqTenSec"})
+            v2 = _wait_for_topic_change(mqtt, soc_topic, v1, timeout_s=70, label="soc")
         try:
             f1 = float(v1)
             f2 = float(v2)
@@ -1722,7 +1890,7 @@ def main() -> int:
         print("[e2e] case: portal UI updates polling schedule (WiFiManager, paged)")
         base = os.environ.get("DEVICE_HTTP_BASE", "").strip()
         if not base:
-            raise E2EError("DEVICE_HTTP_BASE is required for portal UI test (set in tools/e2e/e2e.local.env)")
+            raise E2EError("DEVICE_HTTP_BASE is required for portal UI test (set in tools/e2e/e2e.local.json or e2e.local.env)")
 
         reboot_wifi_path = _discover_reboot_wifi_path_from_code()
         if not reboot_wifi_path:

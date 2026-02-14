@@ -156,6 +156,56 @@ TEST_CASE("status poll JSON builder includes required keys")
 	CHECK(payload.find("\"rs485_probe_backoff_ms\":15000") != std::string::npos);
 }
 
+TEST_CASE("status poll compact JSON includes snapshot/dispatch and stub scheduler keys conditionally")
+{
+	StatusPollSnapshot snapshot{};
+	snapshot.rs485Backend = "stub";
+	snapshot.rs485StubMode = "online";
+	snapshot.rs485StubFailRemaining = 0;
+	snapshot.rs485StubWriteCount = 2;
+	snapshot.rs485StubLastWriteStartReg = 4096;
+	snapshot.rs485StubLastWriteMs = 111;
+	snapshot.essSnapshotLastOk = true;
+	snapshot.essSnapshotAttempts = 42;
+	snapshot.dispatchLastRunMs = 1000;
+	snapshot.dispatchLastSkipReason = "";
+	snapshot.pollIntervalSeconds = 30;
+	snapshot.schedTenSecLastRunMs = 10;
+	snapshot.schedOneMinLastRunMs = 60;
+	snapshot.schedFiveMinLastRunMs = 300;
+	snapshot.schedOneHourLastRunMs = 3600;
+	snapshot.schedOneDayLastRunMs = 86400;
+	snapshot.schedUserLastRunMs = 123;
+	snapshot.lastPollMs = 250;
+	snapshot.pollOkCount = 9;
+	snapshot.pollErrCount = 1;
+	snapshot.rs485ProbeLastAttemptMs = 5000;
+	snapshot.rs485ProbeBackoffMs = 15000;
+
+	char buffer[512];
+	CHECK(buildStatusPollJsonCompact(snapshot, buffer, sizeof(buffer)));
+	std::string payload(buffer);
+
+	CHECK(payload.find("\"ess_snapshot_attempts\":42") != std::string::npos);
+	CHECK(payload.find("\"dispatch_last_run_ms\":1000") != std::string::npos);
+
+#if RS485_STUB
+	CHECK(payload.find("\"s10_ms\":10") != std::string::npos);
+	CHECK(payload.find("\"s60_ms\":60") != std::string::npos);
+	CHECK(payload.find("\"s300_ms\":300") != std::string::npos);
+	CHECK(payload.find("\"s3600_ms\":3600") != std::string::npos);
+	CHECK(payload.find("\"s86400_ms\":86400") != std::string::npos);
+	CHECK(payload.find("\"su_ms\":123") != std::string::npos);
+#else
+	CHECK(payload.find("\"s10_ms\":") == std::string::npos);
+	CHECK(payload.find("\"s60_ms\":") == std::string::npos);
+	CHECK(payload.find("\"s300_ms\":") == std::string::npos);
+	CHECK(payload.find("\"s3600_ms\":") == std::string::npos);
+	CHECK(payload.find("\"s86400_ms\":") == std::string::npos);
+	CHECK(payload.find("\"su_ms\":") == std::string::npos);
+#endif
+}
+
 TEST_CASE("status stub JSON builder includes required keys")
 {
 	StatusStubSnapshot snapshot{};

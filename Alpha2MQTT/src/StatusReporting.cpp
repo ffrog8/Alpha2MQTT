@@ -7,6 +7,10 @@
 #include <cstdio>
 #include <cstring>
 
+#ifndef RS485_STUB
+#define RS485_STUB 0
+#endif
+
 const char *
 eventCodeName(MqttEventCode code)
 {
@@ -142,6 +146,14 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		"\"dispatch_last_run_ms\":%lu,"
 		"\"dispatch_last_skip_reason\":\"%s\","
 		"\"poll_interval_s\":%lu,"
+#if RS485_STUB
+		"\"s10_ms\":%lu,"
+		"\"s60_ms\":%lu,"
+		"\"s300_ms\":%lu,"
+		"\"s3600_ms\":%lu,"
+		"\"s86400_ms\":%lu,"
+		"\"su_ms\":%lu,"
+#endif
 		"\"sched_10s_last_run_ms\":%lu,"
 		"\"sched_1m_last_run_ms\":%lu,"
 		"\"sched_5m_last_run_ms\":%lu,"
@@ -187,13 +199,21 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		static_cast<unsigned long>(snapshot.bootHeapMaxBlockB),
 		static_cast<unsigned>(snapshot.bootHeapFragPct),
 		snapshot.essSnapshotLastOk ? "true" : "false",
-		static_cast<unsigned long>(snapshot.essSnapshotAttempts),
-		static_cast<unsigned long>(snapshot.dispatchLastRunMs),
-		snapshot.dispatchLastSkipReason ? snapshot.dispatchLastSkipReason : "",
-		static_cast<unsigned long>(snapshot.pollIntervalSeconds),
-		static_cast<unsigned long>(snapshot.schedTenSecLastRunMs),
-		static_cast<unsigned long>(snapshot.schedOneMinLastRunMs),
-		static_cast<unsigned long>(snapshot.schedFiveMinLastRunMs),
+			static_cast<unsigned long>(snapshot.essSnapshotAttempts),
+			static_cast<unsigned long>(snapshot.dispatchLastRunMs),
+			snapshot.dispatchLastSkipReason ? snapshot.dispatchLastSkipReason : "",
+			static_cast<unsigned long>(snapshot.pollIntervalSeconds),
+#if RS485_STUB
+			static_cast<unsigned long>(snapshot.schedTenSecLastRunMs),
+			static_cast<unsigned long>(snapshot.schedOneMinLastRunMs),
+			static_cast<unsigned long>(snapshot.schedFiveMinLastRunMs),
+			static_cast<unsigned long>(snapshot.schedOneHourLastRunMs),
+			static_cast<unsigned long>(snapshot.schedOneDayLastRunMs),
+			static_cast<unsigned long>(snapshot.schedUserLastRunMs),
+#endif
+			static_cast<unsigned long>(snapshot.schedTenSecLastRunMs),
+			static_cast<unsigned long>(snapshot.schedOneMinLastRunMs),
+			static_cast<unsigned long>(snapshot.schedFiveMinLastRunMs),
 		static_cast<unsigned long>(snapshot.schedOneHourLastRunMs),
 		static_cast<unsigned long>(snapshot.schedOneDayLastRunMs),
 		static_cast<unsigned long>(snapshot.schedUserLastRunMs),
@@ -236,6 +256,71 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		static_cast<unsigned>(kRuntimeCritFragPct)
 #endif
 		);
+	if (written < 0 || static_cast<size_t>(written) >= outSize) {
+		return false;
+	}
+	return true;
+}
+
+bool
+buildStatusPollJsonCompact(const StatusPollSnapshot &snapshot, char *out, size_t outSize)
+{
+	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+	int written = snprintf(
+		out,
+		outSize,
+		"{"
+		"\"rs485_backend\":\"%s\","
+		"\"rs485_stub_mode\":\"%s\","
+		"\"rs485_stub_fail_remaining\":%lu,"
+		"\"rs485_stub_writes\":%lu,"
+		"\"rs485_stub_last_write_reg\":%u,"
+		"\"rs485_stub_last_write_ms\":%lu,"
+		"\"ess_snapshot_last_ok\":%s,"
+		"\"ess_snapshot_attempts\":%lu,"
+		"\"dispatch_last_run_ms\":%lu,"
+		"\"dispatch_last_skip_reason\":\"%s\","
+		"\"poll_interval_s\":%lu,"
+#if RS485_STUB
+		"\"s10_ms\":%lu,"
+		"\"s60_ms\":%lu,"
+		"\"s300_ms\":%lu,"
+		"\"s3600_ms\":%lu,"
+		"\"s86400_ms\":%lu,"
+		"\"su_ms\":%lu,"
+#endif
+		"\"last_poll_ms\":%lu,"
+		"\"poll_ok_count\":%lu,"
+		"\"poll_err_count\":%lu,"
+		"\"rs485_probe_last_attempt_ms\":%lu,"
+		"\"rs485_probe_backoff_ms\":%lu"
+		"}",
+		snapshot.rs485Backend ? snapshot.rs485Backend : "",
+		snapshot.rs485StubMode ? snapshot.rs485StubMode : "",
+		static_cast<unsigned long>(snapshot.rs485StubFailRemaining),
+		static_cast<unsigned long>(snapshot.rs485StubWriteCount),
+		static_cast<unsigned>(snapshot.rs485StubLastWriteStartReg),
+		static_cast<unsigned long>(snapshot.rs485StubLastWriteMs),
+		snapshot.essSnapshotLastOk ? "true" : "false",
+			static_cast<unsigned long>(snapshot.essSnapshotAttempts),
+			static_cast<unsigned long>(snapshot.dispatchLastRunMs),
+			snapshot.dispatchLastSkipReason ? snapshot.dispatchLastSkipReason : "",
+			static_cast<unsigned long>(snapshot.pollIntervalSeconds),
+#if RS485_STUB
+			static_cast<unsigned long>(snapshot.schedTenSecLastRunMs),
+			static_cast<unsigned long>(snapshot.schedOneMinLastRunMs),
+			static_cast<unsigned long>(snapshot.schedFiveMinLastRunMs),
+			static_cast<unsigned long>(snapshot.schedOneHourLastRunMs),
+			static_cast<unsigned long>(snapshot.schedOneDayLastRunMs),
+			static_cast<unsigned long>(snapshot.schedUserLastRunMs),
+#endif
+			static_cast<unsigned long>(snapshot.lastPollMs),
+			static_cast<unsigned long>(snapshot.pollOkCount),
+			static_cast<unsigned long>(snapshot.pollErrCount),
+		static_cast<unsigned long>(snapshot.rs485ProbeLastAttemptMs),
+		static_cast<unsigned long>(snapshot.rs485ProbeBackoffMs));
 	if (written < 0 || static_cast<size_t>(written) >= outSize) {
 		return false;
 	}

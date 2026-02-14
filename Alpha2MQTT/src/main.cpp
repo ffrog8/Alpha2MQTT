@@ -1858,6 +1858,10 @@ configHandlerSta(void)
 	// keeps heap usage lower, but requires the user to reach the device on its STA IP.
 	WiFi.mode(WIFI_STA);
 
+	// Clear one-shot portal boot mode immediately so the next reboot returns to normal runtime.
+	if (currentBootMode != BootMode::Normal) {
+		persistUserBootMode(BootMode::Normal);
+	}
 	currentBootMode = BootMode::Normal;
 
 #ifdef DEBUG_OVER_SERIAL
@@ -2144,11 +2148,12 @@ configHandler(void)
 	WiFiManager wifiManager;
 
 	// Config portal is intended to be a temporary recovery/config state, not a persistent "mode".
-	// Keep boot-mode transitions user-driven only; runtime portal entry updates only in-RAM state.
+	// Clear one-shot portal boot mode immediately so the next reboot returns to normal runtime.
 	if (currentBootMode != BootMode::Normal) {
+		persistUserBootMode(BootMode::Normal);
 		currentBootMode = BootMode::Normal;
 #ifdef DEBUG_OVER_SERIAL
-		Serial.println("Config portal entry: boot_mode set to normal (runtime only).");
+		Serial.println("Config portal entry: boot_mode reset to normal.");
 #endif
 	}
 
@@ -4985,8 +4990,23 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 
 	char pollTopic[160];
 	snprintf(pollTopic, sizeof(pollTopic), "%s/poll", statusTopic);
-	if (buildStatusPollJson(poll, pollAddition, sizeof(pollAddition))) {
-		_mqtt.publish(pollTopic, pollAddition, true);
+	bool pollBuilt = buildStatusPollJson(poll, pollAddition, sizeof(pollAddition));
+	bool usedCompactPoll = false;
+	if (!pollBuilt) {
+		pollBuilt = buildStatusPollJsonCompact(poll, pollAddition, sizeof(pollAddition));
+		usedCompactPoll = pollBuilt;
+	}
+	if (pollBuilt) {
+		bool published = _mqtt.publish(pollTopic, pollAddition, true);
+		if (!published && !usedCompactPoll && buildStatusPollJsonCompact(poll, pollAddition, sizeof(pollAddition))) {
+			published = _mqtt.publish(pollTopic, pollAddition, true);
+			usedCompactPoll = true;
+		}
+#ifdef DEBUG_OVER_SERIAL
+		if (!published) {
+			Serial.println("status/poll publish failed (full+compact)");
+		}
+#endif
 		maybeYield();
 	}
 
@@ -5715,10 +5735,12 @@ refreshEssSnapshot(void)
 		rs485Errors += gotError;
 #endif // DEBUG_RS485
 		essSnapshotValid = false;
+		strlcpy(dispatchLastSkipReason, "ess_snapshot_failed", sizeof(dispatchLastSkipReason));
 	} else {
 		pollOkCount++;
 		lastOkTsMs = millis();
 		essSnapshotValid = true;
+		dispatchLastSkipReason[0] = '\0';
 	}
 	essSnapshotLastOk = essSnapshotValid;
 	if (lastPollMs > kPollOverrunMs) {
@@ -5879,10 +5901,7 @@ sendData()
 		if (!bucketNeedsSnapshot) {
 			return true;
 		}
-		if (!bootPlan.inverter ||
-		    !inverterReady ||
-		    _registerHandler == NULL ||
-		    rs485ConnectState != Rs485ConnectState::Connected) {
+		if (!bootPlan.inverter || !inverterReady) {
 			essSnapshotValid = false;
 			snapshotOkThisPass = false;
 			return false;
@@ -6087,8 +6106,9 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 #endif // DEBUG_CALLBACKS
 		return; // We won't be doing anything
 	} else {
-		// Get the payload (ensure NULL termination)
-		strlcpy(mqttIncomingPayload, (char *)message, length + 1);
+		// PubSubClient payload bytes are length-delimited and not guaranteed to be NUL-terminated.
+		memcpy(mqttIncomingPayload, message, length);
+		mqttIncomingPayload[length] = '\0';
 	}
 #ifdef DEBUG_OVER_SERIAL
 	sprintf(_debugOutput, "Payload: %d", length);
