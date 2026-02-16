@@ -6,10 +6,13 @@ constexpr const char *kPortalMenuIds[] = {
 	"wifinoscan",
 	"info",
 	"param",
+	"custom",
 	"update",
 	"sep",
 	"restart",
 };
+constexpr char kPortalMenuPolling[] =
+	"<form action='/config/polling' method='get'><button>Polling</button></form><br/>\n";
 }
 
 bool
@@ -22,6 +25,12 @@ PortalPostWifiAction
 portalPostWifiActionAfterWifiSave(const char *storedMqttServer)
 {
 	return mqttServerIsBlank(storedMqttServer) ? PortalPostWifiAction::RedirectToMqttParams : PortalPostWifiAction::Reboot;
+}
+
+const char *
+portalMenuPollingHtml(void)
+{
+	return kPortalMenuPolling;
 }
 
 PortalMenu

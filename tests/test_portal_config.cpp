@@ -28,7 +28,9 @@ TEST_CASE("portal config: menu includes update and no exit")
 
 	bool hasUpdate = false;
 	bool hasExit = false;
+	bool hasCustom = false;
 	int paramIndex = -1;
+	int customIndex = -1;
 	int updateIndex = -1;
 
 	for (uint8_t i = 0; i < menu.count; i++) {
@@ -37,6 +39,10 @@ TEST_CASE("portal config: menu includes update and no exit")
 		if (strcmp(id, "update") == 0) {
 			hasUpdate = true;
 			updateIndex = i;
+		}
+		if (strcmp(id, "custom") == 0) {
+			hasCustom = true;
+			customIndex = i;
 		}
 		if (strcmp(id, "exit") == 0) {
 			hasExit = true;
@@ -47,7 +53,17 @@ TEST_CASE("portal config: menu includes update and no exit")
 	}
 
 	CHECK(hasUpdate);
+	CHECK(hasCustom);
 	CHECK(!hasExit);
 	CHECK(paramIndex >= 0);
+	CHECK(customIndex > paramIndex);
 	CHECK(updateIndex > paramIndex);
+}
+
+TEST_CASE("portal config: custom polling menu html points to polling page")
+{
+	const char *html = portalMenuPollingHtml();
+	REQUIRE(html != nullptr);
+	CHECK(strstr(html, "/config/polling") != nullptr);
+	CHECK(strstr(html, "Polling") != nullptr);
 }

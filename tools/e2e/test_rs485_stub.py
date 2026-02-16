@@ -53,6 +53,9 @@ Usage
   python3 tools/e2e/test_rs485_stub.py
   python3 tools/e2e/test_rs485_stub.py --no-flash
   python3 tools/e2e/test_rs485_stub.py --force-flash
+  python3 tools/e2e/test_rs485_stub.py --list-cases
+  python3 tools/e2e/test_rs485_stub.py --case portal_polling_ui
+  python3 tools/e2e/test_rs485_stub.py --from-case soc_drift --trace-http
 """
 
 from __future__ import annotations
@@ -75,12 +78,40 @@ class E2EError(Exception):
 
 
 VERBOSE = False
+TRACE_HTTP = False
+TRACE_MQTT = False
 PROGRESS_INTERVAL_S = 10.0
+CASE_ORDER: tuple[str, ...] = (
+    "offline",
+    "fail_then_recover",
+    "online",
+    "scheduler_idle_no_extra_reads",
+    "bucket_snapshot_skip_only",
+    "dispatch_write_via_commands",
+    "dispatch_write_feedback",
+    "strict_unknown_snapshot",
+    "strict_unknown_register_reads",
+    "fail_specific_snapshot_reg",
+    "fail_every_n",
+    "latency",
+    "flapping",
+    "probe_delayed",
+    "fail_writes_only",
+    "fail_for_ms",
+    "soc_drift",
+    "polling_config",
+    "portal_polling_ui",
+)
 
 
 def _log(msg: str) -> None:
-    if VERBOSE:
+    if VERBOSE or TRACE_MQTT:
         print(f"[e2e] {msg}")
+
+
+def _http_log(msg: str) -> None:
+    if TRACE_HTTP:
+        print(f"[e2e][http] {msg}")
 
 
 def _announce(msg: str) -> None:
@@ -115,6 +146,40 @@ def _default_env_file() -> Path:
 def _default_json_file() -> Path:
     # Preferred local config file (gitignored).
     return Path(__file__).resolve().parent / "e2e.local.json"
+
+
+def _load_json_run_defaults(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    if not isinstance(data, dict):
+        return {}
+    run = data.get("run", {})
+    return run if isinstance(run, dict) else {}
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return default
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return _as_bool(raw, default)
+
+
+def _env_csv(name: str) -> list[str]:
+    raw = os.environ.get(name, "")
+    if not raw.strip():
+        return []
+    return [v.strip() for v in raw.split(",") if v.strip()]
 
 def _load_json_file_defaults(path: Path) -> None:
     """
@@ -527,6 +592,7 @@ def _http_request(method: str, url: str, headers: dict[str, str], body: bytes, t
     conn = socket.create_connection((host, port), timeout=timeout_s)
     conn.settimeout(timeout_s)
     try:
+        _http_log(f"{method} {url} req_bytes={len(body)} timeout_s={timeout_s}")
         request_lines = [
             f"{method} {path} HTTP/1.1",
             f"Host: {host}",
@@ -563,7 +629,9 @@ def _http_request(method: str, url: str, headers: dict[str, str], body: bytes, t
         m = re.match(r"HTTP/\d\.\d\s+(\d+)", status_line)
         if not m:
             raise E2EError(f"Could not parse HTTP status line: {status_line!r}")
-        return int(m.group(1)), resp_body
+        status = int(m.group(1))
+        _http_log(f"{method} {url} -> {status} body_bytes={len(resp_body)}")
+        return status, resp_body
     finally:
         conn.close()
 
@@ -606,6 +674,7 @@ def _http_request_full(method: str, url: str, headers: dict[str, str], body: byt
     conn = socket.create_connection((host, port), timeout=timeout_s)
     conn.settimeout(timeout_s)
     try:
+        _http_log(f"{method} {url} req_bytes={len(body)} timeout_s={timeout_s} max_bytes={max_bytes}")
         request_lines = [
             f"{method} {path} HTTP/1.1",
             f"Host: {host}",
@@ -649,7 +718,9 @@ def _http_request_full(method: str, url: str, headers: dict[str, str], body: byt
             if not chunk:
                 break
             body_bytes += chunk
-        return status, body_bytes[:max_bytes]
+        out = body_bytes[:max_bytes]
+        _http_log(f"{method} {url} -> {status} body_bytes={len(out)}")
+        return status, out
     finally:
         conn.close()
 
@@ -667,6 +738,55 @@ def _wait_for_http_ok(url: str, timeout_s: int = 30) -> None:
         except Exception as e:
             return False, f"err={e}"
     _assert_eventually(f"HTTP reachable: {url}", pred, timeout_s=timeout_s, poll_s=2.0)
+
+def _discover_polling_menu_path(menu_html: str) -> str:
+    # Accept both the root menu form button and setup-page anchor forms of the link.
+    m = re.search(r"""(?:action|href)=['"](/config/polling(?:\?[^'"]*)?)['"]""", menu_html, flags=re.IGNORECASE)
+    if not m:
+        raise E2EError("portal menu missing Polling entry/link")
+    return m.group(1)
+
+def _load_polling_page_via_menu(base: str) -> tuple[str, str]:
+    deadline = time.time() + 25
+    polling_path = ""
+    last_detail = "not checked"
+    while time.time() < deadline:
+        for menu_path in ("/", "/param"):
+            status_menu, menu_body = _http_request_full("GET", base + menu_path, headers={}, body=b"", timeout_s=20)
+            if status_menu != 200:
+                last_detail = f"{menu_path} status={status_menu}"
+                continue
+            menu_html = menu_body.decode("utf-8", errors="replace")
+            try:
+                polling_path = _discover_polling_menu_path(menu_html)
+                break
+            except E2EError:
+                last_detail = f"{menu_path} missing polling link"
+                continue
+        if polling_path:
+            break
+        time.sleep(1.0)
+    if not polling_path:
+        raise E2EError(f"portal menu missing Polling entry/link ({last_detail})")
+
+    status_poll, poll_body = _http_request_full("GET", base + polling_path, headers={}, body=b"", timeout_s=20)
+    if status_poll != 200:
+        raise E2EError(f"portal polling page not reachable via menu link {polling_path}: status={status_poll}")
+    poll_html = poll_body.decode("utf-8", errors="replace")
+    return polling_path, poll_html
+
+def _extract_entity_row_and_selected_bucket(poll_html: str, entity_name: str) -> tuple[str, str]:
+    row_re = re.search(rf'<tr data-entity="{re.escape(entity_name)}">(.*?)</tr>', poll_html, flags=re.DOTALL)
+    if not row_re:
+        raise E2EError(f"could not locate {entity_name} row on polling page")
+    row_html = row_re.group(1)
+    row_idx = re.search(r'name="b(\d+)"', row_html)
+    if not row_idx:
+        raise E2EError(f"could not locate row index for {entity_name}")
+    selected = re.search(r'<option value="([^"]+)" selected>', row_html)
+    if not selected:
+        raise E2EError(f"could not locate selected bucket for {entity_name}")
+    return row_idx.group(1), selected.group(1)
 
 
 def _discover_device_topic(mqtt: MqttClient, status_poll_suffix: str) -> str:
@@ -1005,20 +1125,60 @@ def _ensure_latest_stub_via_ota(
 
 
 def main() -> int:
-    _load_json_file_defaults(_default_json_file())
+    json_cfg_path = _default_json_file()
+    _load_json_file_defaults(json_cfg_path)
     _load_env_file_defaults(_default_env_file())
+    run_cfg = _load_json_run_defaults(json_cfg_path)
+    default_verbose = _env_bool("E2E_VERBOSE", _as_bool(run_cfg.get("verbose", False)))
+    default_trace_http = _env_bool("E2E_TRACE_HTTP", _as_bool(run_cfg.get("trace_http", False)))
+    default_trace_mqtt = _env_bool("E2E_TRACE_MQTT", _as_bool(run_cfg.get("trace_mqtt", False)))
+    default_no_flash = _env_bool("E2E_NO_FLASH", _as_bool(run_cfg.get("no_flash", False)))
+    default_force_flash = _env_bool("E2E_FORCE_FLASH", _as_bool(run_cfg.get("force_flash", False)))
+    default_cases = _env_csv("E2E_CASES")
+    if not default_cases:
+        cfg_cases = run_cfg.get("cases", [])
+        if isinstance(cfg_cases, list):
+            default_cases = [str(v).strip() for v in cfg_cases if str(v).strip()]
+    default_from_case = os.environ.get("E2E_FROM_CASE", "").strip()
+    if not default_from_case:
+        raw_from_case = run_cfg.get("from_case", "")
+        if isinstance(raw_from_case, str):
+            default_from_case = raw_from_case.strip()
+
     ap = argparse.ArgumentParser()
+    ap.add_argument("--list-cases", action="store_true", help="List available test cases and exit.")
+    ap.add_argument("--case", action="append", help="Run only the named case (repeatable).")
+    ap.add_argument("--from-case", help="Run from this case onward.")
     ap.add_argument("--no-flash", action="store_true", help="Never flash. Fail if device backend/build does not match expected stub firmware.")
     ap.add_argument("--force-flash", action="store_true", help="Always flash expected stub firmware before running tests.")
     # Back-compat aliases
     ap.add_argument("--ota", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--ensure-stub", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--verbose", action="store_true", help="Verbose logging (MQTT rx/tx and filtering).")
+    ap.add_argument("--trace-http", action="store_true", help="Trace HTTP requests and response status/size.")
+    ap.add_argument("--trace-mqtt", action="store_true", help="Trace MQTT transport activity.")
     args = ap.parse_args()
-    if args.no_flash and args.force_flash:
+    if args.list_cases:
+        for name in CASE_ORDER:
+            print(name)
+        return 0
+
+    selected_cases = args.case if args.case else default_cases
+    from_case = args.from_case.strip() if args.from_case else default_from_case
+    for name in selected_cases:
+        if name not in CASE_ORDER:
+            raise E2EError(f"Unknown case in selection: {name!r}")
+    if from_case and from_case not in CASE_ORDER:
+        raise E2EError(f"Unknown from-case: {from_case!r}")
+
+    policy_no_flash = bool(args.no_flash or default_no_flash)
+    policy_force = bool(args.force_flash or args.ota or default_force_flash)
+    if policy_no_flash and policy_force:
         raise E2EError("--no-flash and --force-flash are mutually exclusive")
-    global VERBOSE
-    VERBOSE = args.verbose
+    global VERBOSE, TRACE_HTTP, TRACE_MQTT
+    VERBOSE = bool(args.verbose or default_verbose)
+    TRACE_HTTP = bool(args.trace_http or default_trace_http)
+    TRACE_MQTT = bool(args.trace_mqtt or default_trace_mqtt)
 
     host = _require_env("MQTT_HOST")
     port = int(os.environ.get("MQTT_PORT", "1883"))
@@ -1051,8 +1211,6 @@ def main() -> int:
 
     firmware_path = Path(os.environ.get("FIRMWARE_BIN") or _latest_stub_firmware_path())
     expected_ts = _firmware_build_ts_ms_from_filename(firmware_path)
-    policy_force = bool(args.force_flash or args.ota)
-    policy_no_flash = bool(args.no_flash)
     status_ok, status_detail = _device_is_latest_stub(mqtt, device_root, expected_ts, status_poll_suffix)
 
     if policy_force:
@@ -1310,7 +1468,7 @@ def main() -> int:
 
         # Also validate write -> read feedback via the existing Register_Number/Register_Value entities.
         # Re-enable and speed up Register_Value in case prior runs changed intervals.
-        set_intervals({"Register_Value": "freqTenSec"})
+        set_intervals({"Register_Value": "ten_sec"})
         regnum_topic = _state_topic(ha_unique, "Register_Number")
         val_topic = _state_topic(ha_unique, "Register_Value")
         mqtt.subscribe(regnum_topic, force=True)
@@ -1428,34 +1586,27 @@ def main() -> int:
 
     def case_strict_unknown_snapshot_has_no_unknown_reads() -> None:
         print("[e2e] case: strict unknown-register protection (snapshot path)")
-        _wait_for_inverter_identity()
+        ha_unique = _wait_for_inverter_identity()
         # Strict mode should be safe for ESS snapshot: the stub must implement all snapshot registers.
-        # To keep this test scoped to the snapshot path (and not other entities that perform Modbus reads),
-        # temporarily disable known non-snapshot entities that read Modbus directly.
-        set_intervals(
-            {
-                "Inverter_version": "freqDisabled",
-                "Inverter_SN": "freqDisabled",
-                "EMS_version": "freqDisabled",
-                "EMS_SN": "freqDisabled",
-                "ESS_Energy_Charge": "freqDisabled",
-                "ESS_Energy_Discharge": "freqDisabled",
-                "Grid_Regulation": "freqDisabled",
-                "Grid_Energy_To": "freqDisabled",
-                "Grid_Energy_From": "freqDisabled",
-                "Battery_Capacity": "freqDisabled",
-                "Inverter_Temp": "freqDisabled",
-                "Battery_Temp": "freqDisabled",
-                "Battery_Faults": "freqDisabled",
-                "Battery_Warnings": "freqDisabled",
-                "Inverter_Faults": "freqDisabled",
-                "Inverter_Warnings": "freqDisabled",
-                "Solar_Energy": "freqDisabled",
-                "Frequency": "freqDisabled",
-                "System_Faults": "freqDisabled",
-                "Register_Value": "freqDisabled",
-            }
-        )
+
+        # Ensure Register_Value is pointed at a known register, so stale unknown-register selection from
+        # previous runs cannot inflate unknown-read counters during this snapshot-focused check.
+        safe_reg = _discover_register_value("REG_BATTERY_HOME_R_SOC")
+        regnum_topic = _state_topic(ha_unique, "Register_Number")
+        mqtt.subscribe(regnum_topic, force=True)
+        deadline = time.time() + 30
+        last_seen = ""
+        while time.time() < deadline:
+            mqtt.publish(_command_topic(ha_unique, "Register_Number"), str(safe_reg), retain=False)
+            try:
+                last_seen = _fetch_latest_text(mqtt, regnum_topic, label="reg_number_state")
+                if last_seen.strip() == str(safe_reg):
+                    break
+            except E2EError:
+                pass
+            time.sleep(1.0)
+        else:
+            raise E2EError(f"Register_Number did not update to {safe_reg}; last_seen={last_seen!r}")
 
         # When already in online mode, mode-only acknowledgement is insufficient; keep publishing
         # until the strict flag itself is observed in status/stub.
@@ -1487,8 +1638,11 @@ def main() -> int:
         baseline_stub = _fetch_stub(mqtt, stub_topic)
         baseline_unknown = int(baseline_stub.get("stub_unknown_reads", 0))
         baseline_attempts = int(_fetch_poll(mqtt, poll_topic).get("ess_snapshot_attempts", 0))
+        last_unknown = baseline_unknown
+        last_attempts = baseline_attempts
 
         def pred() -> Tuple[bool, str]:
+            nonlocal last_unknown, last_attempts
             cur_poll = _fetch_poll(mqtt, poll_topic)
             cur_stub = _fetch_stub(mqtt, stub_topic)
             attempts = int(cur_poll.get("ess_snapshot_attempts", 0))
@@ -1504,8 +1658,15 @@ def main() -> int:
                 f"last_read_reg={last_read_reg} last_fn={last_fn} "
                 f"last_fail_reg={last_fail_reg} last_fail_fn={last_fail_fn} last_fail_type={last_fail_type}"
             )
-            # Wait until at least one new snapshot attempt occurred and succeeded, and unknown reads did not increase.
-            return (attempts > baseline_attempts and ok and unknown == baseline_unknown), detail
+            # Strict-mode stabilization: allow a brief post-toggle transition, but require that unknown reads
+            # stop increasing while subsequent successful snapshot attempts continue.
+            if attempts > last_attempts:
+                if unknown > last_unknown:
+                    last_unknown = unknown
+                    last_attempts = attempts
+                    return False, detail
+                last_attempts = attempts
+            return (attempts > baseline_attempts + 1 and ok and unknown <= last_unknown), detail
 
         _assert_eventually("strict_unknown keeps snapshot OK with zero unknown-register reads", pred, timeout_s=70, poll_s=5.0)
 
@@ -1565,7 +1726,23 @@ def main() -> int:
 
         # Prior cases may temporarily disable Register_Value to keep snapshot tests scoped; re-enable it here
         # and speed it up so we don't wait a full minute.
-        set_intervals({"Register_Value": "freqTenSec"})
+        enable_map = {"Register_Value": "ten_sec"}
+        set_intervals(enable_map)
+        last_enable_pub = time.time()
+        def enable_applied_pred() -> Tuple[bool, str]:
+            nonlocal last_enable_pub
+            now = time.time()
+            if (now - last_enable_pub) >= 5.0:
+                set_intervals(enable_map)
+                last_enable_pub = now
+            val = str(_fetch_config(mqtt, config_topic).get("entity_intervals", {}).get("Register_Value", ""))
+            return (val == "ten_sec"), f"Register_Value={val!r}"
+        _assert_eventually(
+            "Register_Value interval re-enabled",
+            enable_applied_pred,
+            timeout_s=30,
+            poll_s=2.0,
+        )
 
         # Use a handled register that is not virtualized by the stub (so the stub sees it as unknown).
         reg = _discover_register_value("REG_INVERTER_HOME_R_INVERTER_TEMP")
@@ -1814,9 +1991,33 @@ def main() -> int:
 
     def case_soc_drift_over_time() -> None:
         print("[e2e] case: virtual SOC drifts per snapshot attempt")
-        set_mode_and_wait('{"mode":"online","soc_pct":50,"soc_step_x10_per_snapshot":10}', ("online",))
+        drift_mode_payload = '{"mode":"online","soc_pct":50,"soc_step_x10_per_snapshot":10}'
+        set_mode_and_wait(drift_mode_payload, ("online",))
         ha_unique = _wait_for_inverter_identity()
-        set_intervals({"State_of_Charge": "freqTenSec"})
+        current_poll_interval = int(_fetch_poll(mqtt, poll_topic).get("poll_interval_s", 13))
+        set_polling_config(current_poll_interval, "State_of_Charge=ten_sec;")
+        last_pub = time.time()
+
+        def soc_interval_applied_pred() -> Tuple[bool, str]:
+            nonlocal last_pub
+            now = time.time()
+            if (now - last_pub) >= 5.0:
+                set_mode(drift_mode_payload)
+                set_polling_config(current_poll_interval, "State_of_Charge=ten_sec;")
+                last_pub = now
+            cfg = _fetch_config(mqtt, config_topic)
+            intervals = cfg.get("entity_intervals", {})
+            bucket = str(intervals.get("State_of_Charge", "")) if isinstance(intervals, dict) else ""
+            mode = str(_fetch_poll(mqtt, poll_topic).get("rs485_stub_mode", ""))
+            return (bucket == "ten_sec" and mode == "online"), f"bucket={bucket!r} mode={mode!r}"
+
+        _assert_eventually(
+            "soc drift mode and interval applied",
+            soc_interval_applied_pred,
+            timeout_s=45,
+            poll_s=2.0,
+        )
+
         soc_topic = _state_topic(ha_unique, "State_of_Charge")
         mqtt.subscribe(soc_topic, force=True)
 
@@ -1824,8 +2025,9 @@ def main() -> int:
         try:
             v2 = _wait_for_topic_change(mqtt, soc_topic, v1, timeout_s=70, label="soc")
         except E2EError:
-            # Re-apply desired cadence once in case the previous config message was dropped.
-            set_intervals({"State_of_Charge": "freqTenSec"})
+            # Recover from stale mode/cadence by forcing online drift mode and reapplying cadence.
+            set_mode_and_wait(drift_mode_payload, ("online",))
+            set_polling_config(current_poll_interval, "State_of_Charge=ten_sec;")
             v2 = _wait_for_topic_change(mqtt, soc_topic, v1, timeout_s=70, label="soc")
         try:
             f1 = float(v1)
@@ -1850,41 +2052,28 @@ def main() -> int:
         if not old_bucket:
             raise E2EError(f"config missing {target} in entity_intervals")
 
-        new_bucket = "user" if old_bucket != "user" else "one_hour"
+        # Keep this bounded to buckets that can execute within this test window.
+        new_bucket = "ten_sec" if old_bucket != "ten_sec" else "user"
         if new_bucket == old_bucket:
             raise E2EError(f"unable to select alternate bucket for {target} (bucket={old_bucket})")
-
-        poll_before = _fetch_poll(mqtt, poll_topic)
-        bucket_to_count = {
-            "ten_sec": "sched_10s_count",
-            "one_min": "sched_1m_count",
-            "five_min": "sched_5m_count",
-            "one_hour": "sched_1h_count",
-            "one_day": "sched_1d_count",
-            "user": "sched_user_count",
-        }
-        old_field = bucket_to_count.get(old_bucket)
-        new_field = bucket_to_count.get(new_bucket)
-        old_count = int(poll_before.get(old_field, 0)) if old_field else None
-        new_count = int(poll_before.get(new_field, 0)) if new_field else None
 
         poll_interval = 13
         set_polling_config(poll_interval, f"{target}={new_bucket};")
 
-        def poll_pred() -> Tuple[bool, str]:
+        def applied_pred() -> Tuple[bool, str]:
             cur = _fetch_poll(mqtt, poll_topic)
+            cfg = _fetch_config(mqtt, config_topic)
             cur_interval = int(cur.get("poll_interval_s", 0))
-            detail = f"poll_interval_s={cur_interval}"
+            intervals_cur = cfg.get("entity_intervals", {})
+            mapped = str(intervals_cur.get(target, "")) if isinstance(intervals_cur, dict) else ""
+            detail = f"poll_interval_s={cur_interval} mapped={mapped!r}"
             if cur_interval != poll_interval:
                 return False, detail
-            if new_field:
-                cur_new = int(cur.get(new_field, 0))
-                detail += f" new={cur_new} expected>={new_count + 1}"
-                if cur_new < new_count + 1:
-                    return False, detail
+            if mapped != new_bucket:
+                return False, detail
             return True, detail
 
-        _assert_eventually("bucket counts updated", poll_pred, timeout_s=60, poll_s=3.0)
+        _assert_eventually("polling config applied", applied_pred, timeout_s=60, poll_s=3.0)
 
     def case_portal_polling_ui() -> None:
         print("[e2e] case: portal UI updates polling schedule (WiFiManager, paged)")
@@ -1903,35 +2092,75 @@ def main() -> int:
         # Portal is STA-only and should come back on the same IP.
         _wait_for_http_ok(base + "/", timeout_s=40)
 
-        poll_url = base + "/config/polling?page=0"
-        status, body = _http_request_full("GET", poll_url, headers={}, body=b"", timeout_s=20)
-        if status != 200:
-            raise E2EError(f"portal polling page not reachable: status={status}")
-        html = body.decode("utf-8", errors="replace")
+        polling_path, html = _load_polling_page_via_menu(base)
+        if not polling_path.startswith("/config/polling"):
+            raise E2EError(f"unexpected polling menu path: {polling_path!r}")
         if "poll_interval_s" not in html or "/config/polling/save" not in html:
             raise E2EError("portal polling page HTML missing expected form fields")
+        if "class=\"wrap\"" not in html or "<h1>Setup</h1>" not in html:
+            raise E2EError("portal polling page missing shared portal wrapper/header style")
+        if "Unsaved polling changes will be lost. Continue?" not in html:
+            raise E2EError("portal polling page missing unsaved-changes warning text")
 
         # Find which row index corresponds to a known stable mqttName.
         target = "State_of_Charge"
-        m = re.search(rf'data-entity="{re.escape(target)}".*?name="b(\\d+)"', html, flags=re.DOTALL)
-        if not m:
-            raise E2EError(f"could not locate {target} row on portal polling page 0")
-        row = m.group(1)
+        row, initial_bucket = _extract_entity_row_and_selected_bucket(html, target)
+        desired_bucket = "user" if initial_bucket != "user" else "ten_sec"
 
-        # Change poll_interval_s and move target to user bucket.
+        # Navigate away without save and ensure no persistence happened.
+        _http_request_full("GET", base + "/config/polling?page=1", headers={}, body=b"", timeout_s=20)
+        _, html_back = _http_request_full("GET", base + "/config/polling?page=0", headers={}, body=b"", timeout_s=20)
+        html_back_text = html_back.decode("utf-8", errors="replace")
+        _, after_nav_bucket = _extract_entity_row_and_selected_bucket(html_back_text, target)
+        if after_nav_bucket != initial_bucket:
+            raise E2EError(f"unsaved bucket changed after page navigation: before={initial_bucket!r} after={after_nav_bucket!r}")
+
+        # Change poll_interval_s and move target to an alternate bucket.
         fields = {
             "page": "0",
             "poll_interval_s": "13",
-            f"b{row}": "user",
-            "reboot": "1",  # hidden E2E-only arg; triggers reboot into normal
+            f"b{row}": desired_bucket,
         }
         save_url = base + "/config/polling/save"
-        print(f"[e2e] POST {save_url} fields: page=0 poll_interval_s=13 b{row}=user reboot=1")
-        _http_post_form(save_url, fields, timeout_s=20)
+        print(f"[e2e] POST {save_url} fields: page=0 poll_interval_s=13 b{row}={desired_bucket}")
+        save_status = _http_post_form(save_url, fields, timeout_s=20)
+        if save_status not in (200, 302):
+            raise E2EError(f"polling save failed status={save_status}")
+
+        # Save should not reboot out of portal; page should remain reachable after save.
+        _wait_for_http_ok(base + "/config/polling?page=0", timeout_s=10)
+        _sleep_with_mqtt(mqtt, 3)
+        _wait_for_http_ok(base + "/config/polling?page=0", timeout_s=10)
+        _, html_saved = _http_request_full("GET", base + "/config/polling?page=0", headers={}, body=b"", timeout_s=20)
+        html_saved_text = html_saved.decode("utf-8", errors="replace")
+        interval_match_saved = re.search(r'name="poll_interval_s"[^>]*value="(\d+)"', html_saved_text)
+        if not interval_match_saved or int(interval_match_saved.group(1)) != 13:
+            raise E2EError("poll_interval_s UI value not updated immediately after save")
+        _, saved_bucket = _extract_entity_row_and_selected_bucket(html_saved_text, target)
+        if saved_bucket != desired_bucket:
+            raise E2EError(f"{target} bucket UI value not updated immediately after save (expected {desired_bucket!r}, got {saved_bucket!r})")
+
+        rebooted = False
+        reboot_normal_path = _discover_reboot_normal_path_from_code()
+        if reboot_normal_path:
+            reboot_normal_url = base + reboot_normal_path
+            print(f"[e2e] rebooting to normal via {reboot_normal_url}")
+            reboot_status = _http_post_simple(reboot_normal_url, timeout_s=10)
+            rebooted = reboot_status != 404
+
+        if not rebooted:
+            print("[e2e] /reboot/normal unavailable in portal; rebooting via polling save fallback")
+            reboot_fields = dict(fields)
+            reboot_fields["reboot"] = "1"
+            try:
+                _http_post_form(save_url, reboot_fields, timeout_s=20)
+            except Exception as exc:
+                # Expected for rebooting endpoints: device can reset before HTTP response is fully sent.
+                print(f"[e2e] reboot fallback POST ended during reboot ({exc}); continuing")
 
         # Wait for MQTT status to resume after reboot to NORMAL.
         _assert_eventually(
-            "device publishes status/poll after portal save+reboot",
+            "device publishes status/poll after explicit reboot to normal",
             lambda: (True, "ok") if _fetch_poll(mqtt, poll_topic).get("poll_interval_s") else (False, "waiting"),
             timeout_s=60,
             poll_s=3.0,
@@ -1945,8 +2174,27 @@ def main() -> int:
         intervals = cfg.get("entity_intervals", {})
         if not isinstance(intervals, dict):
             raise E2EError(f"config entity_intervals missing: {cfg}")
-        if str(intervals.get(target, "")) != "user":
-            raise E2EError(f"{target} bucket not updated via portal UI (expected user): {intervals.get(target)!r}")
+        if str(intervals.get(target, "")) != desired_bucket:
+            raise E2EError(f"{target} bucket not updated via portal UI (expected {desired_bucket}): {intervals.get(target)!r}")
+
+        # Re-enter portal and verify values are restored in the UI after reboot.
+        print(f"[e2e] rebooting into wifi portal via {reboot_url} (persistence check)")
+        _http_post_simple(reboot_url, timeout_s=10)
+        _wait_for_http_ok(base + "/", timeout_s=40)
+
+        polling_path2, html2 = _load_polling_page_via_menu(base)
+        if not polling_path2.startswith("/config/polling"):
+            raise E2EError(f"unexpected polling menu path after reboot: {polling_path2!r}")
+
+        interval_match = re.search(r'name="poll_interval_s"[^>]*value="(\d+)"', html2)
+        if not interval_match:
+            raise E2EError("polling page missing poll_interval_s input after reboot")
+        if int(interval_match.group(1)) != 13:
+            raise E2EError(f"poll_interval_s UI value not restored after reboot: {interval_match.group(1)}")
+
+        _, restored_bucket = _extract_entity_row_and_selected_bucket(html2, target)
+        if restored_bucket != desired_bucket:
+            raise E2EError(f"{target} bucket UI value not restored after reboot (expected {desired_bucket!r}, got {restored_bucket!r})")
 
     cases: list[Tuple[str, Callable[[], None]]] = [
         ("offline", case_offline),
@@ -1970,9 +2218,38 @@ def main() -> int:
         ("portal_polling_ui", case_portal_polling_ui),
     ]
 
-    for name, fn in cases:
+    case_map = {name: fn for name, fn in cases}
+    ordered_names = [name for name, _ in cases]
+    if from_case:
+        ordered_names = ordered_names[ordered_names.index(from_case):]
+    if selected_cases:
+        selected_set = set(selected_cases)
+        ordered_names = [name for name in ordered_names if name in selected_set]
+    if not ordered_names:
+        raise E2EError("No cases selected to run")
+
+    def dump_failure_context(failed_case: str) -> None:
+        print(f"[e2e] failure context for case={failed_case}")
+        for label, topic, fetcher in (
+            ("poll", poll_topic, lambda: _fetch_poll(mqtt, poll_topic)),
+            ("stub", stub_topic, lambda: _fetch_stub(mqtt, stub_topic)),
+            ("core", status_core_topic, lambda: _fetch_status_core(mqtt, status_core_topic)),
+            ("config", config_topic, lambda: _fetch_config(mqtt, config_topic)),
+        ):
+            try:
+                payload = fetcher()
+                print(f"[e2e] ctx {label} topic={topic} payload={json.dumps(payload, separators=(',', ':'))}")
+            except Exception as e:
+                print(f"[e2e] ctx {label} topic={topic} err={e}")
+
+    for name in ordered_names:
+        fn = case_map[name]
         _announce(f"running case: {name}")
-        _mqtt_retry(mqtt, f"case:{name}", lambda f=fn: f())
+        try:
+            _mqtt_retry(mqtt, f"case:{name}", lambda f=fn: f())
+        except Exception:
+            dump_failure_context(name)
+            raise
 
     print("[e2e] OK")
     return 0

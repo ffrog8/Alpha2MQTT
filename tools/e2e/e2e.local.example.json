@@ -1,4 +1,11 @@
 {
+  "run": {
+    "verbose": false,
+    "trace_http": false,
+    "trace_mqtt": false,
+    "from_case": "",
+    "cases": []
+  },
   "env": {
     "MQTT_HOST": "192.168.11.5",
     "MQTT_PORT": 1883,

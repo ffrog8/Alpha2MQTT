@@ -11,6 +11,7 @@ enum class PortalPostWifiAction {
 
 bool mqttServerIsBlank(const char *server);
 PortalPostWifiAction portalPostWifiActionAfterWifiSave(const char *storedMqttServer);
+const char *portalMenuPollingHtml(void);
 
 struct PortalMenu {
 	const char **items;

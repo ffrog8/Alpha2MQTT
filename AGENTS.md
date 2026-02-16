@@ -144,6 +144,12 @@ When a change affects firmware behavior, prefer this minimal verification set:
 
 If any item is not run, explicitly state “Not executed” and why.
 
+## E2E run-control policy
+- Use `tools/e2e/e2e.local.json` as the default and preferred control surface for E2E run behavior (case selection, verbosity, tracing, flash policy).
+- Keep the E2E command stable (`scripts/e2e.sh`) and do not pass ad-hoc CLI arguments unless a task explicitly requires them.
+- For focused diagnosis, change `e2e.local.json` `run` settings (`from_case`, `cases`, `trace_http`, `trace_mqtt`, etc.) instead of changing command-line flags.
+- Persist E2E logs under `tools/e2e/logs/` so failures can be reviewed later without rerunning.
+
 ## ESP8266 panic stack decode playbook (required)
 When a user provides an ESP8266 panic/exception stack, decode it before proposing fixes.
 Do not rely on guesses from panic type alone.
