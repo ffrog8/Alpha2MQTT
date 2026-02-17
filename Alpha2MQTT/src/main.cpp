@@ -5944,30 +5944,29 @@ sendData()
 		return;
 	}
 
-	if (!inverterReady) {
-		return;
-	}
-
 	// Bucket processing is runtime-driven: due buckets iterate their pre-built membership list.
 	// ESS snapshot is a bucket-scoped prerequisite and is refreshed once per scheduler pass
 	// (even if multiple buckets are due at the same time).
 	bool snapshotAttemptedThisPass = false;
 	bool snapshotOkThisPass = essSnapshotValid;
+	bool dispatchRanThisPass = false;
 
 	auto ensureSnapshotForBucket = [&](bool bucketNeedsSnapshot) -> bool {
-		if (!bucketNeedsSnapshot) {
-			return true;
-		}
-		if (!bootPlan.inverter || !inverterReady) {
-			essSnapshotValid = false;
-			snapshotOkThisPass = false;
-			return false;
-		}
-		if (!snapshotAttemptedThisPass) {
+		if (shouldAttemptEssSnapshotRefreshForBucket(bucketNeedsSnapshot,
+		                                             bootPlan.inverter,
+		                                             inverterReady,
+		                                             snapshotAttemptedThisPass)) {
 			snapshotAttemptedThisPass = true;
 			snapshotOkThisPass = refreshEssSnapshot();
 		}
-		return snapshotOkThisPass;
+		const bool snapshotOkThisBucket = snapshotPrereqSatisfiedForBucket(bucketNeedsSnapshot,
+		                                                                  bootPlan.inverter,
+		                                                                  inverterReady,
+		                                                                  snapshotOkThisPass);
+		if (!snapshotOkThisBucket) {
+			essSnapshotValid = false;
+		}
+		return snapshotOkThisBucket;
 	};
 
 	if (dueTenSeconds) {
@@ -5984,8 +5983,9 @@ sendData()
 			sendDataFromMqttState(&entities[idx], false);
 		}
 
-		if (shouldRunDispatchForTenSecBucket(snapshotOkThisBucket)) {
+		if (shouldRunDispatchForTenSecPass(dueTenSeconds, snapshotOkThisBucket, dispatchRanThisPass)) {
 			checkAndSetDispatchMode();
+			dispatchRanThisPass = true;
 			dispatchLastSkipReason[0] = '\0';
 		} else {
 			strlcpy(dispatchLastSkipReason, "ess_snapshot_failed", sizeof(dispatchLastSkipReason));

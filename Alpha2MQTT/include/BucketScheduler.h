@@ -18,9 +18,38 @@ inline bool shouldPublishEntityForBucket(bool entityNeedsEssSnapshot, bool essSn
 	return !entityNeedsEssSnapshot || essSnapshotOk;
 }
 
+inline bool shouldAttemptEssSnapshotRefreshForBucket(bool bucketNeedsEssSnapshot,
+                                                     bool inverterEnabled,
+                                                     bool inverterReady,
+                                                     bool snapshotAttemptedThisPass)
+{
+	return bucketNeedsEssSnapshot && inverterEnabled && inverterReady && !snapshotAttemptedThisPass;
+}
+
+inline bool snapshotPrereqSatisfiedForBucket(bool bucketNeedsEssSnapshot,
+                                             bool inverterEnabled,
+                                             bool inverterReady,
+                                             bool essSnapshotOk)
+{
+	if (!bucketNeedsEssSnapshot) {
+		return true;
+	}
+	if (!inverterEnabled || !inverterReady) {
+		return false;
+	}
+	return essSnapshotOk;
+}
+
 inline bool shouldRunDispatchForTenSecBucket(bool essSnapshotOk)
 {
 	return essSnapshotOk;
+}
+
+inline bool shouldRunDispatchForTenSecPass(bool dueTenSecBucket,
+                                           bool essSnapshotOk,
+                                           bool dispatchAlreadyRanThisPass)
+{
+	return dueTenSecBucket && shouldRunDispatchForTenSecBucket(essSnapshotOk) && !dispatchAlreadyRanThisPass;
 }
 
 inline bool tenSecBucketRequiresSnapshot(void)

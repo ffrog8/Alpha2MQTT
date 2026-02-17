@@ -108,3 +108,36 @@ TEST_CASE("bucket helpers: ten second cadence always requires snapshot")
 {
 	CHECK(tenSecBucketRequiresSnapshot());
 }
+
+TEST_CASE("bucket helpers: inverter not ready still allows non-snapshot publishes")
+{
+	const bool snapshotOkThisBucket = snapshotPrereqSatisfiedForBucket(true, true, false, false);
+	CHECK_FALSE(snapshotOkThisBucket);
+	CHECK(shouldPublishEntityForBucket(false, snapshotOkThisBucket));
+	CHECK_FALSE(shouldPublishEntityForBucket(true, snapshotOkThisBucket));
+	CHECK_FALSE(shouldRunDispatchForTenSecPass(true, snapshotOkThisBucket, false));
+}
+
+TEST_CASE("bucket helpers: snapshot failure skips only snapshot-dependent entities")
+{
+	bool snapshotAttemptedThisPass = false;
+	CHECK(shouldAttemptEssSnapshotRefreshForBucket(true, true, true, snapshotAttemptedThisPass));
+	snapshotAttemptedThisPass = true;
+	CHECK_FALSE(shouldAttemptEssSnapshotRefreshForBucket(true, true, true, snapshotAttemptedThisPass));
+
+	const bool snapshotOkThisBucket = snapshotPrereqSatisfiedForBucket(true, true, true, false);
+	CHECK_FALSE(snapshotOkThisBucket);
+	CHECK(shouldPublishEntityForBucket(false, snapshotOkThisBucket));
+	CHECK_FALSE(shouldPublishEntityForBucket(true, snapshotOkThisBucket));
+	CHECK_FALSE(shouldRunDispatchForTenSecPass(true, snapshotOkThisBucket, false));
+}
+
+TEST_CASE("bucket helpers: snapshot success publishes snapshot entities and dispatch runs once")
+{
+	const bool snapshotOkThisBucket = snapshotPrereqSatisfiedForBucket(true, true, true, true);
+	CHECK(snapshotOkThisBucket);
+	CHECK(shouldPublishEntityForBucket(false, snapshotOkThisBucket));
+	CHECK(shouldPublishEntityForBucket(true, snapshotOkThisBucket));
+	CHECK(shouldRunDispatchForTenSecPass(true, snapshotOkThisBucket, false));
+	CHECK_FALSE(shouldRunDispatchForTenSecPass(true, snapshotOkThisBucket, true));
+}
