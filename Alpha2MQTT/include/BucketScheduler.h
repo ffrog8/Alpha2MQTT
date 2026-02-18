@@ -18,6 +18,25 @@ inline bool shouldPublishEntityForBucket(bool entityNeedsEssSnapshot, bool essSn
 	return !entityNeedsEssSnapshot || essSnapshotOk;
 }
 
+template <typename NeedsSnapshotByIndexFn, typename PublishByIndexFn>
+inline size_t publishBucketMembers(const uint16_t *members,
+                                   size_t memberCount,
+                                   bool essSnapshotOk,
+                                   NeedsSnapshotByIndexFn needsSnapshotByIndex,
+                                   PublishByIndexFn publishByIndex)
+{
+	size_t publishedCount = 0;
+	for (size_t n = 0; n < memberCount; ++n) {
+		const size_t idx = members[n];
+		if (!shouldPublishEntityForBucket(needsSnapshotByIndex(idx), essSnapshotOk)) {
+			continue;
+		}
+		publishByIndex(idx);
+		++publishedCount;
+	}
+	return publishedCount;
+}
+
 inline bool shouldAttemptEssSnapshotRefreshForBucket(bool bucketNeedsEssSnapshot,
                                                      bool inverterEnabled,
                                                      bool inverterReady,

@@ -1,6 +1,9 @@
+#include <array>
+
 #include <doctest/doctest.h>
 
 #include "BucketScheduler.h"
+#include "Scheduler.h"
 
 namespace {
 
@@ -140,4 +143,71 @@ TEST_CASE("bucket helpers: snapshot success publishes snapshot entities and disp
 	CHECK(shouldPublishEntityForBucket(true, snapshotOkThisBucket));
 	CHECK(shouldRunDispatchForTenSecPass(true, snapshotOkThisBucket, false));
 	CHECK_FALSE(shouldRunDispatchForTenSecPass(true, snapshotOkThisBucket, true));
+}
+
+TEST_CASE("bucket member loops: inverter not ready publishes non-snapshot members in each due bucket")
+{
+	const uint16_t membersTenSec[] = { 0, 1 }; // idx0 non-snapshot, idx1 snapshot
+	const uint16_t membersOneMin[] = { 2, 3 }; // idx2 non-snapshot, idx3 snapshot
+	const uint16_t membersUser[] = { 4, 1 };   // idx4 non-snapshot, idx1 snapshot
+	std::array<size_t, 8> published{};
+	size_t publishedCount = 0;
+
+	auto publishRecord = [&](size_t idx) {
+		if (publishedCount < published.size()) {
+			published[publishedCount++] = idx;
+		}
+	};
+
+	const bool tenSecSnapshotOk = snapshotPrereqSatisfiedForBucket(true, true, false, false);
+	const bool oneMinSnapshotOk = snapshotPrereqSatisfiedForBucket(true, true, false, false);
+	const bool userSnapshotOk = snapshotPrereqSatisfiedForBucket(true, true, false, false);
+	CHECK_FALSE(tenSecSnapshotOk);
+	CHECK_FALSE(oneMinSnapshotOk);
+	CHECK_FALSE(userSnapshotOk);
+
+	const size_t tenSecPublished = publishBucketMembers(
+		membersTenSec, 2, tenSecSnapshotOk, needsSnapshotFromTable, publishRecord);
+	const size_t oneMinPublished = publishBucketMembers(
+		membersOneMin, 2, oneMinSnapshotOk, needsSnapshotFromTable, publishRecord);
+	const size_t userPublished = publishBucketMembers(
+		membersUser, 2, userSnapshotOk, needsSnapshotFromTable, publishRecord);
+
+	CHECK(tenSecPublished == 1);
+	CHECK(oneMinPublished == 1);
+	CHECK(userPublished == 1);
+	CHECK(publishedCount == 3);
+	CHECK(published[0] == 0);
+	CHECK(published[1] == 2);
+	CHECK(published[2] == 4);
+}
+
+TEST_CASE("dispatch edge-trigger: two sendData iterations in one 10s interval dispatch once")
+{
+	uint32_t lastRunTenSeconds = 0;
+	size_t dispatchCount = 0;
+	const uint32_t kTenSecMs = 10000UL;
+
+	auto runSendDataIteration = [&](uint32_t now, bool snapshotOkThisBucket) {
+		const bool dueTenSeconds = shouldRun(now, lastRunTenSeconds, kTenSecMs);
+		if (dueTenSeconds) {
+			lastRunTenSeconds = now;
+		}
+		bool dispatchRanThisPass = false;
+		if (shouldRunDispatchForTenSecPass(dueTenSeconds, snapshotOkThisBucket, dispatchRanThisPass)) {
+			++dispatchCount;
+			dispatchRanThisPass = true;
+		}
+		CHECK_FALSE(shouldRunDispatchForTenSecPass(dueTenSeconds, snapshotOkThisBucket, dispatchRanThisPass));
+	};
+
+	runSendDataIteration(10000UL, true); // boundary due
+	runSendDataIteration(10001UL, true); // same 10s interval, not due
+	CHECK(dispatchCount == 1);
+
+	runSendDataIteration(19999UL, true); // still same boundary window, not due
+	CHECK(dispatchCount == 1);
+
+	runSendDataIteration(20000UL, true); // next boundary due
+	CHECK(dispatchCount == 2);
 }

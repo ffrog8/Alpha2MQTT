@@ -5975,13 +5975,11 @@ sendData()
 
 		sendStatus(snapshotOkThisBucket);
 
-		for (size_t n = 0; n < membersTenSecCount; n++) {
-			const size_t idx = membersTenSec[n];
-			if (!shouldPublishEntityForBucket(mqttEntityNeedsEssSnapshotByIndex(idx), snapshotOkThisBucket)) {
-				continue;
-			}
-			sendDataFromMqttState(&entities[idx], false);
-		}
+		publishBucketMembers(membersTenSec,
+		                     membersTenSecCount,
+		                     snapshotOkThisBucket,
+		                     mqttEntityNeedsEssSnapshotByIndex,
+		                     [&](size_t idx) { sendDataFromMqttState(&entities[idx], false); });
 
 		if (shouldRunDispatchForTenSecPass(dueTenSeconds, snapshotOkThisBucket, dispatchRanThisPass)) {
 			checkAndSetDispatchMode();
@@ -5994,57 +5992,47 @@ sendData()
 
 	if (dueOneMinute) {
 		const bool snapshotOkThisBucket = ensureSnapshotForBucket(oneMinHasEssSnapshot);
-		for (size_t n = 0; n < membersOneMinCount; n++) {
-			const size_t idx = membersOneMin[n];
-			if (!shouldPublishEntityForBucket(mqttEntityNeedsEssSnapshotByIndex(idx), snapshotOkThisBucket)) {
-				continue;
-			}
-			sendDataFromMqttState(&entities[idx], false);
-		}
+		publishBucketMembers(membersOneMin,
+		                     membersOneMinCount,
+		                     snapshotOkThisBucket,
+		                     mqttEntityNeedsEssSnapshotByIndex,
+		                     [&](size_t idx) { sendDataFromMqttState(&entities[idx], false); });
 	}
 
 	if (dueFiveMinutes) {
 		const bool snapshotOkThisBucket = ensureSnapshotForBucket(fiveMinHasEssSnapshot);
-		for (size_t n = 0; n < membersFiveMinCount; n++) {
-			const size_t idx = membersFiveMin[n];
-			if (!shouldPublishEntityForBucket(mqttEntityNeedsEssSnapshotByIndex(idx), snapshotOkThisBucket)) {
-				continue;
-			}
-			sendDataFromMqttState(&entities[idx], false);
-		}
+		publishBucketMembers(membersFiveMin,
+		                     membersFiveMinCount,
+		                     snapshotOkThisBucket,
+		                     mqttEntityNeedsEssSnapshotByIndex,
+		                     [&](size_t idx) { sendDataFromMqttState(&entities[idx], false); });
 	}
 
 	if (dueOneHour) {
 		const bool snapshotOkThisBucket = ensureSnapshotForBucket(oneHourHasEssSnapshot);
-		for (size_t n = 0; n < membersOneHourCount; n++) {
-			const size_t idx = membersOneHour[n];
-			if (!shouldPublishEntityForBucket(mqttEntityNeedsEssSnapshotByIndex(idx), snapshotOkThisBucket)) {
-				continue;
-			}
-			sendDataFromMqttState(&entities[idx], false);
-		}
+		publishBucketMembers(membersOneHour,
+		                     membersOneHourCount,
+		                     snapshotOkThisBucket,
+		                     mqttEntityNeedsEssSnapshotByIndex,
+		                     [&](size_t idx) { sendDataFromMqttState(&entities[idx], false); });
 	}
 
 	if (dueOneDay) {
 		const bool snapshotOkThisBucket = ensureSnapshotForBucket(oneDayHasEssSnapshot);
-		for (size_t n = 0; n < membersOneDayCount; n++) {
-			const size_t idx = membersOneDay[n];
-			if (!shouldPublishEntityForBucket(mqttEntityNeedsEssSnapshotByIndex(idx), snapshotOkThisBucket)) {
-				continue;
-			}
-			sendDataFromMqttState(&entities[idx], false);
-		}
+		publishBucketMembers(membersOneDay,
+		                     membersOneDayCount,
+		                     snapshotOkThisBucket,
+		                     mqttEntityNeedsEssSnapshotByIndex,
+		                     [&](size_t idx) { sendDataFromMqttState(&entities[idx], false); });
 	}
 
 	if (dueUser) {
 		const bool snapshotOkThisBucket = ensureSnapshotForBucket(userHasEssSnapshot);
-		for (size_t n = 0; n < membersUserCount; n++) {
-			const size_t idx = membersUser[n];
-			if (!shouldPublishEntityForBucket(mqttEntityNeedsEssSnapshotByIndex(idx), snapshotOkThisBucket)) {
-				continue;
-			}
-			sendDataFromMqttState(&entities[idx], false);
-		}
+		publishBucketMembers(membersUser,
+		                     membersUserCount,
+		                     snapshotOkThisBucket,
+		                     mqttEntityNeedsEssSnapshotByIndex,
+		                     [&](size_t idx) { sendDataFromMqttState(&entities[idx], false); });
 	}
 }
 
