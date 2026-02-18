@@ -714,7 +714,10 @@ def _http_request_full(method: str, url: str, headers: dict[str, str], body: byt
 
         body_bytes = resp_body
         while len(body_bytes) < max_bytes:
-            chunk = conn.recv(4096)
+            try:
+                chunk = conn.recv(4096)
+            except socket.timeout:
+                break
             if not chunk:
                 break
             body_bytes += chunk
@@ -2140,23 +2143,21 @@ def main() -> int:
         if saved_bucket != desired_bucket:
             raise E2EError(f"{target} bucket UI value not updated immediately after save (expected {desired_bucket!r}, got {saved_bucket!r})")
 
-        rebooted = False
         reboot_normal_path = _discover_reboot_normal_path_from_code()
-        if reboot_normal_path:
-            reboot_normal_url = base + reboot_normal_path
-            print(f"[e2e] rebooting to normal via {reboot_normal_url}")
-            reboot_status = _http_post_simple(reboot_normal_url, timeout_s=10)
-            rebooted = reboot_status != 404
+        if not reboot_normal_path:
+            raise E2EError("Could not discover /reboot/normal endpoint from firmware source")
 
-        if not rebooted:
-            print("[e2e] /reboot/normal unavailable in portal; rebooting via polling save fallback")
-            reboot_fields = dict(fields)
-            reboot_fields["reboot"] = "1"
-            try:
-                _http_post_form(save_url, reboot_fields, timeout_s=20)
-            except Exception as exc:
-                # Expected for rebooting endpoints: device can reset before HTTP response is fully sent.
-                print(f"[e2e] reboot fallback POST ended during reboot ({exc}); continuing")
+        reboot_normal_url = base + reboot_normal_path
+        print(f"[e2e] rebooting to normal via {reboot_normal_url}")
+        reboot_status, reboot_body = _http_request("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
+        if reboot_status != 200:
+            raise E2EError(f"/reboot/normal returned unexpected status={reboot_status}")
+        if reboot_body:
+            reboot_html = reboot_body.decode("utf-8", errors="replace")
+            if "Rebooting into normal runtime" not in reboot_html:
+                raise E2EError("/reboot/normal response missing reboot-to-normal heading")
+            if "Alpha2MQTT Control" not in reboot_html:
+                raise E2EError("/reboot/normal response missing runtime probe marker")
 
         # Wait for MQTT status to resume after reboot to NORMAL.
         _assert_eventually(
@@ -2165,6 +2166,40 @@ def main() -> int:
             timeout_s=60,
             poll_s=3.0,
         )
+
+        root_html_box = {"html": ""}
+        def root_ready_pred() -> Tuple[bool, str]:
+            try:
+                root_status, root_body = _http_request_full("GET", base + "/", headers={}, body=b"", timeout_s=20)
+            except Exception as e:
+                return False, f"err={e}"
+            if root_status != 200:
+                return False, f"status={root_status}"
+            html = root_body.decode("utf-8", errors="replace")
+            if "Alpha2MQTT Control" not in html:
+                return False, "waiting for runtime root"
+            root_html_box["html"] = html
+            return True, "ok"
+
+        _assert_eventually("runtime root page after reboot", root_ready_pred, timeout_s=60, poll_s=2.0)
+        root_html = root_html_box["html"]
+        for required in (
+            "Alpha2MQTT Control",
+            "Reboot Normal",
+            "Reboot AP Config",
+            "Reboot WiFi Config",
+            "Boot mode:",
+            "Boot intent:",
+            "Reset reason:",
+            "Uptime (ms):",
+            "WiFi status:",
+            "MQTT connected:",
+            "Inverter ready:",
+            "ESS snapshot ok:",
+            "poll_interval_s:",
+        ):
+            if required not in root_html:
+                raise E2EError(f"runtime root page missing expected status/control field: {required}")
 
         poll = _fetch_poll(mqtt, poll_topic)
         if int(poll.get("poll_interval_s", 0)) != 13:

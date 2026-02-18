@@ -67,3 +67,12 @@ TEST_CASE("portal config: custom polling menu html points to polling page")
 	CHECK(strstr(html, "/config/polling") != nullptr);
 	CHECK(strstr(html, "Polling") != nullptr);
 }
+
+TEST_CASE("portal config: reboot-to-normal html includes runtime redirect probe")
+{
+	const char *html = portalRebootToNormalHtml();
+	REQUIRE(html != nullptr);
+	CHECK(strstr(html, "Rebooting into normal runtime") != nullptr);
+	CHECK(strstr(html, "fetch('/',{cache:'no-store'})") != nullptr);
+	CHECK(strstr(html, "Alpha2MQTT Control") != nullptr);
+}

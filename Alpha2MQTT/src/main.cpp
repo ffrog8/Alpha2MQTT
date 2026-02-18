@@ -443,6 +443,7 @@ const char* wifiStatusReason(wl_status_t status);
 const char* wifiStatusLabel(wl_status_t status);
 const char* wifiModeLabel(WiFiMode_t mode);
 void handlePortalStatusRequest(WiFiManager& wifiManager);
+void handlePortalRebootNormalRequest(WiFiManager& wifiManager);
 bool portalHasPersistedWifiCredentials(void);
 void configHandlerSta(void);
 
@@ -768,19 +769,70 @@ handleHttpRoot(void)
 #ifdef DEBUG_OVER_SERIAL
 	Serial.println("HTTP GET /");
 #endif
-	char page[512];
-	snprintf(page, sizeof(page),
-		"<!doctype html><html><body>"
-		"<h3>Alpha2MQTT Control</h3>"
-		"<p>Boot mode: %s<br>Boot intent: %s<br>Reset reason: %s</p>"
-		"<form method='POST' action='/reboot/normal'><button>Reboot Normal</button></form>"
-		"<form method='POST' action='/reboot/ap'><button>Reboot AP Config</button></form>"
-		"<form method='POST' action='/reboot/wifi'><button>Reboot WiFi Config</button></form>"
-		"</body></html>",
-		bootModeToString(currentBootMode),
-		bootIntentToString(currentBootIntent),
-		lastResetReason);
-	httpServer.send(200, "text/html", page);
+	httpServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+	httpServer.sendHeader("Connection", "close");
+	httpServer.send(200, "text/html", "");
+
+	const IPAddress ip = WiFi.localIP();
+	const wl_status_t wifiStatus = WiFi.status();
+#ifdef DEBUG_RS485
+	const unsigned long rs485ErrorCount = static_cast<unsigned long>(rs485Errors);
+#else
+	const unsigned long rs485ErrorCount = 0;
+#endif
+	char buf[256];
+
+	httpServer.sendContent("<!doctype html><html><body>");
+	httpServer.sendContent("<h3>Alpha2MQTT Control</h3>");
+	snprintf(buf, sizeof(buf), "<p>Boot mode: %s<br>Boot intent: %s<br>Reset reason: %s</p>",
+	         bootModeToString(currentBootMode),
+	         bootIntentToString(currentBootIntent),
+	         lastResetReason);
+	httpServer.sendContent(buf);
+
+	httpServer.sendContent("<form method='POST' action='/reboot/normal'><button>Reboot Normal</button></form>");
+	httpServer.sendContent("<form method='POST' action='/reboot/ap'><button>Reboot AP Config</button></form>");
+	httpServer.sendContent("<form method='POST' action='/reboot/wifi'><button>Reboot WiFi Config</button></form>");
+
+	httpServer.sendContent("<h4>Status</h4><p>");
+	snprintf(buf, sizeof(buf),
+	         "Uptime (ms): %lu<br>WiFi status: %d<br>RSSI (dBm): %d<br>IP: %u.%u.%u.%u",
+	         static_cast<unsigned long>(millis()),
+	         static_cast<int>(wifiStatus),
+	         WiFi.RSSI(),
+	         ip[0], ip[1], ip[2], ip[3]);
+	httpServer.sendContent(buf);
+	snprintf(buf, sizeof(buf),
+	         "<br>MQTT connected: %u<br>MQTT reconnects: %lu"
+	         "<br>Inverter ready: %u<br>RS485 state: %u<br>RS485 errors: %lu",
+	         _mqtt.connected() ? 1U : 0U,
+	         static_cast<unsigned long>(mqttReconnectCount),
+	         inverterReady ? 1U : 0U,
+	         static_cast<unsigned>(rs485ConnectState),
+	         rs485ErrorCount);
+	httpServer.sendContent(buf);
+	snprintf(buf, sizeof(buf),
+	         "<br>Poll ok: %lu<br>Poll err: %lu<br>Last poll ms: %lu"
+	         "<br>ESS snapshot ok: %u<br>ESS snapshot attempts: %lu<br>poll_interval_s: %lu",
+	         static_cast<unsigned long>(pollOkCount),
+	         static_cast<unsigned long>(pollErrCount),
+	         static_cast<unsigned long>(lastPollMs),
+	         essSnapshotLastOk ? 1U : 0U,
+	         static_cast<unsigned long>(essSnapshotAttemptCount),
+	         static_cast<unsigned long>(pollIntervalSeconds));
+	httpServer.sendContent(buf);
+#if defined(MP_ESP8266)
+	snprintf(buf, sizeof(buf),
+	         "<br>Heap free/max/frag: %u/%u/%u",
+	         ESP.getFreeHeap(),
+	         ESP.getMaxFreeBlockSize(),
+	         ESP.getHeapFragmentation());
+#else
+	snprintf(buf, sizeof(buf), "<br>Heap free: %u", ESP.getFreeHeap());
+#endif
+	httpServer.sendContent(buf);
+	httpServer.sendContent("</p></body></html>");
+	httpServer.sendContent("");
 }
 
 void
@@ -1281,8 +1333,22 @@ handlePortalStatusRequest(WiFiManager& wifiManager)
 
 	snprintf(buf, sizeof(buf), "<br>Uptime (ms): %lu</p>", static_cast<unsigned long>(millis()));
 	wifiManager.server->sendContent(buf);
+	wifiManager.server->sendContent("<form method=\"POST\" action=\"/reboot/normal\"><button type=\"submit\">Reboot Normal</button></form>");
 	wifiManager.server->sendContent("<p>Page refreshes every second.</p></body></html>");
 	wifiManager.server->sendContent("");
+}
+
+void
+handlePortalRebootNormalRequest(WiFiManager& wifiManager)
+{
+	if (!wifiManager.server) {
+		return;
+	}
+
+	wifiManager.server->send(200, "text/html", portalRebootToNormalHtml());
+	portalNeedsMqttConfig = false;
+	portalRebootScheduled = true;
+	portalRebootAt = millis() + 1500;
 }
 
 static constexpr uint8_t kPollingPortalPageSize = 8;
@@ -1407,6 +1473,7 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		"<div class=\"row\">"
 		"<form data-nav-away=\"1\" action=\"/\" method=\"get\" onsubmit=\"return pNav()\"><button type=\"submit\">Menu</button></form>"
 		"<form data-nav-away=\"1\" action=\"/param\" method=\"get\" onsubmit=\"return pNav()\"><button type=\"submit\">MQTT Setup</button></form>"
+		"<form data-nav-away=\"1\" action=\"/reboot/normal\" method=\"post\" onsubmit=\"return pNav()\"><button type=\"submit\">Reboot Normal</button></form>"
 		"</div>";
 	static const char kSavedMsg[] = "<div class=\"msg S\"><strong>Saved.</strong></div>";
 	static const char kErrMsg[] = "<div class=\"msg D\"><strong>Some values were invalid and were ignored.</strong></div>";
@@ -2012,6 +2079,9 @@ configHandlerSta(void)
 			wifiManager.server->on("/config/polling/save", HTTP_POST, [&]() {
 				handlePortalPollingSave(wifiManager);
 			});
+			wifiManager.server->on("/reboot/normal", HTTP_POST, [&]() {
+				handlePortalRebootNormalRequest(wifiManager);
+			});
 		}
 	});
 
@@ -2343,6 +2413,9 @@ configHandler(void)
 			});
 			wifiManager.server->on("/config/polling/save", HTTP_POST, [&]() {
 				handlePortalPollingSave(wifiManager);
+			});
+			wifiManager.server->on("/reboot/normal", HTTP_POST, [&]() {
+				handlePortalRebootNormalRequest(wifiManager);
 			});
 		}
 	});
