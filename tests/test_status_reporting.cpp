@@ -92,6 +92,8 @@ TEST_CASE("status poll JSON builder includes required keys")
 	snapshot.rs485ProbeLastAttemptMs = 12345;
 	snapshot.rs485ProbeBackoffMs = 15000;
 	snapshot.rs485Backend = "stub";
+	snapshot.inverterReady = true;
+	snapshot.essSnapshotOk = false;
 	snapshot.essSnapshotLastOk = false;
 	snapshot.essSnapshotAttempts = 3;
 	snapshot.rs485StubMode = "offline";
@@ -120,7 +122,7 @@ TEST_CASE("status poll JSON builder includes required keys")
 	snapshot.persistInvalidBucketCount = 3;
 	snapshot.persistDuplicateEntityCount = 4;
 
-	char buffer[1024];
+	char buffer[2048];
 	CHECK(buildStatusPollJson(snapshot, buffer, sizeof(buffer)));
 
 	std::string payload(buffer);
@@ -130,6 +132,8 @@ TEST_CASE("status poll JSON builder includes required keys")
 	CHECK(payload.find("\"rs485_stub_writes\":3") != std::string::npos);
 	CHECK(payload.find("\"rs485_stub_last_write_reg\":4123") != std::string::npos);
 	CHECK(payload.find("\"rs485_stub_last_write_ms\":4242") != std::string::npos);
+	CHECK(payload.find("\"inverter_ready\":true") != std::string::npos);
+	CHECK(payload.find("\"ess_snapshot_ok\":false") != std::string::npos);
 	CHECK(payload.find("\"mem\":{\"f\":5555") != std::string::npos);
 	CHECK(payload.find("\"mem\":{\"f\":5555,\"m\":4444,\"g\":12,\"l\":1}") != std::string::npos);
 	CHECK(payload.find("\"boot_mem\":{\"l\":2,\"s\":3,\"f\":3333,\"m\":2222,\"g\":34}") != std::string::npos);
@@ -165,6 +169,8 @@ TEST_CASE("status poll compact JSON includes snapshot/dispatch and stub schedule
 	snapshot.rs485StubWriteCount = 2;
 	snapshot.rs485StubLastWriteStartReg = 4096;
 	snapshot.rs485StubLastWriteMs = 111;
+	snapshot.inverterReady = true;
+	snapshot.essSnapshotOk = true;
 	snapshot.essSnapshotLastOk = true;
 	snapshot.essSnapshotAttempts = 42;
 	snapshot.dispatchLastRunMs = 1000;
@@ -186,6 +192,8 @@ TEST_CASE("status poll compact JSON includes snapshot/dispatch and stub schedule
 	CHECK(buildStatusPollJsonCompact(snapshot, buffer, sizeof(buffer)));
 	std::string payload(buffer);
 
+	CHECK(payload.find("\"inverter_ready\":true") != std::string::npos);
+	CHECK(payload.find("\"ess_snapshot_ok\":true") != std::string::npos);
 	CHECK(payload.find("\"ess_snapshot_attempts\":42") != std::string::npos);
 	CHECK(payload.find("\"dispatch_last_run_ms\":1000") != std::string::npos);
 
@@ -204,6 +212,119 @@ TEST_CASE("status poll compact JSON includes snapshot/dispatch and stub schedule
 	CHECK(payload.find("\"s86400_ms\":") == std::string::npos);
 	CHECK(payload.find("\"su_ms\":") == std::string::npos);
 #endif
+}
+
+TEST_CASE("status publishes liveness when inverter not ready and snapshot invalid")
+{
+	StatusCoreSnapshot core{};
+	core.presence = "online";
+	core.a2mStatus = "online";
+	core.rs485Status = "unknown";
+	core.gridStatus = "unknown";
+	core.bootMode = "normal";
+	core.bootIntent = "normal";
+	core.httpControlPlaneEnabled = true;
+	core.haUniqueId = "A2M-TEST";
+
+	StatusPollSnapshot poll{};
+	poll.rs485Backend = "real";
+	poll.inverterReady = false;
+	poll.essSnapshotOk = false;
+	poll.essSnapshotLastOk = false;
+	poll.pollIntervalSeconds = 30;
+	poll.pollOkCount = 7;
+	poll.pollErrCount = 1;
+	poll.rs485ProbeLastAttemptMs = 2500;
+	poll.rs485ProbeBackoffMs = 15000;
+
+	char coreBuffer[256];
+	char pollBuffer[512];
+	CHECK(buildStatusCoreJson(core, coreBuffer, sizeof(coreBuffer)));
+	CHECK(buildStatusPollJsonCompact(poll, pollBuffer, sizeof(pollBuffer)));
+
+	std::string corePayload(coreBuffer);
+	std::string pollPayload(pollBuffer);
+	CHECK(corePayload.find("\"rs485Status\":\"unknown\"") != std::string::npos);
+	CHECK(corePayload.find("\"gridStatus\":\"unknown\"") != std::string::npos);
+	CHECK(pollPayload.find("\"inverter_ready\":false") != std::string::npos);
+	CHECK(pollPayload.find("\"ess_snapshot_ok\":false") != std::string::npos);
+	CHECK(pollPayload.find("\"rs485_backend\":\"real\"") != std::string::npos);
+	CHECK(pollPayload.find("\"poll_ok_count\":7") != std::string::npos);
+	CHECK(pollPayload.find("\"poll_err_count\":1") != std::string::npos);
+}
+
+TEST_CASE("status publishes liveness when inverter ready but snapshot failed")
+{
+	StatusCoreSnapshot core{};
+	core.presence = "online";
+	core.a2mStatus = "online";
+	core.rs485Status = "unknown";
+	core.gridStatus = "unknown";
+	core.bootMode = "normal";
+	core.bootIntent = "normal";
+	core.httpControlPlaneEnabled = true;
+	core.haUniqueId = "A2M-TEST";
+
+	StatusPollSnapshot poll{};
+	poll.rs485Backend = "real";
+	poll.inverterReady = true;
+	poll.essSnapshotOk = false;
+	poll.essSnapshotLastOk = false;
+	poll.essSnapshotAttempts = 12;
+	poll.dispatchLastRunMs = 0;
+	poll.pollIntervalSeconds = 30;
+	poll.pollOkCount = 2;
+	poll.pollErrCount = 5;
+
+	char coreBuffer[256];
+	char pollBuffer[512];
+	CHECK(buildStatusCoreJson(core, coreBuffer, sizeof(coreBuffer)));
+	CHECK(buildStatusPollJsonCompact(poll, pollBuffer, sizeof(pollBuffer)));
+
+	std::string corePayload(coreBuffer);
+	std::string pollPayload(pollBuffer);
+	CHECK(corePayload.find("\"rs485Status\":\"unknown\"") != std::string::npos);
+	CHECK(corePayload.find("\"gridStatus\":\"unknown\"") != std::string::npos);
+	CHECK(pollPayload.find("\"inverter_ready\":true") != std::string::npos);
+	CHECK(pollPayload.find("\"ess_snapshot_ok\":false") != std::string::npos);
+	CHECK(pollPayload.find("\"ess_snapshot_attempts\":12") != std::string::npos);
+}
+
+TEST_CASE("status includes ess-derived fields when snapshot ok")
+{
+	StatusCoreSnapshot core{};
+	core.presence = "online";
+	core.a2mStatus = "online";
+	core.rs485Status = "OK";
+	core.gridStatus = "OK";
+	core.bootMode = "normal";
+	core.bootIntent = "normal";
+	core.httpControlPlaneEnabled = true;
+	core.haUniqueId = "A2M-TEST";
+
+	StatusPollSnapshot poll{};
+	poll.rs485Backend = "real";
+	poll.inverterReady = true;
+	poll.essSnapshotOk = true;
+	poll.essSnapshotLastOk = true;
+	poll.essSnapshotAttempts = 44;
+	poll.dispatchLastRunMs = 1000;
+	poll.pollIntervalSeconds = 30;
+	poll.pollOkCount = 11;
+	poll.pollErrCount = 0;
+
+	char coreBuffer[256];
+	char pollBuffer[512];
+	CHECK(buildStatusCoreJson(core, coreBuffer, sizeof(coreBuffer)));
+	CHECK(buildStatusPollJsonCompact(poll, pollBuffer, sizeof(pollBuffer)));
+
+	std::string corePayload(coreBuffer);
+	std::string pollPayload(pollBuffer);
+	CHECK(corePayload.find("\"rs485Status\":\"OK\"") != std::string::npos);
+	CHECK(corePayload.find("\"gridStatus\":\"OK\"") != std::string::npos);
+	CHECK(pollPayload.find("\"inverter_ready\":true") != std::string::npos);
+	CHECK(pollPayload.find("\"ess_snapshot_ok\":true") != std::string::npos);
+	CHECK(pollPayload.find("\"ess_snapshot_attempts\":44") != std::string::npos);
 }
 
 TEST_CASE("status stub JSON builder includes required keys")

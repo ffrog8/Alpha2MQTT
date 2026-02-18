@@ -139,6 +139,8 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		"\"rs485_stub_writes\":%lu,"
 		"\"rs485_stub_last_write_reg\":%u,"
 		"\"rs485_stub_last_write_ms\":%lu,"
+		"\"inverter_ready\":%s,"
+		"\"ess_snapshot_ok\":%s,"
 		"\"mem\":{\"f\":%lu,\"m\":%lu,\"g\":%u,\"l\":%u},"
 		"\"boot_mem\":{\"l\":%u,\"s\":%u,\"f\":%lu,\"m\":%lu,\"g\":%u},"
 		"\"ess_snapshot_last_ok\":%s,"
@@ -189,6 +191,8 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		static_cast<unsigned long>(snapshot.rs485StubWriteCount),
 		static_cast<unsigned>(snapshot.rs485StubLastWriteStartReg),
 		static_cast<unsigned long>(snapshot.rs485StubLastWriteMs),
+		snapshot.inverterReady ? "true" : "false",
+		snapshot.essSnapshotOk ? "true" : "false",
 		static_cast<unsigned long>(snapshot.heapFreeB),
 		static_cast<unsigned long>(snapshot.heapMaxBlockB),
 		static_cast<unsigned>(snapshot.heapFragPct),
@@ -278,6 +282,8 @@ buildStatusPollJsonCompact(const StatusPollSnapshot &snapshot, char *out, size_t
 		"\"rs485_stub_writes\":%lu,"
 		"\"rs485_stub_last_write_reg\":%u,"
 		"\"rs485_stub_last_write_ms\":%lu,"
+		"\"inverter_ready\":%s,"
+		"\"ess_snapshot_ok\":%s,"
 		"\"ess_snapshot_last_ok\":%s,"
 		"\"ess_snapshot_attempts\":%lu,"
 		"\"dispatch_last_run_ms\":%lu,"
@@ -303,6 +309,8 @@ buildStatusPollJsonCompact(const StatusPollSnapshot &snapshot, char *out, size_t
 		static_cast<unsigned long>(snapshot.rs485StubWriteCount),
 		static_cast<unsigned>(snapshot.rs485StubLastWriteStartReg),
 		static_cast<unsigned long>(snapshot.rs485StubLastWriteMs),
+		snapshot.inverterReady ? "true" : "false",
+		snapshot.essSnapshotOk ? "true" : "false",
 		snapshot.essSnapshotLastOk ? "true" : "false",
 			static_cast<unsigned long>(snapshot.essSnapshotAttempts),
 			static_cast<unsigned long>(snapshot.dispatchLastRunMs),

@@ -4920,8 +4920,9 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 	modbusRequestAndResponseStatusValues resultAddedToPayload;
 	String ssid = WiFi.SSID();
 	String ip = WiFi.localIP().toString();
+	const bool essSnapshotOkNow = includeEssSnapshot && essSnapshotValid;
 
-	if (includeEssSnapshot && essSnapshotValid) {
+	if (essSnapshotOkNow) {
 		switch (isGridOnline()) {
 		case gridStatus::gridOnline:
 			gridStatusStr = "OK";
@@ -4942,7 +4943,7 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 
 	core.presence = "online";
 	core.a2mStatus = "online";
-	if (includeEssSnapshot && essSnapshotValid) {
+	if (essSnapshotOkNow) {
 		core.rs485Status = opData.essRs485Connected ? "OK" : "Problem";
 	} else {
 		core.rs485Status = "unknown";
@@ -4964,6 +4965,8 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 	net.wifiStatusCode = static_cast<int>(WiFi.status());
 	net.wifiReconnects = wifiReconnectCount;
 
+	poll.inverterReady = inverterReady;
+	poll.essSnapshotOk = essSnapshotOkNow;
 	poll.pollOkCount = pollOkCount;
 	{
 		const MemSample sample = readMemSample();
@@ -5886,6 +5889,11 @@ sendData()
 	}
 	if (dueUser) {
 		schedUserLastRunMs = lastRunUser;
+	}
+
+	if (dueTenSeconds && !mqttEntitiesRtAvailable()) {
+		sendStatus(false);
+		return;
 	}
 
 	if (!mqttEntitiesRtAvailable()) {

@@ -58,6 +58,8 @@ struct StatusPollSnapshot {
 	const char *wifiStatus;
 	int wifiStatusCode;
 	uint32_t wifiReconnects;
+	bool inverterReady;
+	bool essSnapshotOk;
 	uint32_t heapFreeB;
 	uint32_t heapMaxBlockB;
 	uint8_t heapFragPct;
