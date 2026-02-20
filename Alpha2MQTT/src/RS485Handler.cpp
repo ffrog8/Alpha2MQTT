@@ -151,6 +151,11 @@ modbusRequestAndResponseStatusValues RS485Handler::sendModbus(uint8_t frame[], b
 {
 	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
 	int tries = 0;
+	struct TxnGuard {
+		bool &flag;
+		explicit TxnGuard(bool &f) : flag(f) { flag = true; }
+		~TxnGuard() { flag = false; }
+	} txnGuard(_inTransaction);
 
 	//Calculate the CRC and overwrite the last two bytes.
 	calcCRC(frame, actualFrameSize);

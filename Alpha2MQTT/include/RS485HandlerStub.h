@@ -72,6 +72,7 @@ class RS485Handler
 		uint32_t _cfgAppliedMs = 0;
 		uint32_t _probeAttempts = 0;
 		int16_t _socStepX10PerSnapshot = 0;
+		bool _inTransaction = false;
 
 		uint32_t _readCount = 0;
 		uint32_t _writeCount = 0;
@@ -381,6 +382,7 @@ class RS485Handler
 		uint16_t stubLastWriteStartReg() const { return _lastWriteStartReg; }
 		uint16_t stubLastWriteRegCount() const { return _lastWriteRegCount; }
 		uint32_t stubLastWriteMs() const { return _lastWriteMs; }
+		bool inTransaction() const { return _inTransaction; }
 
 		~RS485Handler() = default;
 
@@ -395,6 +397,11 @@ class RS485Handler
 			if (resp == nullptr || frame == nullptr) {
 				return modbusRequestAndResponseStatusValues::invalidFrame;
 			}
+			struct TxnGuard {
+				bool &flag;
+				explicit TxnGuard(bool &f) : flag(f) { flag = true; }
+				~TxnGuard() { flag = false; }
+			} txnGuard(_inTransaction);
 
 			const uint8_t fn = frame[1];
 			resp->functionCode = fn;

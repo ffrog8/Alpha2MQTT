@@ -2191,6 +2191,8 @@ def main() -> int:
             "Boot mode:",
             "Boot intent:",
             "Reset reason:",
+            "Firmware version:",
+            "RS485 backend:",
             "Uptime (ms):",
             "WiFi status:",
             "MQTT connected:",
@@ -2200,6 +2202,11 @@ def main() -> int:
         ):
             if required not in root_html:
                 raise E2EError(f"runtime root page missing expected status/control field: {required}")
+
+        restart_alias_status, _ = _http_request("GET", base + "/restart?", headers={}, body=b"", timeout_s=10)
+        if restart_alias_status != 302:
+            raise E2EError(f"/restart? should redirect to runtime root with 302 (got {restart_alias_status})")
+        _wait_for_http_ok(base + "/", timeout_s=10)
 
         poll = _fetch_poll(mqtt, poll_topic)
         if int(poll.get("poll_interval_s", 0)) != 13:

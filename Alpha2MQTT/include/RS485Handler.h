@@ -79,6 +79,7 @@ class RS485Handler
 #ifdef DEBUG_OUTPUT_TX_RX
 		void outputFrameToSerial(bool transmit, uint8_t frame[], byte actualFrameSize);
 #endif // DEBUG_OUTPUT_TX_RX
+		bool _inTransaction = false;
 		uint16_t baudRate;
 		bool _rs485IsOnline;
 		char uartInfoString[OLED_CHARACTER_WIDTH];
@@ -98,6 +99,7 @@ class RS485Handler
 #endif // DEBUG_OVER_SERIAL || DEBUG_LEVEL2 || DEBUG_OUTPUT_TX_RX
 		void setBaudRate(unsigned long baudRate);
 		bool isRs485Online();
+		bool inTransaction() const { return _inTransaction; }
 		char *uartInfo();
 };
 

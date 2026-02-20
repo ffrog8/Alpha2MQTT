@@ -106,6 +106,9 @@ bool httpControlPlaneEnabled = false;
 static bool inMqttCallback = false;
 static bool pendingPollingConfigSet = false;
 static char pendingPollingConfigPayload[512] = "";
+static bool pendingEntityCommandSet = false;
+static const mqttState *pendingEntityCommand = nullptr;
+static char pendingEntityCommandPayload[128] = "";
 
 enum PortalStatus : uint8_t {
 	portalStatusIdle = 0,
@@ -420,6 +423,7 @@ void publishStatusNow(void);
 void publishEvent(MqttEventCode code, const char *detail);
 MqttEventCode eventCodeFromResult(modbusRequestAndResponseStatusValues result);
 void noteRs485Error(modbusRequestAndResponseStatusValues result, const char *detail);
+static void processPendingEntityCommand(void);
 void setBootIntentAndReboot(BootIntent intent, bool persistIntent = false);
 static void persistUserBootIntent(BootIntent intent);
 static void persistUserBootMode(BootMode mode);
@@ -432,6 +436,7 @@ static void persistUserBucketMap(const char *bucketMap);
 static void persistDefaultsIfMissing(void);
 void setupHttpControlPlane(void);
 void handleHttpRoot(void);
+void handleHttpRestartAlias(void);
 void handleRebootNormal(void);
 void handleRebootAp(void);
 void handleRebootWifi(void);
@@ -446,6 +451,9 @@ void handlePortalStatusRequest(WiFiManager& wifiManager);
 void handlePortalRebootNormalRequest(WiFiManager& wifiManager);
 bool portalHasPersistedWifiCredentials(void);
 void configHandlerSta(void);
+const char *portalCustomHeadScript(void);
+static inline bool isMqttPumpBlocked(void);
+static bool pumpMqttOnce(void);
 
 void
 buildDeviceName(void)
@@ -560,19 +568,39 @@ pumpMqttDuringSetup(uint32_t durationMs)
 	uint32_t start = millis();
 
 	while (millis() - start < durationMs) {
-		if (_mqtt.connected()) {
-			_mqtt.loop();
-		}
+		pumpMqttOnce();
 		diagDelay(5);
 	}
+}
+
+static inline bool
+isMqttPumpBlocked(void)
+{
+	if (inMqttCallback) {
+		return true;
+	}
+	if (_modBus != nullptr && _modBus->inTransaction()) {
+		return true;
+	}
+	return false;
+}
+
+static bool
+pumpMqttOnce(void)
+{
+	if (!_mqtt.connected()) {
+		return false;
+	}
+	if (isMqttPumpBlocked()) {
+		return true;
+	}
+	return _mqtt.loop();
 }
 
 void
 serviceRs485Hooks(void)
 {
-	if (_mqtt.connected() && !inMqttCallback) {
-		_mqtt.loop();
-	}
+	pumpMqttOnce();
 	if (httpControlPlaneEnabled) {
 		httpServer.handleClient();
 	}
@@ -753,6 +781,8 @@ setupHttpControlPlane(void)
 	}
 
 	httpServer.on("/", HTTP_GET, handleHttpRoot);
+	httpServer.on("/restart", HTTP_GET, handleHttpRestartAlias);
+	httpServer.on("/restart/", HTTP_GET, handleHttpRestartAlias);
 	httpServer.on("/reboot/normal", HTTP_POST, handleRebootNormal);
 	httpServer.on("/reboot/ap", HTTP_POST, handleRebootAp);
 	httpServer.on("/reboot/wifi", HTTP_POST, handleRebootWifi);
@@ -780,6 +810,11 @@ handleHttpRoot(void)
 #else
 	const unsigned long rs485ErrorCount = 0;
 #endif
+#if RS485_STUB
+	const char *rs485Backend = "stub";
+#else
+	const char *rs485Backend = "real";
+#endif
 	char buf[256];
 
 	httpServer.sendContent("<!doctype html><html><body>");
@@ -796,7 +831,10 @@ handleHttpRoot(void)
 
 	httpServer.sendContent("<h4>Status</h4><p>");
 	snprintf(buf, sizeof(buf),
+	         "Firmware version: %s<br>RS485 backend: %s<br>"
 	         "Uptime (ms): %lu<br>WiFi status: %d<br>RSSI (dBm): %d<br>IP: %u.%u.%u.%u",
+	         _version,
+	         rs485Backend,
 	         static_cast<unsigned long>(millis()),
 	         static_cast<int>(wifiStatus),
 	         WiFi.RSSI(),
@@ -833,6 +871,17 @@ handleHttpRoot(void)
 	httpServer.sendContent(buf);
 	httpServer.sendContent("</p></body></html>");
 	httpServer.sendContent("");
+}
+
+void
+handleHttpRestartAlias(void)
+{
+#ifdef DEBUG_OVER_SERIAL
+	Serial.println("HTTP GET /restart -> /");
+#endif
+	httpServer.sendHeader("Cache-Control", "no-store");
+	httpServer.sendHeader("Location", "/", true);
+	httpServer.send(302, "text/plain", "");
 }
 
 void
@@ -1402,6 +1451,36 @@ portalArgToU16(const String &arg, uint16_t defaultValue)
 		return defaultValue;
 	}
 	return static_cast<uint16_t>(parsed);
+}
+
+const char *
+portalCustomHeadScript(void)
+{
+	return
+		"<script>"
+		"(function(){"
+		"var p=(window.location&&window.location.pathname)||'';"
+		"if (p === '/wifisave') {"
+		"window.location.href='/status';"
+		"return;"
+		"}"
+		"if (p === '/restart' || p === '/restart/') {"
+		"function probe(){"
+		"fetch('/',{cache:'no-store'}).then(function(r){"
+		"if (r && r.ok) { window.location.href='/'; return; }"
+		"setTimeout(probe,1000);"
+		"}).catch(function(){setTimeout(probe,1000);});"
+		"}"
+		"setTimeout(probe,300);"
+		"}"
+		"if (p === '/0wifi') {"
+		"window.addEventListener('DOMContentLoaded', function(){"
+		"var nodes=document.querySelectorAll(\"form[action^='/wifi?refresh=1']\");"
+		"for (var i=0;i<nodes.length;i++){nodes[i].remove();}"
+		"});"
+		"}"
+		"})();"
+		"</script>";
 }
 
 static inline void
@@ -2021,20 +2100,7 @@ configHandlerSta(void)
 	wifiManager.setConnectTimeout(20);
 	wifiManager.setConfigPortalTimeout(0);
 	wifiManager.setDisableConfigPortal(false);
-	wifiManager.setCustomHeadElement(
-		"<script>"
-		"(function(){"
-		"if (window.location && window.location.pathname === '/wifisave') {"
-		"window.location.href = '/status';"
-		"}"
-		"if (window.location && window.location.pathname === '/0wifi') {"
-		"window.addEventListener('DOMContentLoaded', function(){"
-		"var nodes=document.querySelectorAll(\"form[action^='/wifi?refresh=1']\");"
-		"for (var i=0;i<nodes.length;i++){nodes[i].remove();}"
-		"});"
-		"}"
-		"})();"
-		"</script>");
+	wifiManager.setCustomHeadElement(portalCustomHeadScript());
 
 	String mqttPortDefault = String(appConfig.mqttPort);
 	WiFiManagerParameter p_lineBreak_text("<p>MQTT settings:</p>");
@@ -2384,20 +2450,7 @@ configHandler(void)
 	});
 #endif
 
-	wifiManager.setCustomHeadElement(
-		"<script>"
-		"(function(){"
-		"if (window.location && window.location.pathname === '/wifisave') {"
-		"window.location.href = '/status';"
-		"}"
-		"if (window.location && window.location.pathname === '/0wifi') {"
-		"window.addEventListener('DOMContentLoaded', function(){"
-		"var nodes=document.querySelectorAll(\"form[action^='/wifi?refresh=1']\");"
-		"for (var i=0;i<nodes.length;i++){nodes[i].remove();}"
-		"});"
-		"}"
-		"})();"
-		"</script>");
+	wifiManager.setCustomHeadElement(portalCustomHeadScript());
 	portalRoutesBoundServer = nullptr;
 	wifiManager.setWebServerCallback([&]() {
 		if (wifiManager.server) {
@@ -2636,7 +2689,8 @@ loop()
 
 	if (bootPlan.mqtt) {
 		// make sure mqtt is still connected
-		if ((!_mqtt.connected()) || !_mqtt.loop()) {
+		const bool mqttOk = pumpMqttOnce();
+		if (!mqttOk) {
 			if (lastMqttConnected) {
 				pendingMqttDisconnectEvent = true;
 			}
@@ -2651,6 +2705,9 @@ loop()
 	if (bootPlan.mqtt && pendingPollingConfigSet) {
 		pendingPollingConfigSet = false;
 		handlePollingConfigSet(pendingPollingConfigPayload);
+	}
+	if (bootPlan.mqtt && pendingEntityCommandSet) {
+		processPendingEntityCommand();
 	}
 
 	if (httpControlPlaneEnabled) {
@@ -3595,7 +3652,7 @@ updateOLED(bool justStatus, const char* line2, const char* line3, const char* li
 		int8_t rssi = WiFi.RSSI();
 		bool mqttOk = false;
 		if (bootPlan.mqtt) {
-			mqttOk = _mqtt.connected() && _mqtt.loop();
+			mqttOk = _mqtt.connected();
 		}
 		// There's 20 characters we can play with, width wise.
 		snprintf(line1Contents, sizeof(line1Contents), "A2M  %c%c%c         %3hhd",
@@ -3606,7 +3663,7 @@ updateOLED(bool justStatus, const char* line2, const char* line3, const char* li
 #else // LARGE_DISPLAY
 	bool mqttOk = false;
 	if (bootPlan.mqtt) {
-		mqttOk = _mqtt.connected() && _mqtt.loop();
+		mqttOk = _mqtt.connected();
 	}
 	// There's ten characters we can play with, width wise.
 	snprintf(line1Contents, sizeof(line1Contents), "%s%c%c%c", "A2M    ",
@@ -6196,6 +6253,156 @@ sendDataFromMqttState(const mqttState *singleEntity, bool doHomeAssistant)
 	}
 }
 
+static void
+processPendingEntityCommand(void)
+{
+	if (!pendingEntityCommandSet || pendingEntityCommand == NULL) {
+		return;
+	}
+
+	const mqttState *mqttEntity = pendingEntityCommand;
+	char mqttIncomingPayload[sizeof(pendingEntityCommandPayload)];
+	strlcpy(mqttIncomingPayload, pendingEntityCommandPayload, sizeof(mqttIncomingPayload));
+	pendingEntityCommandSet = false;
+	pendingEntityCommand = NULL;
+	pendingEntityCommandPayload[0] = '\0';
+
+	int32_t singleInt32 = -1;
+	const char *singleString = NULL;
+	char *endPtr = NULL;
+	const mqttState *relatedMqttEntity = NULL;
+	bool valueProcessingError = false;
+
+	// First, process value.
+	switch (mqttEntity->entityId) {
+	case mqttEntityId::entitySocTarget:
+	case mqttEntityId::entityChargePwr:
+	case mqttEntityId::entityDischargePwr:
+	case mqttEntityId::entityPushPwr:
+	case mqttEntityId::entityRegNum:
+		singleInt32 = strtol(mqttIncomingPayload, &endPtr, 10);
+		if ((endPtr == mqttIncomingPayload) || ((singleInt32 == 0) && (errno != 0))) {
+			valueProcessingError = true;
+		}
+		break;
+	case mqttEntityId::entityOpMode:
+		singleString = mqttIncomingPayload;
+		break;
+	default:
+#ifdef DEBUG_OVER_SERIAL
+		sprintf(_debugOutput, "Trying to update an unhandled entity! %d", mqttEntity->entityId);
+		Serial.println(_debugOutput);
+#endif
+#ifdef DEBUG_CALLBACKS
+		unknownCallbacks++;
+#endif // DEBUG_CALLBACKS
+		return;
+	}
+
+	if (valueProcessingError) {
+#ifdef DEBUG_OVER_SERIAL
+		snprintf(_debugOutput, sizeof(_debugOutput), "Callback for %s with bad value: ", mqttEntity->mqttName);
+		Serial.print(_debugOutput);
+		Serial.println(mqttIncomingPayload);
+#endif
+#ifdef DEBUG_CALLBACKS
+		badCallbacks++;
+#endif // DEBUG_CALLBACKS
+		return;
+	}
+
+	// Now set the value and take appropriate action(s)
+	switch (mqttEntity->entityId) {
+	case mqttEntityId::entitySocTarget:
+		if ((singleInt32 < SOC_TARGET_MIN) || (singleInt32 > SOC_TARGET_MAX)) {
+#ifdef DEBUG_OVER_SERIAL
+			sprintf(_debugOutput, "HA sent invalid SocTarget! %ld", singleInt32);
+			Serial.println(_debugOutput);
+#endif
+#ifdef DEBUG_CALLBACKS
+			badCallbacks++;
+#endif // DEBUG_CALLBACKS
+		} else {
+			opData.a2mSocTarget = singleInt32;
+			opData.a2mReadyToUseSocTarget = true;
+		}
+		break;
+	case mqttEntityId::entityChargePwr:
+		if ((singleInt32 < 0) || (singleInt32 > INVERTER_POWER_MAX)) {
+#ifdef DEBUG_OVER_SERIAL
+			sprintf(_debugOutput, "HA sent invalid Charge Power! %ld", singleInt32);
+			Serial.println(_debugOutput);
+#endif
+#ifdef DEBUG_CALLBACKS
+			badCallbacks++;
+#endif // DEBUG_CALLBACKS
+		} else {
+			opData.a2mPwrCharge = singleInt32;
+			opData.a2mReadyToUsePwrCharge = true;
+		}
+		break;
+	case mqttEntityId::entityDischargePwr:
+		if ((singleInt32 < 0) || (singleInt32 > INVERTER_POWER_MAX)) {
+#ifdef DEBUG_OVER_SERIAL
+			sprintf(_debugOutput, "HA sent invalid Discharge Power! %ld", singleInt32);
+			Serial.println(_debugOutput);
+#endif
+#ifdef DEBUG_CALLBACKS
+			badCallbacks++;
+#endif // DEBUG_CALLBACKS
+		} else {
+			opData.a2mPwrDischarge = singleInt32;
+			opData.a2mReadyToUsePwrDischarge = true;
+		}
+		break;
+	case mqttEntityId::entityPushPwr:
+		if ((singleInt32 < 0) || (singleInt32 > INVERTER_POWER_MAX)) {
+#ifdef DEBUG_OVER_SERIAL
+			sprintf(_debugOutput, "HA sent invalid Push Power! %ld", singleInt32);
+			Serial.println(_debugOutput);
+#endif
+#ifdef DEBUG_CALLBACKS
+			badCallbacks++;
+#endif // DEBUG_CALLBACKS
+		} else {
+			opData.a2mPwrPush = singleInt32;
+			opData.a2mReadyToUsePwrPush = true;
+		}
+		break;
+	case mqttEntityId::entityRegNum:
+		regNumberToRead = singleInt32; // Set local variable
+		relatedMqttEntity = lookupEntity(mqttEntityId::entityRegValue);
+		sendDataFromMqttState(relatedMqttEntity, false); // Send update for related entity
+		break;
+	case mqttEntityId::entityOpMode:
+		{
+			enum opMode tempOpMode = lookupOpMode(singleString);
+			if (tempOpMode != (enum opMode)-1) {
+				opData.a2mOpMode = tempOpMode;
+				opData.a2mReadyToUseOpMode = true;
+			} else {
+#ifdef DEBUG_OVER_SERIAL
+				snprintf(_debugOutput, sizeof(_debugOutput), "Callback: Bad opMode: %s", singleString);
+				Serial.println(_debugOutput);
+#endif
+#ifdef DEBUG_CALLBACKS
+				badCallbacks++;
+#endif // DEBUG_CALLBACKS
+			}
+		}
+		break;
+	default:
+#ifdef DEBUG_OVER_SERIAL
+		sprintf(_debugOutput, "Trying to write an unhandled entity! %d", mqttEntity->entityId);
+		Serial.println(_debugOutput);
+#endif
+		break;
+	}
+
+	// Send (hopefully) updated state. If we failed to update, sender should notice value not changing.
+	sendDataFromMqttState(mqttEntity, false);
+}
+
 
 /*
  * mqttCallback()
@@ -6516,7 +6723,7 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 		// Force the next schedule pass to run ASAP so E2E tests can observe outcomes quickly.
 		resendAllData = true;
 		return;
-#endif
+	#endif
 	} else {
 		// match to deviceName "/SERIAL#/MQTT_NAME/command"
 		char matchPrefix[64];
@@ -6533,151 +6740,25 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 			}
 		}
 		if (mqttEntity == NULL) {
-#ifdef DEBUG_CALLBACKS
+	#ifdef DEBUG_CALLBACKS
 			unknownCallbacks++;
-#endif // DEBUG_CALLBACKS
-			return; // No further processing possible.
-		}
-	}
-
-	// Update system!!!
-	{
-		int32_t singleInt32 = -1;
-		char *singleString;
-		char *endPtr = NULL;
-		const mqttState *relatedMqttEntity = NULL;
-		bool valueProcessingError = false;
-
-		// First, process value.
-		switch (mqttEntity->entityId) {
-		case mqttEntityId::entitySocTarget:
-		case mqttEntityId::entityChargePwr:
-		case mqttEntityId::entityDischargePwr:
-		case mqttEntityId::entityPushPwr:
-		case mqttEntityId::entityRegNum:
-			singleInt32 = strtol(mqttIncomingPayload, &endPtr, 10);
-			if ((endPtr == mqttIncomingPayload) || ((singleInt32 == 0) && (errno != 0))) {
-				valueProcessingError = true;
-			}
-			break;
-		case mqttEntityId::entityOpMode:
-			singleString = mqttIncomingPayload;
-			break;
-		default:
-#ifdef DEBUG_OVER_SERIAL
-			sprintf(_debugOutput, "Trying to update an unhandled entity! %d", mqttEntity->entityId);
-			Serial.println(_debugOutput);
-#endif
-#ifdef DEBUG_CALLBACKS
-			unknownCallbacks++;
-#endif // DEBUG_CALLBACKS
+	#endif // DEBUG_CALLBACKS
 			return; // No further processing possible.
 		}
 
-		if (valueProcessingError) {
-#ifdef DEBUG_OVER_SERIAL
-			snprintf(_debugOutput, sizeof(_debugOutput), "Callback for %s with bad value: ", mqttEntity->mqttName);
-			Serial.print(_debugOutput);
-			Serial.println(mqttIncomingPayload);
-#endif
-#ifdef DEBUG_CALLBACKS
+		// Defer command application out of callback context to avoid deep call chains while PubSubClient
+		// is executing loop() and to keep RS485 writes on the main loop path.
+		if (strlen(mqttIncomingPayload) >= sizeof(pendingEntityCommandPayload)) {
+	#ifdef DEBUG_CALLBACKS
 			badCallbacks++;
-#endif // DEBUG_CALLBACKS
-		} else {
-			// Now set the value and take appropriate action(s)
-			switch (mqttEntity->entityId) {
-			case mqttEntityId::entitySocTarget:
-				if ((singleInt32 < SOC_TARGET_MIN) || (singleInt32 > SOC_TARGET_MAX)) {
-#ifdef DEBUG_OVER_SERIAL
-					sprintf(_debugOutput, "HA sent invalid SocTarget! %ld", singleInt32);
-					Serial.println(_debugOutput);
-#endif
-#ifdef DEBUG_CALLBACKS
-					badCallbacks++;
-#endif // DEBUG_CALLBACKS
-				} else {
-					opData.a2mSocTarget = singleInt32;
-					opData.a2mReadyToUseSocTarget = true;
-				}
-				break;
-			case mqttEntityId::entityChargePwr:
-				if ((singleInt32 < 0) || (singleInt32 > INVERTER_POWER_MAX)) {
-#ifdef DEBUG_OVER_SERIAL
-					sprintf(_debugOutput, "HA sent invalid Charge Power! %ld", singleInt32);
-					Serial.println(_debugOutput);
-#endif
-#ifdef DEBUG_CALLBACKS
-					badCallbacks++;
-#endif // DEBUG_CALLBACKS
-				} else {
-					opData.a2mPwrCharge = singleInt32;
-					opData.a2mReadyToUsePwrCharge = true;
-				}
-				break;
-			case mqttEntityId::entityDischargePwr:
-				if ((singleInt32 < 0) || (singleInt32 > INVERTER_POWER_MAX)) {
-#ifdef DEBUG_OVER_SERIAL
-					sprintf(_debugOutput, "HA sent invalid Discharge Power! %ld", singleInt32);
-					Serial.println(_debugOutput);
-#endif
-#ifdef DEBUG_CALLBACKS
-					badCallbacks++;
-#endif // DEBUG_CALLBACKS
-				} else {
-					opData.a2mPwrDischarge = singleInt32;
-					opData.a2mReadyToUsePwrDischarge = true;
-				}
-				break;
-			case mqttEntityId::entityPushPwr:
-				if ((singleInt32 < 0) || (singleInt32 > INVERTER_POWER_MAX)) {
-#ifdef DEBUG_OVER_SERIAL
-					sprintf(_debugOutput, "HA sent invalid Push Power! %ld", singleInt32);
-					Serial.println(_debugOutput);
-#endif
-#ifdef DEBUG_CALLBACKS
-					badCallbacks++;
-#endif // DEBUG_CALLBACKS
-				} else {
-					opData.a2mPwrPush = singleInt32;
-					opData.a2mReadyToUsePwrPush = true;
-				}
-				break;
-			case mqttEntityId::entityRegNum:
-				regNumberToRead = singleInt32;    // Set local variable
-				relatedMqttEntity = lookupEntity(mqttEntityId::entityRegValue);
-				sendDataFromMqttState(relatedMqttEntity, false);    // Send update for related entity
-				break;
-			case mqttEntityId::entityOpMode:
-				{
-					enum opMode tempOpMode = lookupOpMode(singleString);
-					if (tempOpMode != (enum opMode)-1) {
-						opData.a2mOpMode = tempOpMode;
-						opData.a2mReadyToUseOpMode = true;
-					} else {
-#ifdef DEBUG_OVER_SERIAL
-						snprintf(_debugOutput, sizeof(_debugOutput), "Callback: Bad opMode: %s", singleString);
-						Serial.println(_debugOutput);
-#endif
-#ifdef DEBUG_CALLBACKS
-						badCallbacks++;
-#endif // DEBUG_CALLBACKS
-					}
-				}
-				break;
-			default:
-#ifdef DEBUG_OVER_SERIAL
-				sprintf(_debugOutput, "Trying to write an unhandled entity! %d", mqttEntity->entityId);
-				Serial.println(_debugOutput);
-#endif
-				break;
-			}
+	#endif // DEBUG_CALLBACKS
+			return;
 		}
+		pendingEntityCommand = mqttEntity;
+		strlcpy(pendingEntityCommandPayload, mqttIncomingPayload, sizeof(pendingEntityCommandPayload));
+		pendingEntityCommandSet = true;
+		return;
 	}
-
-	// Send (hopefully) updated state.  If we failed to update, sender should notice value not changing.
-	sendDataFromMqttState(mqttEntity, false);
-
-	return;
 }
 
 
