@@ -30,6 +30,7 @@ First, go and customise options at the top of Definitions.h!
 #include "../include/PollingConfig.h"
 #include "../include/RebootRequest.h"
 #include "../include/StatusReporting.h"
+#include "../include/DiscoveryModel.h"
 #include "../include/Rs485ProbeLogic.h"
 #include "../include/Scheduler.h"
 #include "../include/TimeProvider.h"
@@ -96,6 +97,7 @@ char _version[20] = "";
 char deviceSerialNumber[17]; // 8 registers = max 16 chars (usually 15)
 char deviceBatteryType[32];
 char haUniqueId[32] = "A2M-UNKNOWN";
+char controllerIdentifier[40] = "";
 char statusTopic[128];
 char deviceName[32];
 char configSetTopic[64];
@@ -136,6 +138,9 @@ const char kPreferencePollInterval[] = "poll_interval_s";
 const char kPreferenceBucketMapMigrated[] = "Bucket_Map_Migrated";
 // Persisted "last polling-config change" timestamp published as polling-config last_change.
 const char kPreferencePollingLastChange[] = "polling_last_change";
+const char kControllerInverterSerialEntity[] = "inverter_serial";
+const char kControllerModel[] = "Alpha2MQTT Bridge";
+const char kInverterModelFallback[] = "Alpha ESS";
 constexpr size_t kPrefBootIntentMaxLen = 24;
 constexpr size_t kPrefBootModeMaxLen = 24;
 constexpr size_t kPrefDeviceSerialMaxLen = 32;
@@ -399,6 +404,8 @@ void savePollingConfig(const mqttState*);
 void publishPollingConfig(void);
 void publishConfigDiscovery(void);
 void publishHaEntityDiscovery(const mqttState*);
+void publishControllerInverterSerialDiscovery(void);
+void publishControllerInverterSerialState(void);
 bool handlePollingConfigSet(const char*);
 const char* mqttUpdateFreqToString(mqttUpdateFreq);
 bool mqttUpdateFreqFromString(const char*, mqttUpdateFreq*);
@@ -419,6 +426,8 @@ void updateStatusLed(void);
 void buildDeviceName(void);
 void publishBootEventOncePerBoot(void);
 void setMqttIdentifiersFromSerial(const char *serial);
+bool inverterSerialKnown(void);
+const char *discoveryDeviceIdForScope(DiscoveryDeviceScope scope);
 void publishStatusNow(void);
 void publishEvent(MqttEventCode code, const char *detail);
 MqttEventCode eventCodeFromResult(modbusRequestAndResponseStatusValues result);
@@ -461,9 +470,30 @@ buildDeviceName(void)
 	uint8_t mac[6] = { 0 };
 	WiFi.macAddress(mac);
 	snprintf(deviceName, sizeof(deviceName), "%s-%02X%02X%02X", DEVICE_NAME, mac[3], mac[4], mac[5]);
+	buildControllerIdentifier(mac, controllerIdentifier, sizeof(controllerIdentifier));
 	snprintf(configSetTopic, sizeof(configSetTopic), "%s/config/set", deviceName);
 	snprintf(statusTopic, sizeof(statusTopic), "%s/status", deviceName);
 	snprintf(rs485StubControlTopic, sizeof(rs485StubControlTopic), "%s/debug/rs485_stub/set", deviceName);
+}
+
+bool
+inverterSerialKnown(void)
+{
+	return inverterSerialIsValid(deviceSerialNumber);
+}
+
+const char *
+discoveryDeviceIdForScope(DiscoveryDeviceScope scope)
+{
+	if (scope == DiscoveryDeviceScope::Controller) {
+		return controllerIdentifier;
+	}
+	if (!inverterSerialKnown()) {
+		return "";
+	}
+	static char inverterIdentifier[64];
+	buildInverterIdentifier(deviceSerialNumber, inverterIdentifier, sizeof(inverterIdentifier));
+	return inverterIdentifier;
 }
 
 void
@@ -950,7 +980,7 @@ handleRebootWifi(void)
 void
 subscribeInverterTopics(void)
 {
-	if (!inverterReady || inverterSubscriptionsSet || !_mqtt.connected()) {
+	if (!inverterReady || !inverterSerialKnown() || inverterSubscriptionsSet || !_mqtt.connected()) {
 		return;
 	}
 	if (!mqttEntitiesRtAvailable()) {
@@ -963,8 +993,18 @@ subscribeInverterTopics(void)
 	char subscriptionDef[100];
 
 	for (int i = 0; i < numberOfEntities; i++) {
-		if (entities[i].subscribe) {
-			sprintf(subscriptionDef, "%s/%s/%s/command", deviceName, haUniqueId, entities[i].mqttName);
+		if (entities[i].subscribe && mqttEntityScope(entities[i].entityId) == DiscoveryDeviceScope::Inverter) {
+			char topicBase[160];
+			if (!buildEntityTopicBase(deviceName,
+			                          DiscoveryDeviceScope::Inverter,
+			                          controllerIdentifier,
+			                          deviceSerialNumber,
+			                          entities[i].mqttName,
+			                          topicBase,
+			                          sizeof(topicBase))) {
+				continue;
+			}
+			snprintf(subscriptionDef, sizeof(subscriptionDef), "%s/command", topicBase);
 			subscribed = subscribed && _mqtt.subscribe(subscriptionDef, MQTT_SUBSCRIBE_QOS);
 #ifdef DEBUG_OVER_SERIAL
 			snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", subscriptionDef, subscribed);
@@ -3196,8 +3236,8 @@ publishConfigDiscovery(void)
 		 ", \"device\": {"
 		 " \"name\": \"%s\", \"model\": \"%s\", \"manufacturer\": \"AlphaESS\","
 		 " \"identifiers\": [\"%s\"]}",
-		 haUniqueId, deviceBatteryType,
-		 haUniqueId);
+		 deviceName, kControllerModel,
+		 controllerIdentifier);
 	resultAddedToPayload = addToPayload(addition);
 	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
 		return;
@@ -3209,7 +3249,7 @@ publishConfigDiscovery(void)
 		return;
 	}
 
-	snprintf(addition, sizeof(addition), ", \"unique_id\": \"%s_%s\"", haUniqueId, sensorName);
+	snprintf(addition, sizeof(addition), ", \"unique_id\": \"%s_%s\"", controllerIdentifier, sensorName);
 	resultAddedToPayload = addToPayload(addition);
 	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
 		return;
@@ -3231,8 +3271,71 @@ publishConfigDiscovery(void)
 		return;
 	}
 
-	snprintf(topic, sizeof(topic), "homeassistant/sensor/%s/%s/config", haUniqueId, sensorName);
+	snprintf(topic, sizeof(topic), "homeassistant/sensor/%s/%s/config", controllerIdentifier, sensorName);
 	sendMqtt(topic, MQTT_RETAIN);
+}
+
+void
+publishControllerInverterSerialDiscovery(void)
+{
+	char addition[256];
+	modbusRequestAndResponseStatusValues resultAddedToPayload;
+	char topic[160];
+
+	emptyPayload();
+
+	resultAddedToPayload = addToPayload("{");
+	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		return;
+	}
+	resultAddedToPayload = addToPayload("\"component\": \"sensor\"");
+	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		return;
+	}
+	snprintf(addition, sizeof(addition),
+	         ", \"device\": { \"name\": \"%s\", \"model\": \"%s\", \"manufacturer\": \"AlphaESS\", \"identifiers\": [\"%s\"]}",
+	         deviceName, kControllerModel, controllerIdentifier);
+	resultAddedToPayload = addToPayload(addition);
+	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		return;
+	}
+	resultAddedToPayload = addToPayload(", \"name\": \"Inverter Serial\"");
+	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		return;
+	}
+	snprintf(addition, sizeof(addition), ", \"unique_id\": \"%s_%s\"", controllerIdentifier, kControllerInverterSerialEntity);
+	resultAddedToPayload = addToPayload(addition);
+	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		return;
+	}
+	snprintf(addition, sizeof(addition),
+	         ", \"state_topic\": \"%s/%s/%s/state\", \"entity_category\": \"diagnostic\"",
+	         deviceName, controllerIdentifier, kControllerInverterSerialEntity);
+	resultAddedToPayload = addToPayload(addition);
+	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		return;
+	}
+	resultAddedToPayload = addToPayload("}");
+	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		return;
+	}
+
+	snprintf(topic, sizeof(topic), "homeassistant/sensor/%s/%s/config", controllerIdentifier, kControllerInverterSerialEntity);
+	sendMqtt(topic, MQTT_RETAIN);
+}
+
+void
+publishControllerInverterSerialState(void)
+{
+	char topic[160];
+	char payload[40];
+	snprintf(topic, sizeof(topic), "%s/%s/%s/state", deviceName, controllerIdentifier, kControllerInverterSerialEntity);
+	if (inverterSerialKnown()) {
+		strlcpy(payload, deviceSerialNumber, sizeof(payload));
+	} else {
+		strlcpy(payload, "unknown", sizeof(payload));
+	}
+	_mqtt.publish(topic, payload, true);
 }
 
 void
@@ -3252,6 +3355,11 @@ publishHaEntityDiscovery(const mqttState *entity)
 		return;
 	}
 	mqttUpdateFreq effectiveFreq = mqttEntitiesRt()[idx].effectiveFreq;
+	const DiscoveryDeviceScope scope = mqttEntityScope(entity->entityId);
+	const char *deviceId = discoveryDeviceIdForScope(scope);
+	if (deviceId[0] == '\0') {
+		return;
+	}
 
 	if (effectiveFreq == mqttUpdateFreq::freqNever) {
 		sendDataFromMqttState(entity, true);
@@ -3273,7 +3381,7 @@ publishHaEntityDiscovery(const mqttState *entity)
 			entityType = "sensor";
 			break;
 		}
-		snprintf(topic, sizeof(topic), "homeassistant/%s/%s/%s/config", entityType, haUniqueId, entity->mqttName);
+		snprintf(topic, sizeof(topic), "homeassistant/%s/%s/%s/config", entityType, deviceId, entity->mqttName);
 		emptyPayload();
 		sendMqtt(topic, MQTT_RETAIN);
 		return;
@@ -4334,24 +4442,29 @@ mqttReconnect(void)
 #endif
 #endif
 
-				if (inverterReady) {
+				if (inverterReady && inverterSerialKnown()) {
 					for (int i = 0; i < numberOfEntities; i++) {
-						if (entities[i].subscribe) {
-							snprintf(subscriptionDef,
-							         sizeof(subscriptionDef),
-							         "%s/%s/%s/command",
-							         deviceName,
-							         haUniqueId,
-							         entities[i].mqttName);
+						if (entities[i].subscribe && mqttEntityScope(entities[i].entityId) == DiscoveryDeviceScope::Inverter) {
+							char topicBase[160];
+							if (!buildEntityTopicBase(deviceName,
+							                          DiscoveryDeviceScope::Inverter,
+							                          controllerIdentifier,
+							                          deviceSerialNumber,
+							                          entities[i].mqttName,
+							                          topicBase,
+							                          sizeof(topicBase))) {
+								continue;
+							}
+							snprintf(subscriptionDef, sizeof(subscriptionDef), "%s/command", topicBase);
 							subscribed = subscribed && _mqtt.subscribe(subscriptionDef, MQTT_SUBSCRIBE_QOS);
 #ifdef DEBUG_OVER_SERIAL
 							snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", subscriptionDef, subscribed);
 							Serial.println(_debugOutput);
 #endif
 						}
+					}
+					inverterSubscriptionsAdded = true;
 				}
-				inverterSubscriptionsAdded = true;
-			}
 
 			// Subscribe or resubscribe to topics.
 			if (subscribed) {
@@ -5170,6 +5283,8 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 
 	sendMqtt(statusTopic, MQTT_RETAIN);
 	maybeYield();
+	publishControllerInverterSerialState();
+	maybeYield();
 
 	char netTopic[160];
 	snprintf(netTopic, sizeof(netTopic), "%s/net", statusTopic);
@@ -5231,10 +5346,32 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 }
 
 modbusRequestAndResponseStatusValues
-addConfig(const mqttState *singleEntity, modbusRequestAndResponseStatusValues& resultAddedToPayload)
+addConfig(const mqttState *singleEntity,
+          DiscoveryDeviceScope scope,
+          modbusRequestAndResponseStatusValues& resultAddedToPayload)
 {
 	char stateAddition[1024] = "";
 	char prettyName[64];
+	char uniqueId[128];
+	char topicBase[200];
+	const char *deviceId = discoveryDeviceIdForScope(scope);
+	const bool inverterScope = (scope == DiscoveryDeviceScope::Inverter);
+	const bool haveTopicBase = buildEntityTopicBase(deviceName,
+	                                                scope,
+	                                                controllerIdentifier,
+	                                                deviceSerialNumber,
+	                                                singleEntity->mqttName,
+	                                                topicBase,
+	                                                sizeof(topicBase));
+	if (deviceId[0] == '\0' || !haveTopicBase) {
+		return modbusRequestAndResponseStatusValues::preProcessing;
+	}
+	buildEntityUniqueId(scope,
+	                    controllerIdentifier,
+	                    deviceSerialNumber,
+	                    singleEntity->mqttName,
+	                    uniqueId,
+	                    sizeof(uniqueId));
 
 	sprintf(stateAddition, "{");
 	resultAddedToPayload = addToPayload(stateAddition);
@@ -5262,12 +5399,24 @@ addConfig(const mqttState *singleEntity, modbusRequestAndResponseStatusValues& r
 		return resultAddedToPayload;
 	}
 
-	snprintf(stateAddition, sizeof(stateAddition),
-		 ", \"device\": {"
-		 " \"name\": \"%s\", \"model\": \"%s\", \"manufacturer\": \"AlphaESS\","
-		 " \"identifiers\": [\"%s\"]}",
-		 haUniqueId, deviceBatteryType,
-		 haUniqueId);
+	if (inverterScope) {
+		snprintf(stateAddition, sizeof(stateAddition),
+		         ", \"device\": {"
+		         " \"name\": \"%s\", \"model\": \"%s\", \"manufacturer\": \"AlphaESS\","
+		         " \"identifiers\": [\"%s\"], \"via_device\": \"%s\"}",
+		         haUniqueId,
+		         (deviceBatteryType[0] != '\0' ? deviceBatteryType : kInverterModelFallback),
+		         deviceId,
+		         controllerIdentifier);
+	} else {
+		snprintf(stateAddition, sizeof(stateAddition),
+		         ", \"device\": {"
+		         " \"name\": \"%s\", \"model\": \"%s\", \"manufacturer\": \"AlphaESS\","
+		         " \"identifiers\": [\"%s\"]}",
+		         deviceName,
+		         kControllerModel,
+		         deviceId);
+	}
 	resultAddedToPayload = addToPayload(stateAddition);
 	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
 		return resultAddedToPayload;
@@ -5283,7 +5432,7 @@ addConfig(const mqttState *singleEntity, modbusRequestAndResponseStatusValues& r
 		return resultAddedToPayload;
 	}
 
-	snprintf(stateAddition, sizeof(stateAddition), ", \"unique_id\": \"%s_%s\"", haUniqueId, singleEntity->mqttName);
+	snprintf(stateAddition, sizeof(stateAddition), ", \"unique_id\": \"%s\"", uniqueId);
 	resultAddedToPayload = addToPayload(stateAddition);
 	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
 		return resultAddedToPayload;
@@ -5564,19 +5713,19 @@ addConfig(const mqttState *singleEntity, modbusRequestAndResponseStatusValues& r
 	case mqttEntityId::entityInverterWarnings:
 	case mqttEntityId::entitySystemFaults:
 		snprintf(stateAddition, sizeof(stateAddition),
-			", \"state_topic\": \"%s/%s/%s/state\""
+			", \"state_topic\": \"%s/state\""
 			", \"value_template\": \"{{ \\\"OK\\\" if value_json.numEvents == 0 else \\\"Problem\\\" }}\""
-			", \"json_attributes_topic\": \"%s/%s/%s/state\"",
-			deviceName, haUniqueId, singleEntity->mqttName,
-			deviceName, haUniqueId, singleEntity->mqttName);
+			", \"json_attributes_topic\": \"%s/state\"",
+			topicBase,
+			topicBase);
 		break;
 	case mqttEntityId::entityFrequency:
 		snprintf(stateAddition, sizeof(stateAddition),
-			", \"state_topic\": \"%s/%s/%s/state\""
+			", \"state_topic\": \"%s/state\""
 			", \"value_template\": \"{{ value_json[\\\"Use Frequency\\\"] | default(\\\"\\\") }}\""
-			", \"json_attributes_topic\": \"%s/%s/%s/state\"",
-			deviceName, haUniqueId, singleEntity->mqttName,
-			deviceName, haUniqueId, singleEntity->mqttName);
+			", \"json_attributes_topic\": \"%s/state\"",
+			topicBase,
+			topicBase);
 		break;
 	case mqttEntityId::entityRs485Avail:
 		snprintf(stateAddition, sizeof(stateAddition),
@@ -5594,8 +5743,8 @@ addConfig(const mqttState *singleEntity, modbusRequestAndResponseStatusValues& r
 		break;
 	default:
 		snprintf(stateAddition, sizeof(stateAddition),
-			", \"state_topic\": \"%s/%s/%s/state\"",
-			deviceName, haUniqueId, singleEntity->mqttName);
+			", \"state_topic\": \"%s/state\"",
+			topicBase);
 		break;
 	}
 	resultAddedToPayload = addToPayload(stateAddition);
@@ -5604,8 +5753,7 @@ addConfig(const mqttState *singleEntity, modbusRequestAndResponseStatusValues& r
 	}
 
 	if (singleEntity->subscribe) {
-		sprintf(stateAddition, ", \"command_topic\": \"%s/%s/%s/command\"",
-			deviceName, haUniqueId, singleEntity->mqttName);
+		snprintf(stateAddition, sizeof(stateAddition), ", \"command_topic\": \"%s/command\"", topicBase);
 		resultAddedToPayload = addToPayload(stateAddition);
 		if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
 			return resultAddedToPayload;
@@ -5721,13 +5869,14 @@ addToPayload(const char* addition)
 void
 sendHaData()
 {
-	if (!inverterReady || !mqttEntitiesRtAvailable() || !_mqtt.connected()) {
+	if (!mqttEntitiesRtAvailable() || !_mqtt.connected()) {
 		return;
 	}
 	const mqttState *entities = mqttEntitiesDesc();
 	int numberOfEntities = static_cast<int>(mqttEntitiesCount());
 
 	publishConfigDiscovery();
+	publishControllerInverterSerialDiscovery();
 	for (int i = 0; i < numberOfEntities; i++) {
 		publishHaEntityDiscovery(&entities[i]);
 	}
@@ -6178,11 +6327,16 @@ void
 sendDataFromMqttState(const mqttState *singleEntity, bool doHomeAssistant)
 {
 	char topic[256];
+	char topicBase[200];
 	modbusRequestAndResponseStatusValues result;
 	modbusRequestAndResponseStatusValues resultAddedToPayload;
+	DiscoveryDeviceScope scope = DiscoveryDeviceScope::Controller;
+	const char *deviceId = "";
 
 	if (singleEntity == NULL)
 		return;
+	scope = mqttEntityScope(singleEntity->entityId);
+	deviceId = discoveryDeviceIdForScope(scope);
 	if (!mqttEntitiesRtAvailable()) {
 		return;
 	}
@@ -6194,6 +6348,18 @@ sendDataFromMqttState(const mqttState *singleEntity, bool doHomeAssistant)
 	if (!doHomeAssistant &&
 	    (effectiveFreq == mqttUpdateFreq::freqNever ||
 	     effectiveFreq == mqttUpdateFreq::freqDisabled)) {
+		return;
+	}
+	if (deviceId[0] == '\0') {
+		return;
+	}
+	if (!buildEntityTopicBase(deviceName,
+	                          scope,
+	                          controllerIdentifier,
+	                          deviceSerialNumber,
+	                          singleEntity->mqttName,
+	                          topicBase,
+	                          sizeof(topicBase))) {
 		return;
 	}
 	if (!doHomeAssistant && mqttEntityNeedsEssSnapshotByIndex(idx) && !essSnapshotValid) {
@@ -6219,8 +6385,8 @@ sendDataFromMqttState(const mqttState *singleEntity, bool doHomeAssistant)
 			break;
 		}
 
-		snprintf(topic, sizeof(topic), "homeassistant/%s/%s/%s/config", entityType, haUniqueId, singleEntity->mqttName);
-		result = addConfig(singleEntity, resultAddedToPayload);
+		snprintf(topic, sizeof(topic), "homeassistant/%s/%s/%s/config", entityType, deviceId, singleEntity->mqttName);
+		result = addConfig(singleEntity, scope, resultAddedToPayload);
 	} else {
 		bool skip = false;
 		if (!opData.a2mReadyToUseOpMode && (singleEntity->entityId == mqttEntityId::entityOpMode)) {
@@ -6239,7 +6405,7 @@ sendDataFromMqttState(const mqttState *singleEntity, bool doHomeAssistant)
 			skip = true;
 		}
 		if (!skip) {
-			snprintf(topic, sizeof(topic), "%s/%s/%s/state", deviceName, haUniqueId, singleEntity->mqttName);
+			snprintf(topic, sizeof(topic), "%s/state", topicBase);
 			result = addState(singleEntity, &resultAddedToPayload);
 		} else {
 			result = modbusRequestAndResponseStatusValues::preProcessing;
@@ -6725,11 +6891,13 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 		return;
 	#endif
 	} else {
-		// match to deviceName "/SERIAL#/MQTT_NAME/command"
-		char matchPrefix[64];
+		// match to inverter command topic "<device>/<alpha2mqtt_inv_<serial>>/<entity>/command"
+		char matchPrefix[128];
+		const char *inverterDeviceId = discoveryDeviceIdForScope(DiscoveryDeviceScope::Inverter);
 
-		snprintf(matchPrefix, sizeof(matchPrefix), "%s/%s/", deviceName, haUniqueId);
+		snprintf(matchPrefix, sizeof(matchPrefix), "%s/%s/", deviceName, inverterDeviceId);
 		if (inverterReady &&
+		    inverterDeviceId[0] != '\0' &&
 		    !strncmp(topic, matchPrefix, strlen(matchPrefix)) &&
 		    !strcmp(&topic[strlen(topic) - strlen("/command")], "/command")) {
 			char topicEntityName[64];

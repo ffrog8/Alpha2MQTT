@@ -82,6 +82,7 @@ TRACE_HTTP = False
 TRACE_MQTT = False
 PROGRESS_INTERVAL_S = 10.0
 CASE_ORDER: tuple[str, ...] = (
+    "two_device_discovery",
     "offline",
     "fail_then_recover",
     "online",
@@ -1332,22 +1333,128 @@ def main() -> int:
         mqtt.publish(f"{device_root}/config/set", payload, retain=False)
 
     def _wait_for_inverter_identity() -> str:
+        def inverter_id_from_ha_unique(ha_unique: str) -> str:
+            if not ha_unique.startswith("A2M-"):
+                return ""
+            serial = ha_unique[4:]
+            if not serial or serial.lower() == "unknown":
+                return ""
+            return f"alpha2mqtt_inv_{serial}"
+
         def pred() -> Tuple[bool, str]:
             core = _fetch_status_core(mqtt, status_core_topic)
             ha_unique = str(core.get("ha_unique_id", ""))
-            detail = f"ha_unique_id={ha_unique!r}"
-            if ha_unique and ha_unique != "A2M-UNKNOWN":
-                return True, detail
-            return False, detail
-        _assert_eventually("inverter identity available (ha_unique_id != A2M-UNKNOWN)", pred, timeout_s=60, poll_s=3.0)
+            inverter_id = inverter_id_from_ha_unique(ha_unique)
+            detail = f"ha_unique_id={ha_unique!r} inverter_id={inverter_id!r}"
+            return (inverter_id != ""), detail
+        _assert_eventually("inverter identity available", pred, timeout_s=60, poll_s=3.0)
         core = _fetch_status_core(mqtt, status_core_topic)
-        return str(core.get("ha_unique_id", "A2M-UNKNOWN"))
+        return inverter_id_from_ha_unique(str(core.get("ha_unique_id", "")))
 
-    def _state_topic(ha_unique: str, name: str) -> str:
-        return f"{device_root}/{ha_unique}/{name}/state"
+    def _state_topic(inverter_device_id: str, name: str) -> str:
+        return f"{device_root}/{inverter_device_id}/{name}/state"
 
-    def _command_topic(ha_unique: str, name: str) -> str:
-        return f"{device_root}/{ha_unique}/{name}/command"
+    def _command_topic(inverter_device_id: str, name: str) -> str:
+        return f"{device_root}/{inverter_device_id}/{name}/command"
+
+    def _collect_discovery_messages(timeout_s: int = 20) -> list[tuple[str, dict[str, Any]]]:
+        mqtt.subscribe("homeassistant/+/+/+/config", force=True)
+        deadline = time.time() + timeout_s
+        out: list[tuple[str, dict[str, Any]]] = []
+        while time.time() < deadline:
+            try:
+                topic, payload = mqtt.wait_for_publish(timeout_s=3.0)
+            except E2EError as e:
+                if "Timeout waiting for MQTT publish" in str(e):
+                    continue
+                raise
+            if not topic.startswith("homeassistant/") or not topic.endswith("/config"):
+                continue
+            try:
+                parsed = _parse_json(payload)
+            except Exception:
+                continue
+            out.append((topic, parsed))
+        return out
+
+    def case_two_device_discovery() -> None:
+        print("[e2e] case: two-device discovery model")
+        mqtt.subscribe(f"{device_root}/+/inverter_serial/state", force=True)
+        controller_topic = ""
+        controller_serial = ""
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            topic, payload = mqtt.wait_for_publish(timeout_s=5.0)
+            if topic.startswith(f"{device_root}/") and topic.endswith("/inverter_serial/state"):
+                controller_topic = topic
+                controller_serial = payload
+                break
+        if not controller_topic:
+            raise E2EError("controller inverter_serial state topic was not observed")
+        parts = controller_topic.split("/")
+        if len(parts) < 3:
+            raise E2EError(f"unexpected controller inverter_serial topic format: {controller_topic}")
+        controller_id = parts[1]
+        if not re.fullmatch(r"alpha2mqtt_[0-9a-f]{12}", controller_id):
+            raise E2EError(f"invalid controller identifier from inverter_serial topic: {controller_id!r}")
+
+        # Force a discovery re-advertise so checks are against current firmware behavior, not stale retained topics.
+        mqtt.publish("homeassistant/status", "online", retain=False)
+        _sleep_with_mqtt(mqtt, 2)
+        discovered = _collect_discovery_messages(timeout_s=25)
+        if not discovered:
+            raise E2EError("No Home Assistant discovery payloads observed")
+
+        controller_entity_count = 0
+        inverter_id_seen = set()
+
+        for _topic, payload in discovered:
+            device = payload.get("device", {})
+            if not isinstance(device, dict):
+                continue
+            identifiers = device.get("identifiers", [])
+            if not isinstance(identifiers, list) or not identifiers:
+                continue
+            identifier = str(identifiers[0])
+            unique_id = str(payload.get("unique_id", ""))
+            if identifier == controller_id:
+                if unique_id.startswith(f"{controller_id}_"):
+                    controller_entity_count += 1
+            if identifier.startswith("alpha2mqtt_inv_"):
+                inverter_id_seen.add(identifier)
+                via = str(device.get("via_device", ""))
+                if not via:
+                    raise E2EError(f"inverter discovery missing via_device: topic={_topic} payload={payload}")
+                if via != controller_id:
+                    raise E2EError(f"inverter via_device mismatch: via={via!r} expected={controller_id!r}")
+
+        if controller_entity_count == 0:
+            raise E2EError("controller discovery entities not found (unique_id prefix mismatch)")
+
+        # Controller-scoped inverter serial entity must always exist.
+        inverter_serial_uid = f"{controller_id}_inverter_serial"
+        inverter_serial_seen = any(str(payload.get("unique_id", "")) == inverter_serial_uid for _, payload in discovered)
+        if not inverter_serial_seen:
+            raise E2EError(f"missing controller inverter_serial discovery unique_id={inverter_serial_uid}")
+
+        serial_known = str(controller_serial).strip().lower() not in ("", "unknown")
+        if not serial_known and inverter_id_seen:
+            raise E2EError(f"inverter discovery published before serial known: ids={sorted(inverter_id_seen)}")
+
+        if serial_known:
+            inverter_device_id = _wait_for_inverter_identity()
+            if inverter_device_id not in inverter_id_seen:
+                # retained discovery may not have arrived in first window; retry once.
+                discovered_retry = _collect_discovery_messages(timeout_s=12)
+                inverter_id_seen_retry = {
+                    str(p.get("device", {}).get("identifiers", [""])[0])
+                    for _, p in discovered_retry
+                    if isinstance(p.get("device", {}), dict)
+                    and isinstance(p.get("device", {}).get("identifiers", []), list)
+                    and p.get("device", {}).get("identifiers", [])
+                }
+                if inverter_device_id not in inverter_id_seen_retry:
+                    raise E2EError(f"expected inverter discovery id={inverter_device_id} not observed")
 
     def case_offline() -> None:
         print("[e2e] case: stub offline")
@@ -2239,6 +2346,7 @@ def main() -> int:
             raise E2EError(f"{target} bucket UI value not restored after reboot (expected {desired_bucket!r}, got {restored_bucket!r})")
 
     cases: list[Tuple[str, Callable[[], None]]] = [
+        ("two_device_discovery", case_two_device_discovery),
         ("offline", case_offline),
         ("fail_then_recover", case_fail_then_recover),
         ("online", case_online),
