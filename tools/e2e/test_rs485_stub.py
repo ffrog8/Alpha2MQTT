@@ -916,6 +916,9 @@ def _fetch_config(mqtt: MqttClient, topic: str) -> dict[str, Any]:
 def _fetch_status_core(mqtt: MqttClient, topic: str) -> dict[str, Any]:
     return _fetch_latest_json(mqtt, topic, label="core")
 
+def _fetch_status_net(mqtt: MqttClient, topic: str) -> dict[str, Any]:
+    return _fetch_latest_json(mqtt, topic, label="net")
+
 def _fetch_boot(mqtt: MqttClient, boot_topic: str) -> dict[str, Any]:
     # Boot is retained, but if the broker has restarted (no retained state), we may need to
     # wait for a device reboot to republish it.
@@ -1047,6 +1050,27 @@ def _device_is_latest_stub(
     except E2EError as e:
         return False, f"status_net_stale ({e})"
     return True, "ok"
+
+def _resolve_device_http_base(mqtt: MqttClient, device_root: str) -> str:
+    configured = os.environ.get("DEVICE_HTTP_BASE", "").strip()
+    net_topic = f"{device_root}/status/net"
+    try:
+        net = _fetch_status_net(mqtt, net_topic)
+        ip = str(net.get("ip", "")).strip()
+        if ip:
+            live_base = f"http://{ip}"
+            if configured and configured != live_base:
+                _announce(f"DEVICE_HTTP_BASE override ignored; using live status/net IP {live_base}")
+            return live_base
+    except E2EError:
+        pass
+
+    if configured:
+        return configured
+    raise E2EError(
+        "DEVICE_HTTP_BASE is not configured and status/net did not provide a device IP. "
+        "Set DEVICE_HTTP_BASE or ensure the device is publishing status/net with an ip field."
+    )
 
 def _ensure_latest_stub_via_ota(
     mqtt: MqttClient,
@@ -1219,7 +1243,7 @@ def main() -> int:
 
     if policy_force:
         _announce("flash policy: force")
-        http_base = _require_env("DEVICE_HTTP_BASE")
+        http_base = _resolve_device_http_base(mqtt, device_root)
         _ensure_latest_stub_via_ota(
             mqtt=mqtt,
             device_root=device_root,
@@ -1237,7 +1261,7 @@ def main() -> int:
         if status_ok:
             _announce("device already on expected stub backend/build; skipping flash")
         else:
-            http_base = _require_env("DEVICE_HTTP_BASE")
+            http_base = _resolve_device_http_base(mqtt, device_root)
             _ensure_latest_stub_via_ota(
                 mqtt=mqtt,
                 device_root=device_root,
@@ -1323,6 +1347,38 @@ def main() -> int:
                 chunk = candidate
         if chunk:
             mqtt.publish(f"{device_root}/config/set", json.dumps(chunk), retain=False)
+
+    def wait_intervals_applied(entity_to_freq: dict[str, str], *, timeout_s: int = 30, republish_every_s: float = 5.0) -> None:
+        if not entity_to_freq:
+            return
+        set_intervals(entity_to_freq)
+        last_pub = time.time()
+
+        def pred() -> Tuple[bool, str]:
+            nonlocal last_pub
+            now = time.time()
+            if (now - last_pub) >= republish_every_s:
+                set_intervals(entity_to_freq)
+                last_pub = now
+
+            cfg = _fetch_config(mqtt, config_topic)
+            intervals = cfg.get("entity_intervals", {})
+            if not isinstance(intervals, dict):
+                return False, f"entity_intervals invalid: {cfg!r}"
+
+            mismatches = []
+            for key, expected in entity_to_freq.items():
+                actual = str(intervals.get(key, ""))
+                if actual != expected:
+                    mismatches.append(f"{key}={actual!r}")
+            return (not mismatches), ", ".join(mismatches) if mismatches else "ok"
+
+        _assert_eventually(
+            "intervals applied",
+            pred,
+            timeout_s=timeout_s,
+            poll_s=2.0,
+        )
 
     def set_polling_config(poll_interval_s: int, bucket_map: str) -> None:
         # Config-set parser expects string values, not numbers.
@@ -1578,7 +1634,7 @@ def main() -> int:
 
         # Also validate write -> read feedback via the existing Register_Number/Register_Value entities.
         # Re-enable and speed up Register_Value in case prior runs changed intervals.
-        set_intervals({"Register_Value": "ten_sec"})
+        wait_intervals_applied({"Register_Value": "ten_sec"})
         regnum_topic = _state_topic(ha_unique, "Register_Number")
         val_topic = _state_topic(ha_unique, "Register_Value")
         mqtt.subscribe(regnum_topic, force=True)
@@ -1837,22 +1893,7 @@ def main() -> int:
         # Prior cases may temporarily disable Register_Value to keep snapshot tests scoped; re-enable it here
         # and speed it up so we don't wait a full minute.
         enable_map = {"Register_Value": "ten_sec"}
-        set_intervals(enable_map)
-        last_enable_pub = time.time()
-        def enable_applied_pred() -> Tuple[bool, str]:
-            nonlocal last_enable_pub
-            now = time.time()
-            if (now - last_enable_pub) >= 5.0:
-                set_intervals(enable_map)
-                last_enable_pub = now
-            val = str(_fetch_config(mqtt, config_topic).get("entity_intervals", {}).get("Register_Value", ""))
-            return (val == "ten_sec"), f"Register_Value={val!r}"
-        _assert_eventually(
-            "Register_Value interval re-enabled",
-            enable_applied_pred,
-            timeout_s=30,
-            poll_s=2.0,
-        )
+        wait_intervals_applied(enable_map)
 
         # Use a handled register that is not virtualized by the stub (so the stub sees it as unknown).
         reg = _discover_register_value("REG_INVERTER_HOME_R_INVERTER_TEMP")
@@ -2187,9 +2228,7 @@ def main() -> int:
 
     def case_portal_polling_ui() -> None:
         print("[e2e] case: portal UI updates polling schedule (WiFiManager, paged)")
-        base = os.environ.get("DEVICE_HTTP_BASE", "").strip()
-        if not base:
-            raise E2EError("DEVICE_HTTP_BASE is required for portal UI test (set in tools/e2e/e2e.local.json or e2e.local.env)")
+        base = _resolve_device_http_base(mqtt, device_root)
 
         reboot_wifi_path = _discover_reboot_wifi_path_from_code()
         if not reboot_wifi_path:
