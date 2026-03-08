@@ -1,4 +1,5 @@
 #include "../include/diag.h"
+#include "../Definitions.h"
 
 #include <Arduino.h>
 

@@ -162,7 +162,9 @@ Customise these options as per README.txt.  Please read README.txt before contin
 
 // The device name is used as the MQTT base topic and presence on the network.
 // You can have more than one Alpha2MQTT on your network without changing this.
+#ifndef DEVICE_NAME
 #define DEVICE_NAME "Alpha2MQTT"
+#endif
 
 // Default address of inverter is 0x55 as per Alpha Modbus documentation.  If you have altered it, reflect that change here.
 #define ALPHA_SLAVE_ID 0x55
