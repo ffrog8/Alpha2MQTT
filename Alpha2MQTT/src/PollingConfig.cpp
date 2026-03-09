@@ -61,6 +61,9 @@ applyBucketMapString(const char *map,
 		return false;
 	}
 
+	MqttEntityRuntime staged[kMqttEntityMaxCount];
+	memcpy(staged, rt, entityCount * sizeof(MqttEntityRuntime));
+
 	uint8_t seen[kMqttEntityMaxCount];
 	memset(seen, 0, sizeof(seen));
 	const char *cursor = map;
@@ -109,13 +112,14 @@ applyBucketMapString(const char *map,
 					if (seen[idx]) {
 						duplicateEntityCount++;
 					}
-					applyBucketToRuntime(rt[idx], bucketId);
+					applyBucketToRuntime(staged[idx], bucketId);
 					seen[idx] = 1;
 				}
 			}
 		}
 	}
 
+	memcpy(rt, staged, entityCount * sizeof(MqttEntityRuntime));
 	return true;
 }
 

@@ -433,7 +433,7 @@ void publishEvent(MqttEventCode code, const char *detail);
 MqttEventCode eventCodeFromResult(modbusRequestAndResponseStatusValues result);
 void noteRs485Error(modbusRequestAndResponseStatusValues result, const char *detail);
 static void processPendingEntityCommand(void);
-void setBootIntentAndReboot(BootIntent intent, bool persistIntent = false);
+void setBootIntentAndReboot(BootIntent intent, bool persistIntent = true);
 static void persistUserBootIntent(BootIntent intent);
 static void persistUserBootMode(BootMode mode);
 static void persistUserMqttConfig(const char *server, int port, const char *user, const char *pass);
@@ -3475,8 +3475,6 @@ handlePollingConfigSet(const char *payload)
 
 		if (!strcmp(key, "bucket_map")) {
 			if (mqttEntitiesRtAvailable()) {
-				persistUserBucketMap(value);
-				anyChange = true;
 				persistUnknownEntityCount = 0;
 				persistInvalidBucketCount = 0;
 				persistDuplicateEntityCount = 0;
@@ -3489,8 +3487,12 @@ handlePollingConfigSet(const char *payload)
 				                                          persistDuplicateEntityCount);
 				persistLoadOk = applied ? 1 : 0;
 				persistLoadErr = applied ? 0 : 1;
-				resendHaData = true;
-				resendAllData = true;
+				if (applied) {
+					persistUserBucketMap(value);
+					anyChange = true;
+					resendHaData = true;
+					resendAllData = true;
+				}
 			}
 			handled = true;
 		}

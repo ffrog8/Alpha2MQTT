@@ -60,6 +60,26 @@ TEST_CASE("bucket map duplicate entries count and last write wins")
 	CHECK(rt[0].bucketId == BucketId::FiveMin);
 }
 
+TEST_CASE("bucket map syntax failure does not partially mutate runtime")
+{
+	mqttState entities[2]{};
+	entities[0] = { mqttEntityId::entityOpMode, "Op_Mode", mqttUpdateFreq::freqTenSec, false, false, homeAssistantClass::haClassSelect };
+	entities[1] = { mqttEntityId::entitySocTarget, "SOC_Target", mqttUpdateFreq::freqOneMin, false, false, homeAssistantClass::haClassNumber };
+
+	MqttEntityRuntime rt[2]{};
+	for (size_t i = 0; i < 2; ++i) {
+		applyBucketToRuntime(rt[i], bucketIdFromFreq(entities[i].updateFreq));
+	}
+
+	uint32_t unknown = 0;
+	uint32_t invalid = 0;
+	uint32_t dup = 0;
+
+	CHECK(!applyBucketMapString("Op_Mode=one_min;SOC_Target", entities, 2, rt, unknown, invalid, dup));
+	CHECK(rt[0].bucketId == BucketId::TenSec);
+	CHECK(rt[1].bucketId == BucketId::OneMin);
+}
+
 TEST_CASE("bucket map rejects entity counts above kMqttEntityMaxCount")
 {
 	mqttState entities[kMqttEntityMaxCount + 1]{};
