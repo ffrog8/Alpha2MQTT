@@ -440,8 +440,10 @@ static void persistUserMqttConfig(const char *server, int port, const char *user
 static void persistUserWifiCredentials(const char *ssid, const char *pass);
 static void persistUserExtAntenna(bool enabled);
 static void persistUserPollingConfig(uint32_t intervalSeconds, const char *bucketMap);
+static void persistUserPollingLastChange(const char *lastChange);
 static void persistUserPollInterval(uint32_t intervalSeconds);
 static void persistUserBucketMap(const char *bucketMap);
+static void persistUserDeviceSerial(const char *serial);
 static void persistDefaultsIfMissing(void);
 void setupHttpControlPlane(void);
 void handleHttpRoot(void);
@@ -1152,6 +1154,23 @@ persistUserPollingConfig(uint32_t intervalSeconds, const char *bucketMap)
 }
 
 static void
+persistUserPollingLastChange(const char *lastChange)
+{
+	if (lastChange == nullptr || *lastChange == '\0') {
+		return;
+	}
+
+	Preferences preferences;
+	char stored[kPrefPollingLastChangeMaxLen] = "";
+	preferences.begin(DEVICE_NAME, false);
+	preferences.getString(kPreferencePollingLastChange, stored, sizeof(stored));
+	if (strcmp(stored, lastChange) != 0) {
+		preferences.putString(kPreferencePollingLastChange, lastChange);
+	}
+	preferences.end();
+}
+
+static void
 persistUserPollInterval(uint32_t intervalSeconds)
 {
 	Preferences preferences;
@@ -1166,6 +1185,23 @@ persistUserBucketMap(const char *bucketMap)
 	Preferences preferences;
 	preferences.begin(DEVICE_NAME, false);
 	preferences.putString(kPreferenceBucketMap, bucketMap);
+	preferences.end();
+}
+
+static void
+persistUserDeviceSerial(const char *serial)
+{
+	if (serial == nullptr || *serial == '\0') {
+		return;
+	}
+
+	Preferences preferences;
+	char stored[kPrefDeviceSerialMaxLen] = "";
+	preferences.begin(DEVICE_NAME, false);
+	preferences.getString(kPreferenceDeviceSerial, stored, sizeof(stored));
+	if (strcmp(stored, serial) != 0) {
+		preferences.putString(kPreferenceDeviceSerial, serial);
+	}
 	preferences.end();
 }
 
@@ -2954,6 +2990,7 @@ void
 updatePollingLastChange(void)
 {
 	getPollingTimestamp(_pollingConfigLastChange, sizeof(_pollingConfigLastChange));
+	persistUserPollingLastChange(_pollingConfigLastChange);
 }
 
 void
@@ -3908,6 +3945,7 @@ getSerialNumber()
 	if ((result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) &&
 	    (strlen(response.dataValueFormatted) >= 15)) {
 		strlcpy(deviceSerialNumber, response.dataValueFormatted, sizeof(deviceSerialNumber));
+		persistUserDeviceSerial(deviceSerialNumber);
 	} else {
 		Preferences preferences;
 		char storedSerial[kPrefDeviceSerialMaxLen] = "";
