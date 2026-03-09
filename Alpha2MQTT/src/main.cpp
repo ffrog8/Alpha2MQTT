@@ -1881,6 +1881,11 @@ void setup()
 
 	currentBootIntent = bootIntentFromString(storedIntent);
 	bootIntentForPublish = currentBootIntent;
+	if (currentBootIntent != BootIntent::Normal) {
+		// Boot intent is a one-boot diagnostic hint. Consume it now so later
+		// unrelated resets do not keep reporting the previous requested mode.
+		persistUserBootIntent(BootIntent::Normal);
+	}
 	currentBootMode = bootModeFromString(storedMode);
 	bootModeForDiagnostics = currentBootMode;
 
@@ -4277,13 +4282,14 @@ mqttReconnect(void)
 #ifdef DEBUG_OVER_SERIAL
 		Serial.printf("WiFi guard scan state %d\r\n", scanState);
 #endif
-		if (scanState == WIFI_SCAN_RUNNING) {
-			if (shouldStartWifiScan(currentBootMode)) {
-				WiFi.scanNetworksAsync(wifiScanCompleteNoop, false);
-			}
+		const WifiScanGuardAction action = classifyWifiScanGuard(scanState);
+		if (action == WifiScanGuardAction::RebindNoopCallback) {
+			// Guard any in-flight scan, even in NORMAL mode. The protection is about
+			// neutralizing a stale callback target, not authorizing new scans.
+			WiFi.scanNetworksAsync(wifiScanCompleteNoop, false);
 			return;
 		}
-		if (scanState >= 0 || scanState == WIFI_SCAN_FAILED) {
+		if (action == WifiScanGuardAction::DeleteResults) {
 			WiFi.scanDelete();
 		}
 	};
@@ -4329,13 +4335,11 @@ mqttReconnect(void)
 #ifdef DEBUG_OVER_SERIAL
 		logHeap("before WiFi guard");
 #endif
-		if (shouldStartWifiScan(currentBootMode)) {
-			guardAsyncWifiScanCallback();
-		} else {
+		guardAsyncWifiScanCallback();
+		if (!shouldStartWifiScan(currentBootMode)) {
 #ifdef DEBUG_OVER_SERIAL
-			Serial.println(F("WiFi guard: scans disabled in NORMAL; clearing results."));
+			Serial.println(F("WiFi guard: scans disabled in NORMAL."));
 #endif
-			WiFi.scanDelete();
 		}
 #ifdef DEBUG_OVER_SERIAL
 		logHeap("after WiFi guard");
