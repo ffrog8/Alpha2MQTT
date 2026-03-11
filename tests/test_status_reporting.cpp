@@ -71,6 +71,27 @@ TEST_CASE("status net JSON builder includes required keys")
 	CHECK(payload.find("\"wifi_status\":\"Connected\"") != std::string::npos);
 }
 
+TEST_CASE("status net JSON builder escapes SSID content")
+{
+	StatusNetSnapshot snapshot{};
+	snapshot.uptimeS = 1;
+	snapshot.freeHeap = 2;
+	snapshot.rssiDbm = -40;
+	snapshot.ip = "192.168.1.50";
+	snapshot.ssid = "qa\\\"wifi";
+	snapshot.mqttConnected = true;
+	snapshot.mqttReconnects = 0;
+	snapshot.wifiStatus = "Connected";
+	snapshot.wifiStatusCode = 3;
+	snapshot.wifiReconnects = 0;
+
+	char buffer[1024];
+	CHECK(buildStatusNetJson(snapshot, buffer, sizeof(buffer)));
+
+	std::string payload(buffer);
+	CHECK(payload.find("\"ssid\":\"qa\\\\\\\"wifi\"") != std::string::npos);
+}
+
 TEST_CASE("status poll JSON builder includes required keys")
 {
 	StatusPollSnapshot snapshot{};
@@ -168,6 +189,24 @@ TEST_CASE("status poll JSON builder includes required keys")
 	CHECK(payload.find("\"last_err_code\":2") != std::string::npos);
 	CHECK(payload.find("\"rs485_probe_last_attempt_ms\":12345") != std::string::npos);
 	CHECK(payload.find("\"rs485_probe_backoff_ms\":15000") != std::string::npos);
+}
+
+TEST_CASE("status poll JSON builder escapes string fields")
+{
+	StatusPollSnapshot snapshot{};
+	snapshot.rs485Backend = "st\\\"ub";
+	snapshot.rs485StubMode = "on\\line";
+	snapshot.inverterReady = true;
+	snapshot.essSnapshotOk = true;
+	snapshot.essSnapshotLastOk = true;
+	snapshot.dispatchLastSkipReason = "bad\\\"skip";
+
+	char buffer[2048];
+	CHECK(buildStatusPollJson(snapshot, buffer, sizeof(buffer)));
+
+	std::string payload(buffer);
+	CHECK(payload.find("\"rs485_backend\":\"st\\\\\\\"ub\"") != std::string::npos);
+	CHECK(payload.find("\"dispatch_last_skip_reason\":\"bad\\\\\\\"skip\"") != std::string::npos);
 }
 
 TEST_CASE("status poll compact JSON includes snapshot/dispatch and stub scheduler keys conditionally")

@@ -18,6 +18,9 @@ static const char *kPollBudgetBucketKeys[kStatusPollBucketCount] = {
 };
 
 static bool
+appendEscapedJsonString(char *dest, size_t destSize, const char *src);
+
+static bool
 buildPollBudgetJson(const StatusPollSnapshot &snapshot, char *out, size_t outSize)
 {
 	if (out == nullptr || outSize == 0) {
@@ -168,6 +171,22 @@ buildStatusCoreJson(const StatusCoreSnapshot &snapshot, char *out, size_t outSiz
 	if (out == nullptr || outSize == 0) {
 		return false;
 	}
+	char presence[32];
+	char a2mStatus[32];
+	char rs485Status[32];
+	char gridStatus[32];
+	char bootMode[32];
+	char bootIntent[32];
+	char haUniqueId[64];
+	if (!appendEscapedJsonString(presence, sizeof(presence), snapshot.presence) ||
+	    !appendEscapedJsonString(a2mStatus, sizeof(a2mStatus), snapshot.a2mStatus) ||
+	    !appendEscapedJsonString(rs485Status, sizeof(rs485Status), snapshot.rs485Status) ||
+	    !appendEscapedJsonString(gridStatus, sizeof(gridStatus), snapshot.gridStatus) ||
+	    !appendEscapedJsonString(bootMode, sizeof(bootMode), snapshot.bootMode) ||
+	    !appendEscapedJsonString(bootIntent, sizeof(bootIntent), snapshot.bootIntent) ||
+	    !appendEscapedJsonString(haUniqueId, sizeof(haUniqueId), snapshot.haUniqueId)) {
+		return false;
+	}
 	int written = snprintf(
 		out,
 		outSize,
@@ -181,14 +200,14 @@ buildStatusCoreJson(const StatusCoreSnapshot &snapshot, char *out, size_t outSiz
 		"\"http_control_plane_enabled\":%s,"
 		"\"ha_unique_id\":\"%s\""
 		"}",
-		snapshot.presence ? snapshot.presence : "",
-		snapshot.a2mStatus ? snapshot.a2mStatus : "",
-		snapshot.rs485Status ? snapshot.rs485Status : "",
-		snapshot.gridStatus ? snapshot.gridStatus : "",
-		snapshot.bootMode ? snapshot.bootMode : "",
-		snapshot.bootIntent ? snapshot.bootIntent : "",
+		presence,
+		a2mStatus,
+		rs485Status,
+		gridStatus,
+		bootMode,
+		bootIntent,
 		snapshot.httpControlPlaneEnabled ? "true" : "false",
-		snapshot.haUniqueId ? snapshot.haUniqueId : "");
+		haUniqueId);
 	if (written < 0 || static_cast<size_t>(written) >= outSize) {
 		return false;
 	}
@@ -199,6 +218,14 @@ bool
 buildStatusNetJson(const StatusNetSnapshot &snapshot, char *out, size_t outSize)
 {
 	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+	char ip[64];
+	char ssid[128];
+	char wifiStatus[32];
+	if (!appendEscapedJsonString(ip, sizeof(ip), snapshot.ip) ||
+	    !appendEscapedJsonString(ssid, sizeof(ssid), snapshot.ssid) ||
+	    !appendEscapedJsonString(wifiStatus, sizeof(wifiStatus), snapshot.wifiStatus)) {
 		return false;
 	}
 	int written = snprintf(
@@ -219,11 +246,11 @@ buildStatusNetJson(const StatusNetSnapshot &snapshot, char *out, size_t outSize)
 		static_cast<unsigned long>(snapshot.uptimeS),
 		static_cast<unsigned long>(snapshot.freeHeap),
 		snapshot.rssiDbm,
-		snapshot.ip ? snapshot.ip : "",
-		snapshot.ssid ? snapshot.ssid : "",
+		ip,
+		ssid,
 		snapshot.mqttConnected ? "true" : "false",
 		static_cast<unsigned long>(snapshot.mqttReconnects),
-		snapshot.wifiStatus ? snapshot.wifiStatus : "",
+		wifiStatus,
 		snapshot.wifiStatusCode,
 		static_cast<unsigned long>(snapshot.wifiReconnects));
 	if (written < 0 || static_cast<size_t>(written) >= outSize) {
@@ -236,6 +263,14 @@ bool
 buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSize)
 {
 	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+	char rs485Backend[32];
+	char rs485StubMode[32];
+	char dispatchLastSkipReason[64];
+	if (!appendEscapedJsonString(rs485Backend, sizeof(rs485Backend), snapshot.rs485Backend) ||
+	    !appendEscapedJsonString(rs485StubMode, sizeof(rs485StubMode), snapshot.rs485StubMode) ||
+	    !appendEscapedJsonString(dispatchLastSkipReason, sizeof(dispatchLastSkipReason), snapshot.dispatchLastSkipReason)) {
 		return false;
 	}
 	char pollBudget[768];
@@ -299,8 +334,8 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		",\"mem_thr\":[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]"
 #endif
 		"}",
-		snapshot.rs485Backend ? snapshot.rs485Backend : "",
-		snapshot.rs485StubMode ? snapshot.rs485StubMode : "",
+		rs485Backend,
+		rs485StubMode,
 		static_cast<unsigned long>(snapshot.rs485StubFailRemaining),
 		static_cast<unsigned long>(snapshot.rs485StubWriteCount),
 		static_cast<unsigned>(snapshot.rs485StubLastWriteStartReg),
@@ -319,7 +354,7 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		snapshot.essSnapshotLastOk ? "true" : "false",
 			static_cast<unsigned long>(snapshot.essSnapshotAttempts),
 			static_cast<unsigned long>(snapshot.dispatchLastRunMs),
-			snapshot.dispatchLastSkipReason ? snapshot.dispatchLastSkipReason : "",
+			dispatchLastSkipReason,
 			static_cast<unsigned long>(snapshot.pollIntervalSeconds),
 #if RS485_STUB
 			static_cast<unsigned long>(snapshot.schedTenSecLastRunMs),
@@ -387,6 +422,14 @@ buildStatusPollJsonCompact(const StatusPollSnapshot &snapshot, char *out, size_t
 	if (out == nullptr || outSize == 0) {
 		return false;
 	}
+	char rs485Backend[32];
+	char rs485StubMode[32];
+	char dispatchLastSkipReason[64];
+	if (!appendEscapedJsonString(rs485Backend, sizeof(rs485Backend), snapshot.rs485Backend) ||
+	    !appendEscapedJsonString(rs485StubMode, sizeof(rs485StubMode), snapshot.rs485StubMode) ||
+	    !appendEscapedJsonString(dispatchLastSkipReason, sizeof(dispatchLastSkipReason), snapshot.dispatchLastSkipReason)) {
+		return false;
+	}
 	char pollBudget[512];
 	if (!buildPollBudgetJsonCompact(snapshot, pollBudget, sizeof(pollBudget))) {
 		return false;
@@ -423,8 +466,8 @@ buildStatusPollJsonCompact(const StatusPollSnapshot &snapshot, char *out, size_t
 		"\"rs485_probe_last_attempt_ms\":%lu,"
 		"\"rs485_probe_backoff_ms\":%lu"
 		"}",
-		snapshot.rs485Backend ? snapshot.rs485Backend : "",
-		snapshot.rs485StubMode ? snapshot.rs485StubMode : "",
+		rs485Backend,
+		rs485StubMode,
 		static_cast<unsigned long>(snapshot.rs485StubFailRemaining),
 		static_cast<unsigned long>(snapshot.rs485StubWriteCount),
 		static_cast<unsigned>(snapshot.rs485StubLastWriteStartReg),
@@ -434,7 +477,7 @@ buildStatusPollJsonCompact(const StatusPollSnapshot &snapshot, char *out, size_t
 		snapshot.essSnapshotLastOk ? "true" : "false",
 			static_cast<unsigned long>(snapshot.essSnapshotAttempts),
 			static_cast<unsigned long>(snapshot.dispatchLastRunMs),
-			snapshot.dispatchLastSkipReason ? snapshot.dispatchLastSkipReason : "",
+			dispatchLastSkipReason,
 			static_cast<unsigned long>(snapshot.pollIntervalSeconds),
 #if RS485_STUB
 			static_cast<unsigned long>(snapshot.schedTenSecLastRunMs),
@@ -460,6 +503,10 @@ bool
 buildStatusStubJson(const StatusStubSnapshot &snapshot, char *out, size_t outSize)
 {
 	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+	char lastFailType[32];
+	if (!appendEscapedJsonString(lastFailType, sizeof(lastFailType), snapshot.lastFailType)) {
 		return false;
 	}
 	int written = snprintf(
@@ -493,7 +540,7 @@ buildStatusStubJson(const StatusStubSnapshot &snapshot, char *out, size_t outSiz
 		static_cast<unsigned>(snapshot.lastFn),
 		static_cast<unsigned>(snapshot.lastFailStartReg),
 		static_cast<unsigned>(snapshot.lastFailFn),
-		snapshot.lastFailType ? snapshot.lastFailType : "",
+		lastFailType,
 		static_cast<unsigned>(snapshot.latencyMs),
 		snapshot.strictUnknown ? "true" : "false",
 		static_cast<unsigned long>(snapshot.failEveryN),
@@ -508,6 +555,8 @@ buildStatusStubJson(const StatusStubSnapshot &snapshot, char *out, size_t outSiz
 	}
 	return true;
 }
+
+namespace {
 
 static bool
 appendEscapedJsonString(char *dest, size_t destSize, const char *src)
@@ -549,6 +598,8 @@ appendEscapedJsonString(char *dest, size_t destSize, const char *src)
 	dest[writePos] = '\0';
 	return true;
 }
+
+} // namespace
 
 bool
 buildStatusManualReadJson(const StatusManualReadSnapshot &snapshot, char *out, size_t outSize)
