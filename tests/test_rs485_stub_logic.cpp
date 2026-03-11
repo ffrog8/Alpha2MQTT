@@ -42,3 +42,15 @@ TEST_CASE("rs485 stub: can fail a specific register regardless of mode")
 	CHECK_FALSE(rs485StubShouldFail(cfg, 100, 556));
 }
 
+TEST_CASE("rs485 stub: online-like modes bypass probe lifecycle")
+{
+	CHECK_FALSE(rs485StubModeUsesProbeLifecycle(Rs485StubMode::OnlineAlways));
+	CHECK_FALSE(rs485StubModeUsesProbeLifecycle(Rs485StubMode::FailFirstNThenRecover));
+	CHECK_FALSE(rs485StubModeUsesProbeLifecycle(Rs485StubMode::FlapTime));
+}
+
+TEST_CASE("rs485 stub: offline-like modes keep probe lifecycle")
+{
+	CHECK(rs485StubModeUsesProbeLifecycle(Rs485StubMode::OfflineForever));
+	CHECK(rs485StubModeUsesProbeLifecycle(Rs485StubMode::ProbeDelayedOnline));
+}

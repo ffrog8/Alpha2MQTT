@@ -44,10 +44,13 @@ The E2E checks behavior via the existing poll status topic:
   <device_root>/status/poll
 and the stub-only status topic (stub firmware only):
   <device_root>/status/stub
+and the manual register-read correlation topic:
+  <device_root>/status/manual_read
 and asserts on keys emitted by the firmware:
   rs485_backend, rs485_stub_mode, rs485_stub_fail_remaining,
   ess_snapshot_attempts, ess_snapshot_last_ok,
-  dispatch_last_run_ms, dispatch_last_skip_reason.
+  dispatch_last_run_ms, dispatch_last_skip_reason,
+  seq, requested_reg, observed_reg, value.
 
 Usage
   python3 tools/e2e/test_rs485_stub.py
@@ -55,7 +58,7 @@ Usage
   python3 tools/e2e/test_rs485_stub.py --force-flash
   python3 tools/e2e/test_rs485_stub.py --list-cases
   python3 tools/e2e/test_rs485_stub.py --case portal_polling_ui
-  python3 tools/e2e/test_rs485_stub.py --from-case soc_drift --trace-http
+  python3 tools/e2e/test_rs485_stub.py --from-case soc_drift_e2e --trace-http
 """
 
 from __future__ import annotations
@@ -99,7 +102,10 @@ CASE_ORDER: tuple[str, ...] = (
     "probe_delayed",
     "fail_writes_only",
     "fail_for_ms",
-    "soc_drift",
+    "soc_drift_backend_ready",
+    "stub_soc_drift_applies",
+    "soc_publish_respects_bucket",
+    "soc_drift_e2e",
     "polling_config",
     "portal_polling_ui",
 )
@@ -967,6 +973,9 @@ def _wait_for_boot_fw_build_ts_ms(
 def _fetch_stub(mqtt: MqttClient, topic: str) -> dict[str, Any]:
     return _fetch_latest_json(mqtt, topic, label="stub")
 
+def _fetch_manual_read(mqtt: MqttClient, topic: str) -> dict[str, Any]:
+    return _fetch_latest_json(mqtt, topic, label="manual_read")
+
 def _fetch_latest_text(mqtt: MqttClient, topic: str, label: str) -> str:
     def inner() -> str:
         mqtt.subscribe(topic, force=True)
@@ -1002,21 +1011,113 @@ def _fetch_latest_text(mqtt: MqttClient, topic: str, label: str) -> str:
     return _mqtt_retry(mqtt, f"fetch_latest_text({label})", inner)
 
 def _wait_for_topic_change(mqtt: MqttClient, topic: str, prev: str, timeout_s: int, label: str) -> str:
+    def inner() -> str:
+        mqtt.subscribe(topic, force=True)
+        deadline = time.time() + timeout_s
+        last_observed = ""
+        while time.time() < deadline:
+            try:
+                got_topic, payload = mqtt.wait_for_publish(timeout_s=12.0)
+            except E2EError as e:
+                if "Timeout waiting for MQTT publish" in str(e):
+                    continue
+                raise
+            last_observed = f"topic={got_topic} payload={payload!r}"
+            if got_topic != topic:
+                continue
+            if payload != prev:
+                return payload
+        raise E2EError(f"Timeout waiting for {label} change on {topic}. Last observed: {last_observed}")
+
+    return _mqtt_retry(mqtt, f"wait_for_topic_change({label})", inner)
+
+def _wait_for_live_json_change(
+    mqtt: MqttClient,
+    topic: str,
+    label: str,
+    *,
+    timeout_s: int = 20,
+) -> dict[str, Any]:
+    prev = _fetch_latest_text(mqtt, topic, label=f"{label}_baseline")
+    changed = _wait_for_topic_change(mqtt, topic, prev, timeout_s=timeout_s, label=label)
+    try:
+        return _parse_json(changed)
+    except Exception as e:
+        raise E2EError(f"{label} payload was not valid JSON on {topic}: {changed!r} ({e})")
+
+def _wait_for_manual_read(
+    mqtt: MqttClient,
+    manual_topic: str,
+    *,
+    expected_reg: int,
+    previous_marker: str,
+    timeout_s: int,
+    label: str,
+) -> dict[str, Any]:
+    mqtt.subscribe(manual_topic, force=True)
     deadline = time.time() + timeout_s
     last_observed = ""
     while time.time() < deadline:
         try:
-            got_topic, payload = mqtt.wait_for_publish(timeout_s=12.0)
+            got_topic, payload = mqtt.wait_for_publish(timeout_s=8.0)
         except E2EError as e:
             if "Timeout waiting for MQTT publish" in str(e):
                 continue
             raise
         last_observed = f"topic={got_topic} payload={payload!r}"
-        if got_topic != topic:
+        if got_topic != manual_topic:
             continue
-        if payload != prev:
-            return payload
-    raise E2EError(f"Timeout waiting for {label} change on {topic}. Last observed: {last_observed}")
+        try:
+            parsed = _parse_json(payload)
+        except Exception as e:
+            raise E2EError(f"{label} payload was not valid JSON on {manual_topic}: {payload!r} ({e})")
+        requested_reg = parsed.get("requested_reg")
+        try:
+            requested_reg_int = int(requested_reg)
+        except Exception:
+            continue
+        if requested_reg_int != expected_reg:
+            continue
+        marker = json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+        if marker == previous_marker:
+            continue
+        return parsed
+    raise E2EError(f"Timeout waiting for {label} JSON on {manual_topic}. Last observed: {last_observed}")
+
+def _select_register_and_wait_manual_read(
+    mqtt: MqttClient,
+    command_topic: str,
+    manual_topic: str,
+    reg: int,
+    *,
+    label: str,
+    timeout_s: int = 30,
+) -> dict[str, Any]:
+    try:
+        previous = _fetch_manual_read(mqtt, manual_topic)
+        previous_marker = json.dumps(previous, sort_keys=True, separators=(",", ":"))
+    except E2EError:
+        previous_marker = ""
+
+    deadline = time.time() + timeout_s
+    last_err = "no attempts"
+    while time.time() < deadline:
+        mqtt.publish(command_topic, str(reg), retain=False)
+        try:
+            return _wait_for_manual_read(
+                mqtt,
+                manual_topic,
+                expected_reg=reg,
+                previous_marker=previous_marker,
+                timeout_s=8,
+                label=label,
+            )
+        except E2EError as e:
+            last_err = str(e)
+        time.sleep(1.0)
+    raise E2EError(
+        f"Register_Number did not publish status/manual_read for register {reg}; last_err={last_err}"
+    )
 
 def _device_is_latest_stub(
     mqtt: MqttClient,
@@ -1413,25 +1514,8 @@ def main() -> int:
     def _command_topic(inverter_device_id: str, name: str) -> str:
         return f"{device_root}/{inverter_device_id}/{name}/command"
 
-    def _collect_discovery_messages(timeout_s: int = 20) -> list[tuple[str, dict[str, Any]]]:
-        mqtt.subscribe("homeassistant/+/+/+/config", force=True)
-        deadline = time.time() + timeout_s
-        out: list[tuple[str, dict[str, Any]]] = []
-        while time.time() < deadline:
-            try:
-                topic, payload = mqtt.wait_for_publish(timeout_s=3.0)
-            except E2EError as e:
-                if "Timeout waiting for MQTT publish" in str(e):
-                    continue
-                raise
-            if not topic.startswith("homeassistant/") or not topic.endswith("/config"):
-                continue
-            try:
-                parsed = _parse_json(payload)
-            except Exception:
-                continue
-            out.append((topic, parsed))
-        return out
+    def _manual_read_topic() -> str:
+        return f"{device_root}/status/manual_read"
 
     def case_two_device_discovery() -> None:
         print("[e2e] case: two-device discovery model")
@@ -1457,60 +1541,59 @@ def main() -> int:
         # Force a discovery re-advertise so checks are against current firmware behavior, not stale retained topics.
         mqtt.publish("homeassistant/status", "online", retain=False)
         _sleep_with_mqtt(mqtt, 2)
-        discovered = _collect_discovery_messages(timeout_s=25)
-        if not discovered:
-            raise E2EError("No Home Assistant discovery payloads observed")
-
-        controller_entity_count = 0
-        inverter_id_seen = set()
-
-        for _topic, payload in discovered:
-            device = payload.get("device", {})
-            if not isinstance(device, dict):
-                continue
-            identifiers = device.get("identifiers", [])
-            if not isinstance(identifiers, list) or not identifiers:
-                continue
-            identifier = str(identifiers[0])
-            unique_id = str(payload.get("unique_id", ""))
-            if identifier == controller_id:
-                if unique_id.startswith(f"{controller_id}_"):
-                    controller_entity_count += 1
-            if identifier.startswith("alpha2mqtt_inv_"):
-                inverter_id_seen.add(identifier)
-                via = str(device.get("via_device", ""))
-                if not via:
-                    raise E2EError(f"inverter discovery missing via_device: topic={_topic} payload={payload}")
-                if via != controller_id:
-                    raise E2EError(f"inverter via_device mismatch: via={via!r} expected={controller_id!r}")
-
-        if controller_entity_count == 0:
-            raise E2EError("controller discovery entities not found (unique_id prefix mismatch)")
-
-        # Controller-scoped inverter serial entity must always exist.
-        inverter_serial_uid = f"{controller_id}_inverter_serial"
-        inverter_serial_seen = any(str(payload.get("unique_id", "")) == inverter_serial_uid for _, payload in discovered)
-        if not inverter_serial_seen:
-            raise E2EError(f"missing controller inverter_serial discovery unique_id={inverter_serial_uid}")
 
         serial_known = str(controller_serial).strip().lower() not in ("", "unknown")
-        if not serial_known and inverter_id_seen:
-            raise E2EError(f"inverter discovery published before serial known: ids={sorted(inverter_id_seen)}")
-
+        inverter_device_id = _wait_for_inverter_identity() if serial_known else ""
+        inverter_serial_uid = f"{controller_id}_inverter_serial"
+        expected_topics = {
+            f"homeassistant/sensor/{controller_id}/inverter_serial/config",
+            f"homeassistant/sensor/{controller_id}/A2M_version/config",
+        }
         if serial_known:
-            inverter_device_id = _wait_for_inverter_identity()
-            if inverter_device_id not in inverter_id_seen:
-                # retained discovery may not have arrived in first window; retry once.
-                discovered_retry = _collect_discovery_messages(timeout_s=12)
-                inverter_id_seen_retry = {
-                    str(p.get("device", {}).get("identifiers", [""])[0])
-                    for _, p in discovered_retry
-                    if isinstance(p.get("device", {}), dict)
-                    and isinstance(p.get("device", {}).get("identifiers", []), list)
-                    and p.get("device", {}).get("identifiers", [])
-                }
-                if inverter_device_id not in inverter_id_seen_retry:
-                    raise E2EError(f"expected inverter discovery id={inverter_device_id} not observed")
+            expected_topics.add(f"homeassistant/sensor/{inverter_device_id}/Inverter_SN/config")
+
+        seen_topics: set[str] = set()
+        mqtt.subscribe("homeassistant/+/+/+/config", force=True)
+        deadline = time.time() + 25
+        while time.time() < deadline and seen_topics != expected_topics:
+            try:
+                got_topic, raw_payload = mqtt.wait_for_publish(timeout_s=5.0)
+            except E2EError as e:
+                if "Timeout waiting for MQTT publish" in str(e):
+                    continue
+                raise
+            if got_topic not in expected_topics:
+                continue
+            try:
+                payload = _parse_json(raw_payload)
+            except Exception:
+                continue
+            if got_topic.endswith("/inverter_serial/config"):
+                if str(payload.get("unique_id", "")) != inverter_serial_uid:
+                    raise E2EError(
+                        f"controller inverter_serial unique_id mismatch: "
+                        f"expected {inverter_serial_uid!r} got {payload.get('unique_id')!r}"
+                    )
+            elif got_topic.endswith("/A2M_version/config"):
+                if not str(payload.get("unique_id", "")).startswith(f"{controller_id}_"):
+                    raise E2EError("controller discovery entities not found (unique_id prefix mismatch)")
+            elif got_topic.endswith("/Inverter_SN/config"):
+                inverter_device = payload.get("device", {})
+                if not isinstance(inverter_device, dict):
+                    raise E2EError(f"inverter discovery missing device block: {payload}")
+                identifiers = inverter_device.get("identifiers", [])
+                if not isinstance(identifiers, list) or not identifiers or str(identifiers[0]) != inverter_device_id:
+                    raise E2EError(
+                        f"inverter discovery identifier mismatch: expected {inverter_device_id!r} got {identifiers!r}"
+                    )
+                via = str(inverter_device.get("via_device", ""))
+                if via != controller_id:
+                    raise E2EError(f"inverter via_device mismatch: via={via!r} expected={controller_id!r}")
+            seen_topics.add(got_topic)
+
+        missing = sorted(expected_topics - seen_topics)
+        if missing:
+            raise E2EError(f"missing discovery topic(s): {missing}")
 
     def case_offline() -> None:
         print("[e2e] case: stub offline")
@@ -1631,43 +1714,17 @@ def main() -> int:
         # Ensure we can assert on the actual dispatch start register value.
         reg_dispatch_start = _discover_register_value("REG_DISPATCH_RW_DISPATCH_START")
         dispatch_start_start = _discover_define_value("DISPATCH_START_START")
-
-        # Also validate write -> read feedback via the existing Register_Number/Register_Value entities.
-        # Re-enable and speed up Register_Value in case prior runs changed intervals.
-        wait_intervals_applied({"Register_Value": "ten_sec"})
-        regnum_topic = _state_topic(ha_unique, "Register_Number")
-        val_topic = _state_topic(ha_unique, "Register_Value")
-        mqtt.subscribe(regnum_topic, force=True)
-        mqtt.subscribe(val_topic, force=True)
-
-        def fetch_value_text(label: str, timeout_s: int = 80) -> str:
-            deadline = time.time() + timeout_s
-            last_err = "no attempts"
-            while time.time() < deadline:
-                try:
-                    return _fetch_latest_text(mqtt, val_topic, label=label)
-                except E2EError as e:
-                    last_err = str(e)
-                    time.sleep(1.5)
-            raise E2EError(f"Timeout waiting for {label} text on {val_topic}. Last observed: {last_err}")
-
-        # Point Register_Value at the dispatch-start register, and wait until the firmware confirms it.
-        def ensure_regnum_set() -> None:
-            deadline = time.time() + 30
-            last_seen = ""
-            while time.time() < deadline:
-                mqtt.publish(f"{base}/Register_Number/command", str(reg_dispatch_start), retain=False)
-                try:
-                    last_seen = _fetch_latest_text(mqtt, regnum_topic, label="reg_number_state")
-                    if last_seen.strip() == str(reg_dispatch_start):
-                        return
-                except E2EError:
-                    pass
-                time.sleep(1.0)
-            raise E2EError(f"Register_Number did not update to {reg_dispatch_start}; last_seen={last_seen!r}")
-
-        ensure_regnum_set()
-        before_val = fetch_value_text("dispatch_start_before")
+        manual_topic = _manual_read_topic()
+        manual_before = _select_register_and_wait_manual_read(
+            mqtt,
+            _command_topic(ha_unique, "Register_Number"),
+            manual_topic,
+            reg_dispatch_start,
+            label="dispatch_start_before",
+        )
+        before_val = str(manual_before.get("value", ""))
+        if before_val == "":
+            raise E2EError("manual_read missing value for dispatch_start_before")
 
         op_mode_target = _discover_define_string("OP_MODE_DESC_TARGET")
 
@@ -1731,19 +1788,24 @@ def main() -> int:
 
         _assert_eventually("dispatch write observed in stub backend", pred, timeout_s=45, poll_s=3.0)
 
-        # Now assert that subsequent reads/publishes reflect the effect of the write.
-        deadline = time.time() + 60
-        last_val = before_val
-        while time.time() < deadline:
-            last_val = fetch_value_text("dispatch_start_after", timeout_s=30)
-            normalized = last_val.strip().lower()
-            if normalized in ("start", "started") or last_val.strip() == str(dispatch_start_start):
-                return
-            time.sleep(1.0)
-        raise E2EError(
-            f"Register_Value did not reflect dispatch_start change; expected 'Start' (or {dispatch_start_start}) "
-            f"but got last={last_val!r} initial={before_val!r}"
+        manual_after = _select_register_and_wait_manual_read(
+            mqtt,
+            _command_topic(ha_unique, "Register_Number"),
+            manual_topic,
+            reg_dispatch_start,
+            label="dispatch_start_after",
         )
+        observed_reg = int(manual_after.get("observed_reg", 0))
+        if observed_reg != reg_dispatch_start:
+            raise E2EError(f"manual_read observed_reg mismatch: expected {reg_dispatch_start}, got {observed_reg}")
+        last_val = str(manual_after.get("value", ""))
+        normalized = last_val.strip().lower()
+        if normalized not in ("start", "started") and last_val.strip() != str(dispatch_start_start):
+            raise E2EError(
+                f"manual_read did not reflect dispatch_start change; expected 'Start' (or {dispatch_start_start}) "
+                f"but got last={last_val!r} initial={before_val!r}"
+            )
+        return
 
     def case_dispatch_write_feedback_via_register_value() -> None:
         print("[e2e] case: dispatch write feedback (Register_Value reflects new dispatch state)")
@@ -1889,48 +1951,10 @@ def main() -> int:
     def case_strict_unknown_register_reads() -> None:
         print("[e2e] case: strict/loose unknown register reads via Register_Value")
         ha_unique = _wait_for_inverter_identity()
-
-        # Prior cases may temporarily disable Register_Value to keep snapshot tests scoped; re-enable it here
-        # and speed it up so we don't wait a full minute.
-        enable_map = {"Register_Value": "ten_sec"}
-        wait_intervals_applied(enable_map)
+        manual_topic = _manual_read_topic()
 
         # Use a handled register that is not virtualized by the stub (so the stub sees it as unknown).
         reg = _discover_register_value("REG_INVERTER_HOME_R_INVERTER_TEMP")
-
-        # Make sure Register_Number is actually applied before we assert on Register_Value output.
-        regnum_topic = _state_topic(ha_unique, "Register_Number")
-        mqtt.subscribe(regnum_topic, force=True)
-
-        val_topic = _state_topic(ha_unique, "Register_Value")
-        mqtt.subscribe(val_topic, force=True)
-
-        def fetch_value_text(label: str, timeout_s: int = 80) -> str:
-            deadline = time.time() + timeout_s
-            last_err = "no attempts"
-            while time.time() < deadline:
-                try:
-                    return _fetch_latest_text(mqtt, val_topic, label=label)
-                except E2EError as e:
-                    last_err = str(e)
-                    time.sleep(1.5)
-            raise E2EError(f"Timeout waiting for {label} text on {val_topic}. Last observed: {last_err}")
-
-        def ensure_regnum_set() -> None:
-            deadline = time.time() + 30
-            last_seen = ""
-            while time.time() < deadline:
-                mqtt.publish(_command_topic(ha_unique, "Register_Number"), str(reg), retain=False)
-                try:
-                    last_seen = _fetch_latest_text(mqtt, regnum_topic, label="reg_number_state")
-                    if last_seen.strip() == str(reg):
-                        return
-                except E2EError:
-                    pass
-                time.sleep(1.0)
-            raise E2EError(f"Register_Number did not update to {reg}; last_seen={last_seen!r}")
-
-        ensure_regnum_set()
 
         before_stub = _fetch_stub(mqtt, stub_topic)
         before_unknown = int(before_stub.get("stub_unknown_reads", 0))
@@ -1945,7 +1969,26 @@ def main() -> int:
             timeout_s=30,
             poll_s=2.0,
         )
-        value_loose = fetch_value_text("reg_value_loose")
+        loose_manual = _select_register_and_wait_manual_read(
+            mqtt,
+            _command_topic(ha_unique, "Register_Number"),
+            manual_topic,
+            reg,
+            label="reg_value_loose",
+        )
+        value_loose = str(loose_manual.get("value", ""))
+        if int(loose_manual.get("observed_reg", 0)) != reg:
+            raise E2EError(f"manual_read observed_reg mismatch in loose mode: expected {reg}, got {loose_manual.get('observed_reg')!r}")
+        def loose_recorded_pred() -> Tuple[bool, str]:
+            cur = _fetch_stub(mqtt, stub_topic)
+            unknown_now = int(cur.get("stub_unknown_reads", 0))
+            return (unknown_now > before_unknown), f"unknown_reads={unknown_now}"
+        _assert_eventually(
+            "loose unknown register read recorded in stub status",
+            loose_recorded_pred,
+            timeout_s=25,
+            poll_s=1.5,
+        )
         after_loose = _fetch_stub(mqtt, stub_topic)
 
         unknown_after = int(after_loose.get("stub_unknown_reads", 0))
@@ -1966,18 +2009,30 @@ def main() -> int:
             timeout_s=30,
             poll_s=2.0,
         )
-        value_strict = _wait_for_topic_change(mqtt, val_topic, value_loose, timeout_s=30, label="reg_value")
+        strict_manual = _select_register_and_wait_manual_read(
+            mqtt,
+            _command_topic(ha_unique, "Register_Number"),
+            manual_topic,
+            reg,
+            label="reg_value_strict",
+        )
+        value_strict = str(strict_manual.get("value", ""))
+        if int(strict_manual.get("observed_reg", 0)) != reg:
+            raise E2EError(f"manual_read observed_reg mismatch in strict mode: expected {reg}, got {strict_manual.get('observed_reg')!r}")
         if value_strict != "Slave Error":
             raise E2EError(f"Expected Slave Error in strict mode but got: {value_strict!r}")
-        # `status/stub` is periodic/retained telemetry; allow time for it to reflect the last fail.
-        deadline = time.time() + 30
-        last = {}
-        while time.time() < deadline:
-            last = _fetch_stub(mqtt, stub_topic)
-            if bool(last.get("strict_unknown", False)) and str(last.get("last_fail_type", "")) == "slave_error":
-                return
-            time.sleep(1.0)
-        raise E2EError(f"Expected strict_unknown=true and last_fail_type=slave_error, got: {last}")
+        def strict_recorded_pred() -> Tuple[bool, str]:
+            cur = _fetch_stub(mqtt, stub_topic)
+            strict_val = bool(cur.get("strict_unknown", False))
+            last_fail_type = str(cur.get("last_fail_type", ""))
+            return (strict_val and last_fail_type == "slave_error"), f"strict={strict_val} last_fail_type={last_fail_type}"
+        _assert_eventually(
+            "strict unknown register read recorded in stub status",
+            strict_recorded_pred,
+            timeout_s=25,
+            poll_s=1.5,
+        )
+        return
 
     def case_fail_specific_snapshot_register_and_type() -> None:
         print("[e2e] case: fail specific snapshot register + fail type reporting")
@@ -2140,53 +2195,133 @@ def main() -> int:
             time.sleep(3.0)
         raise E2EError(f"fail_for_ms did not show fail then recover within timeout; last={last_detail}")
 
-    def case_soc_drift_over_time() -> None:
-        print("[e2e] case: virtual SOC drifts per snapshot attempt")
-        drift_mode_payload = '{"mode":"online","soc_pct":50,"soc_step_x10_per_snapshot":10}'
+    def _soc_drift_payload() -> str:
+        return '{"mode":"online","soc_pct":50,"soc_step_x10_per_snapshot":10}'
+
+    def _soc_drift_poll_interval() -> int:
+        return int(_fetch_poll(mqtt, poll_topic).get("poll_interval_s", 13))
+
+    def _ensure_soc_drift_backend(current_poll_interval: int) -> None:
+        drift_mode_payload = _soc_drift_payload()
         set_mode_and_wait(drift_mode_payload, ("online",))
-        ha_unique = _wait_for_inverter_identity()
-        current_poll_interval = int(_fetch_poll(mqtt, poll_topic).get("poll_interval_s", 13))
         set_polling_config(current_poll_interval, "State_of_Charge=ten_sec;")
         last_pub = time.time()
+        _wait_for_live_json_change(mqtt, poll_topic, "poll liveness after soc drift setup", timeout_s=25)
 
-        def soc_interval_applied_pred() -> Tuple[bool, str]:
+        def drift_ready_pred() -> Tuple[bool, str]:
             nonlocal last_pub
             now = time.time()
             if (now - last_pub) >= 5.0:
                 set_mode(drift_mode_payload)
                 set_polling_config(current_poll_interval, "State_of_Charge=ten_sec;")
                 last_pub = now
+            cur_poll = _fetch_poll(mqtt, poll_topic)
+            cur_stub = _fetch_stub(mqtt, stub_topic)
             cfg = _fetch_config(mqtt, config_topic)
             intervals = cfg.get("entity_intervals", {})
             bucket = str(intervals.get("State_of_Charge", "")) if isinstance(intervals, dict) else ""
-            mode = str(_fetch_poll(mqtt, poll_topic).get("rs485_stub_mode", ""))
-            return (bucket == "ten_sec" and mode == "online"), f"bucket={bucket!r} mode={mode!r}"
+            mode = str(cur_poll.get("rs485_stub_mode", ""))
+            snapshot_ok = bool(cur_poll.get("ess_snapshot_last_ok", False))
+            probe_backoff_ms = int(cur_poll.get("rs485_probe_backoff_ms", 0))
+            stub_reads = int(cur_stub.get("stub_reads", 0))
+            step = int(cur_stub.get("soc_step_x10_per_snapshot", 0))
+            soc_x10 = int(cur_stub.get("soc_x10", 0))
+            detail = (
+                f"mode={mode!r} bucket={bucket!r} snapshot_ok={snapshot_ok} "
+                f"probe_backoff_ms={probe_backoff_ms} stub_reads={stub_reads} soc_step={step} soc_x10={soc_x10}"
+            )
+            return (
+                mode == "online"
+                and bucket == "ten_sec"
+                and snapshot_ok
+                and probe_backoff_ms == 0
+                and stub_reads > 0
+                and step == 10
+                and soc_x10 >= 500
+            ), detail
 
         _assert_eventually(
-            "soc drift mode and interval applied",
-            soc_interval_applied_pred,
-            timeout_s=45,
+            "soc drift backend recovered and publishing",
+            drift_ready_pred,
+            timeout_s=60,
             poll_s=2.0,
         )
 
+    def _wait_for_soc_change(ha_unique: str, prev: str, label: str, timeout_s: int) -> str:
         soc_topic = _state_topic(ha_unique, "State_of_Charge")
         mqtt.subscribe(soc_topic, force=True)
+        deadline = time.time() + timeout_s
+        last_err = "no attempts"
+        while time.time() < deadline:
+            try:
+                return _wait_for_topic_change(mqtt, soc_topic, prev, timeout_s=20, label=label)
+            except E2EError as e:
+                last_err = str(e)
+                _ensure_soc_drift_backend(_soc_drift_poll_interval())
+        raise E2EError(f"Timeout waiting for {label} change after drift-mode recovery attempts. Last observed: {last_err}")
 
+    def case_soc_drift_backend_ready() -> None:
+        print("[e2e] case: soc drift backend ready")
+        _wait_for_inverter_identity()
+        _ensure_soc_drift_backend(_soc_drift_poll_interval())
+
+    def case_stub_soc_drift_applies() -> None:
+        print("[e2e] case: stub SOC drift applies internally")
+        _wait_for_inverter_identity()
+        current_poll_interval = _soc_drift_poll_interval()
+        _ensure_soc_drift_backend(current_poll_interval)
+        before = _fetch_stub(mqtt, stub_topic)
+        before_reads = int(before.get("stub_reads", 0))
+        before_soc_x10 = int(before.get("soc_x10", 0))
+
+        def drift_pred() -> Tuple[bool, str]:
+            cur_poll = _fetch_poll(mqtt, poll_topic)
+            cur = _fetch_stub(mqtt, stub_topic)
+            cur_mode = str(cur_poll.get("rs485_stub_mode", ""))
+            cur_reads = int(cur.get("stub_reads", 0))
+            cur_soc_x10 = int(cur.get("soc_x10", 0))
+            if cur_mode != "online" or cur_reads < before_reads or cur_soc_x10 < before_soc_x10:
+                raise E2EError(
+                    "stub SOC drift state reset while waiting: "
+                    f"mode={cur_mode!r} stub_reads={cur_reads} soc_x10={cur_soc_x10} "
+                    f"before_reads={before_reads} before_soc_x10={before_soc_x10}"
+                )
+            detail = (
+                f"mode={cur_mode!r} stub_reads={cur_reads} soc_x10={cur_soc_x10} "
+                f"before_reads={before_reads} before_soc_x10={before_soc_x10}"
+            )
+            return (cur_reads > before_reads and cur_soc_x10 > before_soc_x10), detail
+
+        _assert_eventually("stub SOC drifts internally", drift_pred, timeout_s=45, poll_s=3.0)
+
+    def case_soc_publish_respects_bucket() -> None:
+        print("[e2e] case: State_of_Charge publish respects bucket")
+        ha_unique = _wait_for_inverter_identity()
+        current_poll_interval = _soc_drift_poll_interval()
+        _ensure_soc_drift_backend(current_poll_interval)
+        soc_topic = _state_topic(ha_unique, "State_of_Charge")
+        mqtt.subscribe(soc_topic, force=True)
         v1 = _fetch_latest_text(mqtt, soc_topic, label="soc")
-        try:
-            v2 = _wait_for_topic_change(mqtt, soc_topic, v1, timeout_s=70, label="soc")
-        except E2EError:
-            # Recover from stale mode/cadence by forcing online drift mode and reapplying cadence.
-            set_mode_and_wait(drift_mode_payload, ("online",))
-            set_polling_config(current_poll_interval, "State_of_Charge=ten_sec;")
-            v2 = _wait_for_topic_change(mqtt, soc_topic, v1, timeout_s=70, label="soc")
+        v2 = _wait_for_soc_change(ha_unique, v1, "soc_publish", timeout_s=45)
+        if v2 == v1:
+            raise E2EError(f"State_of_Charge did not republish after bucket enable: v1={v1!r} v2={v2!r}")
+
+    def case_soc_drift_e2e() -> None:
+        print("[e2e] case: soc drift end-to-end")
+        ha_unique = _wait_for_inverter_identity()
+        current_poll_interval = _soc_drift_poll_interval()
+        _ensure_soc_drift_backend(current_poll_interval)
+        soc_topic = _state_topic(ha_unique, "State_of_Charge")
+        mqtt.subscribe(soc_topic, force=True)
+        v1 = _fetch_latest_text(mqtt, soc_topic, label="soc")
+        v2 = _wait_for_soc_change(ha_unique, v1, "soc", timeout_s=45)
         try:
             f1 = float(v1)
             f2 = float(v2)
         except ValueError:
             raise E2EError(f"Unexpected SOC payloads (not floats): v1={v1!r} v2={v2!r}")
         if f2 <= f1:
-            v3 = _wait_for_topic_change(mqtt, soc_topic, v2, timeout_s=45, label="soc")
+            v3 = _wait_for_soc_change(ha_unique, v2, "soc", timeout_s=30)
             f3 = float(v3)
             if f3 <= f2:
                 raise E2EError(f"SOC did not monotonically increase across publishes: {v1!r} {v2!r} {v3!r}")
@@ -2402,7 +2537,10 @@ def main() -> int:
         ("probe_delayed", case_probe_delayed_online),
         ("fail_writes_only", case_fail_writes_only_dispatch_write_fails),
         ("fail_for_ms", case_fail_for_ms_then_recover),
-        ("soc_drift", case_soc_drift_over_time),
+        ("soc_drift_backend_ready", case_soc_drift_backend_ready),
+        ("stub_soc_drift_applies", case_stub_soc_drift_applies),
+        ("soc_publish_respects_bucket", case_soc_publish_respects_bucket),
+        ("soc_drift_e2e", case_soc_drift_e2e),
         ("polling_config", case_polling_config_persistence),
         ("portal_polling_ui", case_portal_polling_ui),
     ]

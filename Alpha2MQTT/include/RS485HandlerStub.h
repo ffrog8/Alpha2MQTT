@@ -379,6 +379,7 @@ class RS485Handler
 		uint32_t stubProbeAttempts() const { return _probeAttempts; }
 		uint32_t stubProbeSuccessAfterN() const { return _cfg.probeSuccessAfterN; }
 		int16_t stubSocStepX10PerSnapshot() const { return _socStepX10PerSnapshot; }
+		uint16_t stubBatterySocX10() const { return _state.batterySocX10; }
 		uint16_t stubLastWriteStartReg() const { return _lastWriteStartReg; }
 		uint16_t stubLastWriteRegCount() const { return _lastWriteRegCount; }
 		uint32_t stubLastWriteMs() const { return _lastWriteMs; }

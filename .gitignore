@@ -36,6 +36,9 @@ bld/
 # E2E local configuration (do not commit secrets/hostnames)
 tools/e2e/e2e.local.env
 tools/e2e/e2e.local.json
+tools/serial/logs/
+tools/serial/__pycache__/
+core
 
 # Visual Studio 2015/2017 cache/options directory
 .vs/

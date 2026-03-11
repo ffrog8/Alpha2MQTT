@@ -111,6 +111,7 @@ static char pendingPollingConfigPayload[512] = "";
 static bool pendingEntityCommandSet = false;
 static const mqttState *pendingEntityCommand = nullptr;
 static char pendingEntityCommandPayload[128] = "";
+static uint32_t manualRegisterReadSeq = 0;
 
 enum PortalStatus : uint8_t {
 	portalStatusIdle = 0,
@@ -216,7 +217,10 @@ int _maxPayloadSize;
 char* _mqttPayload;
 
 bool resendHaData = false;
+bool resendHaPreludePending = false;
+size_t resendHaNextEntityIndex = 0;
 bool resendAllData = false;
+static constexpr size_t kHaDiscoveryBatchSize = 1;
 // Human-readable timestamp of the most recent polling-config mutation.
 char _pollingConfigLastChange[32] = "";
 // Bucket ids accepted via /config/set mapping (legacy freq* aliases are still accepted).
@@ -349,6 +353,9 @@ static uint32_t rs485ProbeLastAttemptMs = 0;
 
 static bool rs485TryReadIdentityOnce(void);
 static void rs485ProbeTick(void);
+#if RS485_STUB
+static void rs485ApplyStubConnectivityMode(Rs485StubMode mode);
+#endif
 
 /*
  * Home Assistant auto-discovered values
@@ -388,6 +395,7 @@ void setupWifi(bool initialConnect);
 void mqttReconnect(void);
 void mqttCallback(char* topic, byte* message, unsigned int length);
 void sendHaData(void);
+void requestHaDataResend(void);
 void getA2mOpDataFromEss(void);
 bool refreshEssSnapshot(void);
 void sendData(void);
@@ -433,6 +441,7 @@ void publishEvent(MqttEventCode code, const char *detail);
 MqttEventCode eventCodeFromResult(modbusRequestAndResponseStatusValues result);
 void noteRs485Error(modbusRequestAndResponseStatusValues result, const char *detail);
 static void processPendingEntityCommand(void);
+static void publishManualRegisterReadState(int32_t requestedReg);
 void setBootIntentAndReboot(BootIntent intent, bool persistIntent = true);
 static void persistUserBootIntent(BootIntent intent);
 static void persistUserBootMode(BootMode mode);
@@ -681,6 +690,43 @@ rs485TryReadIdentityOnce(void)
 	return true;
 }
 
+#if RS485_STUB
+static void
+rs485ApplyStubConnectivityMode(Rs485StubMode mode)
+{
+	if (_modBus == NULL || _registerHandler == NULL) {
+		return;
+	}
+
+	rs485AttemptsInCycle = 0;
+	rs485CycleBackoffMs = kRs485ProbeAttemptDelayMs;
+	rs485NextAttemptAtMs = millis();
+	rs485ProbeLastAttemptMs = 0;
+
+	if (rs485StubModeUsesProbeLifecycle(mode)) {
+		rs485LockedBaud = 0;
+		rs485ConnectState = Rs485ConnectState::ProbingBaud;
+		essSnapshotValid = false;
+		essSnapshotLastOk = false;
+		resendAllData = true;
+		return;
+	}
+
+	// Online-like stub modes are intended to exercise snapshot and publish behavior directly.
+	// Do not make them depend on the separate baud-probe state machine or issue Modbus reads
+	// from the MQTT callback path.
+	if (!inverterSerialKnown()) {
+		strlcpy(deviceSerialNumber, "STUBSN000000000", sizeof(deviceSerialNumber));
+		setMqttIdentifiersFromSerial(deviceSerialNumber);
+	}
+	rs485ConnectState = Rs485ConnectState::Connected;
+	rs485LockedBaud = DEFAULT_BAUD_RATE;
+	essSnapshotValid = false;
+	essSnapshotLastOk = false;
+	resendAllData = true;
+}
+#endif
+
 static void
 rs485ProbeTick(void)
 {
@@ -705,7 +751,7 @@ rs485ProbeTick(void)
 
 			// Now that inverter identity is known, discovery/config can be published under the real HA unique id.
 			loadPollingConfig();
-			resendHaData = true;
+			requestHaDataResend();
 			resendAllData = true;
 			return;
 		}
@@ -2761,7 +2807,7 @@ loop()
 			setupWifi(false);
 			if (bootPlan.mqtt) {
 				mqttReconnect();
-				resendHaData = true;
+				requestHaDataResend();
 			}
 		} else {
 			lastWifiConnected = true;
@@ -2777,7 +2823,7 @@ loop()
 			}
 			lastMqttConnected = false;
 			mqttReconnect();
-			resendHaData = true;
+			requestHaDataResend();
 		} else {
 			lastMqttConnected = true;
 		}
@@ -3148,7 +3194,7 @@ savePollingConfig(const mqttState *entity)
 	const mqttState *entities = mqttEntitiesDesc();
 	MqttEntityRuntime *rt = mqttEntitiesRt();
 	int numberOfEntities = static_cast<int>(mqttEntitiesCount());
-	char map[2048];
+	char *map = g_portalBucketMapScratch;
 	size_t used = 0;
 	map[0] = '\0';
 
@@ -3166,11 +3212,11 @@ savePollingConfig(const mqttState *entity)
 			continue;
 		}
 		const int needed = snprintf(map + used,
-		                            sizeof(map) - used,
+		                            kPrefBucketMapMaxLen - used,
 		                            "%s=%s;",
 		                            entities[i].mqttName,
 		                            bucketIdToString(rt[i].bucketId));
-		if (needed < 0 || static_cast<size_t>(needed) >= (sizeof(map) - used)) {
+		if (needed < 0 || static_cast<size_t>(needed) >= (kPrefBucketMapMaxLen - used)) {
 			// Too many overrides to fit into the stored map; avoid writing a truncated map.
 			return;
 		}
@@ -3381,6 +3427,14 @@ publishControllerInverterSerialState(void)
 }
 
 void
+requestHaDataResend(void)
+{
+	resendHaData = true;
+	resendHaPreludePending = true;
+	resendHaNextEntityIndex = 0;
+}
+
+void
 publishHaEntityDiscovery(const mqttState *entity)
 {
 	const char *entityType;
@@ -3532,7 +3586,7 @@ handlePollingConfigSet(const char *payload)
 				if (applied) {
 					persistUserBucketMap(value);
 					anyChange = true;
-					resendHaData = true;
+					requestHaDataResend();
 					resendAllData = true;
 				}
 			}
@@ -3575,7 +3629,7 @@ handlePollingConfigSet(const char *payload)
 		recomputeBucketCounts();
 		if (changedEntity != nullptr) {
 			savePollingConfig(changedEntity);
-			resendHaData = true;
+			requestHaDataResend();
 		}
 		updatePollingLastChange();
 		publishPollingConfig();
@@ -5364,6 +5418,7 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 		stub.stubReads = _modBus->stubReadCount();
 		stub.stubWrites = _modBus->stubWriteCount();
 		stub.stubUnknownReads = _modBus->stubUnknownRegisterReads();
+		stub.socX10 = _modBus->stubBatterySocX10();
 		stub.lastReadStartReg = _modBus->stubLastReadStartReg();
 		stub.lastFn = _modBus->stubLastFn();
 		stub.lastFailStartReg = _modBus->stubLastFailStartReg();
@@ -5392,22 +5447,18 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 modbusRequestAndResponseStatusValues
 addConfig(const mqttState *singleEntity,
           DiscoveryDeviceScope scope,
+          const char *topicBase,
           modbusRequestAndResponseStatusValues& resultAddedToPayload)
 {
-	char stateAddition[1024] = "";
+	// HA discovery generation runs on a constrained ESP8266 loop/callback stack.
+	// Reuse the existing polling scratch buffer instead of allocating another 1 KB stack frame.
+	char (&stateAddition)[kPrefBucketMapMaxLen] = g_portalBucketMapScratch;
 	char prettyName[64];
 	char uniqueId[128];
-	char topicBase[200];
 	const char *deviceId = discoveryDeviceIdForScope(scope);
 	const bool inverterScope = (scope == DiscoveryDeviceScope::Inverter);
-	const bool haveTopicBase = buildEntityTopicBase(deviceName,
-	                                                scope,
-	                                                controllerIdentifier,
-	                                                deviceSerialNumber,
-	                                                singleEntity->mqttName,
-	                                                topicBase,
-	                                                sizeof(topicBase));
-	if (deviceId[0] == '\0' || !haveTopicBase) {
+	stateAddition[0] = '\0';
+	if (deviceId[0] == '\0' || topicBase == nullptr || topicBase[0] == '\0') {
 		return modbusRequestAndResponseStatusValues::preProcessing;
 	}
 	buildEntityUniqueId(scope,
@@ -5917,14 +5968,31 @@ sendHaData()
 		return;
 	}
 	const mqttState *entities = mqttEntitiesDesc();
-	int numberOfEntities = static_cast<int>(mqttEntitiesCount());
+	const size_t numberOfEntities = mqttEntitiesCount();
 
-	publishConfigDiscovery();
-	publishControllerInverterSerialDiscovery();
-	for (int i = 0; i < numberOfEntities; i++) {
-		publishHaEntityDiscovery(&entities[i]);
+	// Spread retained HA discovery publishes across multiple loop() turns so a config change
+	// cannot monopolize the ESP8266 network stack long enough to trigger the watchdog.
+	if (resendHaPreludePending) {
+		publishConfigDiscovery();
+		maybeYield();
+		publishControllerInverterSerialDiscovery();
+		maybeYield();
+		resendHaPreludePending = false;
+	}
+
+	size_t batchCount = 0;
+	while (resendHaNextEntityIndex < numberOfEntities && batchCount < kHaDiscoveryBatchSize) {
+		publishHaEntityDiscovery(&entities[resendHaNextEntityIndex]);
+		++resendHaNextEntityIndex;
+		++batchCount;
+		maybeYield();
+	}
+	if (resendHaNextEntityIndex < numberOfEntities) {
+		return;
 	}
 	resendHaData = false;
+	resendHaPreludePending = false;
+	resendHaNextEntityIndex = 0;
 }
 
 /*
@@ -6430,7 +6498,7 @@ sendDataFromMqttState(const mqttState *singleEntity, bool doHomeAssistant)
 		}
 
 		snprintf(topic, sizeof(topic), "homeassistant/%s/%s/%s/config", entityType, deviceId, singleEntity->mqttName);
-		result = addConfig(singleEntity, scope, resultAddedToPayload);
+		result = addConfig(singleEntity, scope, topicBase, resultAddedToPayload);
 	} else {
 		bool skip = false;
 		if (!opData.a2mReadyToUseOpMode && (singleEntity->entityId == mqttEntityId::entityOpMode)) {
@@ -6463,6 +6531,80 @@ sendDataFromMqttState(const mqttState *singleEntity, bool doHomeAssistant)
 	}
 }
 
+static bool
+publishManualRegisterValueState(const mqttState *valueEntity, const modbusRequestAndResponse &response)
+{
+	if (valueEntity == nullptr || !mqttEntitiesRtAvailable()) {
+		return false;
+	}
+	const size_t idx = static_cast<size_t>(valueEntity - mqttEntitiesDesc());
+	if (idx >= mqttEntitiesCount()) {
+		return false;
+	}
+	mqttUpdateFreq effectiveFreq = mqttEntitiesRt()[idx].effectiveFreq;
+	if (effectiveFreq == mqttUpdateFreq::freqNever ||
+	    effectiveFreq == mqttUpdateFreq::freqDisabled) {
+		return false;
+	}
+	char topicBase[200];
+	char topic[256];
+	if (!buildEntityTopicBase(deviceName,
+	                          mqttEntityScope(valueEntity->entityId),
+	                          controllerIdentifier,
+	                          deviceSerialNumber,
+	                          valueEntity->mqttName,
+	                          topicBase,
+	                          sizeof(topicBase))) {
+		return false;
+	}
+	emptyPayload();
+	modbusRequestAndResponseStatusValues resultAddedToPayload = addToPayload(response.dataValueFormatted);
+	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		return false;
+	}
+	snprintf(topic, sizeof(topic), "%s/state", topicBase);
+	sendMqtt(topic, valueEntity->retain ? MQTT_RETAIN : false);
+	return true;
+}
+
+static void
+publishManualRegisterReadStatus(int32_t requestedReg, const modbusRequestAndResponse &response)
+{
+	static char manualReadAddition[256];
+	char manualReadTopic[160];
+	StatusManualReadSnapshot snapshot{};
+	snapshot.seq = ++manualRegisterReadSeq;
+	snapshot.tsMs = millis();
+	snapshot.requestedReg = requestedReg;
+#if RS485_STUB
+	snapshot.observedReg = (_modBus != nullptr) ? _modBus->stubLastReadStartReg() : 0;
+#else
+	snapshot.observedReg = 0;
+#endif
+	snapshot.value = response.dataValueFormatted;
+	snprintf(manualReadTopic, sizeof(manualReadTopic), "%s/manual_read", statusTopic);
+	if (buildStatusManualReadJson(snapshot, manualReadAddition, sizeof(manualReadAddition))) {
+		_mqtt.publish(manualReadTopic, manualReadAddition, true);
+		maybeYield();
+	}
+}
+
+static void
+publishManualRegisterReadState(int32_t requestedReg)
+{
+	const mqttState *valueEntity = lookupEntity(mqttEntityId::entityRegValue);
+	if (valueEntity == nullptr) {
+		return;
+	}
+	modbusRequestAndResponse response;
+	const modbusRequestAndResponseStatusValues result = readEntity(valueEntity, &response);
+	if (result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
+		return;
+	}
+	publishManualRegisterValueState(valueEntity, response);
+	publishManualRegisterReadStatus(requestedReg, response);
+}
+
 static void
 processPendingEntityCommand(void)
 {
@@ -6480,7 +6622,6 @@ processPendingEntityCommand(void)
 	int32_t singleInt32 = -1;
 	const char *singleString = NULL;
 	char *endPtr = NULL;
-	const mqttState *relatedMqttEntity = NULL;
 	bool valueProcessingError = false;
 
 	// First, process value.
@@ -6581,8 +6722,7 @@ processPendingEntityCommand(void)
 		break;
 	case mqttEntityId::entityRegNum:
 		regNumberToRead = singleInt32; // Set local variable
-		relatedMqttEntity = lookupEntity(mqttEntityId::entityRegValue);
-		sendDataFromMqttState(relatedMqttEntity, false); // Send update for related entity
+		publishManualRegisterReadState(singleInt32);
 		break;
 	case mqttEntityId::entityOpMode:
 		{
@@ -6662,7 +6802,7 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 	// Special case for Home Assistant itself
 	if (strcmp(topic, MQTT_SUB_HOMEASSISTANT) == 0) {
 		if (strcmp(mqttIncomingPayload, "online") == 0) {
-			resendHaData = true;
+			requestHaDataResend();
 			resendAllData = true;
 		} else {
 #ifdef DEBUG_OVER_SERIAL
@@ -6925,6 +7065,7 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 				virtualDispatchActivePower,
 				virtualDispatchSoc);
 		}
+		rs485ApplyStubConnectivityMode(mode);
 #ifdef DEBUG_OVER_SERIAL
 		snprintf(_debugOutput, sizeof(_debugOutput), "RS485 stub control applied: mode=%s fail_n=%lu fail_reg=%u",
 			 _modBus->stubModeLabel(), static_cast<unsigned long>(failN), static_cast<unsigned>(failReg));

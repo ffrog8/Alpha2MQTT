@@ -76,6 +76,22 @@ rs485StubShouldFail(const Rs485StubConfig &cfg, uint32_t attemptIndexOneBased, u
 	}
 }
 
+static inline bool
+rs485StubModeUsesProbeLifecycle(Rs485StubMode mode)
+{
+	switch (mode) {
+	case Rs485StubMode::OfflineForever:
+	case Rs485StubMode::ProbeDelayedOnline:
+		return true;
+	case Rs485StubMode::OnlineAlways:
+	case Rs485StubMode::FailFirstNThenRecover:
+	case Rs485StubMode::FlapTime:
+		return false;
+	default:
+		return true;
+	}
+}
+
 static inline uint16_t
 rs485StubWordForRegister(uint16_t reg)
 {

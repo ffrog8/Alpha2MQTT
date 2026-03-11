@@ -348,6 +348,7 @@ buildStatusStubJson(const StatusStubSnapshot &snapshot, char *out, size_t outSiz
 		"\"stub_reads\":%lu,"
 		"\"stub_writes\":%lu,"
 		"\"stub_unknown_reads\":%lu,"
+		"\"soc_x10\":%u,"
 		"\"last_read_reg\":%u,"
 		"\"last_fn\":%u,"
 		"\"last_fail_reg\":%u,"
@@ -366,6 +367,7 @@ buildStatusStubJson(const StatusStubSnapshot &snapshot, char *out, size_t outSiz
 		static_cast<unsigned long>(snapshot.stubReads),
 		static_cast<unsigned long>(snapshot.stubWrites),
 		static_cast<unsigned long>(snapshot.stubUnknownReads),
+		static_cast<unsigned>(snapshot.socX10),
 		static_cast<unsigned>(snapshot.lastReadStartReg),
 		static_cast<unsigned>(snapshot.lastFn),
 		static_cast<unsigned>(snapshot.lastFailStartReg),
@@ -380,6 +382,78 @@ buildStatusStubJson(const StatusStubSnapshot &snapshot, char *out, size_t outSiz
 		static_cast<unsigned long>(snapshot.probeAttempts),
 		static_cast<unsigned long>(snapshot.probeSuccessAfterN),
 		static_cast<int>(snapshot.socStepX10PerSnapshot));
+	if (written < 0 || static_cast<size_t>(written) >= outSize) {
+		return false;
+	}
+	return true;
+}
+
+static bool
+appendEscapedJsonString(char *dest, size_t destSize, const char *src)
+{
+	if (dest == nullptr || destSize == 0) {
+		return false;
+	}
+	dest[0] = '\0';
+	if (src == nullptr) {
+		return true;
+	}
+	size_t writePos = 0;
+	for (size_t i = 0; src[i] != '\0'; ++i) {
+		const char ch = src[i];
+		if ((ch == '\\') || (ch == '"')) {
+			if ((writePos + 2) >= destSize) {
+				return false;
+			}
+			dest[writePos++] = '\\';
+			dest[writePos++] = ch;
+			continue;
+		}
+		if (static_cast<unsigned char>(ch) < 0x20) {
+			if ((writePos + 6) >= destSize) {
+				return false;
+			}
+			const int written = snprintf(dest + writePos, destSize - writePos, "\\u%04x", ch);
+			if ((written <= 0) || (static_cast<size_t>(written) >= (destSize - writePos))) {
+				return false;
+			}
+			writePos += static_cast<size_t>(written);
+			continue;
+		}
+		if ((writePos + 1) >= destSize) {
+			return false;
+		}
+		dest[writePos++] = ch;
+	}
+	dest[writePos] = '\0';
+	return true;
+}
+
+bool
+buildStatusManualReadJson(const StatusManualReadSnapshot &snapshot, char *out, size_t outSize)
+{
+	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+	char escapedValue[128];
+	if (!appendEscapedJsonString(escapedValue, sizeof(escapedValue), snapshot.value)) {
+		return false;
+	}
+	const int written = snprintf(
+		out,
+		outSize,
+		"{"
+		"\"seq\":%lu,"
+		"\"ts_ms\":%lu,"
+		"\"requested_reg\":%ld,"
+		"\"observed_reg\":%u,"
+		"\"value\":\"%s\""
+		"}",
+		static_cast<unsigned long>(snapshot.seq),
+		static_cast<unsigned long>(snapshot.tsMs),
+		static_cast<long>(snapshot.requestedReg),
+		static_cast<unsigned>(snapshot.observedReg),
+		escapedValue);
 	if (written < 0 || static_cast<size_t>(written) >= outSize) {
 		return false;
 	}

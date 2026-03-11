@@ -111,6 +111,7 @@ struct StatusStubSnapshot {
 	uint32_t stubReads;
 	uint32_t stubWrites;
 	uint32_t stubUnknownReads;
+	uint16_t socX10;
 	uint16_t lastReadStartReg;
 	uint8_t lastFn;
 	uint16_t lastFailStartReg;
@@ -127,8 +128,17 @@ struct StatusStubSnapshot {
 	int16_t socStepX10PerSnapshot;
 };
 
+struct StatusManualReadSnapshot {
+	uint32_t seq;
+	uint32_t tsMs;
+	int32_t requestedReg;
+	uint16_t observedReg;
+	const char *value;
+};
+
 bool buildStatusCoreJson(const StatusCoreSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusNetJson(const StatusNetSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusPollJsonCompact(const StatusPollSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusStubJson(const StatusStubSnapshot &snapshot, char *out, size_t outSize);
+bool buildStatusManualReadJson(const StatusManualReadSnapshot &snapshot, char *out, size_t outSize);

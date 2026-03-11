@@ -333,6 +333,7 @@ TEST_CASE("status stub JSON builder includes required keys")
 	snapshot.stubReads = 12;
 	snapshot.stubWrites = 3;
 	snapshot.stubUnknownReads = 4;
+	snapshot.socX10 = 655;
 	snapshot.lastReadStartReg = 123;
 	snapshot.lastFn = 3;
 	snapshot.lastFailStartReg = 456;
@@ -355,6 +356,7 @@ TEST_CASE("status stub JSON builder includes required keys")
 	CHECK(payload.find("\"stub_reads\":12") != std::string::npos);
 	CHECK(payload.find("\"stub_writes\":3") != std::string::npos);
 	CHECK(payload.find("\"stub_unknown_reads\":4") != std::string::npos);
+	CHECK(payload.find("\"soc_x10\":655") != std::string::npos);
 	CHECK(payload.find("\"last_read_reg\":123") != std::string::npos);
 	CHECK(payload.find("\"last_fn\":3") != std::string::npos);
 	CHECK(payload.find("\"last_fail_reg\":456") != std::string::npos);
@@ -369,4 +371,24 @@ TEST_CASE("status stub JSON builder includes required keys")
 	CHECK(payload.find("\"probe_attempts\":7") != std::string::npos);
 	CHECK(payload.find("\"probe_success_after_n\":9") != std::string::npos);
 	CHECK(payload.find("\"soc_step_x10_per_snapshot\":-5") != std::string::npos);
+}
+
+TEST_CASE("status manual read JSON builder includes deterministic correlation fields")
+{
+	StatusManualReadSnapshot snapshot{};
+	snapshot.seq = 42;
+	snapshot.tsMs = 123456;
+	snapshot.requestedReg = 2176;
+	snapshot.observedReg = 2176;
+	snapshot.value = "Unknown (\"AL\")\\path";
+
+	char buffer[256];
+	CHECK(buildStatusManualReadJson(snapshot, buffer, sizeof(buffer)));
+
+	std::string payload(buffer);
+	CHECK(payload.find("\"seq\":42") != std::string::npos);
+	CHECK(payload.find("\"ts_ms\":123456") != std::string::npos);
+	CHECK(payload.find("\"requested_reg\":2176") != std::string::npos);
+	CHECK(payload.find("\"observed_reg\":2176") != std::string::npos);
+	CHECK(payload.find("\"value\":\"Unknown (\\\"AL\\\")\\\\path\"") != std::string::npos);
 }
