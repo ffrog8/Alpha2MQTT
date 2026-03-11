@@ -1288,6 +1288,9 @@ persistUserBucketMap(const char *bucketMap)
 	Preferences preferences;
 	preferences.begin(DEVICE_NAME, false);
 	preferences.putString(kPreferenceBucketMap, bucketMap);
+	// Writing the stable Bucket_Map makes it the authoritative config source.
+	// Mark migration complete so stale legacy Freq_* keys no longer reapply on boot.
+	preferences.putBool(kPreferenceBucketMapMigrated, true);
 	preferences.end();
 }
 
@@ -3171,17 +3174,23 @@ loadPollingConfig(void)
 	preferences.getString(kPreferenceBucketMap, bucketMap, sizeof(bucketMap));
 	const bool legacyMigrated = preferences.getBool(kPreferenceBucketMapMigrated, false);
 	if (bucketMap[0] != '\0') {
-		appliedBucketMap = applyBucketMapString(bucketMap,
-		                                        entities,
-		                                        entityCount,
-		                                        buckets,
-		                                        persistUnknownEntityCount,
-		                                        persistInvalidBucketCount,
-		                                        persistDuplicateEntityCount);
-		if (appliedBucketMap) {
+		if (bucketMapUsesDescriptorIndices(bucketMap)) {
+			// Older compact "#<index>=bucket" maps are not stable once the catalog grows.
+			// Ignore them on boot and fall back to defaults until a fresh name-based map is saved.
 			persistLoadOk = 1;
 		} else {
-			persistLoadErr = 1;
+			appliedBucketMap = applyBucketMapString(bucketMap,
+			                                        entities,
+			                                        entityCount,
+			                                        buckets,
+			                                        persistUnknownEntityCount,
+			                                        persistInvalidBucketCount,
+			                                        persistDuplicateEntityCount);
+			if (appliedBucketMap) {
+				persistLoadOk = 1;
+			} else {
+				persistLoadErr = 1;
+			}
 		}
 	} else if (!legacyMigrated) {
 		// Legacy per-entity keys are read-only fallback when Bucket_Map is absent.

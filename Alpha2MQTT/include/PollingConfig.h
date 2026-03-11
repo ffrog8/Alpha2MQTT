@@ -12,6 +12,7 @@
 
 BucketId bucketIdFromLegacyFreq(int storedValue);
 bool isValidMqttUpdateFreq(int value);
+bool bucketMapUsesDescriptorIndices(const char *map);
 
 // Copy a length-delimited MQTT payload into a caller-owned text buffer and
 // append NUL. Chose a shared helper so the larger config/set path can be
@@ -55,8 +56,8 @@ bool buildBucketMapFromLegacy(const mqttState *entities,
                               size_t outSize,
                               size_t &appliedCount);
 
-// Build a compact Bucket_Map string from explicit bucket assignments indexed by
-// descriptor order. Returns true on success even when appliedCount==0.
+// Build a stable Bucket_Map string from explicit bucket assignments. Names are
+// used instead of descriptor indices so persisted config survives catalog growth.
 bool buildBucketMapFromAssignments(const mqttState *entities,
                                    size_t entityCount,
                                    const BucketId *buckets,

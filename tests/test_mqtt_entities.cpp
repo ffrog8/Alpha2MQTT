@@ -122,6 +122,33 @@ TEST_CASE("mqtt entities: controller diagnostics include runtime polling signals
 	CHECK(budgetUsed1m->family == MqttEntityFamily::Controller);
 }
 
+TEST_CASE("mqtt entities: controller diagnostics append after the legacy persisted entity set")
+{
+	const mqttState *desc = mqttEntitiesDesc();
+	const size_t count = mqttEntitiesCount();
+	size_t registerValueIdx = count;
+	size_t rs485ErrorsIdx = count;
+	size_t budgetExceededIdx = count;
+
+	for (size_t i = 0; i < count; ++i) {
+		if (mqttEntityNameEquals(&desc[i], "Register_Value")) {
+			registerValueIdx = i;
+		}
+		if (mqttEntityNameEquals(&desc[i], "A2M_RS485_Errors")) {
+			rs485ErrorsIdx = i;
+		}
+		if (mqttEntityNameEquals(&desc[i], "Polling_Budget_Exceeded")) {
+			budgetExceededIdx = i;
+		}
+	}
+
+	REQUIRE(registerValueIdx < count);
+	REQUIRE(rs485ErrorsIdx < count);
+	REQUIRE(budgetExceededIdx < count);
+	CHECK(registerValueIdx < rs485ErrorsIdx);
+	CHECK(registerValueIdx < budgetExceededIdx);
+}
+
 TEST_CASE("mqtt entities: shared direct-register reads collapse into one poll transaction")
 {
 	initMqttEntitiesRtIfNeeded(true);

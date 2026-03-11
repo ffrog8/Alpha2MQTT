@@ -125,6 +125,13 @@ TEST_CASE("bucket map supports compact descriptor indices")
 	CHECK(buckets[1] == BucketId::User);
 }
 
+TEST_CASE("bucket map detects deprecated descriptor-index tokens")
+{
+	CHECK(bucketMapUsesDescriptorIndices("#1=user;#0=five_min;"));
+	CHECK_FALSE(bucketMapUsesDescriptorIndices("Op_Mode=one_min;SOC_Target=disabled;"));
+	CHECK_FALSE(bucketMapUsesDescriptorIndices(""));
+}
+
 TEST_CASE("bucket map duplicate entries count and last write wins")
 {
 	mqttState entities[1]{};
@@ -176,6 +183,9 @@ TEST_CASE("bucket map rejects entity counts above compiled descriptor count")
 TEST_CASE("legacy freq mapping uses bucket ids")
 {
 	CHECK(bucketIdFromLegacyFreq(static_cast<int>(mqttUpdateFreq::freqOneMin)) == BucketId::OneMin);
+	CHECK(bucketIdFromLegacyFreq(5) == BucketId::Disabled);
+	CHECK(bucketIdFromLegacyFreq(static_cast<int>(mqttUpdateFreq::freqNever)) == BucketId::Disabled);
+	CHECK(bucketIdFromLegacyFreq(static_cast<int>(mqttUpdateFreq::freqDisabled)) == BucketId::Disabled);
 	CHECK(bucketIdFromLegacyFreq(9999) == BucketId::Unknown);
 }
 
@@ -191,7 +201,36 @@ TEST_CASE("legacy values build compact stable bucket map")
 
 	CHECK(buildBucketMapFromLegacy(entities, 2, legacy, out, sizeof(out), applied));
 	CHECK(applied == 1);
-	CHECK(std::string(out) == "#0=one_hour;");
+	CHECK(std::string(out) == "Op_Mode=one_hour;");
+}
+
+TEST_CASE("legacy freqNever numeric value migrates to disabled instead of user")
+{
+	mqttState entities[1]{};
+	entities[0] = makeEntity(mqttEntityId::entityOpMode, "Op_Mode", mqttUpdateFreq::freqOneMin, homeAssistantClass::haClassSelect);
+
+	int legacy[1] = { 5 };
+	char out[64];
+	size_t applied = 0;
+
+	CHECK(buildBucketMapFromLegacy(entities, 1, legacy, out, sizeof(out), applied));
+	CHECK(applied == 1);
+	CHECK(std::string(out) == "Op_Mode=disabled;");
+}
+
+TEST_CASE("assignment map persists stable entity names instead of descriptor indices")
+{
+	mqttState entities[2]{};
+	entities[0] = makeEntity(mqttEntityId::entityOpMode, "Op_Mode", mqttUpdateFreq::freqTenSec, homeAssistantClass::haClassSelect);
+	entities[1] = makeEntity(mqttEntityId::entitySocTarget, "SOC_Target", mqttUpdateFreq::freqOneMin, homeAssistantClass::haClassNumber);
+
+	BucketId buckets[2] = { BucketId::OneHour, BucketId::Disabled };
+	char out[128];
+	size_t applied = 0;
+
+	CHECK(buildBucketMapFromAssignments(entities, 2, buckets, out, sizeof(out), applied));
+	CHECK(applied == 2);
+	CHECK(std::string(out) == "Op_Mode=one_hour;SOC_Target=disabled;");
 }
 
 TEST_CASE("legacy values skip invalid and defaults")
@@ -219,7 +258,7 @@ TEST_CASE("legacy bucket map builder fails when output buffer too small")
 	CHECK(applied == 0);
 }
 
-TEST_CASE("assignment builder emits compact overrides and round-trips")
+TEST_CASE("assignment builder emits stable name overrides and round-trips")
 {
 	mqttState entities[2]{};
 	entities[0] = makeEntity(mqttEntityId::entityOpMode, "Op_Mode", mqttUpdateFreq::freqTenSec, homeAssistantClass::haClassSelect);
@@ -231,7 +270,7 @@ TEST_CASE("assignment builder emits compact overrides and round-trips")
 
 	CHECK(buildBucketMapFromAssignments(entities, 2, buckets, out, sizeof(out), applied));
 	CHECK(applied == 1);
-	CHECK(std::string(out) == "#1=user;");
+	CHECK(std::string(out) == "SOC_Target=user;");
 
 	BucketId roundTrip[2] = { BucketId::TenSec, BucketId::OneMin };
 	uint32_t unknown = 0;

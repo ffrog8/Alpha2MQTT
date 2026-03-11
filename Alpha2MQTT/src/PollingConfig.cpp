@@ -29,6 +29,25 @@ copyLengthDelimitedString(const char *src, size_t length, char *out, size_t outS
 BucketId
 bucketIdFromLegacyFreq(int storedValue)
 {
+	// Legacy Freq_* keys predate freqUser. Their persisted numeric values used
+	// 5 for freqNever, so upgraded devices must remap that slot explicitly
+	// instead of casting into the current enum ordering.
+	switch (storedValue) {
+	case 0:
+		return BucketId::TenSec;
+	case 1:
+		return BucketId::OneMin;
+	case 2:
+		return BucketId::FiveMin;
+	case 3:
+		return BucketId::OneHour;
+	case 4:
+		return BucketId::OneDay;
+	case 5:
+		return BucketId::Disabled;
+	default:
+		break;
+	}
 	if (!isValidMqttUpdateFreq(storedValue)) {
 		return BucketId::Unknown;
 	}
@@ -47,6 +66,26 @@ lookupEntityByName(const char *name, const mqttState *entities, size_t entityCou
 		}
 	}
 	return nullptr;
+}
+
+bool
+bucketMapUsesDescriptorIndices(const char *map)
+{
+	if (map == nullptr) {
+		return false;
+	}
+
+	const char *cursor = map;
+	while (*cursor != '\0') {
+		while (*cursor != '\0' && (*cursor == ';' || isspace(static_cast<unsigned char>(*cursor)))) {
+			cursor++;
+		}
+		if (*cursor == '\0') {
+			return false;
+		}
+		return *cursor == '#';
+	}
+	return false;
 }
 
 static const char *
@@ -268,10 +307,12 @@ buildBucketMapFromLegacy(const mqttState *entities,
 			continue;
 		}
 		const char *bucketStr = bucketIdToString(bucket);
+		char entityName[64];
+		mqttEntityNameCopy(&entities[i], entityName, sizeof(entityName));
 		const int needed = snprintf(out + used,
 		                            outSize - used,
-		                            "#%u=%s;",
-		                            static_cast<unsigned>(i),
+		                            "%s=%s;",
+		                            entityName,
 		                            bucketStr);
 		if (needed < 0 || static_cast<size_t>(needed) >= (outSize - used)) {
 			return false;
@@ -309,10 +350,12 @@ buildBucketMapFromAssignments(const mqttState *entities,
 			continue;
 		}
 		const char *bucketStr = bucketIdToString(bucket);
+		char entityName[64];
+		mqttEntityNameCopy(&entities[i], entityName, sizeof(entityName));
 		const int needed = snprintf(out + used,
 		                            outSize - used,
-		                            "#%u=%s;",
-		                            static_cast<unsigned>(i),
+		                            "%s=%s;",
+		                            entityName,
 		                            bucketStr);
 		if (needed < 0 || static_cast<size_t>(needed) >= (outSize - used)) {
 			return false;
