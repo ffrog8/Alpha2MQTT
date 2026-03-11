@@ -103,6 +103,63 @@ bucketIdToFreq(BucketId bucket)
 	}
 }
 
+uint32_t
+bucketIntervalMs(BucketId bucket, uint32_t userIntervalMs)
+{
+	switch (bucket) {
+	case BucketId::TenSec:
+		return 10000UL;
+	case BucketId::OneMin:
+		return 60000UL;
+	case BucketId::FiveMin:
+		return 300000UL;
+	case BucketId::OneHour:
+		return 3600000UL;
+	case BucketId::OneDay:
+		return 86400000UL;
+	case BucketId::User:
+		return userIntervalMs;
+	case BucketId::Disabled:
+	case BucketId::Unknown:
+	default:
+		return 0;
+	}
+}
+
+uint32_t
+bucketBudgetMs(BucketId bucket, uint32_t userIntervalMs, uint32_t maxBudgetMs)
+{
+	const uint32_t intervalMs = bucketIntervalMs(bucket, userIntervalMs);
+	if (intervalMs == 0) {
+		return 0;
+	}
+	if (maxBudgetMs == 0 || intervalMs < maxBudgetMs) {
+		return intervalMs;
+	}
+	return maxBudgetMs;
+}
+
+int
+bucketOrdinal(BucketId bucket)
+{
+	switch (bucket) {
+	case BucketId::TenSec:
+		return 0;
+	case BucketId::OneMin:
+		return 1;
+	case BucketId::FiveMin:
+		return 2;
+	case BucketId::OneHour:
+		return 3;
+	case BucketId::OneDay:
+		return 4;
+	case BucketId::User:
+		return 5;
+	default:
+		return -1;
+	}
+}
+
 BucketMembership
 buildBucketMembership(const BucketId *buckets,
                       size_t entityCount,

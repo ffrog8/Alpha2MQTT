@@ -52,6 +52,12 @@ TEST_CASE("mqtt entities: runtime initializes without allocating a full mutable 
 		}
 	}
 	CHECK(plan->activeCount == expectedActive);
+	CHECK(plan->tenSec.transactionCount <= plan->tenSec.count);
+	CHECK(plan->oneMin.transactionCount <= plan->oneMin.count);
+	CHECK(plan->fiveMin.transactionCount <= plan->fiveMin.count);
+	CHECK(plan->oneHour.transactionCount <= plan->oneHour.count);
+	CHECK(plan->oneDay.transactionCount <= plan->oneDay.count);
+	CHECK(plan->user.transactionCount <= plan->user.count);
 }
 
 TEST_CASE("mqtt entities: ESS snapshot dependency metadata matches expected entities")
@@ -93,4 +99,77 @@ TEST_CASE("mqtt entities: expanded catalog exposes metadata for direct register 
 	CHECK(gridVoltage->readKind == MqttEntityReadKind::Register);
 	CHECK(gridVoltage->updateFreq == mqttUpdateFreq::freqDisabled);
 	CHECK(gridVoltage->readKey == REG_GRID_METER_R_VOLTAGE_OF_A_PHASE);
+}
+
+TEST_CASE("mqtt entities: shared direct-register reads collapse into one poll transaction")
+{
+	initMqttEntitiesRtIfNeeded(true);
+	BucketId buckets[kMqttEntityDescriptorCount]{};
+	REQUIRE(mqttEntityCopyBuckets(buckets, kMqttEntityDescriptorCount));
+
+	const mqttState *desc = mqttEntitiesDesc();
+	size_t batTempIdx = kMqttEntityDescriptorCount;
+	size_t maxCellTempIdx = kMqttEntityDescriptorCount;
+	for (size_t i = 0; i < kMqttEntityDescriptorCount; ++i) {
+		if (mqttEntityNameEquals(&desc[i], "Battery_Temp")) {
+			batTempIdx = i;
+		}
+		if (mqttEntityNameEquals(&desc[i], "Max_Cell_Temperature")) {
+			maxCellTempIdx = i;
+		}
+	}
+	REQUIRE(batTempIdx < kMqttEntityDescriptorCount);
+	REQUIRE(maxCellTempIdx < kMqttEntityDescriptorCount);
+
+	buckets[batTempIdx] = BucketId::FiveMin;
+	buckets[maxCellTempIdx] = BucketId::FiveMin;
+	REQUIRE(mqttEntityApplyBuckets(buckets, kMqttEntityDescriptorCount));
+
+	const MqttEntityActivePlan *plan = mqttActivePlan();
+	REQUIRE(plan != nullptr);
+	REQUIRE(plan->fiveMin.transactionCount > 0);
+	CHECK(plan->fiveMin.transactionCount < plan->fiveMin.count);
+
+	bool foundSharedRegisterGroup = false;
+	for (size_t txnIdx = 0; txnIdx < plan->fiveMin.transactionCount; ++txnIdx) {
+		const MqttPollTransaction &txn = plan->fiveMin.transactions[txnIdx];
+		if (txn.kind == MqttPollTransactionKind::RegisterFanout &&
+		    txn.readKey == REG_BATTERY_HOME_R_MAX_CELL_TEMPERATURE &&
+		    txn.entityCount == 2) {
+			foundSharedRegisterGroup = true;
+			break;
+		}
+	}
+	CHECK(foundSharedRegisterGroup);
+
+	buckets[maxCellTempIdx] = BucketId::Disabled;
+	REQUIRE(mqttEntityApplyBuckets(buckets, kMqttEntityDescriptorCount));
+}
+
+TEST_CASE("mqtt entities: bucket overrides are queryable before rebuilding the active plan")
+{
+	initMqttEntitiesRtIfNeeded(true);
+	BucketId buckets[kMqttEntityDescriptorCount]{};
+	REQUIRE(mqttEntityCopyBuckets(buckets, kMqttEntityDescriptorCount));
+
+	const mqttState *desc = mqttEntitiesDesc();
+	size_t uptimeIdx = kMqttEntityDescriptorCount;
+	for (size_t i = 0; i < kMqttEntityDescriptorCount; ++i) {
+		if (mqttEntityNameEquals(&desc[i], "A2M_uptime")) {
+			uptimeIdx = i;
+			break;
+		}
+	}
+	REQUIRE(uptimeIdx < kMqttEntityDescriptorCount);
+
+	buckets[uptimeIdx] = BucketId::OneMin;
+	REQUIRE(mqttEntityApplyBuckets(buckets, kMqttEntityDescriptorCount));
+
+	CHECK(mqttEntityBucketByIndex(uptimeIdx) == BucketId::OneMin);
+	REQUIRE(mqttEntityCopyBuckets(buckets, kMqttEntityDescriptorCount));
+	CHECK(buckets[uptimeIdx] == BucketId::OneMin);
+
+	const MqttEntityActivePlan *plan = mqttActivePlan();
+	REQUIRE(plan != nullptr);
+	CHECK(plan->oneMin.count > 0);
 }

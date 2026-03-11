@@ -1,7 +1,8 @@
 // Purpose: Keep the compiled MQTT entity catalog in flash and expose the
 // minimal mutable runtime state needed for user-selected polling.
 // Invariants: Descriptor count is derived from the catalog rows, and active
-// poll membership is cached only for currently enabled entities.
+// runtime state stores transaction plans plus entity fanout lists only for
+// currently enabled entities.
 #pragma once
 
 #include <cstddef>
@@ -14,9 +15,24 @@ struct MqttEntityBucketOverride {
 	BucketId bucketId;
 };
 
+enum class MqttPollTransactionKind : uint8_t {
+	SnapshotFanout = 0,
+	RegisterFanout,
+	SingleEntity
+};
+
+struct MqttPollTransaction {
+	uint16_t firstMemberOffset;
+	uint16_t entityCount;
+	uint16_t readKey;
+	MqttPollTransactionKind kind;
+};
+
 struct MqttEntityActiveBucket {
 	uint16_t *members;
+	MqttPollTransaction *transactions;
 	size_t count;
+	size_t transactionCount;
 	bool hasEssSnapshot;
 };
 

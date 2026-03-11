@@ -36,3 +36,18 @@ TEST_CASE("scheduler timedOut uses wraparound")
 	CHECK(timedOut(start, now, 0x30u));
 	CHECK_FALSE(timedOut(start, now, 0x200u));
 }
+
+TEST_CASE("scheduler deferred cursor advances from the first skipped transaction")
+{
+	CHECK(normalizeDeferredCursor(5, 4) == 1);
+	CHECK(normalizeDeferredCursor(0, 0) == 0);
+	CHECK(nextDeferredCursor(2, 3, 7, true) == 5);
+	CHECK(nextDeferredCursor(6, 2, 7, true) == 1);
+}
+
+TEST_CASE("scheduler deferred cursor resets after a full bucket pass")
+{
+	CHECK(nextDeferredCursor(0, 4, 4, false) == 0);
+	CHECK(nextDeferredCursor(3, 4, 4, true) == 0);
+	CHECK(nextDeferredCursor(1, 0, 4, true) == 1);
+}

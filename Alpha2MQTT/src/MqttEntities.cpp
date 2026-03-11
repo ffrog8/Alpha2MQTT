@@ -1,7 +1,8 @@
 // Purpose: Provide the flash-resident MQTT entity catalog and a sparse runtime
 // selection model for enabled polling work.
-// Responsibilities: Resolve per-entity bucket overrides, maintain the enabled
-// active poll plan, and avoid per-catalog mutable allocations on ESP8266.
+// Responsibilities: Resolve per-entity bucket overrides, maintain enabled-only
+// transaction plans plus entity fanout lists, and avoid per-catalog mutable
+// allocations on ESP8266.
 #include "../include/MqttEntities.h"
 
 #include "../include/BucketScheduler.h"
@@ -53,8 +54,11 @@ static void
 resetBucket(MqttEntityActiveBucket &bucket)
 {
 	delete[] bucket.members;
+	delete[] bucket.transactions;
 	bucket.members = nullptr;
+	bucket.transactions = nullptr;
 	bucket.count = 0;
+	bucket.transactionCount = 0;
 	bucket.hasEssSnapshot = false;
 }
 
@@ -112,14 +116,152 @@ allocateMembers(size_t count)
 	return new (std::nothrow) uint16_t[count];
 }
 
-static void
-appendMember(MqttEntityActiveBucket &bucket, size_t &nextIndex, size_t idx, bool needsEssSnapshot)
+static MqttPollTransactionKind
+transactionKindForEntity(const mqttState &entity)
 {
-	if (bucket.members != nullptr && nextIndex < bucket.count) {
-		bucket.members[nextIndex] = static_cast<uint16_t>(idx);
+	if (entity.needsEssSnapshot) {
+		return MqttPollTransactionKind::SnapshotFanout;
 	}
-	++nextIndex;
-	bucket.hasEssSnapshot = bucket.hasEssSnapshot || needsEssSnapshot;
+	if (entity.readKind == MqttEntityReadKind::Register) {
+		return MqttPollTransactionKind::RegisterFanout;
+	}
+	return MqttPollTransactionKind::SingleEntity;
+}
+
+struct TempTransactionSpec {
+	MqttPollTransactionKind kind = MqttPollTransactionKind::SingleEntity;
+	uint16_t readKey = 0;
+	uint16_t firstMemberOffset = 0;
+	uint16_t entityCount = 0;
+};
+
+static bool
+transactionMatches(const TempTransactionSpec &spec, const mqttState &entity)
+{
+	const MqttPollTransactionKind kind = transactionKindForEntity(entity);
+	if (spec.kind != kind) {
+		return false;
+	}
+	switch (kind) {
+	case MqttPollTransactionKind::SnapshotFanout:
+		return true;
+	case MqttPollTransactionKind::RegisterFanout:
+		return spec.readKey == entity.readKey;
+	case MqttPollTransactionKind::SingleEntity:
+	default:
+		return false;
+	}
+}
+
+static bool
+buildBucketTransactions(MqttEntityActiveBucket &bucket, BucketId bucketId)
+{
+	if (bucket.count == 0) {
+		return true;
+	}
+
+	TempTransactionSpec *specs = new (std::nothrow) TempTransactionSpec[bucket.count];
+	if (specs == nullptr) {
+		return false;
+	}
+
+	uint16_t entityTxnIndex[kMqttEntityDescriptorCount];
+	for (size_t i = 0; i < kMqttEntityDescriptorCount; ++i) {
+		entityTxnIndex[i] = UINT16_MAX;
+	}
+
+	size_t txnCount = 0;
+	size_t matchedEntityCount = 0;
+	for (size_t idx = 0; idx < kMqttEntityDescriptorCount; ++idx) {
+		if (bucketForIndex(idx) != bucketId) {
+			continue;
+		}
+		const mqttState &entity = kMqttEntities[idx];
+		size_t txnIndex = txnCount;
+		for (size_t existing = 0; existing < txnCount; ++existing) {
+			if (transactionMatches(specs[existing], entity)) {
+				txnIndex = existing;
+				break;
+			}
+		}
+		if (txnIndex == txnCount) {
+			specs[txnIndex].kind = transactionKindForEntity(entity);
+			specs[txnIndex].readKey = entity.readKey;
+			txnCount++;
+		}
+		specs[txnIndex].entityCount++;
+		entityTxnIndex[idx] = static_cast<uint16_t>(txnIndex);
+		matchedEntityCount++;
+	}
+
+	if (matchedEntityCount != bucket.count) {
+		delete[] specs;
+		return false;
+	}
+
+	bucket.transactions = new (std::nothrow) MqttPollTransaction[txnCount];
+	if (bucket.transactions == nullptr) {
+		delete[] specs;
+		return false;
+	}
+
+	size_t nextOffset = 0;
+	for (size_t i = 0; i < txnCount; ++i) {
+		specs[i].firstMemberOffset = static_cast<uint16_t>(nextOffset);
+		bucket.transactions[i].firstMemberOffset = specs[i].firstMemberOffset;
+		bucket.transactions[i].entityCount = specs[i].entityCount;
+		bucket.transactions[i].readKey = specs[i].readKey;
+		bucket.transactions[i].kind = specs[i].kind;
+		nextOffset += specs[i].entityCount;
+	}
+
+	if (nextOffset != bucket.count) {
+		delete[] specs;
+		return false;
+	}
+
+	bucket.members = allocateMembers(bucket.count);
+	if (bucket.count != 0 && bucket.members == nullptr) {
+		delete[] specs;
+		return false;
+	}
+
+	uint16_t fillCounts[kMqttEntityDescriptorCount];
+	for (size_t i = 0; i < kMqttEntityDescriptorCount; ++i) {
+		fillCounts[i] = 0;
+	}
+
+	for (size_t idx = 0; idx < kMqttEntityDescriptorCount; ++idx) {
+		if (bucketForIndex(idx) != bucketId) {
+			continue;
+		}
+		const uint16_t txnIndex = entityTxnIndex[idx];
+		if (txnIndex == UINT16_MAX || txnIndex >= txnCount) {
+			delete[] specs;
+			return false;
+		}
+		const size_t offset = specs[txnIndex].firstMemberOffset + fillCounts[txnIndex];
+		if (offset >= bucket.count) {
+			delete[] specs;
+			return false;
+		}
+		bucket.members[offset] = static_cast<uint16_t>(idx);
+		fillCounts[txnIndex]++;
+	}
+
+	for (size_t i = 0; i < txnCount; ++i) {
+		if (fillCounts[i] != specs[i].entityCount) {
+			delete[] specs;
+			return false;
+		}
+		if (specs[i].kind == MqttPollTransactionKind::SnapshotFanout) {
+			bucket.hasEssSnapshot = true;
+		}
+	}
+
+	bucket.transactionCount = txnCount;
+	delete[] specs;
+	return true;
 }
 
 static bool
@@ -167,58 +309,14 @@ rebuildActivePlan(void)
 		}
 	}
 
-	nextPlan.tenSec.members = allocateMembers(nextPlan.tenSec.count);
-	nextPlan.oneMin.members = allocateMembers(nextPlan.oneMin.count);
-	nextPlan.fiveMin.members = allocateMembers(nextPlan.fiveMin.count);
-	nextPlan.oneHour.members = allocateMembers(nextPlan.oneHour.count);
-	nextPlan.oneDay.members = allocateMembers(nextPlan.oneDay.count);
-	nextPlan.user.members = allocateMembers(nextPlan.user.count);
-
-	const bool allocFailed =
-		(nextPlan.tenSec.count && nextPlan.tenSec.members == nullptr) ||
-		(nextPlan.oneMin.count && nextPlan.oneMin.members == nullptr) ||
-		(nextPlan.fiveMin.count && nextPlan.fiveMin.members == nullptr) ||
-		(nextPlan.oneHour.count && nextPlan.oneHour.members == nullptr) ||
-		(nextPlan.oneDay.count && nextPlan.oneDay.members == nullptr) ||
-		(nextPlan.user.count && nextPlan.user.members == nullptr);
-	if (allocFailed) {
+	if (!buildBucketTransactions(nextPlan.tenSec, BucketId::TenSec) ||
+	    !buildBucketTransactions(nextPlan.oneMin, BucketId::OneMin) ||
+	    !buildBucketTransactions(nextPlan.fiveMin, BucketId::FiveMin) ||
+	    !buildBucketTransactions(nextPlan.oneHour, BucketId::OneHour) ||
+	    !buildBucketTransactions(nextPlan.oneDay, BucketId::OneDay) ||
+	    !buildBucketTransactions(nextPlan.user, BucketId::User)) {
 		resetActivePlan(nextPlan);
 		return false;
-	}
-
-	size_t tenSecIdx = 0;
-	size_t oneMinIdx = 0;
-	size_t fiveMinIdx = 0;
-	size_t oneHourIdx = 0;
-	size_t oneDayIdx = 0;
-	size_t userIdx = 0;
-
-	for (size_t idx = 0; idx < kMqttEntityDescriptorCount; ++idx) {
-		const bool needsEssSnapshot = kMqttEntities[idx].needsEssSnapshot;
-		switch (bucketForIndex(idx)) {
-		case BucketId::TenSec:
-			appendMember(nextPlan.tenSec, tenSecIdx, idx, needsEssSnapshot);
-			break;
-		case BucketId::OneMin:
-			appendMember(nextPlan.oneMin, oneMinIdx, idx, needsEssSnapshot);
-			break;
-		case BucketId::FiveMin:
-			appendMember(nextPlan.fiveMin, fiveMinIdx, idx, needsEssSnapshot);
-			break;
-		case BucketId::OneHour:
-			appendMember(nextPlan.oneHour, oneHourIdx, idx, needsEssSnapshot);
-			break;
-		case BucketId::OneDay:
-			appendMember(nextPlan.oneDay, oneDayIdx, idx, needsEssSnapshot);
-			break;
-		case BucketId::User:
-			appendMember(nextPlan.user, userIdx, idx, needsEssSnapshot);
-			break;
-		case BucketId::Disabled:
-		case BucketId::Unknown:
-		default:
-			break;
-		}
 	}
 
 	resetActivePlan(g_runtime.plan);
@@ -355,22 +453,11 @@ mqttEntityApplyBuckets(const BucketId *buckets, size_t entityCount)
 		}
 	}
 
-	MqttEntityBucketOverride *oldOverrides = g_runtime.overrides;
-	const size_t oldOverrideCount = g_runtime.overrideCount;
-	const bool oldPlanDirty = g_runtime.planDirty;
-
+	delete[] g_runtime.overrides;
 	g_runtime.overrides = nextOverrides;
 	g_runtime.overrideCount = nextOverrideCount;
+	resetActivePlan(g_runtime.plan);
 	g_runtime.planDirty = true;
-	if (!rebuildActivePlan()) {
-		delete[] g_runtime.overrides;
-		g_runtime.overrides = oldOverrides;
-		g_runtime.overrideCount = oldOverrideCount;
-		g_runtime.planDirty = oldPlanDirty;
-		return false;
-	}
-
-	delete[] oldOverrides;
 	return true;
 }
 

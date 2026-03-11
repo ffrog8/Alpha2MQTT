@@ -249,6 +249,7 @@ uint16_t schedFiveMinCount = 0;
 uint16_t schedOneHourCount = 0;
 uint16_t schedOneDayCount = 0;
 uint16_t schedUserCount = 0;
+size_t schedNextCursor[6] = {};
 
 // OLED variables
 char _oledOperatingIndicator = '*';
@@ -405,7 +406,7 @@ uint32_t getUptimeSeconds(void);
 bool checkTimer(unsigned long *lastRun, unsigned long interval);
 void emptyPayload(void);
 void sendMqtt(const char*, bool);
-void sendDataFromMqttState(const mqttState*, bool);
+void sendDataFromMqttState(const mqttState*, bool, const modbusRequestAndResponse *preparedResponse = nullptr);
 void loadPollingConfig(void);
 void recomputeBucketCounts(void);
 void savePollingConfig(const mqttState*);
@@ -3037,17 +3038,41 @@ recomputeBucketCounts(void)
 	if (!mqttEntitiesRtAvailable()) {
 		return;
 	}
-	const MqttEntityActivePlan *plan = mqttActivePlan();
-	if (plan == nullptr) {
-		return;
-	}
 
-	schedTenSecCount = static_cast<uint16_t>(plan->tenSec.count);
-	schedOneMinCount = static_cast<uint16_t>(plan->oneMin.count);
-	schedFiveMinCount = static_cast<uint16_t>(plan->fiveMin.count);
-	schedOneHourCount = static_cast<uint16_t>(plan->oneHour.count);
-	schedOneDayCount = static_cast<uint16_t>(plan->oneDay.count);
-	schedUserCount = static_cast<uint16_t>(plan->user.count);
+	schedTenSecCount = 0;
+	schedOneMinCount = 0;
+	schedFiveMinCount = 0;
+	schedOneHourCount = 0;
+	schedOneDayCount = 0;
+	schedUserCount = 0;
+
+	const size_t entityCount = mqttEntitiesCount();
+	for (size_t idx = 0; idx < entityCount; ++idx) {
+		switch (mqttEntityBucketByIndex(idx)) {
+		case BucketId::TenSec:
+			schedTenSecCount++;
+			break;
+		case BucketId::OneMin:
+			schedOneMinCount++;
+			break;
+		case BucketId::FiveMin:
+			schedFiveMinCount++;
+			break;
+		case BucketId::OneHour:
+			schedOneHourCount++;
+			break;
+		case BucketId::OneDay:
+			schedOneDayCount++;
+			break;
+		case BucketId::User:
+			schedUserCount++;
+			break;
+		case BucketId::Disabled:
+		case BucketId::Unknown:
+		default:
+			break;
+		}
+	}
 }
 
 void
@@ -6190,6 +6215,74 @@ refreshEssSnapshot(void)
 	return essSnapshotValid;
 }
 
+static size_t *
+bucketCursorFor(BucketId bucket)
+{
+	const int ordinal = bucketOrdinal(bucket);
+	if (ordinal < 0 || ordinal >= static_cast<int>(sizeof(schedNextCursor) / sizeof(schedNextCursor[0]))) {
+		return nullptr;
+	}
+	return &schedNextCursor[ordinal];
+}
+
+static void
+resetBucketCursors(void)
+{
+	for (size_t i = 0; i < sizeof(schedNextCursor) / sizeof(schedNextCursor[0]); ++i) {
+		schedNextCursor[i] = 0;
+	}
+}
+
+static void
+executePollTransaction(const MqttEntityActiveBucket &bucketPlan,
+                       const MqttPollTransaction &transaction,
+                       const mqttState *entities,
+                       bool snapshotOkThisBucket)
+{
+	if (transaction.entityCount == 0 || entities == nullptr || bucketPlan.members == nullptr) {
+		return;
+	}
+
+	const size_t leaderOffset = transaction.firstMemberOffset;
+	if (leaderOffset >= bucketPlan.count) {
+		return;
+	}
+
+	switch (transaction.kind) {
+	case MqttPollTransactionKind::SnapshotFanout:
+		if (!snapshotOkThisBucket) {
+			return;
+		}
+		for (size_t member = 0; member < transaction.entityCount; ++member) {
+			const size_t offset = static_cast<size_t>(transaction.firstMemberOffset) + member;
+			if (offset >= bucketPlan.count) {
+				break;
+			}
+			sendDataFromMqttState(&entities[bucketPlan.members[offset]], false, nullptr);
+		}
+		return;
+	case MqttPollTransactionKind::RegisterFanout:
+	case MqttPollTransactionKind::SingleEntity:
+	default:
+		break;
+	}
+
+	const size_t leaderIdx = bucketPlan.members[leaderOffset];
+	modbusRequestAndResponse response;
+	const modbusRequestAndResponseStatusValues result = readEntity(&entities[leaderIdx], &response);
+	if (result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
+		return;
+	}
+
+	for (size_t member = 0; member < transaction.entityCount; ++member) {
+		const size_t offset = static_cast<size_t>(transaction.firstMemberOffset) + member;
+		if (offset >= bucketPlan.count) {
+			break;
+		}
+		sendDataFromMqttState(&entities[bucketPlan.members[offset]], false, &response);
+	}
+}
+
 /*
  * sendData
  *
@@ -6210,6 +6303,7 @@ sendData()
 		resendAllData = false;
 		lastRunTenSeconds = lastRunOneMinute = lastRunFiveMinutes = lastRunOneHour = lastRunOneDay = 0;
 		lastRunUser = 0;
+		resetBucketCursors();
 	}
 
 	const bool dueTenSeconds = checkTimer(&lastRunTenSeconds, STATUS_INTERVAL_TEN_SECONDS);
@@ -6283,22 +6377,49 @@ sendData()
 		return snapshotOkThisBucket;
 	};
 
+	auto runBucketTransactions = [&](BucketId bucketId,
+	                                 const MqttEntityActiveBucket &bucketPlan,
+	                                 bool snapshotOkThisBucket) -> bool {
+		if (bucketPlan.transactionCount == 0) {
+			return false;
+		}
+		size_t *cursorPtr = bucketCursorFor(bucketId);
+		if (cursorPtr == nullptr) {
+			return false;
+		}
+		const size_t startCursor = normalizeDeferredCursor(*cursorPtr, bucketPlan.transactionCount);
+		const uint32_t budgetMs = bucketBudgetMs(bucketId, pollIntervalSeconds * 1000UL, kPollOverrunMs);
+		const uint32_t bucketStartMs = millis();
+		size_t processed = 0;
+		bool truncated = false;
+
+		while (processed < bucketPlan.transactionCount) {
+			const size_t txnIndex = (startCursor + processed) % bucketPlan.transactionCount;
+			executePollTransaction(bucketPlan, bucketPlan.transactions[txnIndex], entities, snapshotOkThisBucket);
+			processed++;
+			if (processed < bucketPlan.transactionCount && timedOut(bucketStartMs, millis(), budgetMs)) {
+				truncated = true;
+				break;
+			}
+		}
+
+		*cursorPtr = nextDeferredCursor(startCursor, processed, bucketPlan.transactionCount, truncated);
+		return truncated;
+	};
+
 	if (dueTenSeconds) {
 		// 10s cadence also gates dispatch, which depends on the ESS snapshot.
 		const bool snapshotOkThisBucket = ensureSnapshotForBucket(tenSecBucketRequiresSnapshot());
-
 		sendStatus(snapshotOkThisBucket);
+		const bool tenSecTruncated = runBucketTransactions(BucketId::TenSec, plan->tenSec, snapshotOkThisBucket);
 
-		publishBucketMembers(plan->tenSec.members,
-		                     plan->tenSec.count,
-		                     snapshotOkThisBucket,
-		                     mqttEntityNeedsEssSnapshotByIndex,
-		                     [&](size_t idx) { sendDataFromMqttState(&entities[idx], false); });
-
-		if (shouldRunDispatchForTenSecPass(dueTenSeconds, snapshotOkThisBucket, dispatchRanThisPass)) {
+		if (!tenSecTruncated &&
+		    shouldRunDispatchForTenSecPass(dueTenSeconds, snapshotOkThisBucket, dispatchRanThisPass)) {
 			checkAndSetDispatchMode();
 			dispatchRanThisPass = true;
 			dispatchLastSkipReason[0] = '\0';
+		} else if (tenSecTruncated) {
+			strlcpy(dispatchLastSkipReason, "poll_budget_exhausted", sizeof(dispatchLastSkipReason));
 		} else {
 			strlcpy(dispatchLastSkipReason, "ess_snapshot_failed", sizeof(dispatchLastSkipReason));
 		}
@@ -6306,52 +6427,32 @@ sendData()
 
 	if (dueOneMinute) {
 		const bool snapshotOkThisBucket = ensureSnapshotForBucket(plan->oneMin.hasEssSnapshot);
-		publishBucketMembers(plan->oneMin.members,
-		                     plan->oneMin.count,
-		                     snapshotOkThisBucket,
-		                     mqttEntityNeedsEssSnapshotByIndex,
-		                     [&](size_t idx) { sendDataFromMqttState(&entities[idx], false); });
+		runBucketTransactions(BucketId::OneMin, plan->oneMin, snapshotOkThisBucket);
 	}
 
 	if (dueFiveMinutes) {
 		const bool snapshotOkThisBucket = ensureSnapshotForBucket(plan->fiveMin.hasEssSnapshot);
-		publishBucketMembers(plan->fiveMin.members,
-		                     plan->fiveMin.count,
-		                     snapshotOkThisBucket,
-		                     mqttEntityNeedsEssSnapshotByIndex,
-		                     [&](size_t idx) { sendDataFromMqttState(&entities[idx], false); });
+		runBucketTransactions(BucketId::FiveMin, plan->fiveMin, snapshotOkThisBucket);
 	}
 
 	if (dueOneHour) {
 		const bool snapshotOkThisBucket = ensureSnapshotForBucket(plan->oneHour.hasEssSnapshot);
-		publishBucketMembers(plan->oneHour.members,
-		                     plan->oneHour.count,
-		                     snapshotOkThisBucket,
-		                     mqttEntityNeedsEssSnapshotByIndex,
-		                     [&](size_t idx) { sendDataFromMqttState(&entities[idx], false); });
+		runBucketTransactions(BucketId::OneHour, plan->oneHour, snapshotOkThisBucket);
 	}
 
 	if (dueOneDay) {
 		const bool snapshotOkThisBucket = ensureSnapshotForBucket(plan->oneDay.hasEssSnapshot);
-		publishBucketMembers(plan->oneDay.members,
-		                     plan->oneDay.count,
-		                     snapshotOkThisBucket,
-		                     mqttEntityNeedsEssSnapshotByIndex,
-		                     [&](size_t idx) { sendDataFromMqttState(&entities[idx], false); });
+		runBucketTransactions(BucketId::OneDay, plan->oneDay, snapshotOkThisBucket);
 	}
 
 	if (dueUser) {
 		const bool snapshotOkThisBucket = ensureSnapshotForBucket(plan->user.hasEssSnapshot);
-		publishBucketMembers(plan->user.members,
-		                     plan->user.count,
-		                     snapshotOkThisBucket,
-		                     mqttEntityNeedsEssSnapshotByIndex,
-		                     [&](size_t idx) { sendDataFromMqttState(&entities[idx], false); });
+		runBucketTransactions(BucketId::User, plan->user, snapshotOkThisBucket);
 	}
 }
 
 void
-sendDataFromMqttState(const mqttState *singleEntity, bool doHomeAssistant)
+sendDataFromMqttState(const mqttState *singleEntity, bool doHomeAssistant, const modbusRequestAndResponse *preparedResponse)
 {
 	char topic[256];
 	char topicBase[200];
@@ -6436,7 +6537,12 @@ sendDataFromMqttState(const mqttState *singleEntity, bool doHomeAssistant)
 		}
 		if (!skip) {
 			snprintf(topic, sizeof(topic), "%s/state", topicBase);
-			result = addState(singleEntity, &resultAddedToPayload);
+			if (preparedResponse != nullptr) {
+				result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
+				resultAddedToPayload = addToPayload(preparedResponse->dataValueFormatted);
+			} else {
+				result = addState(singleEntity, &resultAddedToPayload);
+			}
 		} else {
 			result = modbusRequestAndResponseStatusValues::preProcessing;
 		}

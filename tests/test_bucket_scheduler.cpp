@@ -213,3 +213,23 @@ TEST_CASE("dispatch edge-trigger: two sendData iterations in one 10s interval di
 	runSendDataIteration(20000UL, true); // next boundary due
 	CHECK(dispatchCount == 2);
 }
+
+TEST_CASE("bucket helpers expose interval and capped runtime budget")
+{
+	CHECK(bucketIntervalMs(BucketId::TenSec, 42000UL) == 10000UL);
+	CHECK(bucketIntervalMs(BucketId::User, 42000UL) == 42000UL);
+	CHECK(bucketBudgetMs(BucketId::TenSec, 42000UL, 5000UL) == 5000UL);
+	CHECK(bucketBudgetMs(BucketId::User, 3000UL, 5000UL) == 3000UL);
+	CHECK(bucketBudgetMs(BucketId::Disabled, 3000UL, 5000UL) == 0UL);
+}
+
+TEST_CASE("bucket helpers provide stable ordinals for runtime cursor arrays")
+{
+	CHECK(bucketOrdinal(BucketId::TenSec) == 0);
+	CHECK(bucketOrdinal(BucketId::OneMin) == 1);
+	CHECK(bucketOrdinal(BucketId::FiveMin) == 2);
+	CHECK(bucketOrdinal(BucketId::OneHour) == 3);
+	CHECK(bucketOrdinal(BucketId::OneDay) == 4);
+	CHECK(bucketOrdinal(BucketId::User) == 5);
+	CHECK(bucketOrdinal(BucketId::Disabled) == -1);
+}

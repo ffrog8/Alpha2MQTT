@@ -12,6 +12,9 @@ BucketId bucketIdFromString(const char *value);
 const char *bucketIdToString(BucketId bucket);
 BucketId bucketIdFromFreq(mqttUpdateFreq freq);
 mqttUpdateFreq bucketIdToFreq(BucketId bucket);
+uint32_t bucketIntervalMs(BucketId bucket, uint32_t userIntervalMs);
+uint32_t bucketBudgetMs(BucketId bucket, uint32_t userIntervalMs, uint32_t maxBudgetMs);
+int bucketOrdinal(BucketId bucket);
 
 inline bool shouldPublishEntityForBucket(bool entityNeedsEssSnapshot, bool essSnapshotOk)
 {
