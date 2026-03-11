@@ -757,6 +757,11 @@ def _discover_polling_menu_path(menu_html: str) -> str:
     return m.group(1)
 
 def _load_polling_page_via_menu(base: str) -> tuple[str, str]:
+    direct_path = "/config/polling?page=0"
+    status_poll, poll_body = _http_request_full("GET", base + direct_path, headers={}, body=b"", timeout_s=20)
+    if status_poll == 200:
+        return direct_path, poll_body.decode("utf-8", errors="replace")
+
     deadline = time.time() + 25
     polling_path = ""
     last_detail = "not checked"
@@ -785,6 +790,28 @@ def _load_polling_page_via_menu(base: str) -> tuple[str, str]:
     poll_html = poll_body.decode("utf-8", errors="replace")
     return polling_path, poll_html
 
+def _extract_polling_page_bounds(poll_html: str) -> tuple[int, int]:
+    m = re.search(r'<p class="hint">Page\s+(\d+)\s+of\s+(\d+)</p>', poll_html)
+    if not m:
+        raise E2EError("could not locate polling page bounds")
+    page = int(m.group(1)) - 1
+    total = int(m.group(2))
+    if page < 0 or total <= 0 or page >= total:
+        raise E2EError(f"invalid polling page bounds page={page} total={total}")
+    return page, total
+
+def _load_polling_page(base: str, page: int) -> str:
+    status_poll, poll_body = _http_request_full(
+        "GET",
+        f"{base}/config/polling?page={page}",
+        headers={},
+        body=b"",
+        timeout_s=20,
+    )
+    if status_poll != 200:
+        raise E2EError(f"portal polling page {page} not reachable: status={status_poll}")
+    return poll_body.decode("utf-8", errors="replace")
+
 def _extract_entity_row_and_selected_bucket(poll_html: str, entity_name: str) -> tuple[str, str]:
     row_re = re.search(rf'<tr data-entity="{re.escape(entity_name)}">(.*?)</tr>', poll_html, flags=re.DOTALL)
     if not row_re:
@@ -797,6 +824,18 @@ def _extract_entity_row_and_selected_bucket(poll_html: str, entity_name: str) ->
     if not selected:
         raise E2EError(f"could not locate selected bucket for {entity_name}")
     return row_idx.group(1), selected.group(1)
+
+def _locate_entity_on_polling_pages(base: str, first_page_html: str, entity_name: str) -> tuple[int, int, str, str]:
+    first_page, total_pages = _extract_polling_page_bounds(first_page_html)
+    pages = [first_page] + [page for page in range(total_pages) if page != first_page]
+    for page in pages:
+        page_html = first_page_html if page == first_page else _load_polling_page(base, page)
+        try:
+            row, bucket = _extract_entity_row_and_selected_bucket(page_html, entity_name)
+            return page, total_pages, row, bucket
+        except E2EError:
+            continue
+    raise E2EError(f"could not locate {entity_name} row on any polling page")
 
 
 def _discover_device_topic(mqtt: MqttClient, status_poll_suffix: str) -> str:
@@ -1961,10 +2000,11 @@ def main() -> int:
 
         set_mode_and_wait('{"mode":"online","strict_unknown":0}', ("online",))
         _assert_eventually(
-            "strict_unknown disabled",
+            "strict_unknown disabled while backend stays online",
             lambda: (
-                not bool(_fetch_stub(mqtt, stub_topic).get("strict_unknown", False)),
-                f"strict={_fetch_stub(mqtt, stub_topic).get('strict_unknown')}",
+                str(_fetch_poll(mqtt, poll_topic).get("rs485_stub_mode", "")) == "online"
+                and not bool(_fetch_stub(mqtt, stub_topic).get("strict_unknown", False)),
+                f"mode={_fetch_poll(mqtt, poll_topic).get('rs485_stub_mode')} strict={_fetch_stub(mqtt, stub_topic).get('strict_unknown')}",
             ),
             timeout_s=30,
             poll_s=2.0,
@@ -2001,10 +2041,11 @@ def main() -> int:
 
         set_mode_and_wait('{"mode":"online","strict_unknown":1}', ("online",))
         _assert_eventually(
-            "strict_unknown enabled",
+            "strict_unknown enabled while backend stays online",
             lambda: (
-                bool(_fetch_stub(mqtt, stub_topic).get("strict_unknown", False)),
-                f"strict={_fetch_stub(mqtt, stub_topic).get('strict_unknown')}",
+                str(_fetch_poll(mqtt, poll_topic).get("rs485_stub_mode", "")) == "online"
+                and bool(_fetch_stub(mqtt, stub_topic).get("strict_unknown", False)),
+                f"mode={_fetch_poll(mqtt, poll_topic).get('rs485_stub_mode')} strict={_fetch_stub(mqtt, stub_topic).get('strict_unknown')}",
             ),
             timeout_s=30,
             poll_s=2.0,
@@ -2388,35 +2429,34 @@ def main() -> int:
 
         # Find which row index corresponds to a known stable mqttName.
         target = "State_of_Charge"
-        row, initial_bucket = _extract_entity_row_and_selected_bucket(html, target)
+        target_page, total_pages, row, initial_bucket = _locate_entity_on_polling_pages(base, html, target)
         desired_bucket = "user" if initial_bucket != "user" else "ten_sec"
 
         # Navigate away without save and ensure no persistence happened.
-        _http_request_full("GET", base + "/config/polling?page=1", headers={}, body=b"", timeout_s=20)
-        _, html_back = _http_request_full("GET", base + "/config/polling?page=0", headers={}, body=b"", timeout_s=20)
-        html_back_text = html_back.decode("utf-8", errors="replace")
+        nav_page = 0 if target_page != 0 else (1 if total_pages > 1 else 0)
+        _http_request_full("GET", f"{base}/config/polling?page={nav_page}", headers={}, body=b"", timeout_s=20)
+        html_back_text = _load_polling_page(base, target_page)
         _, after_nav_bucket = _extract_entity_row_and_selected_bucket(html_back_text, target)
         if after_nav_bucket != initial_bucket:
             raise E2EError(f"unsaved bucket changed after page navigation: before={initial_bucket!r} after={after_nav_bucket!r}")
 
         # Change poll_interval_s and move target to an alternate bucket.
         fields = {
-            "page": "0",
+            "page": str(target_page),
             "poll_interval_s": "13",
             f"b{row}": desired_bucket,
         }
         save_url = base + "/config/polling/save"
-        print(f"[e2e] POST {save_url} fields: page=0 poll_interval_s=13 b{row}={desired_bucket}")
+        print(f"[e2e] POST {save_url} fields: page={target_page} poll_interval_s=13 b{row}={desired_bucket}")
         save_status = _http_post_form(save_url, fields, timeout_s=20)
         if save_status not in (200, 302):
             raise E2EError(f"polling save failed status={save_status}")
 
         # Save should not reboot out of portal; page should remain reachable after save.
-        _wait_for_http_ok(base + "/config/polling?page=0", timeout_s=10)
+        _wait_for_http_ok(f"{base}/config/polling?page={target_page}", timeout_s=10)
         _sleep_with_mqtt(mqtt, 3)
-        _wait_for_http_ok(base + "/config/polling?page=0", timeout_s=10)
-        _, html_saved = _http_request_full("GET", base + "/config/polling?page=0", headers={}, body=b"", timeout_s=20)
-        html_saved_text = html_saved.decode("utf-8", errors="replace")
+        _wait_for_http_ok(f"{base}/config/polling?page={target_page}", timeout_s=10)
+        html_saved_text = _load_polling_page(base, target_page)
         interval_match_saved = re.search(r'name="poll_interval_s"[^>]*value="(\d+)"', html_saved_text)
         if not interval_match_saved or int(interval_match_saved.group(1)) != 13:
             raise E2EError("poll_interval_s UI value not updated immediately after save")
@@ -2515,7 +2555,9 @@ def main() -> int:
         if int(interval_match.group(1)) != 13:
             raise E2EError(f"poll_interval_s UI value not restored after reboot: {interval_match.group(1)}")
 
-        _, restored_bucket = _extract_entity_row_and_selected_bucket(html2, target)
+        restored_page, _, _, restored_bucket = _locate_entity_on_polling_pages(base, html2, target)
+        if restored_page != target_page:
+            raise E2EError(f"{target} moved to a different portal page across reboot: before={target_page} after={restored_page}")
         if restored_bucket != desired_bucket:
             raise E2EError(f"{target} bucket UI value not restored after reboot (expected {desired_bucket!r}, got {restored_bucket!r})")
 

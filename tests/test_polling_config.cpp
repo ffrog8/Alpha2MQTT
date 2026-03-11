@@ -27,7 +27,53 @@ makeEntity(mqttEntityId id,
 	         false };
 }
 
+struct VisitCapture {
+	std::string bucketMapValue;
+	std::string pollIntervalValue;
+	size_t visited = 0;
+};
+
+static bool
+captureConfigEntry(const char *key, const char *value, void *context)
+{
+	auto &capture = *static_cast<VisitCapture *>(context);
+	capture.visited++;
+	if (std::string(key) == "bucket_map") {
+		capture.bucketMapValue = value;
+	} else if (std::string(key) == "poll_interval_s") {
+		capture.pollIntervalValue = value;
+	}
+	return true;
+}
+
 } // namespace
+
+TEST_CASE("length-delimited copy accepts payloads beyond the legacy 512-byte callback cap")
+{
+	std::string input(900, 'x');
+	char out[1024];
+	char tooSmall[512];
+
+	CHECK(copyLengthDelimitedString(input.c_str(), input.size(), out, sizeof(out)));
+	CHECK(std::string(out) == input);
+	CHECK_FALSE(copyLengthDelimitedString(input.c_str(), input.size(), tooSmall, sizeof(tooSmall)));
+}
+
+TEST_CASE("config entry visitor accepts large bucket_map values")
+{
+	std::string largeMap;
+	for (int i = 0; i < 80; ++i) {
+		largeMap += "Battery_Voltage=disabled;";
+	}
+	std::string payload = "{\"bucket_map\":\"" + largeMap + "\",\"poll_interval_s\":\"45\"}";
+	char scratch[2048];
+	VisitCapture capture{};
+
+	CHECK(visitPollingConfigEntries(payload.c_str(), scratch, sizeof(scratch), captureConfigEntry, &capture));
+	CHECK(capture.visited == 2);
+	CHECK(capture.bucketMapValue == largeMap);
+	CHECK(capture.pollIntervalValue == "45");
+}
 
 TEST_CASE("poll interval clamp enforces bounds")
 {

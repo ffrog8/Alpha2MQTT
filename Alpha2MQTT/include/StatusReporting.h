@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <cstddef>
 
+constexpr size_t kStatusPollBucketCount = 6;
+
 enum class MqttEventCode : uint8_t {
 	None = 0,
 	Rs485Timeout = 1,
@@ -105,6 +107,13 @@ struct StatusPollSnapshot {
 	uint32_t persistUnknownEntityCount;
 	uint32_t persistInvalidBucketCount;
 	uint32_t persistDuplicateEntityCount;
+	bool pollingBudgetExceeded;
+	uint32_t pollingBudgetOverrunCount;
+	uint32_t pollingBudgetUsedMs[kStatusPollBucketCount];
+	uint32_t pollingBudgetLimitMs[kStatusPollBucketCount];
+	uint16_t pollingBacklogCount[kStatusPollBucketCount];
+	uint32_t pollingBacklogOldestAgeMs[kStatusPollBucketCount];
+	uint32_t pollingLastFullCycleAgeMs[kStatusPollBucketCount];
 };
 
 struct StatusStubSnapshot {

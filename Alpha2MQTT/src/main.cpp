@@ -107,7 +107,6 @@ HttpServer httpServer(80);
 bool httpControlPlaneEnabled = false;
 static bool inMqttCallback = false;
 static bool pendingPollingConfigSet = false;
-static char pendingPollingConfigPayload[512] = "";
 static bool pendingEntityCommandSet = false;
 static const mqttState *pendingEntityCommand = nullptr;
 static char pendingEntityCommandPayload[128] = "";
@@ -249,7 +248,17 @@ uint16_t schedFiveMinCount = 0;
 uint16_t schedOneHourCount = 0;
 uint16_t schedOneDayCount = 0;
 uint16_t schedUserCount = 0;
-size_t schedNextCursor[6] = {};
+static constexpr BucketId kRuntimeBuckets[] = {
+	BucketId::TenSec,
+	BucketId::OneMin,
+	BucketId::FiveMin,
+	BucketId::OneHour,
+	BucketId::OneDay,
+	BucketId::User
+};
+size_t schedNextCursor[sizeof(kRuntimeBuckets) / sizeof(kRuntimeBuckets[0])] = {};
+BucketRuntimeBudgetState schedBudgetState[sizeof(kRuntimeBuckets) / sizeof(kRuntimeBuckets[0])] = {};
+uint32_t pollingBudgetOverrunCount = 0;
 
 // OLED variables
 char _oledOperatingIndicator = '*';
@@ -291,12 +300,62 @@ uint32_t receivedCallbacks = 0;
 uint32_t unknownCallbacks = 0;
 uint32_t badCallbacks = 0;
 #endif // DEBUG_CALLBACKS
-#ifdef DEBUG_RS485
 uint32_t rs485Errors = 0;
-#endif // DEBUG_RS485
 #ifdef DEBUG_OPS
 uint32_t opCounter = 0;
 #endif // DEBUG_OPS
+
+enum class PollingBudgetMetric : uint8_t {
+	UsedMs = 0,
+	LimitMs,
+	BacklogCount,
+	BacklogOldestAgeMs,
+	LastFullCycleAgeMs
+};
+
+struct PollingBudgetEntitySpec {
+	mqttEntityId entityId;
+	BucketId bucketId;
+	PollingBudgetMetric metric;
+};
+
+static const PollingBudgetEntitySpec kPollingBudgetEntitySpecs[] = {
+	{ mqttEntityId::entityPollingBudgetUsedMs10s, BucketId::TenSec, PollingBudgetMetric::UsedMs },
+	{ mqttEntityId::entityPollingBudgetLimitMs10s, BucketId::TenSec, PollingBudgetMetric::LimitMs },
+	{ mqttEntityId::entityPollingBacklogCount10s, BucketId::TenSec, PollingBudgetMetric::BacklogCount },
+	{ mqttEntityId::entityPollingBacklogOldestAgeMs10s, BucketId::TenSec, PollingBudgetMetric::BacklogOldestAgeMs },
+	{ mqttEntityId::entityPollingLastFullCycleAgeMs10s, BucketId::TenSec, PollingBudgetMetric::LastFullCycleAgeMs },
+	{ mqttEntityId::entityPollingBudgetUsedMs1m, BucketId::OneMin, PollingBudgetMetric::UsedMs },
+	{ mqttEntityId::entityPollingBudgetLimitMs1m, BucketId::OneMin, PollingBudgetMetric::LimitMs },
+	{ mqttEntityId::entityPollingBacklogCount1m, BucketId::OneMin, PollingBudgetMetric::BacklogCount },
+	{ mqttEntityId::entityPollingBacklogOldestAgeMs1m, BucketId::OneMin, PollingBudgetMetric::BacklogOldestAgeMs },
+	{ mqttEntityId::entityPollingLastFullCycleAgeMs1m, BucketId::OneMin, PollingBudgetMetric::LastFullCycleAgeMs },
+	{ mqttEntityId::entityPollingBudgetUsedMs5m, BucketId::FiveMin, PollingBudgetMetric::UsedMs },
+	{ mqttEntityId::entityPollingBudgetLimitMs5m, BucketId::FiveMin, PollingBudgetMetric::LimitMs },
+	{ mqttEntityId::entityPollingBacklogCount5m, BucketId::FiveMin, PollingBudgetMetric::BacklogCount },
+	{ mqttEntityId::entityPollingBacklogOldestAgeMs5m, BucketId::FiveMin, PollingBudgetMetric::BacklogOldestAgeMs },
+	{ mqttEntityId::entityPollingLastFullCycleAgeMs5m, BucketId::FiveMin, PollingBudgetMetric::LastFullCycleAgeMs },
+	{ mqttEntityId::entityPollingBudgetUsedMs1h, BucketId::OneHour, PollingBudgetMetric::UsedMs },
+	{ mqttEntityId::entityPollingBudgetLimitMs1h, BucketId::OneHour, PollingBudgetMetric::LimitMs },
+	{ mqttEntityId::entityPollingBacklogCount1h, BucketId::OneHour, PollingBudgetMetric::BacklogCount },
+	{ mqttEntityId::entityPollingBacklogOldestAgeMs1h, BucketId::OneHour, PollingBudgetMetric::BacklogOldestAgeMs },
+	{ mqttEntityId::entityPollingLastFullCycleAgeMs1h, BucketId::OneHour, PollingBudgetMetric::LastFullCycleAgeMs },
+	{ mqttEntityId::entityPollingBudgetUsedMs1d, BucketId::OneDay, PollingBudgetMetric::UsedMs },
+	{ mqttEntityId::entityPollingBudgetLimitMs1d, BucketId::OneDay, PollingBudgetMetric::LimitMs },
+	{ mqttEntityId::entityPollingBacklogCount1d, BucketId::OneDay, PollingBudgetMetric::BacklogCount },
+	{ mqttEntityId::entityPollingBacklogOldestAgeMs1d, BucketId::OneDay, PollingBudgetMetric::BacklogOldestAgeMs },
+	{ mqttEntityId::entityPollingLastFullCycleAgeMs1d, BucketId::OneDay, PollingBudgetMetric::LastFullCycleAgeMs },
+	{ mqttEntityId::entityPollingBudgetUsedMsUser, BucketId::User, PollingBudgetMetric::UsedMs },
+	{ mqttEntityId::entityPollingBudgetLimitMsUser, BucketId::User, PollingBudgetMetric::LimitMs },
+	{ mqttEntityId::entityPollingBacklogCountUser, BucketId::User, PollingBudgetMetric::BacklogCount },
+	{ mqttEntityId::entityPollingBacklogOldestAgeMsUser, BucketId::User, PollingBudgetMetric::BacklogOldestAgeMs },
+	{ mqttEntityId::entityPollingLastFullCycleAgeMsUser, BucketId::User, PollingBudgetMetric::LastFullCycleAgeMs }
+};
+
+static BucketRuntimeBudgetState *bucketBudgetStateFor(BucketId bucket);
+static void resetBucketBudgetStates(void);
+static bool pollingBudgetExceeded(void);
+static bool formatPollingBudgetEntityValue(mqttEntityId entityId, char *out, size_t outSize);
 
 #ifdef MP_ESPUNO_ESP32C6
 Adafruit_NeoPixel _statusPixel(1, LED_BUILTIN, NEO_GRB + NEO_KHZ800);
@@ -813,9 +872,7 @@ rs485ProbeTick(void)
 	snprintf(_debugOutput, sizeof(_debugOutput), "Baud Rate Checker Problem: %s", response.statusMqttMessage);
 	Serial.println(_debugOutput);
 #endif
-#ifdef DEBUG_RS485
 	rs485Errors++;
-#endif
 	updateOLED(false, "Test Baud", baudRateString, response.displayMessage);
 
 	rs485AttemptsInCycle++;
@@ -885,11 +942,7 @@ handleHttpRoot(void)
 
 	const IPAddress ip = WiFi.localIP();
 	const wl_status_t wifiStatus = WiFi.status();
-#ifdef DEBUG_RS485
 	const unsigned long rs485ErrorCount = static_cast<unsigned long>(rs485Errors);
-#else
-	const unsigned long rs485ErrorCount = 0;
-#endif
 #if RS485_STUB
 	const char *rs485Backend = "stub";
 #else
@@ -2825,7 +2878,7 @@ loop()
 
 	if (bootPlan.mqtt && pendingPollingConfigSet) {
 		pendingPollingConfigSet = false;
-		handlePollingConfigSet(pendingPollingConfigPayload);
+		handlePollingConfigSet(_mqttPayload);
 	}
 	if (bootPlan.mqtt && pendingEntityCommandSet) {
 		processPendingEntityCommand();
@@ -3469,146 +3522,96 @@ publishHaEntityDiscovery(const mqttState *entity)
 bool
 handlePollingConfigSet(const char *payload)
 {
-	const char *cursor = payload;
-	bool anyChange = false;
-	bool payloadValid = false;
-	const mqttState *changedEntity = nullptr;
+	struct PollingConfigSetContext {
+		bool anyChange = false;
+		bool bucketAssignmentsChanged = false;
+		const mqttState *changedEntity = nullptr;
+		const mqttState *entities = nullptr;
+		size_t entityCount = 0;
+		BucketId *buckets = nullptr;
+		bool bucketsLoaded = false;
+	};
+
 	const mqttState *entities = mqttEntitiesDesc();
 	const size_t entityCount = mqttEntitiesCount();
 	BucketId *buckets = g_portalBucketsScratch;
 	const bool bucketsLoaded = mqttEntitiesRtAvailable() && mqttEntityCopyBuckets(buckets, entityCount);
-	bool bucketAssignmentsChanged = false;
+	PollingConfigSetContext ctx{};
+	ctx.entities = entities;
+	ctx.entityCount = entityCount;
+	ctx.buckets = buckets;
+	ctx.bucketsLoaded = bucketsLoaded;
 
-	while (cursor && *cursor && isspace(static_cast<unsigned char>(*cursor))) {
-		cursor++;
-	}
-	if (*cursor != '{') {
-		return false;
-	}
-	cursor++;
+	const bool payloadValid = visitPollingConfigEntries(
+		payload,
+		g_portalBucketMapScratch,
+		sizeof(g_portalBucketMapScratch),
+		[](const char *key, const char *value, void *opaque) -> bool {
+			PollingConfigSetContext &ctx = *static_cast<PollingConfigSetContext *>(opaque);
+			bool handled = false;
 
-	while (cursor && *cursor) {
-		char key[64];
-		char value[512];
-		size_t keyIndex = 0;
-		size_t valueIndex = 0;
-		bool handled = false;
-
-		while (*cursor && isspace(static_cast<unsigned char>(*cursor))) {
-			cursor++;
-		}
-		if (*cursor == '}') {
-			payloadValid = true;
-			break;
-		}
-		if (*cursor != '"') {
-			break;
-		}
-		cursor++;
-		while (*cursor && *cursor != '"' && keyIndex < sizeof(key) - 1) {
-			key[keyIndex++] = *cursor++;
-		}
-		key[keyIndex] = '\0';
-		if (*cursor != '"') {
-			break;
-		}
-		cursor++;
-		while (*cursor && isspace(static_cast<unsigned char>(*cursor))) {
-			cursor++;
-		}
-		if (*cursor != ':') {
-			break;
-		}
-		cursor++;
-		while (*cursor && isspace(static_cast<unsigned char>(*cursor))) {
-			cursor++;
-		}
-		if (*cursor != '"') {
-			break;
-		}
-		cursor++;
-		while (*cursor && *cursor != '"' && valueIndex < sizeof(value) - 1) {
-			value[valueIndex++] = *cursor++;
-		}
-		value[valueIndex] = '\0';
-		if (*cursor != '"') {
-			break;
-		}
-		cursor++;
-
-		payloadValid = true;
-
-		if (!strcmp(key, kPreferencePollInterval)) {
-			char *endPtr = nullptr;
-			errno = 0;
-			unsigned long parsed = strtoul(value, &endPtr, 10);
-			if (errno == 0 && endPtr != value && *endPtr == '\0') {
-				uint32_t clamped = clampPollInterval(static_cast<uint32_t>(parsed));
-				if (clamped != pollIntervalSeconds) {
-					pollIntervalSeconds = clamped;
-					persistUserPollInterval(pollIntervalSeconds);
-					anyChange = true;
-					resendAllData = true;
+			if (!strcmp(key, kPreferencePollInterval)) {
+				char *endPtr = nullptr;
+				errno = 0;
+				unsigned long parsed = strtoul(value, &endPtr, 10);
+				if (errno == 0 && endPtr != value && *endPtr == '\0') {
+					uint32_t clamped = clampPollInterval(static_cast<uint32_t>(parsed));
+					if (clamped != pollIntervalSeconds) {
+						pollIntervalSeconds = clamped;
+						persistUserPollInterval(pollIntervalSeconds);
+						ctx.anyChange = true;
+						resendAllData = true;
+					}
 				}
+				handled = true;
 			}
-			handled = true;
-		}
 
-		if (!strcmp(key, "bucket_map")) {
-			if (bucketsLoaded) {
-				persistUnknownEntityCount = 0;
-				persistInvalidBucketCount = 0;
-				persistDuplicateEntityCount = 0;
-				const bool applied = applyBucketMapString(value,
-				                                          entities,
-				                                          entityCount,
-				                                          buckets,
-				                                          persistUnknownEntityCount,
-				                                          persistInvalidBucketCount,
-				                                          persistDuplicateEntityCount);
-				persistLoadOk = applied ? 1 : 0;
-				persistLoadErr = applied ? 0 : 1;
-				if (applied) {
-					bucketAssignmentsChanged = true;
+			if (!strcmp(key, "bucket_map")) {
+				if (ctx.bucketsLoaded) {
+					persistUnknownEntityCount = 0;
+					persistInvalidBucketCount = 0;
+					persistDuplicateEntityCount = 0;
+					const bool applied = applyBucketMapString(value,
+					                                          ctx.entities,
+					                                          ctx.entityCount,
+					                                          ctx.buckets,
+					                                          persistUnknownEntityCount,
+					                                          persistInvalidBucketCount,
+					                                          persistDuplicateEntityCount);
+					persistLoadOk = applied ? 1 : 0;
+					persistLoadErr = applied ? 0 : 1;
+					if (applied) {
+						ctx.bucketAssignmentsChanged = true;
+					}
 				}
+				handled = true;
 			}
-			handled = true;
-		}
 
-		if (!handled) {
-			const mqttState *entity = lookupEntityByName(key, entities, entityCount);
-			if (entity != NULL && bucketsLoaded) {
-				BucketId bucket = bucketIdFromString(value);
-				if (bucket != BucketId::Unknown) {
-					size_t idx = static_cast<size_t>(entity - entities);
-					if (idx < entityCount && buckets[idx] != bucket) {
-						buckets[idx] = bucket;
-						if (changedEntity == nullptr) {
-							changedEntity = entity;
+			if (!handled) {
+				const mqttState *entity = lookupEntityByName(key, ctx.entities, ctx.entityCount);
+				if (entity != nullptr && ctx.bucketsLoaded) {
+					BucketId bucket = bucketIdFromString(value);
+					if (bucket != BucketId::Unknown) {
+						size_t idx = static_cast<size_t>(entity - ctx.entities);
+						if (idx < ctx.entityCount && ctx.buckets[idx] != bucket) {
+							ctx.buckets[idx] = bucket;
+							if (ctx.changedEntity == nullptr) {
+								ctx.changedEntity = entity;
+							}
+							ctx.bucketAssignmentsChanged = true;
 						}
-						bucketAssignmentsChanged = true;
 					}
 				}
 			}
-		}
 
-		maybeYield();
-		while (*cursor && isspace(static_cast<unsigned char>(*cursor))) {
-			cursor++;
-		}
-		if (*cursor == ',') {
-			cursor++;
-			continue;
-		}
-		if (*cursor == '}') {
-			payloadValid = true;
-			break;
-		}
-	}
+			maybeYield();
+			return true;
+		},
+		&ctx);
 
-	if (bucketAssignmentsChanged) {
+	if (ctx.bucketAssignmentsChanged) {
 		if (mqttEntityApplyBuckets(buckets, entityCount)) {
-			anyChange = true;
+			ctx.anyChange = true;
 			requestHaDataResend();
 			resendAllData = true;
 		} else {
@@ -3617,9 +3620,9 @@ handlePollingConfigSet(const char *payload)
 		}
 	}
 
-	if (anyChange) {
+	if (ctx.anyChange) {
 		recomputeBucketCounts();
-		savePollingConfig(changedEntity != nullptr ? changedEntity : entities);
+		savePollingConfig(ctx.changedEntity != nullptr ? ctx.changedEntity : entities);
 		updatePollingLastChange();
 		publishPollingConfig();
 		resendAllData = true;
@@ -3976,9 +3979,7 @@ getSerialNumber()
 	       (strlen(response.dataValueFormatted) < 15)) &&
 	       (serialAttempts++ < kMaxIdentityReadAttempts)) {
 		tries++;
-#ifdef DEBUG_RS485
 		rs485Errors++;
-#endif // DEBUG_RS485
 		snprintf(oledLine4, sizeof(oledLine4), "%ld", tries);
 		updateOLED(false, "Alpha sys", "not known", oledLine4);
 		pumpMqttDuringSetup(250);
@@ -4013,9 +4014,7 @@ getSerialNumber()
 	while ((result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) &&
 	       (batteryAttempts++ < kMaxIdentityReadAttempts)) {
 		tries++;
-#ifdef DEBUG_RS485
 		rs485Errors++;
-#endif // DEBUG_RS485
 		snprintf(oledLine4, sizeof(oledLine4), "%ld", tries);
 		updateOLED(false, "Bat type", "not known", oledLine4);
 		pumpMqttDuringSetup(250);
@@ -4196,11 +4195,9 @@ updateRunstate()
 				snprintf(line4, sizeof(line4), "Bad CBs: %lu", badCallbacks);
 				debugIdx = 8;
 #endif // DEBUG_CALLBACKS
-#ifdef DEBUG_RS485
 			} else if (debugIdx < 9) {
 				snprintf(line4, sizeof(line4), "RS485 Err: %lu", rs485Errors);
 				debugIdx = 9;
-#endif // DEBUG_RS485
 			} else if (debugIdx < 11) {
 				char tmpOpMode[12];
 				getOpModeDesc(tmpOpMode, sizeof(tmpOpMode), opData.a2mOpMode);
@@ -5096,12 +5093,10 @@ readEntity(const mqttState *singleEntity, modbusRequestAndResponse* rs)
 		result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
 		break;
 #endif // DEBUG_CALLBACKS
-#ifdef DEBUG_RS485
 	case mqttEntityId::entityRs485Errors:
 		sprintf(rs->dataValueFormatted, "%lu", rs485Errors);
 		result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
 		break;
-#endif // DEBUG_RS485
 #ifdef DEBUG_FREEMEM
 	case mqttEntityId::entityFreemem:
 		sprintf(rs->dataValueFormatted, "%lu", freeMemory());
@@ -5119,6 +5114,12 @@ readEntity(const mqttState *singleEntity, modbusRequestAndResponse* rs)
 	case mqttEntityId::entityA2MVersion:
 		sprintf(rs->dataValueFormatted, "%s", _version);
 		result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
+		break;
+	case mqttEntityId::entityPollingBudgetExceeded:
+	case mqttEntityId::entityPollingBudgetOverrunCount:
+		if (formatPollingBudgetEntityValue(singleEntity->entityId, rs->dataValueFormatted, sizeof(rs->dataValueFormatted))) {
+			result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
+		}
 		break;
 	case mqttEntityId::entityInverterSn:
 #ifdef DEBUG_NO_RS485
@@ -5196,6 +5197,10 @@ readEntity(const mqttState *singleEntity, modbusRequestAndResponse* rs)
 		break;
 #endif // A2M_DEBUG_WIFI
 	default:
+		if (formatPollingBudgetEntityValue(singleEntity->entityId, rs->dataValueFormatted, sizeof(rs->dataValueFormatted))) {
+			result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
+			break;
+		}
 		if (singleEntity->readKind == MqttEntityReadKind::Register ||
 		    singleEntity->readKind == MqttEntityReadKind::Identity) {
 #ifdef DEBUG_NO_RS485
@@ -5213,9 +5218,7 @@ readEntity(const mqttState *singleEntity, modbusRequestAndResponse* rs)
 
 	if ((result != modbusRequestAndResponseStatusValues::readDataInvalidValue) &&
 	    (result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess)) {
-#ifdef DEBUG_RS485
 		rs485Errors++;
-#endif // DEBUG_RS485
 #ifdef DEBUG_OVER_SERIAL
 		char entityName[64];
 		mqttEntityNameCopy(singleEntity, entityName, sizeof(entityName));
@@ -5377,6 +5380,17 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 			poll.persistUnknownEntityCount = persistUnknownEntityCount;
 			poll.persistInvalidBucketCount = persistInvalidBucketCount;
 			poll.persistDuplicateEntityCount = persistDuplicateEntityCount;
+			poll.pollingBudgetExceeded = pollingBudgetExceeded();
+			poll.pollingBudgetOverrunCount = pollingBudgetOverrunCount;
+			const uint32_t nowMs = millis();
+			for (size_t bucketIdx = 0; bucketIdx < (sizeof(kRuntimeBuckets) / sizeof(kRuntimeBuckets[0])); ++bucketIdx) {
+				const BucketRuntimeBudgetState &budgetState = schedBudgetState[bucketIdx];
+				poll.pollingBudgetUsedMs[bucketIdx] = budgetState.usedMsLast;
+				poll.pollingBudgetLimitMs[bucketIdx] = budgetState.limitMsLast;
+				poll.pollingBacklogCount[bucketIdx] = budgetState.backlogCount;
+				poll.pollingBacklogOldestAgeMs[bucketIdx] = bucketBacklogOldestAgeMs(budgetState, nowMs);
+				poll.pollingLastFullCycleAgeMs[bucketIdx] = bucketLastFullCycleAgeMs(budgetState, nowMs);
+			}
 
 			if (!buildStatusCoreJson(core, stateAddition, sizeof(stateAddition))) {
 				return;
@@ -5786,15 +5800,47 @@ addConfig(const mqttState *singleEntity,
 	case mqttEntityId::entityEmsSn:
 		sprintf(stateAddition, ", \"icon\": \"mdi:identifier\"");
 		break;
-#ifdef DEBUG_RS485
 	case mqttEntityId::entityRs485Errors:
-#endif // DEBUG_RS485
 	case mqttEntityId::entityBatFaults:
 	case mqttEntityId::entityBatWarnings:
 	case mqttEntityId::entityInverterFaults:
 	case mqttEntityId::entityInverterWarnings:
 	case mqttEntityId::entitySystemFaults:
 		sprintf(stateAddition, ", \"icon\": \"mdi:alert-decagram-outline\"");
+		break;
+	case mqttEntityId::entityPollingBudgetExceeded:
+	case mqttEntityId::entityPollingBudgetOverrunCount:
+	case mqttEntityId::entityPollingBudgetUsedMs10s:
+	case mqttEntityId::entityPollingBudgetLimitMs10s:
+	case mqttEntityId::entityPollingBacklogCount10s:
+	case mqttEntityId::entityPollingBacklogOldestAgeMs10s:
+	case mqttEntityId::entityPollingLastFullCycleAgeMs10s:
+	case mqttEntityId::entityPollingBudgetUsedMs1m:
+	case mqttEntityId::entityPollingBudgetLimitMs1m:
+	case mqttEntityId::entityPollingBacklogCount1m:
+	case mqttEntityId::entityPollingBacklogOldestAgeMs1m:
+	case mqttEntityId::entityPollingLastFullCycleAgeMs1m:
+	case mqttEntityId::entityPollingBudgetUsedMs5m:
+	case mqttEntityId::entityPollingBudgetLimitMs5m:
+	case mqttEntityId::entityPollingBacklogCount5m:
+	case mqttEntityId::entityPollingBacklogOldestAgeMs5m:
+	case mqttEntityId::entityPollingLastFullCycleAgeMs5m:
+	case mqttEntityId::entityPollingBudgetUsedMs1h:
+	case mqttEntityId::entityPollingBudgetLimitMs1h:
+	case mqttEntityId::entityPollingBacklogCount1h:
+	case mqttEntityId::entityPollingBacklogOldestAgeMs1h:
+	case mqttEntityId::entityPollingLastFullCycleAgeMs1h:
+	case mqttEntityId::entityPollingBudgetUsedMs1d:
+	case mqttEntityId::entityPollingBudgetLimitMs1d:
+	case mqttEntityId::entityPollingBacklogCount1d:
+	case mqttEntityId::entityPollingBacklogOldestAgeMs1d:
+	case mqttEntityId::entityPollingLastFullCycleAgeMs1d:
+	case mqttEntityId::entityPollingBudgetUsedMsUser:
+	case mqttEntityId::entityPollingBudgetLimitMsUser:
+	case mqttEntityId::entityPollingBacklogCountUser:
+	case mqttEntityId::entityPollingBacklogOldestAgeMsUser:
+	case mqttEntityId::entityPollingLastFullCycleAgeMsUser:
+		sprintf(stateAddition, ", \"icon\": \"mdi:clock-alert-outline\"");
 		break;
 #ifdef DEBUG_FREEMEM
 	case mqttEntityId::entityFreemem:
@@ -6190,9 +6236,7 @@ refreshEssSnapshot(void)
 	if (gotError != 0) {
 		pollErrCount++;
 		lastErrTsMs = millis();
-#ifdef DEBUG_RS485
 		rs485Errors += gotError;
-#endif // DEBUG_RS485
 		essSnapshotValid = false;
 		strlcpy(dispatchLastSkipReason, "ess_snapshot_failed", sizeof(dispatchLastSkipReason));
 	} else {
@@ -6216,6 +6260,16 @@ refreshEssSnapshot(void)
 	return essSnapshotValid;
 }
 
+static BucketRuntimeBudgetState *
+bucketBudgetStateFor(BucketId bucket)
+{
+	const int ordinal = bucketOrdinal(bucket);
+	if (ordinal < 0 || ordinal >= static_cast<int>(sizeof(schedBudgetState) / sizeof(schedBudgetState[0]))) {
+		return nullptr;
+	}
+	return &schedBudgetState[ordinal];
+}
+
 static size_t *
 bucketCursorFor(BucketId bucket)
 {
@@ -6232,6 +6286,85 @@ resetBucketCursors(void)
 	for (size_t i = 0; i < sizeof(schedNextCursor) / sizeof(schedNextCursor[0]); ++i) {
 		schedNextCursor[i] = 0;
 	}
+}
+
+static void
+resetBucketBudgetStates(void)
+{
+	memset(schedBudgetState, 0, sizeof(schedBudgetState));
+}
+
+static bool
+pollingBudgetExceeded(void)
+{
+	for (size_t i = 0; i < sizeof(kRuntimeBuckets) / sizeof(kRuntimeBuckets[0]); ++i) {
+		if (bucketRuntimeBudgetExceeded(schedBudgetState[i])) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static const PollingBudgetEntitySpec *
+pollingBudgetEntitySpecFor(mqttEntityId entityId)
+{
+	for (size_t i = 0; i < sizeof(kPollingBudgetEntitySpecs) / sizeof(kPollingBudgetEntitySpecs[0]); ++i) {
+		if (kPollingBudgetEntitySpecs[i].entityId == entityId) {
+			return &kPollingBudgetEntitySpecs[i];
+		}
+	}
+	return nullptr;
+}
+
+static uint32_t
+pollingBudgetMetricValue(const BucketRuntimeBudgetState &state, PollingBudgetMetric metric, uint32_t nowMs)
+{
+	switch (metric) {
+	case PollingBudgetMetric::UsedMs:
+		return state.usedMsLast;
+	case PollingBudgetMetric::LimitMs:
+		return state.limitMsLast;
+	case PollingBudgetMetric::BacklogCount:
+		return state.backlogCount;
+	case PollingBudgetMetric::BacklogOldestAgeMs:
+		return bucketBacklogOldestAgeMs(state, nowMs);
+	case PollingBudgetMetric::LastFullCycleAgeMs:
+	default:
+		return bucketLastFullCycleAgeMs(state, nowMs);
+	}
+}
+
+static bool
+formatPollingBudgetEntityValue(mqttEntityId entityId, char *out, size_t outSize)
+{
+	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+
+	if (entityId == mqttEntityId::entityPollingBudgetExceeded) {
+		strlcpy(out, pollingBudgetExceeded() ? "Problem" : "OK", outSize);
+		return true;
+	}
+	if (entityId == mqttEntityId::entityPollingBudgetOverrunCount) {
+		snprintf(out, outSize, "%lu", static_cast<unsigned long>(pollingBudgetOverrunCount));
+		return true;
+	}
+
+	const PollingBudgetEntitySpec *spec = pollingBudgetEntitySpecFor(entityId);
+	if (spec == nullptr) {
+		return false;
+	}
+
+	const BucketRuntimeBudgetState *state = bucketBudgetStateFor(spec->bucketId);
+	if (state == nullptr) {
+		return false;
+	}
+
+	snprintf(out,
+	         outSize,
+	         "%lu",
+	         static_cast<unsigned long>(pollingBudgetMetricValue(*state, spec->metric, millis())));
+	return true;
 }
 
 static void
@@ -6305,6 +6438,7 @@ sendData()
 		lastRunTenSeconds = lastRunOneMinute = lastRunFiveMinutes = lastRunOneHour = lastRunOneDay = 0;
 		lastRunUser = 0;
 		resetBucketCursors();
+		resetBucketBudgetStates();
 	}
 
 	const bool dueTenSeconds = checkTimer(&lastRunTenSeconds, STATUS_INTERVAL_TEN_SECONDS);
@@ -6381,7 +6515,14 @@ sendData()
 	auto runBucketTransactions = [&](BucketId bucketId,
 	                                 const MqttEntityActiveBucket &bucketPlan,
 	                                 bool snapshotOkThisBucket) -> bool {
+		BucketRuntimeBudgetState *budgetState = bucketBudgetStateFor(bucketId);
+		const uint32_t budgetMs = bucketBudgetMs(bucketId, pollIntervalSeconds * 1000UL, kPollOverrunMs);
+		const uint32_t bucketStartMs = millis();
+
 		if (bucketPlan.transactionCount == 0) {
+			if (budgetState != nullptr) {
+				updateBucketRuntimeBudgetState(*budgetState, millis(), 0, budgetMs, 0, 0, false);
+			}
 			return false;
 		}
 		size_t *cursorPtr = bucketCursorFor(bucketId);
@@ -6389,8 +6530,6 @@ sendData()
 			return false;
 		}
 		const size_t startCursor = normalizeDeferredCursor(*cursorPtr, bucketPlan.transactionCount);
-		const uint32_t budgetMs = bucketBudgetMs(bucketId, pollIntervalSeconds * 1000UL, kPollOverrunMs);
-		const uint32_t bucketStartMs = millis();
 		size_t processed = 0;
 		bool truncated = false;
 
@@ -6404,6 +6543,19 @@ sendData()
 			}
 		}
 
+		const uint32_t bucketEndMs = millis();
+		if (budgetState != nullptr) {
+			updateBucketRuntimeBudgetState(*budgetState,
+			                               bucketEndMs,
+			                               static_cast<uint32_t>(bucketEndMs - bucketStartMs),
+			                               budgetMs,
+			                               bucketPlan.transactionCount,
+			                               processed,
+			                               truncated);
+		}
+		if (truncated) {
+			pollingBudgetOverrunCount++;
+		}
 		*cursorPtr = nextDeferredCursor(startCursor, processed, bucketPlan.transactionCount, truncated);
 		return truncated;
 	};
@@ -6808,7 +6960,34 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 	receivedCallbacks++;
 #endif // DEBUG_CALLBACKS
 
-	if ((length == 0) || (length >= sizeof(mqttIncomingPayload))) {
+	if (strcmp(topic, configSetTopic) == 0) {
+		if (_mqttPayload == nullptr || _maxPayloadSize <= 0) {
+#ifdef DEBUG_CALLBACKS
+			badCallbacks++;
+#endif // DEBUG_CALLBACKS
+			return;
+		}
+		if (!copyLengthDelimitedString(reinterpret_cast<const char *>(message),
+		                               length,
+		                               _mqttPayload,
+		                               static_cast<size_t>(_maxPayloadSize))) {
+#ifdef DEBUG_OVER_SERIAL
+			sprintf(_debugOutput, "mqttCallback: bad config length: %d", length);
+			Serial.println(_debugOutput);
+#endif
+#ifdef DEBUG_CALLBACKS
+			badCallbacks++;
+#endif // DEBUG_CALLBACKS
+			return;
+		}
+		pendingPollingConfigSet = true;
+		return;
+	}
+
+	if (!copyLengthDelimitedString(reinterpret_cast<const char *>(message),
+	                               length,
+	                               mqttIncomingPayload,
+	                               sizeof(mqttIncomingPayload))) {
 #ifdef DEBUG_OVER_SERIAL
 		sprintf(_debugOutput, "mqttCallback: bad length: %d", length);
 		Serial.println(_debugOutput);
@@ -6817,10 +6996,6 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 		badCallbacks++;
 #endif // DEBUG_CALLBACKS
 		return; // We won't be doing anything
-	} else {
-		// PubSubClient payload bytes are length-delimited and not guaranteed to be NUL-terminated.
-		memcpy(mqttIncomingPayload, message, length);
-		mqttIncomingPayload[length] = '\0';
 	}
 #ifdef DEBUG_OVER_SERIAL
 	sprintf(_debugOutput, "Payload: %d", length);
@@ -6841,11 +7016,7 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 		}
 		return; // No further processing needed.
 	} else if (strcmp(topic, configSetTopic) == 0) {
-		// Apply config outside of the MQTT callback to avoid calling diagYield() from a non-yieldable context
-		// (ESP8266 core can panic in __yield()). The main loop will process the update immediately.
-		strlcpy(pendingPollingConfigPayload, mqttIncomingPayload, sizeof(pendingPollingConfigPayload));
-		pendingPollingConfigSet = true;
-		return; // No further processing needed.
+		return; // handled above
 #if RS485_STUB
 		} else if (strcmp(topic, rs485StubControlTopic) == 0) {
 			// Runtime RS485 stub control (single firmware; no rebuilds per test case).
@@ -7418,9 +7589,7 @@ checkAndSetDispatchMode(void)
 #endif
 		result = _registerHandler->writeDispatchRegisters(essDispatchActivePower, essDispatchMode, essDispatchSoc, &response);
 		if (result != modbusRequestAndResponseStatusValues::writeDataRegisterSuccess) {
-#ifdef DEBUG_RS485
 			rs485Errors++;
-#endif // DEBUG_RS485
 		}
 	}
 #endif // ! DEBUG_NO_RS485
@@ -7450,9 +7619,7 @@ getA2mOpDataFromEss(void)
 			if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
 				return true;
 			}
-#ifdef DEBUG_RS485
 			rs485Errors++;
-#endif // DEBUG_RS485
 #ifdef DEBUG_OVER_SERIAL
 			if (attempt == 0 || (attempt + 1) == kMaxReadAttempts) {
 				snprintf(_debugOutput, sizeof(_debugOutput),

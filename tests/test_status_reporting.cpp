@@ -34,7 +34,7 @@ TEST_CASE("status core JSON builder includes required keys")
 	snapshot.httpControlPlaneEnabled = true;
 	snapshot.haUniqueId = "A2M-TEST";
 
-	char buffer[512];
+	char buffer[1024];
 	CHECK(buildStatusCoreJson(snapshot, buffer, sizeof(buffer)));
 
 	std::string payload(buffer);
@@ -62,7 +62,7 @@ TEST_CASE("status net JSON builder includes required keys")
 	snapshot.wifiStatusCode = 3;
 	snapshot.wifiReconnects = 1;
 
-	char buffer[512];
+	char buffer[1024];
 	CHECK(buildStatusNetJson(snapshot, buffer, sizeof(buffer)));
 
 	std::string payload(buffer);
@@ -121,6 +121,13 @@ TEST_CASE("status poll JSON builder includes required keys")
 	snapshot.persistUnknownEntityCount = 2;
 	snapshot.persistInvalidBucketCount = 3;
 	snapshot.persistDuplicateEntityCount = 4;
+	snapshot.pollingBudgetExceeded = true;
+	snapshot.pollingBudgetOverrunCount = 5;
+	snapshot.pollingBudgetUsedMs[0] = 123;
+	snapshot.pollingBudgetLimitMs[0] = 5000;
+	snapshot.pollingBacklogCount[0] = 2;
+	snapshot.pollingBacklogOldestAgeMs[0] = 7000;
+	snapshot.pollingLastFullCycleAgeMs[0] = 11000;
 
 	char buffer[2048];
 	CHECK(buildStatusPollJson(snapshot, buffer, sizeof(buffer)));
@@ -154,6 +161,9 @@ TEST_CASE("status poll JSON builder includes required keys")
 	CHECK(payload.find("\"persist_unknown_entity_count\":2") != std::string::npos);
 	CHECK(payload.find("\"persist_invalid_bucket_count\":3") != std::string::npos);
 	CHECK(payload.find("\"persist_duplicate_entity_count\":4") != std::string::npos);
+	CHECK(payload.find("\"poll_budget\":{\"k\":[\"10s\",\"1m\",\"5m\",\"1h\",\"1d\",\"usr\"],\"x\":true,\"c\":5") != std::string::npos);
+	CHECK(payload.find("\"u\":[123,0,0,0,0,0]") != std::string::npos);
+	CHECK(payload.find("\"b\":[2,0,0,0,0,0]") != std::string::npos);
 	CHECK(payload.find("\"poll_err_count\":1") != std::string::npos);
 	CHECK(payload.find("\"last_err_code\":2") != std::string::npos);
 	CHECK(payload.find("\"rs485_probe_last_attempt_ms\":12345") != std::string::npos);
@@ -187,8 +197,15 @@ TEST_CASE("status poll compact JSON includes snapshot/dispatch and stub schedule
 	snapshot.pollErrCount = 1;
 	snapshot.rs485ProbeLastAttemptMs = 5000;
 	snapshot.rs485ProbeBackoffMs = 15000;
+	snapshot.pollingBudgetExceeded = false;
+	snapshot.pollingBudgetOverrunCount = 3;
+	snapshot.pollingBudgetUsedMs[1] = 321;
+	snapshot.pollingBudgetLimitMs[1] = 5000;
+	snapshot.pollingBacklogCount[1] = 1;
+	snapshot.pollingBacklogOldestAgeMs[1] = 8000;
+	snapshot.pollingLastFullCycleAgeMs[1] = 12000;
 
-	char buffer[512];
+	char buffer[1536];
 	CHECK(buildStatusPollJsonCompact(snapshot, buffer, sizeof(buffer)));
 	std::string payload(buffer);
 
@@ -196,6 +213,9 @@ TEST_CASE("status poll compact JSON includes snapshot/dispatch and stub schedule
 	CHECK(payload.find("\"ess_snapshot_ok\":true") != std::string::npos);
 	CHECK(payload.find("\"ess_snapshot_attempts\":42") != std::string::npos);
 	CHECK(payload.find("\"dispatch_last_run_ms\":1000") != std::string::npos);
+	CHECK(payload.find("\"poll_budget\":{\"x\":false,\"c\":3") != std::string::npos);
+	CHECK(payload.find("\"b\":[0,1,0,0,0,0]") != std::string::npos);
+	CHECK(payload.find("\"a\":[0,8000,0,0,0,0]") != std::string::npos);
 
 #if RS485_STUB
 	CHECK(payload.find("\"s10_ms\":10") != std::string::npos);
@@ -236,9 +256,11 @@ TEST_CASE("status publishes liveness when inverter not ready and snapshot invali
 	poll.pollErrCount = 1;
 	poll.rs485ProbeLastAttemptMs = 2500;
 	poll.rs485ProbeBackoffMs = 15000;
+	poll.pollingBudgetExceeded = true;
+	poll.pollingBudgetOverrunCount = 2;
 
 	char coreBuffer[256];
-	char pollBuffer[512];
+	char pollBuffer[1536];
 	CHECK(buildStatusCoreJson(core, coreBuffer, sizeof(coreBuffer)));
 	CHECK(buildStatusPollJsonCompact(poll, pollBuffer, sizeof(pollBuffer)));
 
@@ -251,6 +273,7 @@ TEST_CASE("status publishes liveness when inverter not ready and snapshot invali
 	CHECK(pollPayload.find("\"rs485_backend\":\"real\"") != std::string::npos);
 	CHECK(pollPayload.find("\"poll_ok_count\":7") != std::string::npos);
 	CHECK(pollPayload.find("\"poll_err_count\":1") != std::string::npos);
+	CHECK(pollPayload.find("\"poll_budget\":{\"x\":true,\"c\":2") != std::string::npos);
 }
 
 TEST_CASE("status publishes liveness when inverter ready but snapshot failed")
@@ -277,7 +300,7 @@ TEST_CASE("status publishes liveness when inverter ready but snapshot failed")
 	poll.pollErrCount = 5;
 
 	char coreBuffer[256];
-	char pollBuffer[512];
+	char pollBuffer[1536];
 	CHECK(buildStatusCoreJson(core, coreBuffer, sizeof(coreBuffer)));
 	CHECK(buildStatusPollJsonCompact(poll, pollBuffer, sizeof(pollBuffer)));
 
@@ -314,7 +337,7 @@ TEST_CASE("status includes ess-derived fields when snapshot ok")
 	poll.pollErrCount = 0;
 
 	char coreBuffer[256];
-	char pollBuffer[512];
+	char pollBuffer[1536];
 	CHECK(buildStatusCoreJson(core, coreBuffer, sizeof(coreBuffer)));
 	CHECK(buildStatusPollJsonCompact(poll, pollBuffer, sizeof(pollBuffer)));
 

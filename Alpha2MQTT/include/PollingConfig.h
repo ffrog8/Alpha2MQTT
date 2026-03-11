@@ -13,10 +13,29 @@
 BucketId bucketIdFromLegacyFreq(int storedValue);
 bool isValidMqttUpdateFreq(int value);
 
+// Copy a length-delimited MQTT payload into a caller-owned text buffer and
+// append NUL. Chose a shared helper so the larger config/set path can be
+// unit-tested without executing the Arduino MQTT callback.
+bool copyLengthDelimitedString(const char *src,
+                               size_t length,
+                               char *out,
+                               size_t outSize);
+
 // Entity identifier for config payloads is the MQTT name string.
 const mqttState *lookupEntityByName(const char *name,
                                     const mqttState *entities,
                                     size_t entityCount);
+
+using PollingConfigEntryVisitor = bool (*)(const char *key, const char *value, void *context);
+
+// Visit the flat {"key":"value"} config/set payload used by polling config.
+// The parser intentionally stays limited to quoted string keys/values with no
+// escape support because that matches the existing firmware contract exactly.
+bool visitPollingConfigEntries(const char *payload,
+                               char *valueScratch,
+                               size_t valueScratchSize,
+                               PollingConfigEntryVisitor visitor,
+                               void *context);
 
 // Apply a Bucket_Map string into the provided bucket assignments. Supports both
 // "Entity_Name=bucket;" and compact "#<descriptor-index>=bucket;" tokens.

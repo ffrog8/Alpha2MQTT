@@ -15,6 +15,17 @@ isValidMqttUpdateFreq(int value)
 	return value >= mqttUpdateFreq::freqTenSec && value <= mqttUpdateFreq::freqDisabled;
 }
 
+bool
+copyLengthDelimitedString(const char *src, size_t length, char *out, size_t outSize)
+{
+	if (src == nullptr || out == nullptr || outSize == 0 || length == 0 || length >= outSize) {
+		return false;
+	}
+	memcpy(out, src, length);
+	out[length] = '\0';
+	return true;
+}
+
 BucketId
 bucketIdFromLegacyFreq(int storedValue)
 {
@@ -36,6 +47,96 @@ lookupEntityByName(const char *name, const mqttState *entities, size_t entityCou
 		}
 	}
 	return nullptr;
+}
+
+static const char *
+skipWhitespace(const char *cursor)
+{
+	while (cursor != nullptr && *cursor != '\0' && isspace(static_cast<unsigned char>(*cursor))) {
+		cursor++;
+	}
+	return cursor;
+}
+
+static bool
+copyQuotedString(const char *&cursor, char *out, size_t outSize)
+{
+	if (cursor == nullptr || out == nullptr || outSize == 0 || *cursor != '"') {
+		return false;
+	}
+
+	size_t index = 0;
+	cursor++;
+	while (*cursor != '\0' && *cursor != '"') {
+		if (index + 1 >= outSize) {
+			return false;
+		}
+		out[index++] = *cursor++;
+	}
+	if (*cursor != '"') {
+		return false;
+	}
+	out[index] = '\0';
+	cursor++;
+	return true;
+}
+
+bool
+visitPollingConfigEntries(const char *payload,
+                          char *valueScratch,
+                          size_t valueScratchSize,
+                          PollingConfigEntryVisitor visitor,
+                          void *context)
+{
+	if (payload == nullptr || valueScratch == nullptr || valueScratchSize == 0 || visitor == nullptr) {
+		return false;
+	}
+
+	const char *cursor = skipWhitespace(payload);
+	if (cursor == nullptr || *cursor != '{') {
+		return false;
+	}
+	cursor++;
+
+	while (true) {
+		char key[64];
+
+		cursor = skipWhitespace(cursor);
+		if (cursor == nullptr || *cursor == '\0') {
+			return false;
+		}
+		if (*cursor == '}') {
+			return true;
+		}
+		if (!copyQuotedString(cursor, key, sizeof(key))) {
+			return false;
+		}
+		cursor = skipWhitespace(cursor);
+		if (cursor == nullptr || *cursor != ':') {
+			return false;
+		}
+		cursor++;
+		cursor = skipWhitespace(cursor);
+		if (cursor == nullptr || !copyQuotedString(cursor, valueScratch, valueScratchSize)) {
+			return false;
+		}
+		if (!visitor(key, valueScratch, context)) {
+			return false;
+		}
+
+		cursor = skipWhitespace(cursor);
+		if (cursor == nullptr || *cursor == '\0') {
+			return false;
+		}
+		if (*cursor == ',') {
+			cursor++;
+			continue;
+		}
+		if (*cursor == '}') {
+			return true;
+		}
+		return false;
+	}
 }
 
 static bool

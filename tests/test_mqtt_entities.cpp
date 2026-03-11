@@ -101,6 +101,27 @@ TEST_CASE("mqtt entities: expanded catalog exposes metadata for direct register 
 	CHECK(gridVoltage->readKey == REG_GRID_METER_R_VOLTAGE_OF_A_PHASE);
 }
 
+TEST_CASE("mqtt entities: controller diagnostics include runtime polling signals")
+{
+	const mqttState *rs485Err = mqttEntityById(mqttEntityId::entityRs485Errors);
+	REQUIRE(rs485Err != nullptr);
+	CHECK(rs485Err->family == MqttEntityFamily::Controller);
+	CHECK(rs485Err->scope == MqttEntityScope::Controller);
+	CHECK(rs485Err->updateFreq == mqttUpdateFreq::freqOneMin);
+
+	const mqttState *budgetExceeded = mqttEntityById(mqttEntityId::entityPollingBudgetExceeded);
+	REQUIRE(budgetExceeded != nullptr);
+	CHECK(mqttEntityNameEquals(budgetExceeded, "Polling_Budget_Exceeded"));
+	CHECK(budgetExceeded->family == MqttEntityFamily::Controller);
+	CHECK(budgetExceeded->scope == MqttEntityScope::Controller);
+	CHECK(budgetExceeded->readKind == MqttEntityReadKind::Derived);
+
+	const mqttState *budgetUsed1m = mqttEntityById(mqttEntityId::entityPollingBudgetUsedMs1m);
+	REQUIRE(budgetUsed1m != nullptr);
+	CHECK(budgetUsed1m->updateFreq == mqttUpdateFreq::freqDisabled);
+	CHECK(budgetUsed1m->family == MqttEntityFamily::Controller);
+}
+
 TEST_CASE("mqtt entities: shared direct-register reads collapse into one poll transaction")
 {
 	initMqttEntitiesRtIfNeeded(true);

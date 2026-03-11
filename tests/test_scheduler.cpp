@@ -51,3 +51,27 @@ TEST_CASE("scheduler deferred cursor resets after a full bucket pass")
 	CHECK(nextDeferredCursor(3, 4, 4, true) == 0);
 	CHECK(nextDeferredCursor(1, 0, 4, true) == 1);
 }
+
+TEST_CASE("scheduler runtime budget state tracks deferred backlog until a full cycle completes")
+{
+	BucketRuntimeBudgetState state{};
+
+	updateBucketRuntimeBudgetState(state, 1000u, 450u, 400u, 5u, 3u, true);
+	CHECK(state.observed);
+	CHECK(bucketRuntimeBudgetExceeded(state));
+	CHECK(state.backlogCount == 2);
+	CHECK(state.usedMsLast == 450u);
+	CHECK(state.limitMsLast == 400u);
+	CHECK(bucketBacklogOldestAgeMs(state, 1600u) == 600u);
+	CHECK(bucketLastFullCycleAgeMs(state, 1600u) == 1600u);
+
+	updateBucketRuntimeBudgetState(state, 1500u, 420u, 400u, 5u, 4u, true);
+	CHECK(state.backlogCount == 1);
+	CHECK(bucketBacklogOldestAgeMs(state, 2000u) == 1000u);
+
+	updateBucketRuntimeBudgetState(state, 3000u, 250u, 400u, 5u, 5u, false);
+	CHECK_FALSE(bucketRuntimeBudgetExceeded(state));
+	CHECK(state.backlogCount == 0);
+	CHECK(bucketBacklogOldestAgeMs(state, 3200u) == 0u);
+	CHECK(bucketLastFullCycleAgeMs(state, 3200u) == 200u);
+}

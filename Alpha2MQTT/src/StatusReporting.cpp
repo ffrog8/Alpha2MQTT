@@ -11,6 +11,115 @@
 #define RS485_STUB 0
 #endif
 
+namespace {
+
+static const char *kPollBudgetBucketKeys[kStatusPollBucketCount] = {
+	"10s", "1m", "5m", "1h", "1d", "usr"
+};
+
+static bool
+buildPollBudgetJson(const StatusPollSnapshot &snapshot, char *out, size_t outSize)
+{
+	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+
+	int written = snprintf(
+		out,
+		outSize,
+		"\"poll_budget\":{\"k\":[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"],"
+		"\"x\":%s,\"c\":%lu,"
+		"\"u\":[%lu,%lu,%lu,%lu,%lu,%lu],"
+		"\"l\":[%lu,%lu,%lu,%lu,%lu,%lu],"
+		"\"b\":[%u,%u,%u,%u,%u,%u],"
+		"\"a\":[%lu,%lu,%lu,%lu,%lu,%lu],"
+		"\"f\":[%lu,%lu,%lu,%lu,%lu,%lu]}",
+		kPollBudgetBucketKeys[0],
+		kPollBudgetBucketKeys[1],
+		kPollBudgetBucketKeys[2],
+		kPollBudgetBucketKeys[3],
+		kPollBudgetBucketKeys[4],
+		kPollBudgetBucketKeys[5],
+		snapshot.pollingBudgetExceeded ? "true" : "false",
+		static_cast<unsigned long>(snapshot.pollingBudgetOverrunCount),
+		static_cast<unsigned long>(snapshot.pollingBudgetUsedMs[0]),
+		static_cast<unsigned long>(snapshot.pollingBudgetUsedMs[1]),
+		static_cast<unsigned long>(snapshot.pollingBudgetUsedMs[2]),
+		static_cast<unsigned long>(snapshot.pollingBudgetUsedMs[3]),
+		static_cast<unsigned long>(snapshot.pollingBudgetUsedMs[4]),
+		static_cast<unsigned long>(snapshot.pollingBudgetUsedMs[5]),
+		static_cast<unsigned long>(snapshot.pollingBudgetLimitMs[0]),
+		static_cast<unsigned long>(snapshot.pollingBudgetLimitMs[1]),
+		static_cast<unsigned long>(snapshot.pollingBudgetLimitMs[2]),
+		static_cast<unsigned long>(snapshot.pollingBudgetLimitMs[3]),
+		static_cast<unsigned long>(snapshot.pollingBudgetLimitMs[4]),
+		static_cast<unsigned long>(snapshot.pollingBudgetLimitMs[5]),
+		static_cast<unsigned>(snapshot.pollingBacklogCount[0]),
+		static_cast<unsigned>(snapshot.pollingBacklogCount[1]),
+		static_cast<unsigned>(snapshot.pollingBacklogCount[2]),
+		static_cast<unsigned>(snapshot.pollingBacklogCount[3]),
+		static_cast<unsigned>(snapshot.pollingBacklogCount[4]),
+		static_cast<unsigned>(snapshot.pollingBacklogCount[5]),
+		static_cast<unsigned long>(snapshot.pollingBacklogOldestAgeMs[0]),
+		static_cast<unsigned long>(snapshot.pollingBacklogOldestAgeMs[1]),
+		static_cast<unsigned long>(snapshot.pollingBacklogOldestAgeMs[2]),
+		static_cast<unsigned long>(snapshot.pollingBacklogOldestAgeMs[3]),
+		static_cast<unsigned long>(snapshot.pollingBacklogOldestAgeMs[4]),
+		static_cast<unsigned long>(snapshot.pollingBacklogOldestAgeMs[5]),
+		static_cast<unsigned long>(snapshot.pollingLastFullCycleAgeMs[0]),
+		static_cast<unsigned long>(snapshot.pollingLastFullCycleAgeMs[1]),
+		static_cast<unsigned long>(snapshot.pollingLastFullCycleAgeMs[2]),
+		static_cast<unsigned long>(snapshot.pollingLastFullCycleAgeMs[3]),
+		static_cast<unsigned long>(snapshot.pollingLastFullCycleAgeMs[4]),
+		static_cast<unsigned long>(snapshot.pollingLastFullCycleAgeMs[5]));
+	if (written < 0 || static_cast<size_t>(written) >= outSize) {
+		return false;
+	}
+	return true;
+}
+
+static bool
+buildPollBudgetJsonCompact(const StatusPollSnapshot &snapshot, char *out, size_t outSize)
+{
+	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+
+	int written = snprintf(
+		out,
+		outSize,
+		"\"poll_budget\":{\"x\":%s,\"c\":%lu,"
+		"\"b\":[%u,%u,%u,%u,%u,%u],"
+		"\"a\":[%lu,%lu,%lu,%lu,%lu,%lu],"
+		"\"f\":[%lu,%lu,%lu,%lu,%lu,%lu]}",
+		snapshot.pollingBudgetExceeded ? "true" : "false",
+		static_cast<unsigned long>(snapshot.pollingBudgetOverrunCount),
+		static_cast<unsigned>(snapshot.pollingBacklogCount[0]),
+		static_cast<unsigned>(snapshot.pollingBacklogCount[1]),
+		static_cast<unsigned>(snapshot.pollingBacklogCount[2]),
+		static_cast<unsigned>(snapshot.pollingBacklogCount[3]),
+		static_cast<unsigned>(snapshot.pollingBacklogCount[4]),
+		static_cast<unsigned>(snapshot.pollingBacklogCount[5]),
+		static_cast<unsigned long>(snapshot.pollingBacklogOldestAgeMs[0]),
+		static_cast<unsigned long>(snapshot.pollingBacklogOldestAgeMs[1]),
+		static_cast<unsigned long>(snapshot.pollingBacklogOldestAgeMs[2]),
+		static_cast<unsigned long>(snapshot.pollingBacklogOldestAgeMs[3]),
+		static_cast<unsigned long>(snapshot.pollingBacklogOldestAgeMs[4]),
+		static_cast<unsigned long>(snapshot.pollingBacklogOldestAgeMs[5]),
+		static_cast<unsigned long>(snapshot.pollingLastFullCycleAgeMs[0]),
+		static_cast<unsigned long>(snapshot.pollingLastFullCycleAgeMs[1]),
+		static_cast<unsigned long>(snapshot.pollingLastFullCycleAgeMs[2]),
+		static_cast<unsigned long>(snapshot.pollingLastFullCycleAgeMs[3]),
+		static_cast<unsigned long>(snapshot.pollingLastFullCycleAgeMs[4]),
+		static_cast<unsigned long>(snapshot.pollingLastFullCycleAgeMs[5]));
+	if (written < 0 || static_cast<size_t>(written) >= outSize) {
+		return false;
+	}
+	return true;
+}
+
+} // namespace
+
 const char *
 eventCodeName(MqttEventCode code)
 {
@@ -129,6 +238,10 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 	if (out == nullptr || outSize == 0) {
 		return false;
 	}
+	char pollBudget[768];
+	if (!buildPollBudgetJson(snapshot, pollBudget, sizeof(pollBudget))) {
+		return false;
+	}
 	int written = snprintf(
 		out,
 		outSize,
@@ -173,6 +286,7 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		"\"persist_unknown_entity_count\":%lu,"
 		"\"persist_invalid_bucket_count\":%lu,"
 		"\"persist_duplicate_entity_count\":%lu,"
+		"%s,"
 		"\"poll_ok_count\":%lu,"
 		"\"poll_err_count\":%lu,"
 		"\"last_poll_ms\":%lu,"
@@ -232,6 +346,7 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		static_cast<unsigned long>(snapshot.persistUnknownEntityCount),
 		static_cast<unsigned long>(snapshot.persistInvalidBucketCount),
 		static_cast<unsigned long>(snapshot.persistDuplicateEntityCount),
+		pollBudget,
 		static_cast<unsigned long>(snapshot.pollOkCount),
 		static_cast<unsigned long>(snapshot.pollErrCount),
 		static_cast<unsigned long>(snapshot.lastPollMs),
@@ -272,6 +387,10 @@ buildStatusPollJsonCompact(const StatusPollSnapshot &snapshot, char *out, size_t
 	if (out == nullptr || outSize == 0) {
 		return false;
 	}
+	char pollBudget[512];
+	if (!buildPollBudgetJsonCompact(snapshot, pollBudget, sizeof(pollBudget))) {
+		return false;
+	}
 	int written = snprintf(
 		out,
 		outSize,
@@ -300,6 +419,7 @@ buildStatusPollJsonCompact(const StatusPollSnapshot &snapshot, char *out, size_t
 		"\"last_poll_ms\":%lu,"
 		"\"poll_ok_count\":%lu,"
 		"\"poll_err_count\":%lu,"
+		"%s,"
 		"\"rs485_probe_last_attempt_ms\":%lu,"
 		"\"rs485_probe_backoff_ms\":%lu"
 		"}",
@@ -322,11 +442,12 @@ buildStatusPollJsonCompact(const StatusPollSnapshot &snapshot, char *out, size_t
 			static_cast<unsigned long>(snapshot.schedFiveMinLastRunMs),
 			static_cast<unsigned long>(snapshot.schedOneHourLastRunMs),
 			static_cast<unsigned long>(snapshot.schedOneDayLastRunMs),
-			static_cast<unsigned long>(snapshot.schedUserLastRunMs),
+		static_cast<unsigned long>(snapshot.schedUserLastRunMs),
 #endif
-			static_cast<unsigned long>(snapshot.lastPollMs),
-			static_cast<unsigned long>(snapshot.pollOkCount),
-			static_cast<unsigned long>(snapshot.pollErrCount),
+		static_cast<unsigned long>(snapshot.lastPollMs),
+		static_cast<unsigned long>(snapshot.pollOkCount),
+		static_cast<unsigned long>(snapshot.pollErrCount),
+		pollBudget,
 		static_cast<unsigned long>(snapshot.rs485ProbeLastAttemptMs),
 		static_cast<unsigned long>(snapshot.rs485ProbeBackoffMs));
 	if (written < 0 || static_cast<size_t>(written) >= outSize) {
