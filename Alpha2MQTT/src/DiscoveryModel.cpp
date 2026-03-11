@@ -1,5 +1,6 @@
 // Purpose: Keep MQTT discovery identity generation and entity scope mapping deterministic and heap-free.
 #include "../include/DiscoveryModel.h"
+#include "../include/MqttEntities.h"
 
 #include <cstdio>
 #include <cstring>
@@ -46,26 +47,14 @@ buildInverterIdentifier(const char *serial, char *out, size_t outLen)
 DiscoveryDeviceScope
 mqttEntityScope(mqttEntityId id)
 {
-	switch (id) {
-#ifdef DEBUG_FREEMEM
-	case mqttEntityId::entityFreemem:
-#endif
-#ifdef DEBUG_CALLBACKS
-	case mqttEntityId::entityCallbacks:
-#endif
-#ifdef A2M_DEBUG_WIFI
-	case mqttEntityId::entityRSSI:
-	case mqttEntityId::entityBSSID:
-	case mqttEntityId::entityTxPower:
-	case mqttEntityId::entityWifiRecon:
-#endif
-#ifdef DEBUG_RS485
-	case mqttEntityId::entityRs485Errors:
-#endif
-	case mqttEntityId::entityRs485Avail:
-	case mqttEntityId::entityA2MUptime:
-	case mqttEntityId::entityA2MVersion:
+	const mqttState *entity = mqttEntityById(id);
+	if (entity == nullptr) {
+		return DiscoveryDeviceScope::Inverter;
+	}
+	switch (entity->scope) {
+	case MqttEntityScope::Controller:
 		return DiscoveryDeviceScope::Controller;
+	case MqttEntityScope::Inverter:
 	default:
 		return DiscoveryDeviceScope::Inverter;
 	}

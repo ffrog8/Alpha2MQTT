@@ -1,8 +1,11 @@
 // Purpose: Implement helpers for persisted polling bucket configuration.
-// Responsibilities: Apply stored bucket mappings to runtime entity state.
+// Responsibilities: Parse stored bucket mappings, normalize override strings,
+// and keep the persisted representation compact as the catalog grows.
 #include "../include/PollingConfig.h"
 
+#include <cerrno>
 #include <cctype>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 
@@ -21,16 +24,6 @@ bucketIdFromLegacyFreq(int storedValue)
 	return bucketIdFromFreq(static_cast<mqttUpdateFreq>(storedValue));
 }
 
-void
-applyBucketToRuntime(MqttEntityRuntime &rt, BucketId bucket)
-{
-	if (bucket == BucketId::Unknown) {
-		return;
-	}
-	rt.bucketId = bucket;
-	rt.effectiveFreq = bucketIdToFreq(bucket);
-}
-
 const mqttState *
 lookupEntityByName(const char *name, const mqttState *entities, size_t entityCount)
 {
@@ -38,33 +31,61 @@ lookupEntityByName(const char *name, const mqttState *entities, size_t entityCou
 		return nullptr;
 	}
 	for (size_t i = 0; i < entityCount; i++) {
-		if (!strcmp(name, entities[i].mqttName)) {
+		if (mqttEntityNameEquals(&entities[i], name)) {
 			return &entities[i];
 		}
 	}
 	return nullptr;
 }
 
+static bool
+resolveEntityToken(const char *token,
+                   const mqttState *entities,
+                   size_t entityCount,
+                   size_t &resolvedIndex)
+{
+	if (token == nullptr || token[0] == '\0') {
+		return false;
+	}
+	if (token[0] == '#') {
+		char *endPtr = nullptr;
+		errno = 0;
+		unsigned long parsed = strtoul(token + 1, &endPtr, 10);
+		if (errno != 0 || endPtr == token + 1 || *endPtr != '\0' || parsed >= entityCount) {
+			return false;
+		}
+		resolvedIndex = static_cast<size_t>(parsed);
+		return true;
+	}
+
+	const mqttState *entity = lookupEntityByName(token, entities, entityCount);
+	if (entity == nullptr) {
+		return false;
+	}
+	resolvedIndex = static_cast<size_t>(entity - entities);
+	return true;
+}
+
 bool
 applyBucketMapString(const char *map,
                      const mqttState *entities,
                      size_t entityCount,
-                     MqttEntityRuntime *rt,
+                     BucketId *buckets,
                      uint32_t &unknownEntityCount,
                      uint32_t &invalidBucketCount,
                      uint32_t &duplicateEntityCount)
 {
-	if (map == nullptr || *map == '\0' || entities == nullptr || rt == nullptr || entityCount == 0) {
+	if (map == nullptr || *map == '\0' || entities == nullptr || buckets == nullptr || entityCount == 0) {
 		return false;
 	}
-	if (entityCount > kMqttEntityMaxCount) {
+	if (entityCount > kMqttEntityDescriptorCount) {
 		return false;
 	}
 
-	MqttEntityRuntime staged[kMqttEntityMaxCount];
-	memcpy(staged, rt, entityCount * sizeof(MqttEntityRuntime));
+	BucketId staged[kMqttEntityDescriptorCount];
+	memcpy(staged, buckets, entityCount * sizeof(BucketId));
 
-	uint8_t seen[kMqttEntityMaxCount];
+	uint8_t seen[kMqttEntityDescriptorCount];
 	memset(seen, 0, sizeof(seen));
 	const char *cursor = map;
 	while (*cursor) {
@@ -75,15 +96,15 @@ applyBucketMapString(const char *map,
 			break;
 		}
 
-		char name[64] = {0};
+		char token[64] = {0};
 		char bucket[32] = {0};
-		size_t nameIdx = 0;
+		size_t tokenIdx = 0;
 		size_t bucketIdx = 0;
 
-		while (*cursor && *cursor != '=' && *cursor != ';' && nameIdx < sizeof(name) - 1) {
-			name[nameIdx++] = *cursor++;
+		while (*cursor && *cursor != '=' && *cursor != ';' && tokenIdx < sizeof(token) - 1) {
+			token[tokenIdx++] = *cursor++;
 		}
-		name[nameIdx] = '\0';
+		token[tokenIdx] = '\0';
 
 		if (*cursor != '=') {
 			return false;
@@ -95,45 +116,43 @@ applyBucketMapString(const char *map,
 		}
 		bucket[bucketIdx] = '\0';
 
-		if (name[0] == '\0' || bucket[0] == '\0') {
+		if (token[0] == '\0' || bucket[0] == '\0') {
 			return false;
 		}
 
-		const mqttState *entity = lookupEntityByName(name, entities, entityCount);
-		if (entity == nullptr) {
+		size_t idx = 0;
+		if (!resolveEntityToken(token, entities, entityCount, idx)) {
 			unknownEntityCount++;
 		} else {
-			const size_t idx = static_cast<size_t>(entity - entities);
-			if (idx < entityCount) {
-				BucketId bucketId = bucketIdFromString(bucket);
-				if (bucketId == BucketId::Unknown) {
-					invalidBucketCount++;
-				} else {
-					if (seen[idx]) {
-						duplicateEntityCount++;
-					}
-					applyBucketToRuntime(staged[idx], bucketId);
-					seen[idx] = 1;
+			const BucketId bucketId = bucketIdFromString(bucket);
+			if (bucketId == BucketId::Unknown) {
+				invalidBucketCount++;
+			} else {
+				if (seen[idx]) {
+					duplicateEntityCount++;
 				}
+				staged[idx] = bucketId;
+				seen[idx] = 1;
 			}
 		}
 	}
 
-	memcpy(rt, staged, entityCount * sizeof(MqttEntityRuntime));
+	memcpy(buckets, staged, entityCount * sizeof(BucketId));
 	return true;
 }
 
 bool
 buildBucketMapFromLegacy(const mqttState *entities,
-                          size_t entityCount,
-                          const int *storedValues,
-                          char *out,
-                          size_t outSize,
-                          size_t &appliedCount)
+                         size_t entityCount,
+                         const int *storedValues,
+                         char *out,
+                         size_t outSize,
+                         size_t &appliedCount)
 {
 	if (entities == nullptr || storedValues == nullptr || out == nullptr || outSize == 0 || entityCount == 0) {
 		return false;
 	}
+
 	appliedCount = 0;
 	out[0] = '\0';
 	size_t used = 0;
@@ -142,16 +161,16 @@ buildBucketMapFromLegacy(const mqttState *entities,
 		if (!isValidMqttUpdateFreq(storedValues[i])) {
 			continue;
 		}
-		BucketId bucket = bucketIdFromLegacyFreq(storedValues[i]);
-		BucketId defaultBucket = bucketIdFromFreq(entities[i].updateFreq);
+		const BucketId bucket = bucketIdFromLegacyFreq(storedValues[i]);
+		const BucketId defaultBucket = bucketIdFromFreq(entities[i].updateFreq);
 		if (bucket == BucketId::Unknown || bucket == defaultBucket) {
 			continue;
 		}
 		const char *bucketStr = bucketIdToString(bucket);
 		const int needed = snprintf(out + used,
 		                            outSize - used,
-		                            "%s=%s;",
-		                            entities[i].mqttName,
+		                            "#%u=%s;",
+		                            static_cast<unsigned>(i),
 		                            bucketStr);
 		if (needed < 0 || static_cast<size_t>(needed) >= (outSize - used)) {
 			return false;
@@ -174,28 +193,25 @@ buildBucketMapFromAssignments(const mqttState *entities,
 	if (entities == nullptr || buckets == nullptr || out == nullptr || outSize == 0 || entityCount == 0) {
 		return false;
 	}
-	if (entityCount > kMqttEntityMaxCount) {
-		return false;
-	}
 
 	appliedCount = 0;
 	out[0] = '\0';
 	size_t used = 0;
 
 	for (size_t i = 0; i < entityCount; ++i) {
-		BucketId bucket = buckets[i];
+		const BucketId bucket = buckets[i];
 		if (bucket == BucketId::Unknown) {
 			continue;
 		}
-		BucketId defaultBucket = bucketIdFromFreq(entities[i].updateFreq);
+		const BucketId defaultBucket = bucketIdFromFreq(entities[i].updateFreq);
 		if (bucket == defaultBucket) {
 			continue;
 		}
 		const char *bucketStr = bucketIdToString(bucket);
 		const int needed = snprintf(out + used,
 		                            outSize - used,
-		                            "%s=%s;",
-		                            entities[i].mqttName,
+		                            "#%u=%s;",
+		                            static_cast<unsigned>(i),
 		                            bucketStr);
 		if (needed < 0 || static_cast<size_t>(needed) >= (outSize - used)) {
 			return false;

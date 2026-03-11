@@ -154,7 +154,7 @@ constexpr size_t kPrefBucketMapMaxLen = 2048;
 constexpr size_t kPrefPollingLastChangeMaxLen = 32;
 // Portal handlers run on a constrained callback stack on ESP8266.
 // Keep large polling map buffers in static storage to avoid stack corruption/panics.
-static BucketId g_portalBucketsScratch[kMqttEntityMaxCount];
+static BucketId g_portalBucketsScratch[kMqttEntityDescriptorCount];
 static char g_portalBucketMapScratch[kPrefBucketMapMaxLen];
 static char g_portalRowRenderBuf[768];
 BootIntent currentBootIntent = BootIntent::Normal;
@@ -1042,12 +1042,14 @@ subscribeInverterTopics(void)
 
 	for (int i = 0; i < numberOfEntities; i++) {
 		if (entities[i].subscribe && mqttEntityScope(entities[i].entityId) == DiscoveryDeviceScope::Inverter) {
+			char entityKey[64];
 			char topicBase[160];
+			mqttEntityNameCopy(&entities[i], entityKey, sizeof(entityKey));
 			if (!buildEntityTopicBase(deviceName,
 			                          DiscoveryDeviceScope::Inverter,
 			                          controllerIdentifier,
 			                          deviceSerialNumber,
-			                          entities[i].mqttName,
+			                          entityKey,
 			                          topicBase,
 			                          sizeof(topicBase))) {
 				continue;
@@ -1536,7 +1538,7 @@ loadPollingBucketsForPortal(const mqttState *entities,
                             BucketId *outBuckets,
                             uint32_t &outPollIntervalSeconds)
 {
-	if (!entities || !outBuckets || entityCount == 0 || entityCount > kMqttEntityMaxCount) {
+	if (!entities || !outBuckets || entityCount == 0 || entityCount > kMqttEntityDescriptorCount) {
 		return false;
 	}
 
@@ -1549,15 +1551,7 @@ loadPollingBucketsForPortal(const mqttState *entities,
 		return true;
 	}
 
-	const MqttEntityRuntime *rt = mqttEntitiesRt();
-	for (size_t i = 0; i < entityCount; ++i) {
-		const BucketId runtimeBucket = rt[i].bucketId;
-		if (runtimeBucket != BucketId::Unknown) {
-			outBuckets[i] = runtimeBucket;
-		}
-	}
-
-	return true;
+	return mqttEntityCopyBuckets(outBuckets, entityCount);
 }
 
 static uint16_t
@@ -1737,12 +1731,14 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 	for (size_t idx = startIdx; idx < endIdx; ++idx) {
 		const size_t row = idx - startIdx;
 		const BucketId cur = buckets[idx];
+		char entityName[64];
+		mqttEntityNameCopy(&entities[idx], entityName, sizeof(entityName));
 		const int rowLen = snprintf(
 			g_portalRowRenderBuf,
 			sizeof(g_portalRowRenderBuf),
 			kRowFmt,
-			entities[idx].mqttName,
-			entities[idx].mqttName,
+			entityName,
+			entityName,
 			static_cast<unsigned>(row),
 			bucketIdToString(BucketId::TenSec), (cur == BucketId::TenSec) ? " selected" : "", "10s",
 			bucketIdToString(BucketId::OneMin), (cur == BucketId::OneMin) ? " selected" : "", "1m",
@@ -1829,11 +1825,7 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 
 	persistUserPollingConfig(storedIntervalSeconds, outMap);
 	pollIntervalSeconds = storedIntervalSeconds;
-	if (mqttEntitiesRtAvailable()) {
-		MqttEntityRuntime *rt = mqttEntitiesRt();
-		for (size_t i = 0; i < entityCount; ++i) {
-			applyBucketToRuntime(rt[i], buckets[i]);
-		}
+	if (mqttEntitiesRtAvailable() && mqttEntityApplyBuckets(buckets, entityCount)) {
 		recomputeBucketCounts();
 	}
 	// Polling save is user-driven config edit only. Never auto-reboot from this path.
@@ -3045,51 +3037,17 @@ recomputeBucketCounts(void)
 	if (!mqttEntitiesRtAvailable()) {
 		return;
 	}
-	const MqttEntityRuntime *rt = mqttEntitiesRt();
-	const size_t count = mqttEntitiesCount();
-	uint16_t tenSec = 0;
-	uint16_t oneMin = 0;
-	uint16_t fiveMin = 0;
-	uint16_t oneHour = 0;
-	uint16_t oneDay = 0;
-	uint16_t user = 0;
-
-	for (size_t i = 0; i < count; i++) {
-		switch (rt[i].bucketId) {
-		case BucketId::TenSec:
-			tenSec++;
-			break;
-		case BucketId::OneMin:
-			oneMin++;
-			break;
-		case BucketId::FiveMin:
-			fiveMin++;
-			break;
-		case BucketId::OneHour:
-			oneHour++;
-			break;
-		case BucketId::OneDay:
-			oneDay++;
-			break;
-		case BucketId::User:
-			user++;
-			break;
-		case BucketId::Disabled:
-		case BucketId::Unknown:
-		default:
-			break;
-		}
-		if ((i % 16) == 0) {
-			maybeYield();
-		}
+	const MqttEntityActivePlan *plan = mqttActivePlan();
+	if (plan == nullptr) {
+		return;
 	}
 
-	schedTenSecCount = tenSec;
-	schedOneMinCount = oneMin;
-	schedFiveMinCount = fiveMin;
-	schedOneHourCount = oneHour;
-	schedOneDayCount = oneDay;
-	schedUserCount = user;
+	schedTenSecCount = static_cast<uint16_t>(plan->tenSec.count);
+	schedOneMinCount = static_cast<uint16_t>(plan->oneMin.count);
+	schedFiveMinCount = static_cast<uint16_t>(plan->fiveMin.count);
+	schedOneHourCount = static_cast<uint16_t>(plan->oneHour.count);
+	schedOneDayCount = static_cast<uint16_t>(plan->oneDay.count);
+	schedUserCount = static_cast<uint16_t>(plan->user.count);
 }
 
 void
@@ -3100,8 +3058,8 @@ loadPollingConfig(void)
 	}
 	Preferences preferences;
 	const mqttState *entities = mqttEntitiesDesc();
-	MqttEntityRuntime *rt = mqttEntitiesRt();
-	int numberOfEntities = static_cast<int>(mqttEntitiesCount());
+	const size_t entityCount = mqttEntitiesCount();
+	BucketId *buckets = g_portalBucketsScratch;
 	bool appliedBucketMap = false;
 
 	persistLoadOk = 0;
@@ -3125,9 +3083,8 @@ loadPollingConfig(void)
 	const uint32_t storedPollInterval = preferences.getUInt(kPreferencePollInterval, kPollIntervalDefaultSeconds);
 	pollIntervalSeconds = clampPollInterval(storedPollInterval);
 
-	for (int i = 0; i < numberOfEntities; i++) {
-		rt[i].defaultFreq = entities[i].updateFreq;
-		applyBucketToRuntime(rt[i], bucketIdFromFreq(entities[i].updateFreq));
+	for (size_t i = 0; i < entityCount; i++) {
+		buckets[i] = bucketIdFromFreq(entities[i].updateFreq);
 	}
 
 	char bucketMap[kPrefBucketMapMaxLen];
@@ -3137,8 +3094,8 @@ loadPollingConfig(void)
 	if (bucketMap[0] != '\0') {
 		appliedBucketMap = applyBucketMapString(bucketMap,
 		                                        entities,
-		                                        static_cast<size_t>(numberOfEntities),
-		                                        rt,
+		                                        entityCount,
+		                                        buckets,
 		                                        persistUnknownEntityCount,
 		                                        persistInvalidBucketCount,
 		                                        persistDuplicateEntityCount);
@@ -3149,27 +3106,24 @@ loadPollingConfig(void)
 		}
 	} else if (!legacyMigrated) {
 		// Legacy per-entity keys are read-only fallback when Bucket_Map is absent.
-		int legacyValues[kMqttEntityMaxCount];
+		int legacyValues[kMqttEntityDescriptorCount];
 		char key[16];
-		const size_t cappedCount = (numberOfEntities > static_cast<int>(kMqttEntityMaxCount))
-		                               ? kMqttEntityMaxCount
-		                               : static_cast<size_t>(numberOfEntities);
-		for (size_t i = 0; i < cappedCount; i++) {
+		for (size_t i = 0; i < entityCount; i++) {
 			buildPollingKey(&entities[i], key, sizeof(key));
 			legacyValues[i] = preferences.getInt(key, static_cast<int>(entities[i].updateFreq));
 		}
 		char mapBuf[2048];
 		size_t appliedCount = 0;
 		if (buildBucketMapFromLegacy(entities,
-		                             cappedCount,
+		                             entityCount,
 		                             legacyValues,
 		                             mapBuf,
 		                             sizeof(mapBuf),
 		                             appliedCount)) {
 			appliedBucketMap = applyBucketMapString(mapBuf,
 			                                        entities,
-			                                        cappedCount,
-			                                        rt,
+			                                        entityCount,
+			                                        buckets,
 			                                        persistUnknownEntityCount,
 			                                        persistInvalidBucketCount,
 			                                        persistDuplicateEntityCount);
@@ -3186,44 +3140,33 @@ loadPollingConfig(void)
 	}
 
 	preferences.end();
+	if (!mqttEntityApplyBuckets(buckets, entityCount)) {
+		persistLoadOk = 0;
+		persistLoadErr = 1;
+	}
+	recomputeBucketCounts();
 }
 
 void
 savePollingConfig(const mqttState *entity)
 {
 	const mqttState *entities = mqttEntitiesDesc();
-	MqttEntityRuntime *rt = mqttEntitiesRt();
-	int numberOfEntities = static_cast<int>(mqttEntitiesCount());
+	const size_t entityCount = mqttEntitiesCount();
+	BucketId *buckets = g_portalBucketsScratch;
 	char *map = g_portalBucketMapScratch;
-	size_t used = 0;
 	map[0] = '\0';
+	(void)entity;
 
-	if (entity == NULL || !mqttEntitiesRtAvailable()) {
+	if (!mqttEntitiesRtAvailable()) {
 		return;
 	}
-	size_t idx = static_cast<size_t>(entity - entities);
-	if (idx >= mqttEntitiesCount()) {
+	if (!mqttEntityCopyBuckets(buckets, entityCount)) {
 		return;
 	}
 
-	for (int i = 0; i < numberOfEntities; i++) {
-		BucketId defaultBucket = bucketIdFromFreq(entities[i].updateFreq);
-		if (rt[i].bucketId == defaultBucket) {
-			continue;
-		}
-		const int needed = snprintf(map + used,
-		                            kPrefBucketMapMaxLen - used,
-		                            "%s=%s;",
-		                            entities[i].mqttName,
-		                            bucketIdToString(rt[i].bucketId));
-		if (needed < 0 || static_cast<size_t>(needed) >= (kPrefBucketMapMaxLen - used)) {
-			// Too many overrides to fit into the stored map; avoid writing a truncated map.
-			return;
-		}
-		used += static_cast<size_t>(needed);
-		if ((i % 8) == 0) {
-			maybeYield();
-		}
+	size_t appliedCount = 0;
+	if (!buildBucketMapFromAssignments(entities, entityCount, buckets, map, kPrefBucketMapMaxLen, appliedCount)) {
+		return;
 	}
 
 	persistUserBucketMap(map);
@@ -3239,8 +3182,11 @@ publishPollingConfig(void)
 	bool first = true;
 	modbusRequestAndResponseStatusValues resultAddedToPayload;
 	const mqttState *entities = mqttEntitiesDesc();
-	const MqttEntityRuntime *rt = mqttEntitiesRt();
-	int numberOfEntities = static_cast<int>(mqttEntitiesCount());
+	const size_t entityCount = mqttEntitiesCount();
+	BucketId *buckets = g_portalBucketsScratch;
+	if (!mqttEntityCopyBuckets(buckets, entityCount)) {
+		return;
+	}
 
 	emptyPayload();
 
@@ -3271,11 +3217,16 @@ publishPollingConfig(void)
 	}
 
 	first = true;
-	for (int i = 0; i < numberOfEntities; i++) {
+	for (size_t i = 0; i < entityCount; i++) {
+		if (buckets[i] == BucketId::Disabled) {
+			continue;
+		}
+		char entityName[64];
+		mqttEntityNameCopy(&entities[i], entityName, sizeof(entityName));
 		snprintf(addition, sizeof(addition), "%s\"%s\": \"%s\"",
 			 first ? "" : ", ",
-			 entities[i].mqttName,
-			 bucketIdToString(rt[i].bucketId));
+			 entityName,
+			 bucketIdToString(buckets[i]));
 		first = false;
 		resultAddedToPayload = addToPayload(addition);
 		if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
@@ -3450,7 +3401,7 @@ publishHaEntityDiscovery(const mqttState *entity)
 	if (idx >= mqttEntitiesCount()) {
 		return;
 	}
-	mqttUpdateFreq effectiveFreq = mqttEntitiesRt()[idx].effectiveFreq;
+	mqttUpdateFreq effectiveFreq = mqttEntityEffectiveFreqByIndex(idx);
 	const DiscoveryDeviceScope scope = mqttEntityScope(entity->entityId);
 	const char *deviceId = discoveryDeviceIdForScope(scope);
 	if (deviceId[0] == '\0') {
@@ -3465,6 +3416,7 @@ publishHaEntityDiscovery(const mqttState *entity)
 	if (effectiveFreq == mqttUpdateFreq::freqDisabled) {
 		switch (entity->haClass) {
 		case homeAssistantClass::haClassBox:
+		case homeAssistantClass::haClassNumber:
 			entityType = "number";
 			break;
 		case homeAssistantClass::haClassSelect:
@@ -3477,7 +3429,9 @@ publishHaEntityDiscovery(const mqttState *entity)
 			entityType = "sensor";
 			break;
 		}
-		snprintf(topic, sizeof(topic), "homeassistant/%s/%s/%s/config", entityType, deviceId, entity->mqttName);
+		char entityName[64];
+		mqttEntityNameCopy(entity, entityName, sizeof(entityName));
+		snprintf(topic, sizeof(topic), "homeassistant/%s/%s/%s/config", entityType, deviceId, entityName);
 		emptyPayload();
 		sendMqtt(topic, MQTT_RETAIN);
 		return;
@@ -3493,6 +3447,11 @@ handlePollingConfigSet(const char *payload)
 	bool anyChange = false;
 	bool payloadValid = false;
 	const mqttState *changedEntity = nullptr;
+	const mqttState *entities = mqttEntitiesDesc();
+	const size_t entityCount = mqttEntitiesCount();
+	BucketId *buckets = g_portalBucketsScratch;
+	const bool bucketsLoaded = mqttEntitiesRtAvailable() && mqttEntityCopyBuckets(buckets, entityCount);
+	bool bucketAssignmentsChanged = false;
 
 	while (cursor && *cursor && isspace(static_cast<unsigned char>(*cursor))) {
 		cursor++;
@@ -3570,42 +3529,38 @@ handlePollingConfigSet(const char *payload)
 		}
 
 		if (!strcmp(key, "bucket_map")) {
-			if (mqttEntitiesRtAvailable()) {
+			if (bucketsLoaded) {
 				persistUnknownEntityCount = 0;
 				persistInvalidBucketCount = 0;
 				persistDuplicateEntityCount = 0;
 				const bool applied = applyBucketMapString(value,
-				                                          mqttEntitiesDesc(),
-				                                          mqttEntitiesCount(),
-				                                          mqttEntitiesRt(),
+				                                          entities,
+				                                          entityCount,
+				                                          buckets,
 				                                          persistUnknownEntityCount,
 				                                          persistInvalidBucketCount,
 				                                          persistDuplicateEntityCount);
 				persistLoadOk = applied ? 1 : 0;
 				persistLoadErr = applied ? 0 : 1;
 				if (applied) {
-					persistUserBucketMap(value);
-					anyChange = true;
-					requestHaDataResend();
-					resendAllData = true;
+					bucketAssignmentsChanged = true;
 				}
 			}
 			handled = true;
 		}
 
 		if (!handled) {
-			const mqttState *entity = lookupEntityByName(key, mqttEntitiesDesc(), mqttEntitiesCount());
-			if (entity != NULL && mqttEntitiesRtAvailable()) {
+			const mqttState *entity = lookupEntityByName(key, entities, entityCount);
+			if (entity != NULL && bucketsLoaded) {
 				BucketId bucket = bucketIdFromString(value);
 				if (bucket != BucketId::Unknown) {
-					size_t idx = static_cast<size_t>(entity - mqttEntitiesDesc());
-					if (idx < mqttEntitiesCount() && mqttEntitiesRt()[idx].bucketId != bucket) {
-						applyBucketToRuntime(mqttEntitiesRt()[idx], bucket);
+					size_t idx = static_cast<size_t>(entity - entities);
+					if (idx < entityCount && buckets[idx] != bucket) {
+						buckets[idx] = bucket;
 						if (changedEntity == nullptr) {
 							changedEntity = entity;
 						}
-						anyChange = true;
-						resendAllData = true;
+						bucketAssignmentsChanged = true;
 					}
 				}
 			}
@@ -3625,12 +3580,20 @@ handlePollingConfigSet(const char *payload)
 		}
 	}
 
+	if (bucketAssignmentsChanged) {
+		if (mqttEntityApplyBuckets(buckets, entityCount)) {
+			anyChange = true;
+			requestHaDataResend();
+			resendAllData = true;
+		} else {
+			persistLoadOk = 0;
+			persistLoadErr = 1;
+		}
+	}
+
 	if (anyChange) {
 		recomputeBucketCounts();
-		if (changedEntity != nullptr) {
-			savePollingConfig(changedEntity);
-			requestHaDataResend();
-		}
+		savePollingConfig(changedEntity != nullptr ? changedEntity : entities);
 		updatePollingLastChange();
 		publishPollingConfig();
 		resendAllData = true;
@@ -4543,12 +4506,14 @@ mqttReconnect(void)
 				if (inverterReady && inverterSerialKnown()) {
 					for (int i = 0; i < numberOfEntities; i++) {
 						if (entities[i].subscribe && mqttEntityScope(entities[i].entityId) == DiscoveryDeviceScope::Inverter) {
+							char entityKey[64];
 							char topicBase[160];
+							mqttEntityNameCopy(&entities[i], entityKey, sizeof(entityKey));
 							if (!buildEntityTopicBase(deviceName,
 							                          DiscoveryDeviceScope::Inverter,
 							                          controllerIdentifier,
 							                          deviceSerialNumber,
-							                          entities[i].mqttName,
+							                          entityKey,
 							                          topicBase,
 							                          sizeof(topicBase))) {
 								continue;
@@ -4596,7 +4561,7 @@ lookupSubscription(char *entityName)
 	int numberOfEntities = static_cast<int>(mqttEntitiesCount());
 	for (int i = 0; i < numberOfEntities; i++) {
 		if (entities[i].subscribe &&
-		    !strcmp(entityName, entities[i].mqttName)) {
+		    mqttEntityNameEquals(&entities[i], entityName)) {
 			return &entities[i];
 		}
 	}
@@ -5204,6 +5169,20 @@ readEntity(const mqttState *singleEntity, modbusRequestAndResponse* rs)
 		result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
 		break;
 #endif // A2M_DEBUG_WIFI
+	default:
+		if (singleEntity->readKind == MqttEntityReadKind::Register ||
+		    singleEntity->readKind == MqttEntityReadKind::Identity) {
+#ifdef DEBUG_NO_RS485
+			snprintf(rs->dataValueFormatted, sizeof(rs->dataValueFormatted), "%u",
+			         static_cast<unsigned>(singleEntity->readKey));
+			result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
+#else // DEBUG_NO_RS485
+			if (_registerHandler != nullptr) {
+				result = _registerHandler->readHandledRegister(singleEntity->readKey, rs);
+			}
+#endif // DEBUG_NO_RS485
+		}
+		break;
 	}
 
 	if ((result != modbusRequestAndResponseStatusValues::readDataInvalidValue) &&
@@ -5212,7 +5191,9 @@ readEntity(const mqttState *singleEntity, modbusRequestAndResponse* rs)
 		rs485Errors++;
 #endif // DEBUG_RS485
 #ifdef DEBUG_OVER_SERIAL
-		snprintf(_debugOutput, sizeof(_debugOutput), "Failed to read register: %s, Result = %d", singleEntity->mqttName, result);
+		char entityName[64];
+		mqttEntityNameCopy(singleEntity, entityName, sizeof(entityName));
+		snprintf(_debugOutput, sizeof(_debugOutput), "Failed to read register: %s, Result = %d", entityName, result);
 		Serial.println(_debugOutput);
 #endif
 	}
@@ -5457,14 +5438,16 @@ addConfig(const mqttState *singleEntity,
 	char uniqueId[128];
 	const char *deviceId = discoveryDeviceIdForScope(scope);
 	const bool inverterScope = (scope == DiscoveryDeviceScope::Inverter);
+	char entityKey[64];
 	stateAddition[0] = '\0';
 	if (deviceId[0] == '\0' || topicBase == nullptr || topicBase[0] == '\0') {
 		return modbusRequestAndResponseStatusValues::preProcessing;
 	}
+	mqttEntityNameCopy(singleEntity, entityKey, sizeof(entityKey));
 	buildEntityUniqueId(scope,
 	                    controllerIdentifier,
 	                    deviceSerialNumber,
-	                    singleEntity->mqttName,
+	                    entityKey,
 	                    uniqueId,
 	                    sizeof(uniqueId));
 
@@ -5517,7 +5500,7 @@ addConfig(const mqttState *singleEntity,
 		return resultAddedToPayload;
 	}
 
-	strlcpy(prettyName, singleEntity->mqttName, sizeof(prettyName));
+	strlcpy(prettyName, entityKey, sizeof(prettyName));
 	while(char *ch = strchr(prettyName, '_')) {
 		*ch = ' ';
 	}
@@ -5559,6 +5542,32 @@ addConfig(const mqttState *singleEntity,
 			 ", \"device_class\": \"frequency\""
 			 ", \"state_class\": \"measurement\""
 			 ", \"unit_of_measurement\": \"Hz\""
+#ifdef MQTT_FORCE_UPDATE
+			 ", \"force_update\": \"true\""
+#endif // MQTT_FORCE_UPDATE
+			 ", \"entity_category\": \"diagnostic\"");
+		break;
+	case homeAssistantClass::haClassReactivePower:
+		snprintf(stateAddition, sizeof(stateAddition),
+			 ", \"state_class\": \"measurement\""
+			 ", \"unit_of_measurement\": \"var\""
+#ifdef MQTT_FORCE_UPDATE
+			 ", \"force_update\": \"true\""
+#endif // MQTT_FORCE_UPDATE
+			 ", \"entity_category\": \"diagnostic\"");
+		break;
+	case homeAssistantClass::haClassApparentPower:
+		snprintf(stateAddition, sizeof(stateAddition),
+			 ", \"state_class\": \"measurement\""
+			 ", \"unit_of_measurement\": \"VA\""
+#ifdef MQTT_FORCE_UPDATE
+			 ", \"force_update\": \"true\""
+#endif // MQTT_FORCE_UPDATE
+			 ", \"entity_category\": \"diagnostic\"");
+		break;
+	case homeAssistantClass::haClassPowerFactor:
+		snprintf(stateAddition, sizeof(stateAddition),
+			 ", \"state_class\": \"measurement\""
 #ifdef MQTT_FORCE_UPDATE
 			 ", \"force_update\": \"true\""
 #endif // MQTT_FORCE_UPDATE
@@ -5647,6 +5656,7 @@ addConfig(const mqttState *singleEntity,
 		}
 	}
 
+	stateAddition[0] = '\0';
 	switch (singleEntity->entityId) {
 	case mqttEntityId::entityRegNum:
 		snprintf(stateAddition, sizeof(stateAddition),
@@ -5776,6 +5786,30 @@ addConfig(const mqttState *singleEntity,
 	case mqttEntityId::entityGridAvail:
 		strcpy(stateAddition, "");
 		break;
+	default:
+		switch (singleEntity->family) {
+		case MqttEntityFamily::Battery:
+			snprintf(stateAddition, sizeof(stateAddition), ", \"icon\": \"mdi:battery-outline\"");
+			break;
+		case MqttEntityFamily::Pv:
+			snprintf(stateAddition, sizeof(stateAddition), ", \"icon\": \"mdi:solar-power\"");
+			break;
+		case MqttEntityFamily::Grid:
+			snprintf(stateAddition, sizeof(stateAddition), ", \"icon\": \"mdi:transmission-tower\"");
+			break;
+		case MqttEntityFamily::Backup:
+			snprintf(stateAddition, sizeof(stateAddition), ", \"icon\": \"mdi:power-plug-battery\"");
+			break;
+		case MqttEntityFamily::Inverter:
+			snprintf(stateAddition, sizeof(stateAddition), ", \"icon\": \"mdi:flash\"");
+			break;
+		case MqttEntityFamily::System:
+		case MqttEntityFamily::Controller:
+		default:
+			stateAddition[0] = '\0';
+			break;
+		}
+		break;
 	}
 	if (strlen(stateAddition) != 0) {
 		resultAddedToPayload = addToPayload(stateAddition);
@@ -5855,78 +5889,26 @@ addConfig(const mqttState *singleEntity,
 		}
 	}
 
-	switch (singleEntity->entityId) {
-	// Entities that are unavailable when RS485 is out.
-	case entityBatSoc:
-	case entityBatPwr:
-	case entityBatEnergyCharge:
-	case entityBatEnergyDischarge:
-	case entityPvPwr:
-	case entityPvEnergy:
-	case entityFrequency:
-	case entityBatTemp:
-	case entityInverterTemp:
-	case entityBatFaults:
-	case entityBatWarnings:
-	case entityInverterFaults:
-	case entityInverterWarnings:
-	case entitySystemFaults:
-	case entityRegNum:
-	case entityRegValue:
-	case entityInverterMode:
-		snprintf(stateAddition, sizeof(stateAddition),
-			", \"availability_template\": \"{{ \\\"online\\\" if value_json.a2mStatus == \\\"online\\\" and value_json.rs485Status == \\\"OK\\\" else \\\"offline\\\" }}\""
-			", \"availability_topic\": \"%s\"", statusTopic);
-		break;
-	// Entities that are unavailable when grid is unknown or rs485 is off
-	case entityGridAvail:
+	if (singleEntity->entityId == entityGridAvail) {
 		snprintf(stateAddition, sizeof(stateAddition),
 			", \"availability_template\": \"{{ \\\"online\\\" if value_json.a2mStatus == \\\"online\\\" and value_json.rs485Status == \\\"OK\\\" and value_json.gridStatus in ( \\\"OK\\\", \\\"Problem\\\" ) else \\\"offline\\\" }}\""
 			", \"availability_topic\": \"%s\"", statusTopic);
-		break;
-	// Entities that are unavailable when grid or rs485 is off
-	case entityGridPwr:
-	case entityGridEnergyTo:
-	case entityGridEnergyFrom:
-		snprintf(stateAddition, sizeof(stateAddition),
-			", \"availability_template\": \"{{ \\\"online\\\" if value_json.a2mStatus == \\\"online\\\" and value_json.rs485Status == \\\"OK\\\" and value_json.gridStatus == \\\"OK\\\" else \\\"offline\\\" }}\""
-			", \"availability_topic\": \"%s\"", statusTopic);
-		break;
-	// Values that shouldn't change. Keep showing even if RS485 is out.
-	case entityInverterSn:
-	case entityInverterVersion:
-	case entityEmsSn:
-	case entityEmsVersion:
-	case entityBatCap:
-	case entityGridReg:
-	// These entities are truly available even when RS485 is out.
-#ifdef DEBUG_FREEMEM
-	case entityFreemem:
-#endif // DEBUG_FREEMEM
-#ifdef DEBUG_CALLBACKS
-	case entityCallbacks:
-#endif // DEBUG_CALLBACKS
-#ifdef A2M_DEBUG_WIFI
-	case entityRSSI:
-	case entityBSSID:
-	case entityTxPower:
-	case entityWifiRecon:
-#endif // A2M_DEBUG_WIFI
-#ifdef DEBUG_RS485
-	case entityRs485Errors:
-#endif // DEBUG_RS485
-	case entityRs485Avail:
-	case entityA2MUptime:
-	case entityA2MVersion:
-	case entityOpMode:
-	case entitySocTarget:
-	case entityChargePwr:
-	case entityDischargePwr:
-	case entityPushPwr:
+	} else if (singleEntity->scope == MqttEntityScope::Controller ||
+	           singleEntity->readKind == MqttEntityReadKind::Control ||
+	           singleEntity->readKind == MqttEntityReadKind::Identity ||
+	           singleEntity->entityId == entityBatCap ||
+	           singleEntity->entityId == entityGridReg) {
 		snprintf(stateAddition, sizeof(stateAddition),
 			", \"availability_template\": \"{{ value_json.a2mStatus | default(\\\"\\\") }}\""
 			", \"availability_topic\": \"%s\"", statusTopic);
-		break;
+	} else if (singleEntity->family == MqttEntityFamily::Grid) {
+		snprintf(stateAddition, sizeof(stateAddition),
+			", \"availability_template\": \"{{ \\\"online\\\" if value_json.a2mStatus == \\\"online\\\" and value_json.rs485Status == \\\"OK\\\" and value_json.gridStatus == \\\"OK\\\" else \\\"offline\\\" }}\""
+			", \"availability_topic\": \"%s\"", statusTopic);
+	} else {
+		snprintf(stateAddition, sizeof(stateAddition),
+			", \"availability_template\": \"{{ \\\"online\\\" if value_json.a2mStatus == \\\"online\\\" and value_json.rs485Status == \\\"OK\\\" else \\\"offline\\\" }}\""
+			", \"availability_topic\": \"%s\"", statusTopic);
 	}
 	resultAddedToPayload = addToPayload(stateAddition);
 	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
@@ -6223,32 +6205,11 @@ sendData()
 	static unsigned long lastRunOneHour = 0;
 	static unsigned long lastRunOneDay = 0;
 	static unsigned long lastRunUser = 0;
-	static bool membersInit = false;
-	static uint16_t membersTenSec[kMqttEntityMaxCount];
-	static uint16_t membersOneMin[kMqttEntityMaxCount];
-	static uint16_t membersFiveMin[kMqttEntityMaxCount];
-	static uint16_t membersOneHour[kMqttEntityMaxCount];
-	static uint16_t membersOneDay[kMqttEntityMaxCount];
-	static uint16_t membersUser[kMqttEntityMaxCount];
-	static size_t membersTenSecCount = 0;
-	static size_t membersOneMinCount = 0;
-	static size_t membersFiveMinCount = 0;
-	static size_t membersOneHourCount = 0;
-	static size_t membersOneDayCount = 0;
-	static size_t membersUserCount = 0;
-	static bool tenSecHasEssSnapshot = false;
-	static bool oneMinHasEssSnapshot = false;
-	static bool fiveMinHasEssSnapshot = false;
-	static bool oneHourHasEssSnapshot = false;
-	static bool oneDayHasEssSnapshot = false;
-	static bool userHasEssSnapshot = false;
 
 	if (resendAllData) {
 		resendAllData = false;
 		lastRunTenSeconds = lastRunOneMinute = lastRunFiveMinutes = lastRunOneHour = lastRunOneDay = 0;
 		lastRunUser = 0;
-		// Polling config may have changed; rebuild bucket membership on the next due pass.
-		membersInit = false;
 	}
 
 	const bool dueTenSeconds = checkTimer(&lastRunTenSeconds, STATUS_INTERVAL_TEN_SECONDS);
@@ -6259,7 +6220,7 @@ sendData()
 	const bool dueUser = checkTimer(&lastRunUser, pollIntervalSeconds * 1000UL);
 	const bool anyDue = (dueTenSeconds || dueOneMinute || dueFiveMinutes || dueOneHour || dueOneDay || dueUser);
 
-	if (!anyDue && membersInit) {
+	if (!anyDue) {
 		return;
 	}
 
@@ -6292,54 +6253,8 @@ sendData()
 	}
 
 	const mqttState *entities = mqttEntitiesDesc();
-	const MqttEntityRuntime *rt = mqttEntitiesRt();
-	const size_t entityCount = mqttEntitiesCount();
-	const int numberOfEntities = static_cast<int>(entityCount);
-
-	if (entityCount > kMqttEntityMaxCount) {
-#ifdef DEBUG_OVER_SERIAL
-		Serial.println("MQTT entity count exceeds max; skipping scheduler.");
-#endif
-		return;
-	}
-
-	// Build bucket membership once per boot (or after /config/set updates via resendAllData).
-	// This keeps the idle path O(1) and avoids full entity scans per bucket.
-	if (!membersInit) {
-		BucketMembership membership = buildBucketMembership(
-			rt,
-			entityCount,
-			membersTenSec,
-			membersOneMin,
-			membersFiveMin,
-			membersOneHour,
-			membersOneDay,
-			membersUser,
-			mqttEntityNeedsEssSnapshotByIndex);
-
-		membersTenSecCount = membership.tenSecCount;
-		membersOneMinCount = membership.oneMinCount;
-		membersFiveMinCount = membership.fiveMinCount;
-		membersOneHourCount = membership.oneHourCount;
-		membersOneDayCount = membership.oneDayCount;
-		membersUserCount = membership.userCount;
-		tenSecHasEssSnapshot = membership.tenSecHasEssSnapshot;
-		oneMinHasEssSnapshot = membership.oneMinHasEssSnapshot;
-		fiveMinHasEssSnapshot = membership.fiveMinHasEssSnapshot;
-		oneHourHasEssSnapshot = membership.oneHourHasEssSnapshot;
-		oneDayHasEssSnapshot = membership.oneDayHasEssSnapshot;
-		userHasEssSnapshot = membership.userHasEssSnapshot;
-		membersInit = true;
-
-		schedTenSecCount = static_cast<uint16_t>(membersTenSecCount);
-		schedOneMinCount = static_cast<uint16_t>(membersOneMinCount);
-		schedFiveMinCount = static_cast<uint16_t>(membersFiveMinCount);
-		schedOneHourCount = static_cast<uint16_t>(membersOneHourCount);
-		schedOneDayCount = static_cast<uint16_t>(membersOneDayCount);
-		schedUserCount = static_cast<uint16_t>(membersUserCount);
-	}
-
-	if (!anyDue) {
+	const MqttEntityActivePlan *plan = mqttActivePlan();
+	if (plan == nullptr) {
 		return;
 	}
 
@@ -6374,8 +6289,8 @@ sendData()
 
 		sendStatus(snapshotOkThisBucket);
 
-		publishBucketMembers(membersTenSec,
-		                     membersTenSecCount,
+		publishBucketMembers(plan->tenSec.members,
+		                     plan->tenSec.count,
 		                     snapshotOkThisBucket,
 		                     mqttEntityNeedsEssSnapshotByIndex,
 		                     [&](size_t idx) { sendDataFromMqttState(&entities[idx], false); });
@@ -6390,45 +6305,45 @@ sendData()
 	}
 
 	if (dueOneMinute) {
-		const bool snapshotOkThisBucket = ensureSnapshotForBucket(oneMinHasEssSnapshot);
-		publishBucketMembers(membersOneMin,
-		                     membersOneMinCount,
+		const bool snapshotOkThisBucket = ensureSnapshotForBucket(plan->oneMin.hasEssSnapshot);
+		publishBucketMembers(plan->oneMin.members,
+		                     plan->oneMin.count,
 		                     snapshotOkThisBucket,
 		                     mqttEntityNeedsEssSnapshotByIndex,
 		                     [&](size_t idx) { sendDataFromMqttState(&entities[idx], false); });
 	}
 
 	if (dueFiveMinutes) {
-		const bool snapshotOkThisBucket = ensureSnapshotForBucket(fiveMinHasEssSnapshot);
-		publishBucketMembers(membersFiveMin,
-		                     membersFiveMinCount,
+		const bool snapshotOkThisBucket = ensureSnapshotForBucket(plan->fiveMin.hasEssSnapshot);
+		publishBucketMembers(plan->fiveMin.members,
+		                     plan->fiveMin.count,
 		                     snapshotOkThisBucket,
 		                     mqttEntityNeedsEssSnapshotByIndex,
 		                     [&](size_t idx) { sendDataFromMqttState(&entities[idx], false); });
 	}
 
 	if (dueOneHour) {
-		const bool snapshotOkThisBucket = ensureSnapshotForBucket(oneHourHasEssSnapshot);
-		publishBucketMembers(membersOneHour,
-		                     membersOneHourCount,
+		const bool snapshotOkThisBucket = ensureSnapshotForBucket(plan->oneHour.hasEssSnapshot);
+		publishBucketMembers(plan->oneHour.members,
+		                     plan->oneHour.count,
 		                     snapshotOkThisBucket,
 		                     mqttEntityNeedsEssSnapshotByIndex,
 		                     [&](size_t idx) { sendDataFromMqttState(&entities[idx], false); });
 	}
 
 	if (dueOneDay) {
-		const bool snapshotOkThisBucket = ensureSnapshotForBucket(oneDayHasEssSnapshot);
-		publishBucketMembers(membersOneDay,
-		                     membersOneDayCount,
+		const bool snapshotOkThisBucket = ensureSnapshotForBucket(plan->oneDay.hasEssSnapshot);
+		publishBucketMembers(plan->oneDay.members,
+		                     plan->oneDay.count,
 		                     snapshotOkThisBucket,
 		                     mqttEntityNeedsEssSnapshotByIndex,
 		                     [&](size_t idx) { sendDataFromMqttState(&entities[idx], false); });
 	}
 
 	if (dueUser) {
-		const bool snapshotOkThisBucket = ensureSnapshotForBucket(userHasEssSnapshot);
-		publishBucketMembers(membersUser,
-		                     membersUserCount,
+		const bool snapshotOkThisBucket = ensureSnapshotForBucket(plan->user.hasEssSnapshot);
+		publishBucketMembers(plan->user.members,
+		                     plan->user.count,
 		                     snapshotOkThisBucket,
 		                     mqttEntityNeedsEssSnapshotByIndex,
 		                     [&](size_t idx) { sendDataFromMqttState(&entities[idx], false); });
@@ -6456,7 +6371,7 @@ sendDataFromMqttState(const mqttState *singleEntity, bool doHomeAssistant)
 	if (idx >= mqttEntitiesCount()) {
 		return;
 	}
-	mqttUpdateFreq effectiveFreq = mqttEntitiesRt()[idx].effectiveFreq;
+	mqttUpdateFreq effectiveFreq = mqttEntityEffectiveFreqByIndex(idx);
 	if (!doHomeAssistant &&
 	    (effectiveFreq == mqttUpdateFreq::freqNever ||
 	     effectiveFreq == mqttUpdateFreq::freqDisabled)) {
@@ -6465,11 +6380,13 @@ sendDataFromMqttState(const mqttState *singleEntity, bool doHomeAssistant)
 	if (deviceId[0] == '\0') {
 		return;
 	}
+	char entityKey[64];
+	mqttEntityNameCopy(singleEntity, entityKey, sizeof(entityKey));
 	if (!buildEntityTopicBase(deviceName,
 	                          scope,
 	                          controllerIdentifier,
 	                          deviceSerialNumber,
-	                          singleEntity->mqttName,
+	                          entityKey,
 	                          topicBase,
 	                          sizeof(topicBase))) {
 		return;
@@ -6484,6 +6401,7 @@ sendDataFromMqttState(const mqttState *singleEntity, bool doHomeAssistant)
 		const char *entityType;
 		switch (singleEntity->haClass) {
 		case homeAssistantClass::haClassBox:
+		case homeAssistantClass::haClassNumber:
 			entityType = "number";
 			break;
 		case homeAssistantClass::haClassSelect:
@@ -6497,7 +6415,7 @@ sendDataFromMqttState(const mqttState *singleEntity, bool doHomeAssistant)
 			break;
 		}
 
-		snprintf(topic, sizeof(topic), "homeassistant/%s/%s/%s/config", entityType, deviceId, singleEntity->mqttName);
+		snprintf(topic, sizeof(topic), "homeassistant/%s/%s/%s/config", entityType, deviceId, entityKey);
 		result = addConfig(singleEntity, scope, topicBase, resultAddedToPayload);
 	} else {
 		bool skip = false;
@@ -6541,18 +6459,20 @@ publishManualRegisterValueState(const mqttState *valueEntity, const modbusReques
 	if (idx >= mqttEntitiesCount()) {
 		return false;
 	}
-	mqttUpdateFreq effectiveFreq = mqttEntitiesRt()[idx].effectiveFreq;
+	mqttUpdateFreq effectiveFreq = mqttEntityEffectiveFreqByIndex(idx);
 	if (effectiveFreq == mqttUpdateFreq::freqNever ||
 	    effectiveFreq == mqttUpdateFreq::freqDisabled) {
 		return false;
 	}
 	char topicBase[200];
 	char topic[256];
+	char entityKey[64];
+	mqttEntityNameCopy(valueEntity, entityKey, sizeof(entityKey));
 	if (!buildEntityTopicBase(deviceName,
 	                          mqttEntityScope(valueEntity->entityId),
 	                          controllerIdentifier,
 	                          deviceSerialNumber,
-	                          valueEntity->mqttName,
+	                          entityKey,
 	                          topicBase,
 	                          sizeof(topicBase))) {
 		return false;
@@ -6652,7 +6572,9 @@ processPendingEntityCommand(void)
 
 	if (valueProcessingError) {
 #ifdef DEBUG_OVER_SERIAL
-		snprintf(_debugOutput, sizeof(_debugOutput), "Callback for %s with bad value: ", mqttEntity->mqttName);
+		char entityName[64];
+		mqttEntityNameCopy(mqttEntity, entityName, sizeof(entityName));
+		snprintf(_debugOutput, sizeof(_debugOutput), "Callback for %s with bad value: ", entityName);
 		Serial.print(_debugOutput);
 		Serial.println(mqttIncomingPayload);
 #endif

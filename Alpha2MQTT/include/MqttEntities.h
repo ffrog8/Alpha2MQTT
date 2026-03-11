@@ -1,28 +1,61 @@
-// Purpose: Keep MQTT entity metadata in flash and allocate mutable per-entity
-// runtime state only when MQTT is enabled, preserving heap for portal modes.
-// Invariants: Runtime state is allocated at most once per boot and is never freed.
+// Purpose: Keep the compiled MQTT entity catalog in flash and expose the
+// minimal mutable runtime state needed for user-selected polling.
+// Invariants: Descriptor count is derived from the catalog rows, and active
+// poll membership is cached only for currently enabled entities.
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 #include "Definitions.h"
 
-struct MqttEntityRuntime {
-	mqttUpdateFreq defaultFreq;
-	mqttUpdateFreq effectiveFreq;
+struct MqttEntityBucketOverride {
+	uint16_t entityIndex;
 	BucketId bucketId;
 };
 
-const mqttState *mqttEntitiesDesc();
-size_t mqttEntitiesCount();
-// Compile-time max for stack/static buffers used in polling config parsing.
-constexpr size_t kMqttEntityMaxCount = 64;
+struct MqttEntityActiveBucket {
+	uint16_t *members;
+	size_t count;
+	bool hasEssSnapshot;
+};
 
-// Read-only metadata stored alongside the descriptor table.
+struct MqttEntityActivePlan {
+	MqttEntityActiveBucket tenSec;
+	MqttEntityActiveBucket oneMin;
+	MqttEntityActiveBucket fiveMin;
+	MqttEntityActiveBucket oneHour;
+	MqttEntityActiveBucket oneDay;
+	MqttEntityActiveBucket user;
+	size_t activeCount;
+};
+
+// Compile-time count derived from the shared descriptor catalog. Scratch buffers
+// that still require a fixed bound should size from this exact value.
+constexpr size_t kMqttEntityDescriptorCount =
+0
+#define MQTT_ENTITY_ROW(...) + 1
+#include "MqttEntityCatalogRows.h"
+#undef MQTT_ENTITY_ROW
+;
+
+const mqttState *mqttEntitiesDesc();
+const mqttState *mqttEntityById(mqttEntityId id);
+size_t mqttEntitiesCount();
+
+bool mqttEntityNameEquals(const mqttState *entity, const char *name);
+void mqttEntityNameCopy(const mqttState *entity, char *out, size_t outSize);
+
 bool mqttEntityNeedsEssSnapshotByIndex(size_t idx);
+BucketId mqttEntityBucketByIndex(size_t idx);
+mqttUpdateFreq mqttEntityEffectiveFreqByIndex(size_t idx);
+bool mqttEntityCopyBuckets(BucketId *outBuckets, size_t entityCount);
+bool mqttEntityApplyBuckets(const BucketId *buckets, size_t entityCount);
+
+const MqttEntityActivePlan *mqttActivePlan();
 
 bool mqttEntitiesRtAvailable();
-MqttEntityRuntime *mqttEntitiesRt();
 
-// Allocates runtime state only when mqttEnabled is true. Allocation happens once per boot.
+// Initializes sparse runtime state only when MQTT is enabled. Allocation of
+// overrides and active poll members remains demand-driven after init.
 void initMqttEntitiesRtIfNeeded(bool mqttEnabled);

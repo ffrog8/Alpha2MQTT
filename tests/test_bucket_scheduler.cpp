@@ -17,12 +17,13 @@ static bool needsSnapshotFromTable(size_t idx)
 
 TEST_CASE("bucket membership assigns entities exclusively by effective frequency")
 {
-	MqttEntityRuntime rt[5]{};
-	rt[0].bucketId = BucketId::TenSec;
-	rt[1].bucketId = BucketId::OneMin;
-	rt[2].bucketId = BucketId::FiveMin;
-	rt[3].bucketId = BucketId::OneMin;
-	rt[4].bucketId = BucketId::Disabled;
+	BucketId buckets[5] = {
+		BucketId::TenSec,
+		BucketId::OneMin,
+		BucketId::FiveMin,
+		BucketId::OneMin,
+		BucketId::Disabled
+	};
 
 	uint16_t tenSec[5]{};
 	uint16_t oneMin[5]{};
@@ -31,7 +32,7 @@ TEST_CASE("bucket membership assigns entities exclusively by effective frequency
 	uint16_t oneDay[5]{};
 	uint16_t user[5]{};
 
-	BucketMembership m = buildBucketMembership(rt, 5, tenSec, oneMin, fiveMin, oneHour, oneDay, user,
+	BucketMembership m = buildBucketMembership(buckets, 5, tenSec, oneMin, fiveMin, oneHour, oneDay, user,
 	                                           needsSnapshotFromTable);
 
 	CHECK(m.tenSecCount == 1);
@@ -70,11 +71,12 @@ TEST_CASE("bucket membership assigns entities exclusively by effective frequency
 
 TEST_CASE("bucket membership tracks whether a bucket contains ESS snapshot entities")
 {
-	MqttEntityRuntime rt[4]{};
-	rt[0].bucketId = BucketId::OneMin;   // needs snapshot (table idx 0 -> false)
-	rt[1].bucketId = BucketId::OneMin;   // needs snapshot (table idx 1 -> true)
-	rt[2].bucketId = BucketId::TenSec;   // idx 2 -> false
-	rt[3].bucketId = BucketId::TenSec;   // idx 3 -> true
+	BucketId buckets[4] = {
+		BucketId::OneMin, // idx 0 -> false
+		BucketId::OneMin, // idx 1 -> true
+		BucketId::TenSec, // idx 2 -> false
+		BucketId::TenSec  // idx 3 -> true
+	};
 
 	uint16_t tenSec[4]{};
 	uint16_t oneMin[4]{};
@@ -83,7 +85,7 @@ TEST_CASE("bucket membership tracks whether a bucket contains ESS snapshot entit
 	uint16_t oneDay[4]{};
 	uint16_t user[4]{};
 
-	BucketMembership m = buildBucketMembership(rt, 4, tenSec, oneMin, fiveMin, oneHour, oneDay, user,
+	BucketMembership m = buildBucketMembership(buckets, 4, tenSec, oneMin, fiveMin, oneHour, oneDay, user,
 	                                           needsSnapshotFromTable);
 
 	CHECK(m.oneMinHasEssSnapshot);

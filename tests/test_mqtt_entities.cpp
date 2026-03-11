@@ -1,28 +1,30 @@
-// Purpose: Verify MQTT entity descriptor/runtime split stays flash-friendly and
-// that runtime state is only allocated when explicitly enabled.
-// Invariants: Runtime allocation is one-way per boot; tests do not attempt to free.
+// Purpose: Verify catalog metadata stays flash-friendly and runtime state is
+// derived from enabled entities rather than a full mutable per-entity array.
+
+#include <cstring>
 
 #include <doctest/doctest.h>
 
+#include "BucketScheduler.h"
 #include "MqttEntities.h"
-
-#include <cstring>
 
 TEST_CASE("mqtt entities: descriptor table exists")
 {
 	CHECK(mqttEntitiesDesc() != nullptr);
 	CHECK(mqttEntitiesCount() > 0);
+	CHECK(mqttEntitiesCount() == kMqttEntityDescriptorCount);
 
 	const mqttState *desc = mqttEntitiesDesc();
 	const size_t count = mqttEntitiesCount();
 	const size_t samples = (count < 3) ? count : 3;
 	for (size_t i = 0; i < samples; ++i) {
-		CHECK(desc[i].mqttName != nullptr);
-		CHECK(std::strlen(desc[i].mqttName) > 0);
+		char name[64];
+		mqttEntityNameCopy(&desc[i], name, sizeof(name));
+		CHECK(std::strlen(name) > 0);
 	}
 }
 
-TEST_CASE("mqtt entities: runtime is allocated only when enabled")
+TEST_CASE("mqtt entities: runtime initializes without allocating a full mutable descriptor array")
 {
 	const bool initialAvailable = mqttEntitiesRtAvailable();
 
@@ -31,29 +33,37 @@ TEST_CASE("mqtt entities: runtime is allocated only when enabled")
 
 	initMqttEntitiesRtIfNeeded(true);
 	CHECK(mqttEntitiesRtAvailable());
-	REQUIRE(mqttEntitiesRt() != nullptr);
+
+	BucketId buckets[kMqttEntityDescriptorCount]{};
+	REQUIRE(mqttEntityCopyBuckets(buckets, kMqttEntityDescriptorCount));
 
 	const mqttState *desc = mqttEntitiesDesc();
-	const MqttEntityRuntime *rt = mqttEntitiesRt();
-	const size_t count = mqttEntitiesCount();
-	const size_t samples = (count < 5) ? count : 5;
-	for (size_t i = 0; i < samples; ++i) {
-		CHECK(rt[i].defaultFreq == desc[i].updateFreq);
-		CHECK(rt[i].effectiveFreq == desc[i].updateFreq);
+	for (size_t i = 0; i < kMqttEntityDescriptorCount; ++i) {
+		CHECK(buckets[i] == bucketIdFromFreq(desc[i].updateFreq));
 	}
+
+	const MqttEntityActivePlan *plan = mqttActivePlan();
+	REQUIRE(plan != nullptr);
+
+	size_t expectedActive = 0;
+	for (size_t i = 0; i < kMqttEntityDescriptorCount; ++i) {
+		if (buckets[i] != BucketId::Disabled) {
+			expectedActive++;
+		}
+	}
+	CHECK(plan->activeCount == expectedActive);
 }
 
 TEST_CASE("mqtt entities: ESS snapshot dependency metadata matches expected entities")
 {
 	initMqttEntitiesRtIfNeeded(true);
-	REQUIRE(mqttEntitiesRtAvailable());
 
 	const mqttState *desc = mqttEntitiesDesc();
 	const size_t count = mqttEntitiesCount();
 
 	auto findIndex = [&](const char *name) -> size_t {
 		for (size_t i = 0; i < count; ++i) {
-			if (std::strcmp(desc[i].mqttName, name) == 0) {
+			if (mqttEntityNameEquals(&desc[i], name)) {
 				return i;
 			}
 		}
@@ -71,4 +81,16 @@ TEST_CASE("mqtt entities: ESS snapshot dependency metadata matches expected enti
 	const size_t uptimeIdx = findIndex("A2M_uptime");
 	REQUIRE(uptimeIdx < count);
 	CHECK_FALSE(mqttEntityNeedsEssSnapshotByIndex(uptimeIdx));
+}
+
+TEST_CASE("mqtt entities: expanded catalog exposes metadata for direct register entities")
+{
+	const mqttState *gridVoltage = mqttEntityById(mqttEntityId::entityGridVoltageA);
+	REQUIRE(gridVoltage != nullptr);
+	CHECK(mqttEntityNameEquals(gridVoltage, "Grid_Voltage_A"));
+	CHECK(gridVoltage->family == MqttEntityFamily::Grid);
+	CHECK(gridVoltage->scope == MqttEntityScope::Inverter);
+	CHECK(gridVoltage->readKind == MqttEntityReadKind::Register);
+	CHECK(gridVoltage->updateFreq == mqttUpdateFreq::freqDisabled);
+	CHECK(gridVoltage->readKey == REG_GRID_METER_R_VOLTAGE_OF_A_PHASE);
 }

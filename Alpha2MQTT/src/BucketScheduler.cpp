@@ -104,7 +104,7 @@ bucketIdToFreq(BucketId bucket)
 }
 
 BucketMembership
-buildBucketMembership(const MqttEntityRuntime *rt,
+buildBucketMembership(const BucketId *buckets,
                       size_t entityCount,
                       uint16_t *membersTenSec,
                       uint16_t *membersOneMin,
@@ -115,13 +115,13 @@ buildBucketMembership(const MqttEntityRuntime *rt,
                       NeedsEssSnapshotFn needsEssSnapshot)
 {
 	BucketMembership out{};
-	if (rt == nullptr || entityCount == 0) {
+	if (buckets == nullptr || entityCount == 0) {
 		return out;
 	}
 
 	for (size_t i = 0; i < entityCount; ++i) {
 		const bool needsSnapshot = (needsEssSnapshot != nullptr) ? needsEssSnapshot(i) : false;
-		switch (rt[i].bucketId) {
+		switch (buckets[i]) {
 		case BucketId::TenSec:
 			if (membersTenSec != nullptr) {
 				membersTenSec[out.tenSecCount] = static_cast<uint16_t>(i);

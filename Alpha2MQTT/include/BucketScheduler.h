@@ -93,12 +93,12 @@ struct BucketMembership {
 
 using NeedsEssSnapshotFn = bool (*)(size_t idx);
 
-BucketMembership buildBucketMembership(const MqttEntityRuntime *rt,
-                                      size_t entityCount,
-                                      uint16_t *membersTenSec,
-                                      uint16_t *membersOneMin,
-                                      uint16_t *membersFiveMin,
-                                      uint16_t *membersOneHour,
-                                      uint16_t *membersOneDay,
-                                      uint16_t *membersUser,
-                                      NeedsEssSnapshotFn needsEssSnapshot);
+BucketMembership buildBucketMembership(const BucketId *buckets,
+                                       size_t entityCount,
+                                       uint16_t *membersTenSec,
+                                       uint16_t *membersOneMin,
+                                       uint16_t *membersFiveMin,
+                                       uint16_t *membersOneHour,
+                                       uint16_t *membersOneDay,
+                                       uint16_t *membersUser,
+                                       NeedsEssSnapshotFn needsEssSnapshot);

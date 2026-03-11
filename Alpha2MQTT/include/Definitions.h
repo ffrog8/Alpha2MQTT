@@ -1297,60 +1297,7 @@ struct modbusRequestAndResponse
 // MQTT HA Subscription - Lets us know if HA restarts.
 #define MQTT_SUB_HOMEASSISTANT "homeassistant/status"
 
-enum mqttEntityId {
-#ifdef DEBUG_FREEMEM
-	entityFreemem,
-#endif // DEBUG_FREEMEM
-#ifdef DEBUG_CALLBACKS
-	entityCallbacks,
-#endif // DEBUG_CALLBACKS
-#ifdef A2M_DEBUG_WIFI
-	entityRSSI,
-	entityBSSID,
-	entityTxPower,
-	entityWifiRecon,
-#endif // A2M_DEBUG_WIFI
-#ifdef DEBUG_RS485
-	entityRs485Errors,
-#endif // DEBUG_RS485
-	entityRs485Avail,
-	entityA2MUptime,
-	entityA2MVersion,
-	entityInverterSn,
-	entityInverterVersion,
-	entityEmsSn,
-	entityEmsVersion,
-	entityBatSoc,
-	entityBatPwr,
-	entityBatEnergyCharge,
-	entityBatEnergyDischarge,
-	entityGridAvail,
-	entityGridPwr,
-	entityGridEnergyTo,
-	entityGridEnergyFrom,
-	entityPvPwr,
-	entityPvEnergy,
-	entityFrequency,
-	entityOpMode,
-	entitySocTarget,
-	entityChargePwr,
-	entityDischargePwr,
-	entityPushPwr,
-	entityBatCap,
-	entityBatTemp,
-	entityInverterTemp,
-	entityBatFaults,
-	entityBatWarnings,
-	entityInverterFaults,
-	entityInverterWarnings,
-	entitySystemFaults,
-	entityInverterMode,
-	entityGridReg,
-	entityRegNum,
-	entityRegValue
-};
-
-enum mqttUpdateFreq {
+enum mqttUpdateFreq : uint8_t {
 	freqTenSec,
 	freqOneMin,
 	freqFiveMin,
@@ -1373,20 +1320,53 @@ enum class BucketId : uint8_t {
 	Unknown
 };
 
-enum homeAssistantClass {
+enum homeAssistantClass : uint8_t {
 	haClassEnergy,
 	haClassPower,
+	haClassReactivePower,
+	haClassApparentPower,
 	haClassBinaryProblem,
 	haClassBattery,
 	haClassVoltage,
 	haClassCurrent,
 	haClassFrequency,
+	haClassPowerFactor,
 	haClassTemp,
 	haClassDuration,
 	haClassInfo,
 	haClassSelect,
 	haClassBox,
 	haClassNumber
+};
+
+enum class MqttEntityFamily : uint8_t {
+	Controller = 0,
+	Grid,
+	Pv,
+	Battery,
+	Inverter,
+	Backup,
+	System
+};
+
+enum class MqttEntityScope : uint8_t {
+	Controller = 0,
+	Inverter = 1
+};
+
+enum class MqttEntityReadKind : uint8_t {
+	Register = 0,
+	Aggregate,
+	Derived,
+	Identity,
+	Control,
+	Manual
+};
+
+enum mqttEntityId : uint16_t {
+#define MQTT_ENTITY_ROW(entityId, mqttName, updateFreq, subscribe, retain, haClass, family, scope, readKind, readKey, needsEssSnapshot) entityId,
+#include "MqttEntityCatalogRows.h"
+#undef MQTT_ENTITY_ROW
 };
 
 enum opMode {
@@ -1413,12 +1393,17 @@ enum gridStatus {
 
 struct mqttState
 {
-	mqttEntityId entityId;
 	const char *mqttName;
+	uint16_t readKey;
+	mqttEntityId entityId;
 	mqttUpdateFreq updateFreq;
+	homeAssistantClass haClass;
+	MqttEntityFamily family;
+	MqttEntityScope scope;
+	MqttEntityReadKind readKind;
 	bool subscribe;
 	bool retain;
-	homeAssistantClass haClass;
+	bool needsEssSnapshot;
 };
 
 #endif // ! _Definitions_h

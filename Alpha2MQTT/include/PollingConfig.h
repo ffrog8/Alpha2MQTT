@@ -1,6 +1,7 @@
 // Purpose: Shared helpers for persisted polling bucket configuration.
-// Responsibilities: Map stored values to runtime bucket assignments and parse bucket maps.
-// Invariants: No dynamic allocation outside of small, bounded helpers.
+// Responsibilities: Parse stored bucket mappings, normalize assignments, and
+// emit compact persisted override maps.
+// Invariants: Helpers operate on bounded caller-provided buffers only.
 #pragma once
 
 #include <cstddef>
@@ -10,20 +11,23 @@
 #include "MqttEntities.h"
 
 BucketId bucketIdFromLegacyFreq(int storedValue);
-void applyBucketToRuntime(MqttEntityRuntime &rt, BucketId bucket);
-// Entity identifier for persisted mappings is the MQTT name string (mqttName).
+bool isValidMqttUpdateFreq(int value);
+
+// Entity identifier for config payloads is the MQTT name string.
 const mqttState *lookupEntityByName(const char *name,
                                     const mqttState *entities,
                                     size_t entityCount);
 
+// Apply a Bucket_Map string into the provided bucket assignments. Supports both
+// "Entity_Name=bucket;" and compact "#<descriptor-index>=bucket;" tokens.
 bool applyBucketMapString(const char *map,
                           const mqttState *entities,
                           size_t entityCount,
-                          MqttEntityRuntime *rt,
+                          BucketId *buckets,
                           uint32_t &unknownEntityCount,
                           uint32_t &invalidBucketCount,
                           uint32_t &duplicateEntityCount);
-bool isValidMqttUpdateFreq(int value);
+
 // Build a stable Bucket_Map string from legacy per-entity values.
 bool buildBucketMapFromLegacy(const mqttState *entities,
                               size_t entityCount,
@@ -32,8 +36,8 @@ bool buildBucketMapFromLegacy(const mqttState *entities,
                               size_t outSize,
                               size_t &appliedCount);
 
-// Build a stable Bucket_Map string from explicit bucket assignments (indexed by entity index).
-// Returns true on success (even if appliedCount==0, which yields an empty map meaning "defaults").
+// Build a compact Bucket_Map string from explicit bucket assignments indexed by
+// descriptor order. Returns true on success even when appliedCount==0.
 bool buildBucketMapFromAssignments(const mqttState *entities,
                                    size_t entityCount,
                                    const BucketId *buckets,

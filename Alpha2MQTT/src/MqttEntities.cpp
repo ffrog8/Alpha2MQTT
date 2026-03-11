@@ -1,134 +1,231 @@
-// Purpose: Provide a flash-resident descriptor table for MQTT/HA entities and a
-// lazily-allocated runtime table for per-boot mutable fields (polling config).
-// Key dependency: `Definitions.h` for the entity enums and descriptor struct.
+// Purpose: Provide the flash-resident MQTT entity catalog and a sparse runtime
+// selection model for enabled polling work.
+// Responsibilities: Resolve per-entity bucket overrides, maintain the enabled
+// active poll plan, and avoid per-catalog mutable allocations on ESP8266.
 #include "../include/MqttEntities.h"
+
 #include "../include/BucketScheduler.h"
+
+#include <new>
+#include <cstdio>
+#include <cstring>
+
+#if defined(ESP8266) || defined(ARDUINO_ARCH_ESP8266)
+#include <pgmspace.h>
+#endif
 
 namespace {
 
-#define MQTT_ENTITY_DESC(id, name, freq, subscribe, retain, haClass) \
-	{ id, name, freq, subscribe, retain, haClass }
+#if defined(ESP8266) || defined(ARDUINO_ARCH_ESP8266)
+#define MQTT_ENTITY_NAME_DECL(id, name) static const char id##_name[] PROGMEM = name;
+#else
+#define MQTT_ENTITY_NAME_DECL(id, name) static const char id##_name[] = name;
+#endif
 
-// Build the descriptor table with the same conditional compilation as before.
-// Entities that are not compiled in are also absent from the metadata table.
-#define MQTT_ENTITY_ROW(id, name, freq, subscribe, retain, haClass, needsEss) MQTT_ENTITY_DESC(id, name, freq, subscribe, retain, haClass),
+#define MQTT_ENTITY_ROW(id, name, ...) MQTT_ENTITY_NAME_DECL(id, name)
+#include "../include/MqttEntityCatalogRows.h"
+#undef MQTT_ENTITY_ROW
+#undef MQTT_ENTITY_NAME_DECL
+
+#define MQTT_ENTITY_ROW(id, name, freq, subscribe, retain, haClass, family, scope, readKind, readKey, needsEssSnapshot) \
+	{ id##_name, static_cast<uint16_t>(readKey), id, freq, haClass, family, scope, readKind, subscribe, retain, needsEssSnapshot },
 
 static const mqttState kMqttEntities[] = {
-#ifdef DEBUG_FREEMEM
-	MQTT_ENTITY_ROW(mqttEntityId::entityFreemem, "A2M_freemem", mqttUpdateFreq::freqOneMin, false, false, homeAssistantClass::haClassInfo, false)
-#endif
-#ifdef DEBUG_CALLBACKS
-	MQTT_ENTITY_ROW(mqttEntityId::entityCallbacks, "A2M_Callbacks", mqttUpdateFreq::freqTenSec, false, false, homeAssistantClass::haClassInfo, false)
-#endif
-#ifdef DEBUG_RS485
-	MQTT_ENTITY_ROW(mqttEntityId::entityRs485Errors, "A2M_RS485_Errors", mqttUpdateFreq::freqTenSec, false, false, homeAssistantClass::haClassInfo, false)
-#endif
-#ifdef A2M_DEBUG_WIFI
-	MQTT_ENTITY_ROW(mqttEntityId::entityRSSI, "A2M_RSSI", mqttUpdateFreq::freqOneMin, false, false, homeAssistantClass::haClassInfo, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityBSSID, "A2M_BSSID", mqttUpdateFreq::freqOneMin, false, false, homeAssistantClass::haClassInfo, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityTxPower, "A2M_TX_Power", mqttUpdateFreq::freqOneMin, false, false, homeAssistantClass::haClassInfo, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityWifiRecon, "A2M_reconnects", mqttUpdateFreq::freqOneMin, false, false, homeAssistantClass::haClassInfo, false)
-#endif
-	// The remaining entities are always compiled in.
-	MQTT_ENTITY_ROW(mqttEntityId::entityRs485Avail, "RS485_Connected", mqttUpdateFreq::freqNever, false, true, homeAssistantClass::haClassBinaryProblem, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityA2MUptime, "A2M_uptime", mqttUpdateFreq::freqTenSec, false, false, homeAssistantClass::haClassDuration, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityA2MVersion, "A2M_version", mqttUpdateFreq::freqOneDay, false, true, homeAssistantClass::haClassInfo, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityInverterVersion, "Inverter_version", mqttUpdateFreq::freqOneDay, false, true, homeAssistantClass::haClassInfo, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityInverterSn, "Inverter_SN", mqttUpdateFreq::freqOneDay, false, true, homeAssistantClass::haClassInfo, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityEmsVersion, "EMS_version", mqttUpdateFreq::freqOneDay, false, true, homeAssistantClass::haClassInfo, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityEmsSn, "EMS_SN", mqttUpdateFreq::freqOneDay, false, true, homeAssistantClass::haClassInfo, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityBatSoc, "State_of_Charge", mqttUpdateFreq::freqOneMin, false, true, homeAssistantClass::haClassBattery, true)
-	MQTT_ENTITY_ROW(mqttEntityId::entityBatPwr, "ESS_Power", mqttUpdateFreq::freqTenSec, false, true, homeAssistantClass::haClassPower, true)
-	MQTT_ENTITY_ROW(mqttEntityId::entityBatEnergyCharge, "ESS_Energy_Charge", mqttUpdateFreq::freqOneMin, false, true, homeAssistantClass::haClassEnergy, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityBatEnergyDischarge, "ESS_Energy_Discharge", mqttUpdateFreq::freqOneMin, false, true, homeAssistantClass::haClassEnergy, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityGridAvail, "Grid_Connected", mqttUpdateFreq::freqNever, false, true, homeAssistantClass::haClassBinaryProblem, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityGridPwr, "Grid_Power", mqttUpdateFreq::freqTenSec, false, true, homeAssistantClass::haClassPower, true)
-	MQTT_ENTITY_ROW(mqttEntityId::entityGridEnergyTo, "Grid_Energy_To", mqttUpdateFreq::freqOneMin, false, true, homeAssistantClass::haClassEnergy, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityGridEnergyFrom, "Grid_Energy_From", mqttUpdateFreq::freqOneMin, false, true, homeAssistantClass::haClassEnergy, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityPvPwr, "Solar_Power", mqttUpdateFreq::freqTenSec, false, true, homeAssistantClass::haClassPower, true)
-	MQTT_ENTITY_ROW(mqttEntityId::entityPvEnergy, "Solar_Energy", mqttUpdateFreq::freqOneMin, false, true, homeAssistantClass::haClassEnergy, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityFrequency, "Frequency", mqttUpdateFreq::freqOneMin, false, true, homeAssistantClass::haClassFrequency, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityOpMode, "Op_Mode", mqttUpdateFreq::freqOneMin, true, true, homeAssistantClass::haClassSelect, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entitySocTarget, "SOC_Target", mqttUpdateFreq::freqOneMin, true, true, homeAssistantClass::haClassBox, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityChargePwr, "Charge_Power", mqttUpdateFreq::freqOneMin, true, true, homeAssistantClass::haClassBox, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityDischargePwr, "Discharge_Power", mqttUpdateFreq::freqOneMin, true, true, homeAssistantClass::haClassBox, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityPushPwr, "Push_Power", mqttUpdateFreq::freqOneMin, true, true, homeAssistantClass::haClassBox, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityBatCap, "Battery_Capacity", mqttUpdateFreq::freqOneDay, false, true, homeAssistantClass::haClassInfo, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityBatTemp, "Battery_Temp", mqttUpdateFreq::freqFiveMin, false, true, homeAssistantClass::haClassTemp, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityInverterTemp, "Inverter_Temp", mqttUpdateFreq::freqFiveMin, false, true, homeAssistantClass::haClassTemp, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityBatFaults, "Battery_Faults", mqttUpdateFreq::freqOneMin, false, true, homeAssistantClass::haClassBinaryProblem, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityBatWarnings, "Battery_Warnings", mqttUpdateFreq::freqOneMin, false, true, homeAssistantClass::haClassBinaryProblem, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityInverterFaults, "Inverter_Faults", mqttUpdateFreq::freqOneMin, false, true, homeAssistantClass::haClassBinaryProblem, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityInverterWarnings, "Inverter_Warnings", mqttUpdateFreq::freqOneMin, false, true, homeAssistantClass::haClassBinaryProblem, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entitySystemFaults, "System_Faults", mqttUpdateFreq::freqOneMin, false, true, homeAssistantClass::haClassBinaryProblem, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityInverterMode, "Inverter_Mode", mqttUpdateFreq::freqTenSec, false, true, homeAssistantClass::haClassInfo, true)
-	MQTT_ENTITY_ROW(mqttEntityId::entityGridReg, "Grid_Regulation", mqttUpdateFreq::freqOneDay, false, false, homeAssistantClass::haClassInfo, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityRegNum, "Register_Number", mqttUpdateFreq::freqOneMin, true, false, homeAssistantClass::haClassBox, false)
-	MQTT_ENTITY_ROW(mqttEntityId::entityRegValue, "Register_Value", mqttUpdateFreq::freqOneMin, false, false, homeAssistantClass::haClassInfo, false)
+#include "../include/MqttEntityCatalogRows.h"
 };
 
 #undef MQTT_ENTITY_ROW
 
-static const bool kNeedsEssSnapshot[] = {
-#ifdef DEBUG_FREEMEM
-	false,
-#endif
-#ifdef DEBUG_CALLBACKS
-	false,
-#endif
-#ifdef DEBUG_RS485
-	false,
-#endif
-#ifdef A2M_DEBUG_WIFI
-	false,
-	false,
-	false,
-	false,
-#endif
-	false, // RS485_Connected
-	false, // A2M_uptime
-	false, // A2M_version
-	false, // Inverter_version
-	false, // Inverter_SN
-	false, // EMS_version
-	false, // EMS_SN
-	true,  // State_of_Charge
-	true,  // ESS_Power
-	false, // ESS_Energy_Charge
-	false, // ESS_Energy_Discharge
-	false, // Grid_Connected
-	true,  // Grid_Power
-	false, // Grid_Energy_To
-	false, // Grid_Energy_From
-	true,  // Solar_Power
-	false, // Solar_Energy
-	false, // Frequency
-	false, // Op_Mode
-	false, // SOC_Target
-	false, // Charge_Power
-	false, // Discharge_Power
-	false, // Push_Power
-	false, // Battery_Capacity
-	false, // Battery_Temp
-	false, // Inverter_Temp
-	false, // Battery_Faults
-	false, // Battery_Warnings
-	false, // Inverter_Faults
-	false, // Inverter_Warnings
-	false, // System_Faults
-	true,  // Inverter_Mode
-	false, // Grid_Regulation
-	false, // Register_Number
-	false, // Register_Value
+static_assert(sizeof(kMqttEntities) / sizeof(kMqttEntities[0]) == kMqttEntityDescriptorCount,
+              "kMqttEntityDescriptorCount must match kMqttEntities length");
+
+struct RuntimeState {
+	bool initialized = false;
+	bool planDirty = true;
+	MqttEntityBucketOverride *overrides = nullptr;
+	size_t overrideCount = 0;
+	MqttEntityActivePlan plan{};
 };
 
-constexpr size_t kMqttEntityCount = sizeof(kMqttEntities) / sizeof(kMqttEntities[0]);
-static_assert(sizeof(kNeedsEssSnapshot) / sizeof(kNeedsEssSnapshot[0]) == kMqttEntityCount,
-              "kNeedsEssSnapshot must match kMqttEntities length");
-static_assert(kMqttEntityCount <= kMqttEntityMaxCount,
-              "kMqttEntityMaxCount must be >= number of MQTT entities");
+static RuntimeState g_runtime;
 
-static MqttEntityRuntime *g_runtime = nullptr;
+static void
+resetBucket(MqttEntityActiveBucket &bucket)
+{
+	delete[] bucket.members;
+	bucket.members = nullptr;
+	bucket.count = 0;
+	bucket.hasEssSnapshot = false;
+}
+
+static void
+resetActivePlan(MqttEntityActivePlan &plan)
+{
+	resetBucket(plan.tenSec);
+	resetBucket(plan.oneMin);
+	resetBucket(plan.fiveMin);
+	resetBucket(plan.oneHour);
+	resetBucket(plan.oneDay);
+	resetBucket(plan.user);
+	plan.activeCount = 0;
+}
+
+static BucketId
+defaultBucketForIndex(size_t idx)
+{
+	if (idx >= kMqttEntityDescriptorCount) {
+		return BucketId::Unknown;
+	}
+	return bucketIdFromFreq(kMqttEntities[idx].updateFreq);
+}
+
+static BucketId
+bucketOverrideForIndex(size_t idx)
+{
+	for (size_t i = 0; i < g_runtime.overrideCount; ++i) {
+		if (g_runtime.overrides[i].entityIndex == idx) {
+			return g_runtime.overrides[i].bucketId;
+		}
+		if (g_runtime.overrides[i].entityIndex > idx) {
+			break;
+		}
+	}
+	return BucketId::Unknown;
+}
+
+static BucketId
+bucketForIndex(size_t idx)
+{
+	BucketId bucket = bucketOverrideForIndex(idx);
+	if (bucket != BucketId::Unknown) {
+		return bucket;
+	}
+	return defaultBucketForIndex(idx);
+}
+
+static uint16_t *
+allocateMembers(size_t count)
+{
+	if (count == 0) {
+		return nullptr;
+	}
+	return new (std::nothrow) uint16_t[count];
+}
+
+static void
+appendMember(MqttEntityActiveBucket &bucket, size_t &nextIndex, size_t idx, bool needsEssSnapshot)
+{
+	if (bucket.members != nullptr && nextIndex < bucket.count) {
+		bucket.members[nextIndex] = static_cast<uint16_t>(idx);
+	}
+	++nextIndex;
+	bucket.hasEssSnapshot = bucket.hasEssSnapshot || needsEssSnapshot;
+}
+
+static bool
+rebuildActivePlan(void)
+{
+	MqttEntityActivePlan nextPlan{};
+
+	for (size_t idx = 0; idx < kMqttEntityDescriptorCount; ++idx) {
+		const bool needsEssSnapshot = kMqttEntities[idx].needsEssSnapshot;
+		switch (bucketForIndex(idx)) {
+		case BucketId::TenSec:
+			nextPlan.tenSec.count++;
+			nextPlan.tenSec.hasEssSnapshot = nextPlan.tenSec.hasEssSnapshot || needsEssSnapshot;
+			nextPlan.activeCount++;
+			break;
+		case BucketId::OneMin:
+			nextPlan.oneMin.count++;
+			nextPlan.oneMin.hasEssSnapshot = nextPlan.oneMin.hasEssSnapshot || needsEssSnapshot;
+			nextPlan.activeCount++;
+			break;
+		case BucketId::FiveMin:
+			nextPlan.fiveMin.count++;
+			nextPlan.fiveMin.hasEssSnapshot = nextPlan.fiveMin.hasEssSnapshot || needsEssSnapshot;
+			nextPlan.activeCount++;
+			break;
+		case BucketId::OneHour:
+			nextPlan.oneHour.count++;
+			nextPlan.oneHour.hasEssSnapshot = nextPlan.oneHour.hasEssSnapshot || needsEssSnapshot;
+			nextPlan.activeCount++;
+			break;
+		case BucketId::OneDay:
+			nextPlan.oneDay.count++;
+			nextPlan.oneDay.hasEssSnapshot = nextPlan.oneDay.hasEssSnapshot || needsEssSnapshot;
+			nextPlan.activeCount++;
+			break;
+		case BucketId::User:
+			nextPlan.user.count++;
+			nextPlan.user.hasEssSnapshot = nextPlan.user.hasEssSnapshot || needsEssSnapshot;
+			nextPlan.activeCount++;
+			break;
+		case BucketId::Disabled:
+		case BucketId::Unknown:
+		default:
+			break;
+		}
+	}
+
+	nextPlan.tenSec.members = allocateMembers(nextPlan.tenSec.count);
+	nextPlan.oneMin.members = allocateMembers(nextPlan.oneMin.count);
+	nextPlan.fiveMin.members = allocateMembers(nextPlan.fiveMin.count);
+	nextPlan.oneHour.members = allocateMembers(nextPlan.oneHour.count);
+	nextPlan.oneDay.members = allocateMembers(nextPlan.oneDay.count);
+	nextPlan.user.members = allocateMembers(nextPlan.user.count);
+
+	const bool allocFailed =
+		(nextPlan.tenSec.count && nextPlan.tenSec.members == nullptr) ||
+		(nextPlan.oneMin.count && nextPlan.oneMin.members == nullptr) ||
+		(nextPlan.fiveMin.count && nextPlan.fiveMin.members == nullptr) ||
+		(nextPlan.oneHour.count && nextPlan.oneHour.members == nullptr) ||
+		(nextPlan.oneDay.count && nextPlan.oneDay.members == nullptr) ||
+		(nextPlan.user.count && nextPlan.user.members == nullptr);
+	if (allocFailed) {
+		resetActivePlan(nextPlan);
+		return false;
+	}
+
+	size_t tenSecIdx = 0;
+	size_t oneMinIdx = 0;
+	size_t fiveMinIdx = 0;
+	size_t oneHourIdx = 0;
+	size_t oneDayIdx = 0;
+	size_t userIdx = 0;
+
+	for (size_t idx = 0; idx < kMqttEntityDescriptorCount; ++idx) {
+		const bool needsEssSnapshot = kMqttEntities[idx].needsEssSnapshot;
+		switch (bucketForIndex(idx)) {
+		case BucketId::TenSec:
+			appendMember(nextPlan.tenSec, tenSecIdx, idx, needsEssSnapshot);
+			break;
+		case BucketId::OneMin:
+			appendMember(nextPlan.oneMin, oneMinIdx, idx, needsEssSnapshot);
+			break;
+		case BucketId::FiveMin:
+			appendMember(nextPlan.fiveMin, fiveMinIdx, idx, needsEssSnapshot);
+			break;
+		case BucketId::OneHour:
+			appendMember(nextPlan.oneHour, oneHourIdx, idx, needsEssSnapshot);
+			break;
+		case BucketId::OneDay:
+			appendMember(nextPlan.oneDay, oneDayIdx, idx, needsEssSnapshot);
+			break;
+		case BucketId::User:
+			appendMember(nextPlan.user, userIdx, idx, needsEssSnapshot);
+			break;
+		case BucketId::Disabled:
+		case BucketId::Unknown:
+		default:
+			break;
+		}
+	}
+
+	resetActivePlan(g_runtime.plan);
+	g_runtime.plan = nextPlan;
+	g_runtime.planDirty = false;
+	return true;
+}
 
 } // namespace
 
@@ -138,43 +235,171 @@ mqttEntitiesDesc()
 	return kMqttEntities;
 }
 
+const mqttState *
+mqttEntityById(mqttEntityId id)
+{
+	for (size_t i = 0; i < kMqttEntityDescriptorCount; ++i) {
+		if (kMqttEntities[i].entityId == id) {
+			return &kMqttEntities[i];
+		}
+	}
+	return nullptr;
+}
+
 size_t
 mqttEntitiesCount()
 {
-	return kMqttEntityCount;
+	return kMqttEntityDescriptorCount;
+}
+
+bool
+mqttEntityNameEquals(const mqttState *entity, const char *name)
+{
+	if (entity == nullptr || name == nullptr) {
+		return false;
+	}
+#if defined(ESP8266) || defined(ARDUINO_ARCH_ESP8266)
+	return strcmp_P(name, reinterpret_cast<PGM_P>(entity->mqttName)) == 0;
+#else
+	return strcmp(name, entity->mqttName) == 0;
+#endif
+}
+
+void
+mqttEntityNameCopy(const mqttState *entity, char *out, size_t outSize)
+{
+	if (out == nullptr || outSize == 0) {
+		return;
+	}
+	if (entity == nullptr || entity->mqttName == nullptr) {
+		out[0] = '\0';
+		return;
+	}
+#if defined(ESP8266) || defined(ARDUINO_ARCH_ESP8266)
+	strncpy_P(out, reinterpret_cast<PGM_P>(entity->mqttName), outSize);
+	out[outSize - 1] = '\0';
+#else
+	snprintf(out, outSize, "%s", entity->mqttName);
+#endif
 }
 
 bool
 mqttEntityNeedsEssSnapshotByIndex(size_t idx)
 {
-	if (idx >= kMqttEntityCount) {
+	if (idx >= kMqttEntityDescriptorCount) {
 		return false;
 	}
-	return kNeedsEssSnapshot[idx];
+	return kMqttEntities[idx].needsEssSnapshot;
+}
+
+BucketId
+mqttEntityBucketByIndex(size_t idx)
+{
+	if (!g_runtime.initialized || idx >= kMqttEntityDescriptorCount) {
+		return BucketId::Unknown;
+	}
+	return bucketForIndex(idx);
+}
+
+mqttUpdateFreq
+mqttEntityEffectiveFreqByIndex(size_t idx)
+{
+	return bucketIdToFreq(mqttEntityBucketByIndex(idx));
+}
+
+bool
+mqttEntityCopyBuckets(BucketId *outBuckets, size_t entityCount)
+{
+	if (!g_runtime.initialized || outBuckets == nullptr || entityCount != kMqttEntityDescriptorCount) {
+		return false;
+	}
+	for (size_t i = 0; i < entityCount; ++i) {
+		outBuckets[i] = bucketForIndex(i);
+	}
+	return true;
+}
+
+bool
+mqttEntityApplyBuckets(const BucketId *buckets, size_t entityCount)
+{
+	if (!g_runtime.initialized || buckets == nullptr || entityCount != kMqttEntityDescriptorCount) {
+		return false;
+	}
+
+	size_t nextOverrideCount = 0;
+	for (size_t i = 0; i < entityCount; ++i) {
+		const BucketId bucket = buckets[i];
+		if (bucket == BucketId::Unknown) {
+			return false;
+		}
+		if (bucket != defaultBucketForIndex(i)) {
+			nextOverrideCount++;
+		}
+	}
+
+	MqttEntityBucketOverride *nextOverrides = nullptr;
+	if (nextOverrideCount > 0) {
+		nextOverrides = new (std::nothrow) MqttEntityBucketOverride[nextOverrideCount];
+		if (nextOverrides == nullptr) {
+			return false;
+		}
+		size_t nextIdx = 0;
+		for (size_t i = 0; i < entityCount; ++i) {
+			const BucketId bucket = buckets[i];
+			if (bucket == defaultBucketForIndex(i)) {
+				continue;
+			}
+			nextOverrides[nextIdx].entityIndex = static_cast<uint16_t>(i);
+			nextOverrides[nextIdx].bucketId = bucket;
+			nextIdx++;
+		}
+	}
+
+	MqttEntityBucketOverride *oldOverrides = g_runtime.overrides;
+	const size_t oldOverrideCount = g_runtime.overrideCount;
+	const bool oldPlanDirty = g_runtime.planDirty;
+
+	g_runtime.overrides = nextOverrides;
+	g_runtime.overrideCount = nextOverrideCount;
+	g_runtime.planDirty = true;
+	if (!rebuildActivePlan()) {
+		delete[] g_runtime.overrides;
+		g_runtime.overrides = oldOverrides;
+		g_runtime.overrideCount = oldOverrideCount;
+		g_runtime.planDirty = oldPlanDirty;
+		return false;
+	}
+
+	delete[] oldOverrides;
+	return true;
+}
+
+const MqttEntityActivePlan *
+mqttActivePlan()
+{
+	if (!g_runtime.initialized) {
+		return nullptr;
+	}
+	if (g_runtime.planDirty) {
+		if (!rebuildActivePlan()) {
+			return nullptr;
+		}
+	}
+	return &g_runtime.plan;
 }
 
 bool
 mqttEntitiesRtAvailable()
 {
-	return g_runtime != nullptr;
-}
-
-MqttEntityRuntime *
-mqttEntitiesRt()
-{
-	return g_runtime;
+	return g_runtime.initialized;
 }
 
 void
 initMqttEntitiesRtIfNeeded(bool mqttEnabled)
 {
-	if (!mqttEnabled || g_runtime != nullptr) {
+	if (!mqttEnabled || g_runtime.initialized) {
 		return;
 	}
-	g_runtime = new MqttEntityRuntime[kMqttEntityCount];
-	for (size_t i = 0; i < kMqttEntityCount; ++i) {
-		g_runtime[i].defaultFreq = kMqttEntities[i].updateFreq;
-		g_runtime[i].effectiveFreq = kMqttEntities[i].updateFreq;
-		g_runtime[i].bucketId = bucketIdFromFreq(kMqttEntities[i].updateFreq);
-	}
+	g_runtime.initialized = true;
+	g_runtime.planDirty = true;
 }
