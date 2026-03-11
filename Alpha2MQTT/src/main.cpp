@@ -666,6 +666,7 @@ rs485TryReadIdentityOnce(void)
 	}
 
 	strlcpy(deviceSerialNumber, response.dataValueFormatted, sizeof(deviceSerialNumber));
+	persistUserDeviceSerial(deviceSerialNumber);
 	_registerHandler->setSerialNumberPrefix(deviceSerialNumber[0], deviceSerialNumber[1]);
 
 	// Battery type is helpful for diagnostics, but it is not required to establish inverter identity.
