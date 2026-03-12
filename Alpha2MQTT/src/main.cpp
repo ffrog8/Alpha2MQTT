@@ -474,7 +474,6 @@ void sendMqtt(const char*, bool);
 void sendDataFromMqttState(const mqttState*, bool, const modbusRequestAndResponse *preparedResponse = nullptr);
 void loadPollingConfig(void);
 void recomputeBucketCounts(void);
-void savePollingConfig(const mqttState*);
 void publishPollingConfig(void);
 void publishConfigDiscovery(void);
 void publishHaEntityDiscovery(const mqttState*);
@@ -487,6 +486,7 @@ bool mqttUpdateFreqFromString(const char*, mqttUpdateFreq*);
 void updatePollingLastChange(void);
 void getPollingTimestamp(char*, size_t);
 void buildPollingKey(const mqttState*, char*, size_t);
+static bool buildPersistedPollingConfigMap(const BucketId *buckets, char *map, size_t mapLen);
 static bool readLegacyPollingPref(size_t index,
                                   const mqttState *entity,
                                   int defaultValue,
@@ -1887,8 +1887,7 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 	}
 
 	char *outMap = g_portalBucketMapScratch;
-	size_t appliedCount = 0;
-	const bool mapBuilt = buildBucketMapFromAssignments(entities, entityCount, buckets, outMap, kPrefBucketMapMaxLen, appliedCount);
+	const bool mapBuilt = buildPersistedPollingConfigMap(buckets, outMap, kPrefBucketMapMaxLen);
 	if (!mapBuilt) {
 		hadError = true;
 	}
@@ -3261,29 +3260,18 @@ loadPollingConfig(void)
 	recomputeBucketCounts();
 }
 
-void
-savePollingConfig(const mqttState *entity)
+static bool
+buildPersistedPollingConfigMap(const BucketId *buckets, char *map, size_t mapLen)
 {
 	const mqttState *entities = mqttEntitiesDesc();
 	const size_t entityCount = mqttEntitiesCount();
-	BucketId *buckets = g_portalBucketsScratch;
-	char *map = g_portalBucketMapScratch;
+
+	if (!mqttEntitiesRtAvailable() || buckets == nullptr || map == nullptr || mapLen == 0) {
+		return false;
+	}
 	map[0] = '\0';
-	(void)entity;
-
-	if (!mqttEntitiesRtAvailable()) {
-		return;
-	}
-	if (!mqttEntityCopyBuckets(buckets, entityCount)) {
-		return;
-	}
-
 	size_t appliedCount = 0;
-	if (!buildBucketMapFromAssignments(entities, entityCount, buckets, map, kPrefBucketMapMaxLen, appliedCount)) {
-		return;
-	}
-
-	persistUserPollingConfig(pollIntervalSeconds, map);
+	return buildBucketMapFromAssignments(entities, entityCount, buckets, map, mapLen, appliedCount);
 }
 
 static bool
@@ -3723,7 +3711,6 @@ handlePollingConfigSet(const char *payload)
 		bool anyChange = false;
 		bool bucketAssignmentsChanged = false;
 		bool pollIntervalChanged = false;
-		const mqttState *changedEntity = nullptr;
 		const mqttState *entities = nullptr;
 		size_t entityCount = 0;
 		BucketId *buckets = nullptr;
@@ -3800,9 +3787,6 @@ handlePollingConfigSet(const char *payload)
 						size_t idx = static_cast<size_t>(entity - ctx.entities);
 						if (idx < ctx.entityCount && ctx.buckets[idx] != bucket) {
 							ctx.buckets[idx] = bucket;
-							if (ctx.changedEntity == nullptr) {
-								ctx.changedEntity = entity;
-							}
 							ctx.bucketAssignmentsChanged = true;
 						}
 					}
@@ -3812,8 +3796,14 @@ handlePollingConfigSet(const char *payload)
 			maybeYield();
 			return true;
 		},
-		&ctx);
+	&ctx);
 	if (!parsed) {
+		return false;
+	}
+	if ((ctx.pollIntervalChanged || ctx.bucketAssignmentsChanged) &&
+	    !buildPersistedPollingConfigMap(ctx.buckets, g_portalBucketMapScratch, kPrefBucketMapMaxLen)) {
+		persistLoadOk = 0;
+		persistLoadErr = 1;
 		return false;
 	}
 
@@ -3834,13 +3824,13 @@ handlePollingConfigSet(const char *payload)
 		}
 	}
 
-		if (ctx.anyChange) {
-			recomputeBucketCounts();
-			savePollingConfig(ctx.changedEntity != nullptr ? ctx.changedEntity : entities);
-			updatePollingLastChange();
-			publishPollingConfig();
-			resendAllData = true;
-		}
+	if (ctx.anyChange) {
+		recomputeBucketCounts();
+		persistUserPollingConfig(pollIntervalSeconds, g_portalBucketMapScratch);
+		updatePollingLastChange();
+		publishPollingConfig();
+		resendAllData = true;
+	}
 
 	return true;
 }
