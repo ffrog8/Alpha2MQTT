@@ -1255,11 +1255,8 @@ persistUserExtAntenna(bool enabled)
 static void
 persistUserPollingConfig(uint32_t intervalSeconds, const char *bucketMap)
 {
-	Preferences preferences;
-	preferences.begin(DEVICE_NAME, false);
-	preferences.putUInt(kPreferencePollInterval, intervalSeconds);
-	preferences.putString(kPreferenceBucketMap, bucketMap);
-	preferences.end();
+	persistUserPollInterval(intervalSeconds);
+	persistUserBucketMap(bucketMap != nullptr ? bucketMap : "");
 }
 
 static void
