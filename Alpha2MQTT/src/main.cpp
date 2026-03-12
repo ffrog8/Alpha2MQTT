@@ -1879,15 +1879,17 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 
 	char *outMap = g_portalBucketMapScratch;
 	size_t appliedCount = 0;
-	if (!buildBucketMapFromAssignments(entities, entityCount, buckets, outMap, kPrefBucketMapMaxLen, appliedCount)) {
+	const bool mapBuilt = buildBucketMapFromAssignments(entities, entityCount, buckets, outMap, kPrefBucketMapMaxLen, appliedCount);
+	if (!mapBuilt) {
 		hadError = true;
-		outMap[0] = '\0';
 	}
 
-	persistUserPollingConfig(storedIntervalSeconds, outMap);
-	pollIntervalSeconds = storedIntervalSeconds;
-	if (mqttEntitiesRtAvailable() && mqttEntityApplyBuckets(buckets, entityCount)) {
-		recomputeBucketCounts();
+	if (mapBuilt) {
+		persistUserPollingConfig(storedIntervalSeconds, outMap);
+		pollIntervalSeconds = storedIntervalSeconds;
+		if (mqttEntitiesRtAvailable() && mqttEntityApplyBuckets(buckets, entityCount)) {
+			recomputeBucketCounts();
+		}
 	}
 	// Polling save is user-driven config edit only. Never auto-reboot from this path.
 	portalRebootScheduled = false;
