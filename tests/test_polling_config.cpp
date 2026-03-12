@@ -1,6 +1,7 @@
 // Purpose: Validate persisted polling bucket parsing and interval validation.
 #include "doctest/doctest.h"
 
+#include <cstdlib>
 #include <string>
 
 #include "ConfigCodec.h"
@@ -103,6 +104,57 @@ TEST_CASE("config entry validation rejects truncated payloads before apply")
 	char scratch[256];
 	CHECK(validatePollingConfigEntries("{\"poll_interval_s\":\"45\",\"bucket_map\":\"Op_Mode=one_min;\"}", scratch, sizeof(scratch)));
 	CHECK_FALSE(validatePollingConfigEntries("{\"poll_interval_s\":\"45\",\"bucket_map\":\"Op_Mode=one_min;\"", scratch, sizeof(scratch)));
+}
+
+TEST_CASE("config entry visit aborts staged apply when bucket_map parsing fails")
+{
+	mqttState entities[1]{};
+	entities[0] = makeEntity(mqttEntityId::entityOpMode, "Op_Mode", mqttUpdateFreq::freqTenSec, homeAssistantClass::haClassSelect);
+
+	struct Context {
+		const mqttState *entities = nullptr;
+		BucketId *stagedBuckets = nullptr;
+		uint32_t *stagedInterval = nullptr;
+		uint32_t unknown = 0;
+		uint32_t invalid = 0;
+		uint32_t dup = 0;
+	};
+
+	BucketId committedBuckets[1] = { BucketId::TenSec };
+	BucketId stagedBuckets[1] = { BucketId::TenSec };
+	uint32_t committedInterval = 30;
+	uint32_t stagedInterval = committedInterval;
+	char scratch[256];
+	Context ctx{ entities, stagedBuckets, &stagedInterval };
+
+	CHECK(validatePollingConfigEntries("{\"poll_interval_s\":\"45\",\"bucket_map\":\"Op_Mode\"}", scratch, sizeof(scratch)));
+	const bool ok = visitPollingConfigEntries(
+		"{\"poll_interval_s\":\"45\",\"bucket_map\":\"Op_Mode\"}",
+		scratch,
+		sizeof(scratch),
+		[](const char *key, const char *value, void *context) -> bool {
+			auto &ctx = *static_cast<Context *>(context);
+			if (std::string(key) == "poll_interval_s") {
+				*ctx.stagedInterval = clampPollInterval(static_cast<uint32_t>(std::strtoul(value, nullptr, 10)));
+				return true;
+			}
+			if (std::string(key) == "bucket_map") {
+				return applyBucketMapString(value,
+				                            ctx.entities,
+				                            1,
+				                            ctx.stagedBuckets,
+				                            ctx.unknown,
+				                            ctx.invalid,
+				                            ctx.dup);
+			}
+			return true;
+		},
+		&ctx);
+
+	CHECK_FALSE(ok);
+	CHECK(committedInterval == 30);
+	CHECK(committedBuckets[0] == BucketId::TenSec);
+	CHECK(stagedBuckets[0] == BucketId::TenSec);
 }
 
 TEST_CASE("poll interval clamp enforces bounds")

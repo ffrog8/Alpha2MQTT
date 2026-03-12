@@ -68,6 +68,25 @@ inverterHaUniqueIdMatchesSerial(const char *uniqueId, const char *serial)
 	return strcmp(uniqueId, expected) == 0;
 }
 
+bool
+buildStaleInverterIdentifier(const char *previousSerial,
+                             const char *nextSerial,
+                             char *out,
+                             size_t outLen)
+{
+	if (out == nullptr || outLen == 0) {
+		return false;
+	}
+	out[0] = '\0';
+	if (!inverterSerialIsValid(previousSerial) ||
+	    !inverterSerialIsValid(nextSerial) ||
+	    strcmp(previousSerial, nextSerial) == 0) {
+		return false;
+	}
+	buildInverterIdentifier(previousSerial, out, outLen);
+	return out[0] != '\0';
+}
+
 DiscoveryDeviceScope
 mqttEntityScope(mqttEntityId id)
 {

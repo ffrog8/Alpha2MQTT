@@ -221,6 +221,9 @@ char* _mqttPayload;
 bool resendHaData = false;
 bool resendHaPreludePending = false;
 size_t resendHaNextEntityIndex = 0;
+bool resendHaClearStaleInverterPending = false;
+size_t resendHaClearStaleInverterIndex = 0;
+char resendHaClearStaleInverterDeviceId[64] = "";
 bool resendAllData = false;
 static constexpr size_t kHaDiscoveryBatchSize = 1;
 // Human-readable timestamp of the most recent polling-config mutation.
@@ -475,6 +478,7 @@ void savePollingConfig(const mqttState*);
 void publishPollingConfig(void);
 void publishConfigDiscovery(void);
 void publishHaEntityDiscovery(const mqttState*);
+void clearHaEntityDiscovery(const mqttState*, const char *deviceId);
 void publishControllerInverterSerialDiscovery(void);
 void publishControllerInverterSerialState(void);
 bool handlePollingConfigSet(const char*);
@@ -502,6 +506,7 @@ void updateStatusLed(void);
 void buildDeviceName(void);
 void publishBootEventOncePerBoot(void);
 void setMqttIdentifiersFromSerial(const char *serial);
+void queueStaleInverterDiscoveryClear(const char *deviceId);
 bool inverterSerialKnown(void);
 const char *discoveryDeviceIdForScope(DiscoveryDeviceScope scope);
 void publishStatusNow(void);
@@ -584,6 +589,17 @@ setMqttIdentifiersFromSerial(const char *serial)
 	inverterReady = true;
 	// Subscriptions are bound to the HA unique id; if identity changes from unknown/persisted, resubscribe.
 	inverterSubscriptionsSet = false;
+}
+
+void
+queueStaleInverterDiscoveryClear(const char *deviceId)
+{
+	if (deviceId == nullptr || deviceId[0] == '\0') {
+		return;
+	}
+	strlcpy(resendHaClearStaleInverterDeviceId, deviceId, sizeof(resendHaClearStaleInverterDeviceId));
+	resendHaClearStaleInverterPending = true;
+	resendHaClearStaleInverterIndex = 0;
 }
 
 void
@@ -730,6 +746,14 @@ rs485TryReadIdentityOnce(void)
 		return false;
 	}
 
+	char previousSerial[sizeof(deviceSerialNumber)];
+	strlcpy(previousSerial, deviceSerialNumber, sizeof(previousSerial));
+	char staleInverterIdentifier[64];
+	const bool staleInverterNamespace = buildStaleInverterIdentifier(previousSerial,
+	                                                                 response.dataValueFormatted,
+	                                                                 staleInverterIdentifier,
+	                                                                 sizeof(staleInverterIdentifier));
+
 	strlcpy(deviceSerialNumber, response.dataValueFormatted, sizeof(deviceSerialNumber));
 	persistUserDeviceSerial(deviceSerialNumber);
 	_registerHandler->setSerialNumberPrefix(deviceSerialNumber[0], deviceSerialNumber[1]);
@@ -744,6 +768,9 @@ rs485TryReadIdentityOnce(void)
 	if (!inverterHaUniqueIdMatchesSerial(haUniqueId, deviceSerialNumber)) {
 		// Persisted serial is only a hint. Refresh topic/discovery identity whenever the live
 		// inverter reports a different serial so reconnects cannot stay pinned to stale namespaces.
+		if (staleInverterNamespace) {
+			queueStaleInverterDiscoveryClear(staleInverterIdentifier);
+		}
 		setMqttIdentifiersFromSerial(deviceSerialNumber);
 	}
 
@@ -3584,12 +3611,81 @@ requestHaDataResend(void)
 	resendHaNextEntityIndex = 0;
 }
 
+static const char *
+homeAssistantEntityType(const mqttState *entity)
+{
+	if (entity == nullptr) {
+		return "sensor";
+	}
+	switch (entity->haClass) {
+	case homeAssistantClass::haClassBox:
+	case homeAssistantClass::haClassNumber:
+		return "number";
+	case homeAssistantClass::haClassSelect:
+		return "select";
+	case homeAssistantClass::haClassBinaryProblem:
+		return "binary_sensor";
+	default:
+		return "sensor";
+	}
+}
+
+void
+clearHaEntityDiscovery(const mqttState *entity, const char *deviceId)
+{
+	char topic[128];
+
+	if (entity == nullptr || deviceId == nullptr || deviceId[0] == '\0') {
+		return;
+	}
+
+	char entityName[64];
+	mqttEntityNameCopy(entity, entityName, sizeof(entityName));
+	snprintf(topic,
+	         sizeof(topic),
+	         "homeassistant/%s/%s/%s/config",
+	         homeAssistantEntityType(entity),
+	         deviceId,
+	         entityName);
+	emptyPayload();
+	sendMqtt(topic, MQTT_RETAIN);
+}
+
+static bool
+publishPendingStaleInverterDiscoveryClears(void)
+{
+	if (!resendHaClearStaleInverterPending || resendHaClearStaleInverterDeviceId[0] == '\0') {
+		return false;
+	}
+	if (!mqttEntitiesRtAvailable()) {
+		return false;
+	}
+
+	const mqttState *entities = mqttEntitiesDesc();
+	const size_t entityCount = mqttEntitiesCount();
+	size_t batchCount = 0;
+	while (resendHaClearStaleInverterIndex < entityCount && batchCount < kHaDiscoveryBatchSize) {
+		const mqttState *entity = &entities[resendHaClearStaleInverterIndex++];
+		if (mqttEntityScope(entity->entityId) != DiscoveryDeviceScope::Inverter) {
+			continue;
+		}
+		clearHaEntityDiscovery(entity, resendHaClearStaleInverterDeviceId);
+		batchCount++;
+		maybeYield();
+	}
+	if (resendHaClearStaleInverterIndex < entityCount) {
+		return true;
+	}
+
+	resendHaClearStaleInverterPending = false;
+	resendHaClearStaleInverterIndex = 0;
+	resendHaClearStaleInverterDeviceId[0] = '\0';
+	return false;
+}
+
 void
 publishHaEntityDiscovery(const mqttState *entity)
 {
-	const char *entityType;
-	char topic[128];
-
 	if (entity == NULL) {
 		return;
 	}
@@ -3613,26 +3709,7 @@ publishHaEntityDiscovery(const mqttState *entity)
 	}
 
 	if (effectiveFreq == mqttUpdateFreq::freqDisabled) {
-		switch (entity->haClass) {
-		case homeAssistantClass::haClassBox:
-		case homeAssistantClass::haClassNumber:
-			entityType = "number";
-			break;
-		case homeAssistantClass::haClassSelect:
-			entityType = "select";
-			break;
-		case homeAssistantClass::haClassBinaryProblem:
-			entityType = "binary_sensor";
-			break;
-		default:
-			entityType = "sensor";
-			break;
-		}
-		char entityName[64];
-		mqttEntityNameCopy(entity, entityName, sizeof(entityName));
-		snprintf(topic, sizeof(topic), "homeassistant/%s/%s/%s/config", entityType, deviceId, entityName);
-		emptyPayload();
-		sendMqtt(topic, MQTT_RETAIN);
+		clearHaEntityDiscovery(entity, deviceId);
 		return;
 	}
 
@@ -3671,7 +3748,7 @@ handlePollingConfigSet(const char *payload)
 		return false;
 	}
 
-	visitPollingConfigEntries(
+	const bool parsed = visitPollingConfigEntries(
 		payload,
 		g_portalBucketMapScratch,
 		sizeof(g_portalBucketMapScratch),
@@ -3707,9 +3784,10 @@ handlePollingConfigSet(const char *payload)
 					                                          persistDuplicateEntityCount);
 					persistLoadOk = applied ? 1 : 0;
 					persistLoadErr = applied ? 0 : 1;
-					if (applied) {
-						ctx.bucketAssignmentsChanged = true;
+					if (!applied) {
+						return false;
 					}
+					ctx.bucketAssignmentsChanged = true;
 				}
 				handled = true;
 			}
@@ -3735,6 +3813,9 @@ handlePollingConfigSet(const char *payload)
 			return true;
 		},
 		&ctx);
+	if (!parsed) {
+		return false;
+	}
 
 	if (ctx.pollIntervalChanged) {
 		pollIntervalSeconds = ctx.stagedPollInterval;
@@ -6159,6 +6240,10 @@ sendHaData()
 
 	// Spread retained HA discovery publishes across multiple loop() turns so a config change
 	// cannot monopolize the ESP8266 network stack long enough to trigger the watchdog.
+	if (publishPendingStaleInverterDiscoveryClears()) {
+		return;
+	}
+
 	if (resendHaPreludePending) {
 		publishConfigDiscovery();
 		maybeYield();

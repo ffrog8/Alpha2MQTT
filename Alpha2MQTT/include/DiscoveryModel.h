@@ -27,6 +27,14 @@ bool inverterHaUniqueIdMatchesSerial(const char *uniqueId, const char *serial);
 // Returns true only for non-empty serials that are not placeholder values.
 bool inverterSerialIsValid(const char *serial);
 
+// Writes the previous inverter discovery identifier when the serial changed
+// from one valid value to another. Returns false when there is no stale
+// inverter namespace to clear.
+bool buildStaleInverterIdentifier(const char *previousSerial,
+                                  const char *nextSerial,
+                                  char *out,
+                                  size_t outLen);
+
 // Returns device scope for a compiled MQTT entity.
 DiscoveryDeviceScope mqttEntityScope(mqttEntityId id);
 

@@ -68,3 +68,21 @@ TEST_CASE("discovery model refreshes HA identity when serial changes")
 	CHECK(inverterHaUniqueIdMatchesSerial(uniqueId, "AL12345678901234"));
 	CHECK_FALSE(inverterHaUniqueIdMatchesSerial(uniqueId, "AL00000000000000"));
 }
+
+TEST_CASE("discovery model returns the stale inverter namespace when serial changes")
+{
+	char staleId[64];
+	CHECK(buildStaleInverterIdentifier("AL12345678901234",
+	                                  "AL00000000000000",
+	                                  staleId,
+	                                  sizeof(staleId)));
+	CHECK(std::string(staleId) == "alpha2mqtt_inv_AL12345678901234");
+	CHECK_FALSE(buildStaleInverterIdentifier("AL12345678901234",
+	                                        "AL12345678901234",
+	                                        staleId,
+	                                        sizeof(staleId)));
+	CHECK_FALSE(buildStaleInverterIdentifier("unknown",
+	                                        "AL00000000000000",
+	                                        staleId,
+	                                        sizeof(staleId)));
+}
