@@ -1,6 +1,8 @@
 // Purpose: Keep portal decision logic testable on host (doctest).
 #include "../include/PortalConfig.h"
 
+#include <cstring>
+
 namespace {
 constexpr const char *kPortalMenuIds[] = {
 	"wifinoscan",
@@ -43,6 +45,32 @@ constexpr char kPortalRebootNormal[] =
 	"})();"
 	"</script>"
 	"</body></html>";
+
+constexpr MqttEntityFamily kPortalPollingFamilies[] = {
+	MqttEntityFamily::Battery,
+	MqttEntityFamily::Inverter,
+	MqttEntityFamily::Backup,
+	MqttEntityFamily::Pv,
+	MqttEntityFamily::Grid,
+	MqttEntityFamily::System,
+	MqttEntityFamily::Controller,
+};
+
+static size_t
+countFamilyEntities(const mqttState *entities, size_t entityCount, MqttEntityFamily family)
+{
+	if (entities == nullptr || entityCount == 0) {
+		return 0;
+	}
+
+	size_t count = 0;
+	for (size_t i = 0; i < entityCount; ++i) {
+		if (entities[i].family == family) {
+			count++;
+		}
+	}
+	return count;
+}
 }
 
 bool
@@ -77,4 +105,135 @@ portalMenuDefault(void)
 	// do not try to mutate the array itself.
 	return { const_cast<const char **>(kPortalMenuIds),
 		static_cast<uint8_t>(sizeof(kPortalMenuIds) / sizeof(kPortalMenuIds[0])) };
+}
+
+uint8_t
+portalPollingFamilyCount(void)
+{
+	return static_cast<uint8_t>(sizeof(kPortalPollingFamilies) / sizeof(kPortalPollingFamilies[0]));
+}
+
+MqttEntityFamily
+portalPollingFamilyAt(uint8_t index)
+{
+	if (index >= portalPollingFamilyCount()) {
+		return kPortalPollingFamilies[0];
+	}
+	return kPortalPollingFamilies[index];
+}
+
+const char *
+portalPollingFamilyKey(MqttEntityFamily family)
+{
+	switch (family) {
+	case MqttEntityFamily::Battery:
+		return "battery";
+	case MqttEntityFamily::Inverter:
+		return "inverter";
+	case MqttEntityFamily::Backup:
+		return "backup";
+	case MqttEntityFamily::Pv:
+		return "pv";
+	case MqttEntityFamily::Grid:
+		return "grid";
+	case MqttEntityFamily::System:
+		return "system";
+	case MqttEntityFamily::Controller:
+	default:
+		return "controller";
+	}
+}
+
+const char *
+portalPollingFamilyLabel(MqttEntityFamily family)
+{
+	switch (family) {
+	case MqttEntityFamily::Battery:
+		return "Battery";
+	case MqttEntityFamily::Inverter:
+		return "Inverter";
+	case MqttEntityFamily::Backup:
+		return "Backup";
+	case MqttEntityFamily::Pv:
+		return "PV";
+	case MqttEntityFamily::Grid:
+		return "Grid";
+	case MqttEntityFamily::System:
+		return "System";
+	case MqttEntityFamily::Controller:
+	default:
+		return "Controller";
+	}
+}
+
+bool
+portalPollingFamilyFromKey(const char *key, MqttEntityFamily *outFamily)
+{
+	if (key == nullptr || key[0] == '\0' || outFamily == nullptr) {
+		return false;
+	}
+
+	for (uint8_t i = 0; i < portalPollingFamilyCount(); ++i) {
+		const MqttEntityFamily family = portalPollingFamilyAt(i);
+		if (strcmp(portalPollingFamilyKey(family), key) == 0) {
+			*outFamily = family;
+			return true;
+		}
+	}
+	return false;
+}
+
+PortalFamilyPage
+portalBuildFamilyPage(const mqttState *entities,
+                      size_t entityCount,
+                      MqttEntityFamily family,
+                      uint16_t requestedPage,
+                      size_t pageSize)
+{
+	PortalFamilyPage page{};
+	page.family = family;
+
+	if (pageSize == 0) {
+		return page;
+	}
+
+	page.totalEntityCount = countFamilyEntities(entities, entityCount, family);
+	if (page.totalEntityCount == 0) {
+		return page;
+	}
+
+	page.maxPage = static_cast<uint16_t>((page.totalEntityCount - 1) / pageSize);
+	page.safePage = (requestedPage > page.maxPage) ? page.maxPage : requestedPage;
+	page.pageStartOffset = static_cast<size_t>(page.safePage) * pageSize;
+	page.pageCount = page.totalEntityCount - page.pageStartOffset;
+	if (page.pageCount > pageSize) {
+		page.pageCount = pageSize;
+	}
+	return page;
+}
+
+size_t
+portalCollectFamilyPageEntityIndices(const mqttState *entities,
+                                     size_t entityCount,
+                                     const PortalFamilyPage &page,
+                                     uint16_t *outIndices,
+                                     size_t outCapacity)
+{
+	if (entities == nullptr || outIndices == nullptr || outCapacity == 0 || page.pageCount == 0) {
+		return 0;
+	}
+
+	const size_t wanted = (page.pageCount < outCapacity) ? page.pageCount : outCapacity;
+	size_t familyOrdinal = 0;
+	size_t collected = 0;
+	for (size_t i = 0; i < entityCount && collected < wanted; ++i) {
+		if (entities[i].family != page.family) {
+			continue;
+		}
+		if (familyOrdinal >= page.pageStartOffset) {
+			outIndices[collected++] = static_cast<uint16_t>(i);
+		}
+		familyOrdinal++;
+	}
+	return collected;
 }
