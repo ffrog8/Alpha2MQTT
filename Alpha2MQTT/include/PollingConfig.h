@@ -79,3 +79,16 @@ bool buildBucketMapFromAssignments(const mqttState *entities,
                                    char *out,
                                    size_t outSize,
                                    size_t &appliedCount);
+
+// Build one chunk of the active (non-disabled) bucket assignments. Unlike the
+// persisted Bucket_Map, this includes defaults so MQTT config consumers can
+// reconstruct the full live schedule. `nextIndex` returns the next descriptor
+// position to resume from when the output buffer fills.
+bool buildActiveBucketMapChunkFromAssignments(const mqttState *entities,
+                                              size_t entityCount,
+                                              const BucketId *buckets,
+                                              size_t startIndex,
+                                              char *out,
+                                              size_t outSize,
+                                              size_t &nextIndex,
+                                              size_t &appliedCount);

@@ -955,8 +955,31 @@ def _fetch_latest_json(mqtt: MqttClient, topic: str, label: str, *, timeout_s: i
 def _fetch_poll(mqtt: MqttClient, topic: str) -> dict[str, Any]:
     return _fetch_latest_json(mqtt, topic, label="poll")
 
+def _parse_bucket_map_assignments(raw: str) -> dict[str, str]:
+    intervals: dict[str, str] = {}
+    for token in raw.split(";"):
+        token = token.strip()
+        if not token or "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if key and value:
+            intervals[key] = value
+    return intervals
+
 def _fetch_config(mqtt: MqttClient, topic: str) -> dict[str, Any]:
-    return _fetch_latest_json(mqtt, topic, label="config")
+    cfg = _fetch_latest_json(mqtt, topic, label="config")
+    if str(cfg.get("entity_intervals_encoding", "")) != "bucket_map_chunks":
+        return cfg
+
+    chunk_count = int(cfg.get("entity_intervals_chunks", 0))
+    intervals: dict[str, str] = {}
+    for idx in range(chunk_count):
+        chunk = _fetch_latest_json(mqtt, f"{topic}/entity_intervals/{idx}", label=f"config-chunk-{idx}")
+        intervals.update(_parse_bucket_map_assignments(str(chunk.get("active_bucket_map", ""))))
+    cfg["entity_intervals"] = intervals
+    return cfg
 
 def _fetch_status_core(mqtt: MqttClient, topic: str) -> dict[str, Any]:
     return _fetch_latest_json(mqtt, topic, label="core")
@@ -1188,7 +1211,9 @@ def _device_is_latest_stub(
         prev_net = _fetch_latest_text(mqtt, net_topic, label="status_net_liveness")
         _wait_for_topic_change(mqtt, net_topic, prev_net, timeout_s=15, label="status/net liveness")
     except E2EError as e:
-        return False, f"status_net_stale ({e})"
+        # A fresh boot event with the expected build id is stronger evidence than a missing status/net
+        # refresh, and re-flashing an already-correct stub increases live-device churn for no gain.
+        return True, f"status_net_stale_ignored ({e})"
     return True, "ok"
 
 def _resolve_device_http_base(mqtt: MqttClient, device_root: str) -> str:

@@ -303,6 +303,19 @@ appendBucketMapOverride(const mqttState &entity,
 	return true;
 }
 
+static bool
+appendActiveBucketAssignment(const mqttState &entity,
+                             BucketId bucket,
+                             char *out,
+                             size_t outSize,
+                             size_t &used)
+{
+	if (bucket == BucketId::Unknown || bucket == BucketId::Disabled) {
+		return true;
+	}
+	return appendBucketMapOverride(entity, bucket, out, outSize, used);
+}
+
 bool
 buildBucketMapFromLegacy(const mqttState *entities,
                          size_t entityCount,
@@ -408,5 +421,50 @@ buildBucketMapFromAssignments(const mqttState *entities,
 		appliedCount++;
 	}
 
+	return true;
+}
+
+bool
+buildActiveBucketMapChunkFromAssignments(const mqttState *entities,
+                                         size_t entityCount,
+                                         const BucketId *buckets,
+                                         size_t startIndex,
+                                         char *out,
+                                         size_t outSize,
+                                         size_t &nextIndex,
+                                         size_t &appliedCount)
+{
+	if (entities == nullptr || buckets == nullptr || out == nullptr || outSize == 0) {
+		return false;
+	}
+	if (entityCount > kMqttEntityDescriptorCount) {
+		return false;
+	}
+
+	out[0] = '\0';
+	appliedCount = 0;
+	nextIndex = entityCount;
+	if (startIndex >= entityCount) {
+		return true;
+	}
+
+	size_t used = 0;
+	for (size_t i = startIndex; i < entityCount; ++i) {
+		const BucketId bucket = buckets[i];
+		if (bucket == BucketId::Unknown || bucket == BucketId::Disabled) {
+			continue;
+		}
+		const size_t usedBefore = used;
+		if (!appendActiveBucketAssignment(entities[i], bucket, out, outSize, used)) {
+			if (appliedCount == 0) {
+				return false;
+			}
+			used = usedBefore;
+			out[used] = '\0';
+			nextIndex = i;
+			return true;
+		}
+		appliedCount++;
+	}
 	return true;
 }

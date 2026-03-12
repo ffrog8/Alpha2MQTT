@@ -18,6 +18,12 @@ void buildControllerIdentifier(const uint8_t mac[6], char *out, size_t outLen);
 // Writes "alpha2mqtt_inv_<serial>" when serial is valid, else writes empty string.
 void buildInverterIdentifier(const char *serial, char *out, size_t outLen);
 
+// Writes "A2M-<serial>" when serial is valid, else writes "A2M-UNKNOWN".
+void buildInverterHaUniqueId(const char *serial, char *out, size_t outLen);
+
+// Returns true when the current HA unique_id already matches the inverter serial.
+bool inverterHaUniqueIdMatchesSerial(const char *uniqueId, const char *serial);
+
 // Returns true only for non-empty serials that are not placeholder values.
 bool inverterSerialIsValid(const char *serial);
 

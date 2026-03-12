@@ -21,6 +21,8 @@ TEST_CASE("discovery model rejects missing inverter serial and skips inverter to
 {
 	CHECK_FALSE(inverterSerialIsValid(""));
 	CHECK_FALSE(inverterSerialIsValid("unknown"));
+	CHECK_FALSE(inverterHaUniqueIdMatchesSerial("A2M-AL12345678901234", ""));
+	CHECK_FALSE(inverterHaUniqueIdMatchesSerial("A2M-UNKNOWN", "AL12345678901234"));
 
 	char topicBase[128];
 	const bool ok = buildEntityTopicBase("Alpha2MQTT-123456",
@@ -56,4 +58,13 @@ TEST_CASE("discovery model routes controller entities and inverter unique_id use
 	                    uidInverter,
 	                    sizeof(uidInverter));
 	CHECK(std::string(uidInverter) == "alpha2mqtt_inv_AL12345678901234_State_of_Charge");
+}
+
+TEST_CASE("discovery model refreshes HA identity when serial changes")
+{
+	char uniqueId[32];
+	buildInverterHaUniqueId("AL12345678901234", uniqueId, sizeof(uniqueId));
+	CHECK(std::string(uniqueId) == "A2M-AL12345678901234");
+	CHECK(inverterHaUniqueIdMatchesSerial(uniqueId, "AL12345678901234"));
+	CHECK_FALSE(inverterHaUniqueIdMatchesSerial(uniqueId, "AL00000000000000"));
 }

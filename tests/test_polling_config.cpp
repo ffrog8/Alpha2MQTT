@@ -346,3 +346,58 @@ TEST_CASE("assignment builder emits stable name overrides and round-trips")
 	CHECK(applyBucketMapString(out, entities, 2, roundTrip, unknown, invalid, dup));
 	CHECK(roundTrip[1] == BucketId::User);
 }
+
+TEST_CASE("active assignment chunk builder includes defaults and resumes from the next descriptor")
+{
+	mqttState entities[3]{};
+	entities[0] = makeEntity(mqttEntityId::entityOpMode, "Op_Mode", mqttUpdateFreq::freqTenSec, homeAssistantClass::haClassSelect);
+	entities[1] = makeEntity(mqttEntityId::entitySocTarget, "SOC_Target", mqttUpdateFreq::freqOneMin, homeAssistantClass::haClassNumber);
+	entities[2] = makeEntity(mqttEntityId::entityChargePwr, "Charge_Power", mqttUpdateFreq::freqFiveMin, homeAssistantClass::haClassNumber);
+
+	BucketId buckets[3] = { BucketId::TenSec, BucketId::OneMin, BucketId::User };
+	char chunk[40];
+	size_t nextIndex = 0;
+	size_t applied = 0;
+
+	CHECK(buildActiveBucketMapChunkFromAssignments(entities, 3, buckets, 0, chunk, sizeof(chunk), nextIndex, applied));
+	CHECK(applied == 2);
+	CHECK(nextIndex == 2);
+	CHECK(std::string(chunk) == "Op_Mode=ten_sec;SOC_Target=one_min;");
+
+	CHECK(buildActiveBucketMapChunkFromAssignments(entities, 3, buckets, nextIndex, chunk, sizeof(chunk), nextIndex, applied));
+	CHECK(applied == 1);
+	CHECK(nextIndex == 3);
+	CHECK(std::string(chunk) == "Charge_Power=user;");
+}
+
+TEST_CASE("active assignment chunk builder round-trips the full live schedule")
+{
+	mqttState entities[3]{};
+	entities[0] = makeEntity(mqttEntityId::entityOpMode, "Op_Mode", mqttUpdateFreq::freqTenSec, homeAssistantClass::haClassSelect);
+	entities[1] = makeEntity(mqttEntityId::entitySocTarget, "SOC_Target", mqttUpdateFreq::freqOneMin, homeAssistantClass::haClassNumber);
+	entities[2] = makeEntity(mqttEntityId::entityChargePwr, "Charge_Power", mqttUpdateFreq::freqFiveMin, homeAssistantClass::haClassNumber);
+
+	BucketId buckets[3] = { BucketId::TenSec, BucketId::Disabled, BucketId::User };
+	BucketId roundTrip[3] = { BucketId::Disabled, BucketId::Disabled, BucketId::Disabled };
+	uint32_t unknown = 0;
+	uint32_t invalid = 0;
+	uint32_t dup = 0;
+
+	char chunk[32];
+	size_t nextIndex = 0;
+	size_t applied = 0;
+	std::string combined;
+	while (nextIndex < 3) {
+		CHECK(buildActiveBucketMapChunkFromAssignments(entities, 3, buckets, nextIndex, chunk, sizeof(chunk), nextIndex, applied));
+		if (applied == 0) {
+			break;
+		}
+		combined += chunk;
+	}
+
+	CHECK(combined == "Op_Mode=ten_sec;Charge_Power=user;");
+	CHECK(applyBucketMapString(combined.c_str(), entities, 3, roundTrip, unknown, invalid, dup));
+	CHECK(roundTrip[0] == BucketId::TenSec);
+	CHECK(roundTrip[1] == BucketId::Disabled);
+	CHECK(roundTrip[2] == BucketId::User);
+}

@@ -44,6 +44,30 @@ buildInverterIdentifier(const char *serial, char *out, size_t outLen)
 	snprintf(out, outLen, "alpha2mqtt_inv_%s", serial);
 }
 
+void
+buildInverterHaUniqueId(const char *serial, char *out, size_t outLen)
+{
+	if (out == nullptr || outLen == 0) {
+		return;
+	}
+	if (!inverterSerialIsValid(serial)) {
+		snprintf(out, outLen, "%s", "A2M-UNKNOWN");
+		return;
+	}
+	snprintf(out, outLen, "A2M-%s", serial);
+}
+
+bool
+inverterHaUniqueIdMatchesSerial(const char *uniqueId, const char *serial)
+{
+	if (uniqueId == nullptr || uniqueId[0] == '\0' || !inverterSerialIsValid(serial)) {
+		return false;
+	}
+	char expected[32];
+	buildInverterHaUniqueId(serial, expected, sizeof(expected));
+	return strcmp(uniqueId, expected) == 0;
+}
+
 DiscoveryDeviceScope
 mqttEntityScope(mqttEntityId id)
 {

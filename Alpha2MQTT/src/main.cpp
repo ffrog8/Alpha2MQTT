@@ -151,11 +151,13 @@ constexpr size_t kPrefMqttServerMaxLen = 64;
 constexpr size_t kPrefMqttUsernameMaxLen = 64;
 constexpr size_t kPrefMqttPasswordMaxLen = 64;
 constexpr size_t kPrefBucketMapMaxLen = 2048;
+constexpr size_t kPollingConfigChunkMapMaxLen = 1024;
 constexpr size_t kPrefPollingLastChangeMaxLen = 32;
 // Portal handlers run on a constrained callback stack on ESP8266.
 // Keep large polling map buffers in static storage to avoid stack corruption/panics.
 static BucketId g_portalBucketsScratch[kMqttEntityDescriptorCount];
 static char g_portalBucketMapScratch[kPrefBucketMapMaxLen];
+static size_t g_lastPublishedPollingConfigChunkCount = 0;
 static char g_portalRowRenderBuf[768];
 BootIntent currentBootIntent = BootIntent::Normal;
 BootIntent bootIntentForPublish = BootIntent::Normal;
@@ -580,7 +582,7 @@ setMqttIdentifiersFromSerial(const char *serial)
 		return;
 	}
 
-	snprintf(haUniqueId, sizeof(haUniqueId), "A2M-%s", serial);
+	buildInverterHaUniqueId(serial, haUniqueId, sizeof(haUniqueId));
 	inverterReady = true;
 	// Subscriptions are bound to the HA unique id; if identity changes from unknown/persisted, resubscribe.
 	inverterSubscriptionsSet = false;
@@ -741,11 +743,9 @@ rs485TryReadIdentityOnce(void)
 		strlcpy(deviceBatteryType, response.dataValueFormatted, sizeof(deviceBatteryType));
 	}
 
-	if (haUniqueId[0] == '\0') {
-		setMqttIdentifiersFromSerial(deviceSerialNumber);
-	} else if (strcmp(haUniqueId, "A2M-UNKNOWN") == 0) {
-		// Treat "unknown" as not-yet-identified so the stub backend (and fresh boots) can still
-		// promote to a real inverter identity once the serial is readable.
+	if (!inverterHaUniqueIdMatchesSerial(haUniqueId, deviceSerialNumber)) {
+		// Persisted serial is only a hint. Refresh topic/discovery identity whenever the live
+		// inverter reports a different serial so reconnects cannot stay pinned to stale namespaces.
 		setMqttIdentifiersFromSerial(deviceSerialNumber);
 	}
 
@@ -860,10 +860,9 @@ rs485ProbeTick(void)
 
 	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
 		rs485LockedBaud = baud;
-		// If inverter identity was previously persisted, we can treat the connection as established immediately.
-		// Otherwise we must read the serial to determine haUniqueId and enable inverterReady-dependent paths.
-		const bool identityKnown = (haUniqueId[0] != '\0' && strcmp(haUniqueId, "A2M-UNKNOWN") != 0);
-		rs485ConnectState = identityKnown ? Rs485ConnectState::Connected : Rs485ConnectState::ReadingIdentity;
+		// Always re-read the live serial after a successful probe. Persisted identity is only a hint,
+		// and reconnects must be able to detect an inverter replacement without manual NVS cleanup.
+		rs485ConnectState = Rs485ConnectState::ReadingIdentity;
 		rs485AttemptsInCycle = 0;
 		rs485CycleBackoffMs = kRs485ProbeAttemptDelayMs;
 		rs485NextAttemptAtMs = now;
@@ -3277,6 +3276,141 @@ savePollingConfig(const mqttState *entity)
 	persistUserBucketMap(map);
 }
 
+static bool
+beginPollingConfigPayload(void)
+{
+	char addition[256];
+	bool first = true;
+	modbusRequestAndResponseStatusValues resultAddedToPayload = addToPayload("{");
+	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		return false;
+	}
+
+	snprintf(addition, sizeof(addition), "\"last_change\": \"%s\", \"poll_interval_s\": %lu, \"allowed_intervals\": [",
+	         _pollingConfigLastChange, static_cast<unsigned long>(pollIntervalSeconds));
+	resultAddedToPayload = addToPayload(addition);
+	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		return false;
+	}
+
+	for (size_t i = 0; i < _pollingAllowedIntervalCount; i++) {
+		snprintf(addition, sizeof(addition), "%s\"%s\"", first ? "" : ", ", _pollingAllowedIntervals[i]);
+		first = false;
+		resultAddedToPayload = addToPayload(addition);
+		if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static void
+publishPollingConfigChunkClear(size_t startIndex, size_t endIndex)
+{
+	char topic[128];
+	for (size_t i = startIndex; i < endIndex; ++i) {
+		snprintf(topic, sizeof(topic), "%s/config/entity_intervals/%lu",
+		         deviceName,
+		         static_cast<unsigned long>(i));
+		emptyPayload();
+		sendMqtt(topic, MQTT_RETAIN);
+		maybeYield();
+	}
+}
+
+static bool
+publishPollingConfigChunked(const mqttState *entities, size_t entityCount, const BucketId *buckets)
+{
+	char *chunkMap = g_portalBucketMapScratch;
+	char addition[256];
+	char topic[128];
+	size_t chunkCount = 0;
+	size_t activeCount = 0;
+	size_t startIndex = 0;
+
+	while (startIndex < entityCount) {
+		size_t nextIndex = entityCount;
+		size_t appliedCount = 0;
+		if (!buildActiveBucketMapChunkFromAssignments(entities,
+		                                              entityCount,
+		                                              buckets,
+		                                              startIndex,
+		                                              chunkMap,
+		                                              kPollingConfigChunkMapMaxLen,
+		                                              nextIndex,
+		                                              appliedCount)) {
+			return false;
+		}
+		if (appliedCount == 0) {
+			break;
+		}
+		chunkCount++;
+		activeCount += appliedCount;
+		startIndex = nextIndex;
+	}
+
+	startIndex = 0;
+	for (size_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
+		size_t nextIndex = entityCount;
+		size_t appliedCount = 0;
+		if (!buildActiveBucketMapChunkFromAssignments(entities,
+		                                              entityCount,
+		                                              buckets,
+		                                              startIndex,
+		                                              chunkMap,
+		                                              kPollingConfigChunkMapMaxLen,
+		                                              nextIndex,
+		                                              appliedCount) ||
+		    appliedCount == 0) {
+			return false;
+		}
+
+		emptyPayload();
+		if (addToPayload("{") == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+			return false;
+		}
+		snprintf(addition,
+		         sizeof(addition),
+		         "\"chunk_index\": %lu, \"chunk_count\": %lu, \"active_bucket_map\": \"",
+		         static_cast<unsigned long>(chunkIndex),
+		         static_cast<unsigned long>(chunkCount));
+		if (addToPayload(addition) == modbusRequestAndResponseStatusValues::payloadExceededCapacity ||
+		    addToPayload(chunkMap) == modbusRequestAndResponseStatusValues::payloadExceededCapacity ||
+		    addToPayload("\"}") == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+			return false;
+		}
+		snprintf(topic,
+		         sizeof(topic),
+		         "%s/config/entity_intervals/%lu",
+		         deviceName,
+		         static_cast<unsigned long>(chunkIndex));
+		sendMqtt(topic, MQTT_RETAIN);
+		startIndex = nextIndex;
+		maybeYield();
+	}
+
+	if (g_lastPublishedPollingConfigChunkCount > chunkCount) {
+		publishPollingConfigChunkClear(chunkCount, g_lastPublishedPollingConfigChunkCount);
+	}
+
+	emptyPayload();
+	if (!beginPollingConfigPayload()) {
+		return false;
+	}
+	snprintf(addition,
+	         sizeof(addition),
+	         "], \"entity_intervals_encoding\": \"bucket_map_chunks\", \"entity_intervals_chunks\": %lu, \"entity_intervals_count\": %lu}",
+	         static_cast<unsigned long>(chunkCount),
+	         static_cast<unsigned long>(activeCount));
+	if (addToPayload(addition) == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		return false;
+	}
+	snprintf(topic, sizeof(topic), "%s/config", deviceName);
+	sendMqtt(topic, MQTT_RETAIN);
+	g_lastPublishedPollingConfigChunkCount = chunkCount;
+	return true;
+}
+
 void
 publishPollingConfig(void)
 {
@@ -3284,8 +3418,8 @@ publishPollingConfig(void)
 		return;
 	}
 	char addition[256];
+	char configTopic[64];
 	bool first = true;
-	modbusRequestAndResponseStatusValues resultAddedToPayload;
 	const mqttState *entities = mqttEntitiesDesc();
 	const size_t entityCount = mqttEntitiesCount();
 	BucketId *buckets = g_portalBucketsScratch;
@@ -3294,64 +3428,41 @@ publishPollingConfig(void)
 	}
 
 	emptyPayload();
+	if (beginPollingConfigPayload() &&
+	    addToPayload("], \"entity_intervals\": {") != modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		for (size_t i = 0; i < entityCount; i++) {
+			if (buckets[i] == BucketId::Disabled) {
+				continue;
+			}
+			char entityName[64];
+			mqttEntityNameCopy(&entities[i], entityName, sizeof(entityName));
+			snprintf(addition, sizeof(addition), "%s\"%s\": \"%s\"",
+			         first ? "" : ", ",
+			         entityName,
+			         bucketIdToString(buckets[i]));
+			first = false;
+			if (addToPayload(addition) == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+				emptyPayload();
+				break;
+			}
+			if ((i % 8) == 0) {
+				diagYield();
+			}
+		}
 
-	resultAddedToPayload = addToPayload("{");
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return;
-	}
-
-	snprintf(addition, sizeof(addition), "\"last_change\": \"%s\", \"poll_interval_s\": %lu, \"allowed_intervals\": [",
-	         _pollingConfigLastChange, static_cast<unsigned long>(pollIntervalSeconds));
-	resultAddedToPayload = addToPayload(addition);
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return;
-	}
-
-	for (size_t i = 0; i < _pollingAllowedIntervalCount; i++) {
-		snprintf(addition, sizeof(addition), "%s\"%s\"", first ? "" : ", ", _pollingAllowedIntervals[i]);
-		first = false;
-		resultAddedToPayload = addToPayload(addition);
-		if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		if (_mqttPayload[0] != '\0' &&
+		    addToPayload("}}") != modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+			snprintf(configTopic, sizeof(configTopic), "%s/config", deviceName);
+			sendMqtt(configTopic, MQTT_RETAIN);
+			if (g_lastPublishedPollingConfigChunkCount > 0) {
+				publishPollingConfigChunkClear(0, g_lastPublishedPollingConfigChunkCount);
+				g_lastPublishedPollingConfigChunkCount = 0;
+			}
 			return;
 		}
 	}
 
-	resultAddedToPayload = addToPayload("], \"entity_intervals\": {");
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return;
-	}
-
-	first = true;
-	for (size_t i = 0; i < entityCount; i++) {
-		if (buckets[i] == BucketId::Disabled) {
-			continue;
-		}
-		char entityName[64];
-		mqttEntityNameCopy(&entities[i], entityName, sizeof(entityName));
-		snprintf(addition, sizeof(addition), "%s\"%s\": \"%s\"",
-			 first ? "" : ", ",
-			 entityName,
-			 bucketIdToString(buckets[i]));
-		first = false;
-		resultAddedToPayload = addToPayload(addition);
-		if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-			return;
-		}
-		if ((i % 8) == 0) {
-			diagYield();
-		}
-	}
-
-	resultAddedToPayload = addToPayload("}}");
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return;
-	}
-
-	{
-		char configTopic[64];
-		snprintf(configTopic, sizeof(configTopic), "%s/config", deviceName);
-		sendMqtt(configTopic, MQTT_RETAIN);
-	}
+	publishPollingConfigChunked(entities, entityCount, buckets);
 }
 
 void
