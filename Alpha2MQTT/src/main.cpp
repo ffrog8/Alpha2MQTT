@@ -702,6 +702,13 @@ isMqttPumpBlocked(void)
 	if (inMqttCallback) {
 		return true;
 	}
+	// PubSubClient dispatches at most one inbound packet per loop() call.
+	// When a deferred config or entity command is already queued for loop(),
+	// stop pumping MQTT so later packets stay queued on the socket instead of
+	// overwriting the single pending slot from callback context.
+	if (pendingPollingConfigSet || pendingEntityCommandSet) {
+		return true;
+	}
 	if (_modBus != nullptr && _modBus->inTransaction()) {
 		return true;
 	}
