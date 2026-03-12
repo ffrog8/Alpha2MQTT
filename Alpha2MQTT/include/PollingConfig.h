@@ -43,6 +43,11 @@ bool visitPollingConfigEntries(const char *payload,
                                PollingConfigEntryVisitor visitor,
                                void *context);
 
+// Validate the polling config payload shape without applying side effects.
+bool validatePollingConfigEntries(const char *payload,
+                                  char *valueScratch,
+                                  size_t valueScratchSize);
+
 // Apply a Bucket_Map string into the provided bucket assignments. Supports both
 // "Entity_Name=bucket;" and compact "#<descriptor-index>=bucket;" tokens.
 bool applyBucketMapString(const char *map,

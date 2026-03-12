@@ -518,8 +518,6 @@ static void persistUserWifiCredentials(const char *ssid, const char *pass);
 static void persistUserExtAntenna(bool enabled);
 static void persistUserPollingConfig(uint32_t intervalSeconds, const char *bucketMap);
 static void persistUserPollingLastChange(const char *lastChange);
-static void persistUserPollInterval(uint32_t intervalSeconds);
-static void persistUserBucketMap(const char *bucketMap);
 static void persistUserDeviceSerial(const char *serial);
 static void persistDefaultsIfMissing(void);
 void setupHttpControlPlane(void);
@@ -1254,8 +1252,14 @@ persistUserExtAntenna(bool enabled)
 static void
 persistUserPollingConfig(uint32_t intervalSeconds, const char *bucketMap)
 {
-	persistUserPollInterval(intervalSeconds);
-	persistUserBucketMap(bucketMap != nullptr ? bucketMap : "");
+	Preferences preferences;
+	preferences.begin(DEVICE_NAME, false);
+	preferences.putUInt(kPreferencePollInterval, intervalSeconds);
+	preferences.putString(kPreferenceBucketMap, bucketMap != nullptr ? bucketMap : "");
+	// Writing the stable Bucket_Map makes it the authoritative config source.
+	// Mark migration complete so stale legacy Freq_* keys no longer reapply on boot.
+	preferences.putBool(kPreferenceBucketMapMigrated, true);
+	preferences.end();
 }
 
 static void
@@ -1272,27 +1276,6 @@ persistUserPollingLastChange(const char *lastChange)
 	if (strcmp(stored, lastChange) != 0) {
 		preferences.putString(kPreferencePollingLastChange, lastChange);
 	}
-	preferences.end();
-}
-
-static void
-persistUserPollInterval(uint32_t intervalSeconds)
-{
-	Preferences preferences;
-	preferences.begin(DEVICE_NAME, false);
-	preferences.putUInt(kPreferencePollInterval, intervalSeconds);
-	preferences.end();
-}
-
-static void
-persistUserBucketMap(const char *bucketMap)
-{
-	Preferences preferences;
-	preferences.begin(DEVICE_NAME, false);
-	preferences.putString(kPreferenceBucketMap, bucketMap);
-	// Writing the stable Bucket_Map makes it the authoritative config source.
-	// Mark migration complete so stale legacy Freq_* keys no longer reapply on boot.
-	preferences.putBool(kPreferenceBucketMapMigrated, true);
 	preferences.end();
 }
 
@@ -3273,7 +3256,7 @@ savePollingConfig(const mqttState *entity)
 		return;
 	}
 
-	persistUserBucketMap(map);
+	persistUserPollingConfig(pollIntervalSeconds, map);
 }
 
 static bool
@@ -3662,11 +3645,13 @@ handlePollingConfigSet(const char *payload)
 	struct PollingConfigSetContext {
 		bool anyChange = false;
 		bool bucketAssignmentsChanged = false;
+		bool pollIntervalChanged = false;
 		const mqttState *changedEntity = nullptr;
 		const mqttState *entities = nullptr;
 		size_t entityCount = 0;
 		BucketId *buckets = nullptr;
 		bool bucketsLoaded = false;
+		uint32_t stagedPollInterval = kPollIntervalDefaultSeconds;
 	};
 
 	const mqttState *entities = mqttEntitiesDesc();
@@ -3678,8 +3663,15 @@ handlePollingConfigSet(const char *payload)
 	ctx.entityCount = entityCount;
 	ctx.buckets = buckets;
 	ctx.bucketsLoaded = bucketsLoaded;
+	ctx.stagedPollInterval = pollIntervalSeconds;
 
-	const bool payloadValid = visitPollingConfigEntries(
+	if (!validatePollingConfigEntries(payload,
+	                                  g_portalBucketMapScratch,
+	                                  sizeof(g_portalBucketMapScratch))) {
+		return false;
+	}
+
+	visitPollingConfigEntries(
 		payload,
 		g_portalBucketMapScratch,
 		sizeof(g_portalBucketMapScratch),
@@ -3687,21 +3679,19 @@ handlePollingConfigSet(const char *payload)
 			PollingConfigSetContext &ctx = *static_cast<PollingConfigSetContext *>(opaque);
 			bool handled = false;
 
-			if (!strcmp(key, kPreferencePollInterval)) {
-				char *endPtr = nullptr;
-				errno = 0;
-				unsigned long parsed = strtoul(value, &endPtr, 10);
-				if (errno == 0 && endPtr != value && *endPtr == '\0') {
-					uint32_t clamped = clampPollInterval(static_cast<uint32_t>(parsed));
-					if (clamped != pollIntervalSeconds) {
-						pollIntervalSeconds = clamped;
-						persistUserPollInterval(pollIntervalSeconds);
-						ctx.anyChange = true;
-						resendAllData = true;
+				if (!strcmp(key, kPreferencePollInterval)) {
+					char *endPtr = nullptr;
+					errno = 0;
+					unsigned long parsed = strtoul(value, &endPtr, 10);
+					if (errno == 0 && endPtr != value && *endPtr == '\0') {
+						uint32_t clamped = clampPollInterval(static_cast<uint32_t>(parsed));
+						if (clamped != pollIntervalSeconds) {
+							ctx.stagedPollInterval = clamped;
+							ctx.pollIntervalChanged = true;
+						}
 					}
+					handled = true;
 				}
-				handled = true;
-			}
 
 			if (!strcmp(key, "bucket_map")) {
 				if (ctx.bucketsLoaded) {
@@ -3746,6 +3736,12 @@ handlePollingConfigSet(const char *payload)
 		},
 		&ctx);
 
+	if (ctx.pollIntervalChanged) {
+		pollIntervalSeconds = ctx.stagedPollInterval;
+		ctx.anyChange = true;
+		resendAllData = true;
+	}
+
 	if (ctx.bucketAssignmentsChanged) {
 		if (mqttEntityApplyBuckets(buckets, entityCount)) {
 			ctx.anyChange = true;
@@ -3757,15 +3753,15 @@ handlePollingConfigSet(const char *payload)
 		}
 	}
 
-	if (ctx.anyChange) {
-		recomputeBucketCounts();
-		savePollingConfig(ctx.changedEntity != nullptr ? ctx.changedEntity : entities);
-		updatePollingLastChange();
-		publishPollingConfig();
-		resendAllData = true;
-	}
+		if (ctx.anyChange) {
+			recomputeBucketCounts();
+			savePollingConfig(ctx.changedEntity != nullptr ? ctx.changedEntity : entities);
+			updatePollingLastChange();
+			publishPollingConfig();
+			resendAllData = true;
+		}
 
-	return payloadValid;
+	return true;
 }
 
 /*

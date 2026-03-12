@@ -98,6 +98,13 @@ TEST_CASE("config entry visitor accepts large bucket_map values")
 	CHECK(capture.pollIntervalValue == "45");
 }
 
+TEST_CASE("config entry validation rejects truncated payloads before apply")
+{
+	char scratch[256];
+	CHECK(validatePollingConfigEntries("{\"poll_interval_s\":\"45\",\"bucket_map\":\"Op_Mode=one_min;\"}", scratch, sizeof(scratch)));
+	CHECK_FALSE(validatePollingConfigEntries("{\"poll_interval_s\":\"45\",\"bucket_map\":\"Op_Mode=one_min;\"", scratch, sizeof(scratch)));
+}
+
 TEST_CASE("poll interval clamp enforces bounds")
 {
 	CHECK(clampPollInterval(0) == kPollIntervalMinSeconds);

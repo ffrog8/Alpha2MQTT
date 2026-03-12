@@ -179,6 +179,22 @@ visitPollingConfigEntries(const char *payload,
 }
 
 static bool
+validatePollingConfigEntry(const char * /* key */, const char * /* value */, void * /* context */)
+{
+	return true;
+}
+
+bool
+validatePollingConfigEntries(const char *payload, char *valueScratch, size_t valueScratchSize)
+{
+	return visitPollingConfigEntries(payload,
+	                                 valueScratch,
+	                                 valueScratchSize,
+	                                 validatePollingConfigEntry,
+	                                 nullptr);
+}
+
+static bool
 resolveEntityToken(const char *token,
                    const mqttState *entities,
                    size_t entityCount,
