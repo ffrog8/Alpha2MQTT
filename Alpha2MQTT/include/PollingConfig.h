@@ -28,6 +28,11 @@ const mqttState *lookupEntityByName(const char *name,
                                     size_t entityCount);
 
 using PollingConfigEntryVisitor = bool (*)(const char *key, const char *value, void *context);
+using LegacyPollingValueReader = bool (*)(size_t index,
+                                          const mqttState *entity,
+                                          int defaultValue,
+                                          int &storedValue,
+                                          void *context);
 
 // Visit the flat {"key":"value"} config/set payload used by polling config.
 // The parser intentionally stays limited to quoted string keys/values with no
@@ -55,6 +60,16 @@ bool buildBucketMapFromLegacy(const mqttState *entities,
                               char *out,
                               size_t outSize,
                               size_t &appliedCount);
+
+// Build a stable Bucket_Map string by reading legacy per-entity values
+// incrementally. This keeps upgrade-time migration off the ESP8266 task stack.
+bool buildBucketMapFromLegacyReader(const mqttState *entities,
+                                    size_t entityCount,
+                                    LegacyPollingValueReader reader,
+                                    void *context,
+                                    char *out,
+                                    size_t outSize,
+                                    size_t &appliedCount);
 
 // Build a stable Bucket_Map string from explicit bucket assignments. Names are
 // used instead of descriptor indices so persisted config survives catalog growth.

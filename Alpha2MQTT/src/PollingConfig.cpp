@@ -282,6 +282,28 @@ applyBucketMapString(const char *map,
 }
 
 bool
+appendBucketMapOverride(const mqttState &entity,
+                        BucketId bucket,
+                        char *out,
+                        size_t outSize,
+                        size_t &used)
+{
+	const char *bucketStr = bucketIdToString(bucket);
+	char entityName[64];
+	mqttEntityNameCopy(&entity, entityName, sizeof(entityName));
+	const int needed = snprintf(out + used,
+	                            outSize - used,
+	                            "%s=%s;",
+	                            entityName,
+	                            bucketStr);
+	if (needed < 0 || static_cast<size_t>(needed) >= (outSize - used)) {
+		return false;
+	}
+	used += static_cast<size_t>(needed);
+	return true;
+}
+
+bool
 buildBucketMapFromLegacy(const mqttState *entities,
                          size_t entityCount,
                          const int *storedValues,
@@ -306,18 +328,49 @@ buildBucketMapFromLegacy(const mqttState *entities,
 		if (bucket == BucketId::Unknown || bucket == defaultBucket) {
 			continue;
 		}
-		const char *bucketStr = bucketIdToString(bucket);
-		char entityName[64];
-		mqttEntityNameCopy(&entities[i], entityName, sizeof(entityName));
-		const int needed = snprintf(out + used,
-		                            outSize - used,
-		                            "%s=%s;",
-		                            entityName,
-		                            bucketStr);
-		if (needed < 0 || static_cast<size_t>(needed) >= (outSize - used)) {
+		if (!appendBucketMapOverride(entities[i], bucket, out, outSize, used)) {
 			return false;
 		}
-		used += static_cast<size_t>(needed);
+		appliedCount++;
+	}
+
+	return appliedCount > 0;
+}
+
+bool
+buildBucketMapFromLegacyReader(const mqttState *entities,
+                               size_t entityCount,
+                               LegacyPollingValueReader reader,
+                               void *context,
+                               char *out,
+                               size_t outSize,
+                               size_t &appliedCount)
+{
+	if (entities == nullptr || reader == nullptr || out == nullptr || outSize == 0 || entityCount == 0) {
+		return false;
+	}
+
+	appliedCount = 0;
+	out[0] = '\0';
+	size_t used = 0;
+
+	for (size_t i = 0; i < entityCount; ++i) {
+		const int defaultValue = static_cast<int>(entities[i].updateFreq);
+		int storedValue = defaultValue;
+		if (!reader(i, &entities[i], defaultValue, storedValue, context)) {
+			return false;
+		}
+		if (!isValidMqttUpdateFreq(storedValue)) {
+			continue;
+		}
+		const BucketId bucket = bucketIdFromLegacyFreq(storedValue);
+		const BucketId defaultBucket = bucketIdFromFreq(entities[i].updateFreq);
+		if (bucket == BucketId::Unknown || bucket == defaultBucket) {
+			continue;
+		}
+		if (!appendBucketMapOverride(entities[i], bucket, out, outSize, used)) {
+			return false;
+		}
 		appliedCount++;
 	}
 
@@ -349,18 +402,9 @@ buildBucketMapFromAssignments(const mqttState *entities,
 		if (bucket == defaultBucket) {
 			continue;
 		}
-		const char *bucketStr = bucketIdToString(bucket);
-		char entityName[64];
-		mqttEntityNameCopy(&entities[i], entityName, sizeof(entityName));
-		const int needed = snprintf(out + used,
-		                            outSize - used,
-		                            "%s=%s;",
-		                            entityName,
-		                            bucketStr);
-		if (needed < 0 || static_cast<size_t>(needed) >= (outSize - used)) {
+		if (!appendBucketMapOverride(entities[i], bucket, out, outSize, used)) {
 			return false;
 		}
-		used += static_cast<size_t>(needed);
 		appliedCount++;
 	}
 

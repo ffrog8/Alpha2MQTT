@@ -14,6 +14,7 @@ add_executable(host_tests
     tests/test_config_codec.cpp
     tests/test_polling_config.cpp
     tests/test_boot_modes.cpp
+    tests/test_boot_event.cpp
     tests/test_mqtt_entities.cpp
     tests/test_portal_config.cpp
     tests/test_status_reporting.cpp
@@ -25,6 +26,7 @@ add_executable(host_tests
     tests/src/TimeProviderHost.cpp
     Alpha2MQTT/src/Scheduler.cpp
     Alpha2MQTT/src/BootModes.cpp
+    Alpha2MQTT/src/BootEvent.cpp
     Alpha2MQTT/src/ConfigCodec.cpp
     Alpha2MQTT/src/MqttEntities.cpp
     Alpha2MQTT/src/BucketScheduler.cpp

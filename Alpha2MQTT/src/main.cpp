@@ -21,6 +21,7 @@ First, go and customise options at the top of Definitions.h!
 #include "../RS485Handler.h"
 #include "../Definitions.h"
 #include "../include/BootModes.h"
+#include "../include/BootEvent.h"
 #include "../include/WifiGuard.h"
 #include "../include/BucketScheduler.h"
 #include "../include/MqttEntities.h"
@@ -480,6 +481,11 @@ bool mqttUpdateFreqFromString(const char*, mqttUpdateFreq*);
 void updatePollingLastChange(void);
 void getPollingTimestamp(char*, size_t);
 void buildPollingKey(const mqttState*, char*, size_t);
+static bool readLegacyPollingPref(size_t index,
+                                  const mqttState *entity,
+                                  int defaultValue,
+                                  int &storedValue,
+                                  void *context);
 void checkAndSetDispatchMode(void);
 void printWifiBars(int rssi);
 void getOpModeDesc(char *dest, size_t size, enum opMode mode);
@@ -583,7 +589,7 @@ setMqttIdentifiersFromSerial(const char *serial)
 void
 publishBootEventOncePerBoot(void)
 {
-	if (bootEventPublished || !_mqtt.connected()) {
+	if (!shouldPublishBootEvent(bootEventPublished, _mqtt.connected())) {
 		return;
 	}
 
@@ -597,8 +603,8 @@ publishBootEventOncePerBoot(void)
 		 bootIntentToString(bootIntentForPublish), resetReason.c_str(), millis(),
 		 static_cast<unsigned long long>(BUILD_TS_MS));
 
-	_mqtt.publish(bootTopic, payload, true);
-	bootEventPublished = true;
+	const bool published = _mqtt.publish(bootTopic, payload, true);
+	bootEventPublished = bootEventPublishedAfterAttempt(bootEventPublished, published);
 }
 
 #if defined(DEBUG_OVER_SERIAL)
@@ -3031,6 +3037,24 @@ buildPollingKey(const mqttState *entity, char *target, size_t size)
 	snprintf(target, size, "Freq_%u", static_cast<unsigned int>(entity->entityId));
 }
 
+static bool
+readLegacyPollingPref(size_t /* index */,
+                      const mqttState *entity,
+                      int defaultValue,
+                      int &storedValue,
+                      void *context)
+{
+	if (entity == nullptr || context == nullptr) {
+		return false;
+	}
+
+	auto *preferences = static_cast<Preferences *>(context);
+	char key[16];
+	buildPollingKey(entity, key, sizeof(key));
+	storedValue = preferences->getInt(key, defaultValue);
+	return true;
+}
+
 static inline void
 maybeYield()
 {
@@ -3142,6 +3166,7 @@ loadPollingConfig(void)
 	const mqttState *entities = mqttEntitiesDesc();
 	const size_t entityCount = mqttEntitiesCount();
 	BucketId *buckets = g_portalBucketsScratch;
+	char *bucketMap = g_portalBucketMapScratch;
 	bool appliedBucketMap = false;
 
 	persistLoadOk = 0;
@@ -3169,9 +3194,8 @@ loadPollingConfig(void)
 		buckets[i] = bucketIdFromFreq(entities[i].updateFreq);
 	}
 
-	char bucketMap[kPrefBucketMapMaxLen];
 	bucketMap[0] = '\0';
-	preferences.getString(kPreferenceBucketMap, bucketMap, sizeof(bucketMap));
+	preferences.getString(kPreferenceBucketMap, bucketMap, kPrefBucketMapMaxLen);
 	const bool legacyMigrated = preferences.getBool(kPreferenceBucketMapMigrated, false);
 	if (bucketMap[0] != '\0') {
 		if (bucketMapUsesDescriptorIndices(bucketMap)) {
@@ -3193,22 +3217,16 @@ loadPollingConfig(void)
 			}
 		}
 	} else if (!legacyMigrated) {
-		// Legacy per-entity keys are read-only fallback when Bucket_Map is absent.
-		int legacyValues[kMqttEntityDescriptorCount];
-		char key[16];
-		for (size_t i = 0; i < entityCount; i++) {
-			buildPollingKey(&entities[i], key, sizeof(key));
-			legacyValues[i] = preferences.getInt(key, static_cast<int>(entities[i].updateFreq));
-		}
-		char mapBuf[2048];
+		// Reuse the shared portal scratch buffer so upgrade-time migration stays off the ESP8266 task stack.
 		size_t appliedCount = 0;
-		if (buildBucketMapFromLegacy(entities,
-		                             entityCount,
-		                             legacyValues,
-		                             mapBuf,
-		                             sizeof(mapBuf),
-		                             appliedCount)) {
-			appliedBucketMap = applyBucketMapString(mapBuf,
+		if (buildBucketMapFromLegacyReader(entities,
+		                                   entityCount,
+		                                   readLegacyPollingPref,
+		                                   &preferences,
+		                                   bucketMap,
+		                                   kPrefBucketMapMaxLen,
+		                                   appliedCount)) {
+			appliedBucketMap = applyBucketMapString(bucketMap,
 			                                        entities,
 			                                        entityCount,
 			                                        buckets,

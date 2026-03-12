@@ -33,6 +33,11 @@ struct VisitCapture {
 	size_t visited = 0;
 };
 
+struct LegacyReaderCapture {
+	int values[4]{};
+	bool fail = false;
+};
+
 static bool
 captureConfigEntry(const char *key, const char *value, void *context)
 {
@@ -42,6 +47,24 @@ captureConfigEntry(const char *key, const char *value, void *context)
 		capture.bucketMapValue = value;
 	} else if (std::string(key) == "poll_interval_s") {
 		capture.pollIntervalValue = value;
+	}
+	return true;
+}
+
+static bool
+captureLegacyValue(size_t index,
+                   const mqttState * /* entity */,
+                   int defaultValue,
+                   int &storedValue,
+                   void *context)
+{
+	auto &capture = *static_cast<LegacyReaderCapture *>(context);
+	if (capture.fail) {
+		return false;
+	}
+	storedValue = defaultValue;
+	if (index < (sizeof(capture.values) / sizeof(capture.values[0]))) {
+		storedValue = capture.values[index];
 	}
 	return true;
 }
@@ -216,6 +239,50 @@ TEST_CASE("legacy freqNever numeric value migrates to disabled instead of user")
 	CHECK(buildBucketMapFromLegacy(entities, 1, legacy, out, sizeof(out), applied));
 	CHECK(applied == 1);
 	CHECK(std::string(out) == "Op_Mode=disabled;");
+}
+
+TEST_CASE("legacy reader builds bucket map without staging the full value array")
+{
+	mqttState entities[2]{};
+	entities[0] = makeEntity(mqttEntityId::entityOpMode, "Op_Mode", mqttUpdateFreq::freqTenSec, homeAssistantClass::haClassSelect);
+	entities[1] = makeEntity(mqttEntityId::entitySocTarget, "SOC_Target", mqttUpdateFreq::freqDisabled, homeAssistantClass::haClassNumber);
+
+	LegacyReaderCapture capture{};
+	capture.values[0] = static_cast<int>(mqttUpdateFreq::freqOneHour);
+	capture.values[1] = static_cast<int>(mqttUpdateFreq::freqDisabled);
+
+	char out[128];
+	size_t applied = 0;
+
+	CHECK(buildBucketMapFromLegacyReader(entities,
+	                                     2,
+	                                     captureLegacyValue,
+	                                     &capture,
+	                                     out,
+	                                     sizeof(out),
+	                                     applied));
+	CHECK(applied == 1);
+	CHECK(std::string(out) == "Op_Mode=one_hour;");
+}
+
+TEST_CASE("legacy reader surfaces read failures")
+{
+	mqttState entities[1]{};
+	entities[0] = makeEntity(mqttEntityId::entityOpMode, "Op_Mode", mqttUpdateFreq::freqTenSec, homeAssistantClass::haClassSelect);
+
+	LegacyReaderCapture capture{};
+	capture.fail = true;
+
+	char out[32];
+	size_t applied = 0;
+
+	CHECK_FALSE(buildBucketMapFromLegacyReader(entities,
+	                                           1,
+	                                           captureLegacyValue,
+	                                           &capture,
+	                                           out,
+	                                           sizeof(out),
+	                                           applied));
 }
 
 TEST_CASE("assignment map persists stable entity names instead of descriptor indices")
