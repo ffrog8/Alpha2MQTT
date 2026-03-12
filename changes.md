@@ -1,5 +1,13 @@
 # Changes
 
+## 2026-03-13
+- Expand the optional telemetry catalog so a much broader set of readable values can be surfaced when enabled.
+- Keep most of the additional telemetry disabled by default so users can opt in selectively.
+- Separate controller-side diagnostics from inverter-facing telemetry for clearer MQTT and Home Assistant presentation.
+- Shift runtime polling toward an active-plan model that only works on enabled telemetry.
+- Add bounded runtime polling behavior with visible backlog and overrun diagnostics instead of unbounded catch-up.
+- Promote polling-pressure and RS485-health visibility as first-class diagnostics.
+
 ## 2026-01-08
 - Add host-based doctest unit tests with CMake and scripts (including a Docker wrapper).
 - Add helper modules for scheduling, boot modes, config serialization, and Modbus framing/CRC.

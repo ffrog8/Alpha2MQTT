@@ -55,7 +55,11 @@ Before this device can do anything, it must be given basic configuration.  It ne
 If you define WiFi/MQTT values via `Secrets.h` (or a `secrets.txt` workflow that generates it), those values are used as defaults for the captive portal fields and as initial settings when no stored configuration exists.
 
 ### Configuring polling intervals via MQTT
-Alpha2MQTT can store per-entity polling intervals that persist across restarts and show up in Home Assistant via MQTT discovery. The authoritative config is a retained payload published to `DEVICE_NAME/config`, with delta updates sent to `DEVICE_NAME/config/set`. When you set an entity to `freqDisabled`, the device stops polling and removes that entity's discovery configuration in HA until it is re-enabled. `freqNever` is reserved for legacy defaults and is not user-settable.
+Alpha2MQTT can store per-entity polling intervals that persist across restarts and show up in Home Assistant via MQTT discovery. The authoritative config is a retained payload published to `DEVICE_NAME/config`, with delta updates sent to `DEVICE_NAME/config/set`. The firmware now supports a broad catalog of optional telemetry, and many of those entities are disabled by default. This lets you choose the small set of values you actually care about instead of polling everything all the time.
+
+When you set an entity to `freqDisabled`, the device stops polling and removes that entity's discovery configuration in HA until it is re-enabled. `freqNever` is reserved for legacy defaults and is not user-settable.
+
+If you enable more telemetry than the selected polling cadence can comfortably sustain, the firmware stays bounded rather than trying to catch up forever. Some values may go stale for a while, and the controller publishes diagnostics so that this is visible instead of silent.
 
 - **Config topic (retained):** `DEVICE_NAME/config`
 - **Config update topic (non-retained):** `DEVICE_NAME/config/set`
@@ -76,13 +80,13 @@ The device publishes lightweight retained/status topics for observability:
 - `DEVICE_NAME/HA_UNIQUE_ID/boot` (retained): `{"boot_intent":"...","reset_reason":"...","ts_ms":...}`
 - `DEVICE_NAME/HA_UNIQUE_ID/status` (retained, ~10s): core fields `presence`, `a2mStatus`, `rs485Status`, `gridStatus`, `boot_intent`.
 - `DEVICE_NAME/HA_UNIQUE_ID/status/net` (retained, ~10s): uptime, heap, WiFi RSSI/SSID/IP, WiFi/MQTT state + reconnect counters.
-- `DEVICE_NAME/HA_UNIQUE_ID/status/poll` (retained, ~10s): poll ok/err counts, last poll duration, last ok/err timestamps, last error code.
+- `DEVICE_NAME/HA_UNIQUE_ID/status/poll` (retained, ~10s): poll ok/err counts, last poll duration, last ok/err timestamps, last error code, and polling-pressure diagnostics such as backlog and budget exhaustion.
 - `DEVICE_NAME/HA_UNIQUE_ID/event` (non-retained): rate-limited fault events like `RS485_TIMEOUT`, `MODBUS_FRAME`, or `POLL_OVERRUN`.
 
 ### What you will see
 - Once your Alpha2MQTT device is working, in Home Assistant go to Settings->Devices & Services->Integrations->MQTT->devices
-- In this list is your new Alpha2MQTT device which starts with "A2M" and ends with your AlphaESS serial number.  In this image it is the top entry. (The 2nd entry is my dummy testing device which you won't see.)
-- Now click on your device and you'll see every entity that is provided for your device.
+- In this list you will see your inverter-focused Alpha2MQTT device, and you may also see a small controller-side diagnostic device. The inverter-facing entities are the main telemetry and control surface. The controller-side entities are there to help you understand connectivity and polling health.
+- Many optional telemetry entities are disabled by default, so the exact list you see will reflect what you have chosen to enable.
 
 ### Controlling Your ESS
 There are 5 control entities for controlling your ESS.  There is "**Op Mode**", "**SOC Target**", "**Charge Power**", "**Discharge Power**", and "**Push Power**".  Control is simple.  You set an "**Op Mode**" and the other control entities that are appropriate for that mode.  Operating Modes are a bit different from AlphaESS internal modes.  They are similar, but add more fuctionality.  For example, most Alpha modes don't honor a target SOC, but most Operating Modes do.  Here are all the modes and which other controls each uses:
@@ -147,6 +151,8 @@ Device wiring:
 
 ### Other Changes and Enhancements
 - Quite a few new registers have been added.  (See [Specs](#alphaess-specs) above.)
+- The firmware now supports a much broader optional telemetry catalog while keeping most additional entities disabled by default until you opt in.
+- Polling is now intended to be user-shaped rather than treated as one fixed built-in schedule. If you ask for too much at a given cadence, the controller stays responsive and surfaces the pressure through diagnostics rather than silently hiding it.
 - This uses an MQTT Last Will and Testament (LWT) to set availability for all entities.  In addition some entities also use the RS485 status to set their availability.  And for others, even the grid status is used.
 - This uses the MQTT retain flag along with other MQTT options to ensure as-graceful-as-possible handling of situations where this device, HA, or the MQTT broker might reboot or go offline.  By default, HA is assumed to be the authority for knowing what state the ESS should be in.  If Alpha2MQTT reboots, HA will set the state upon reconnect.  However, this can be changed in `Definitions.h` so that the ESS is the authority and Alpha2MQTT will then tell HA what the state is.
 - The WiFi code has been tweaked to better handle Multi-AP environments and low signal situations.

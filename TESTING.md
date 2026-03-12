@@ -26,13 +26,15 @@ Outputs:
 
 ## E2E (RS485 stub)
 
-The E2E runner is pure Python3 and reads its defaults from:
+Use the wrapper script:
+
+`./scripts/e2e.sh`
+
+Preferred run control is:
+- `tools/e2e/e2e.local.json` (gitignored)
+
+Legacy env-file control is still supported:
 - `tools/e2e/e2e.local.env` (gitignored)
+- template: `tools/e2e/e2e.example.env`
 
-Template:
-- `tools/e2e/e2e.example.env`
-
-Run:
-
-`python3 tools/e2e/test_rs485_stub.py --ensure-stub`
-
+The JSON control file is the preferred place to select cases, tracing, and flash behavior without changing the command itself.
