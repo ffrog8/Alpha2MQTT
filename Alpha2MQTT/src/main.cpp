@@ -521,7 +521,7 @@ static void persistUserBootMode(BootMode mode);
 static void persistUserMqttConfig(const char *server, int port, const char *user, const char *pass);
 static void persistUserWifiCredentials(const char *ssid, const char *pass);
 static void persistUserExtAntenna(bool enabled);
-static void persistUserPollingConfig(uint32_t intervalSeconds, const char *bucketMap);
+static bool persistUserPollingConfig(uint32_t intervalSeconds, const char *bucketMap);
 static void persistUserPollingLastChange(const char *lastChange);
 static void persistUserDeviceSerial(const char *serial);
 static void persistDefaultsIfMissing(void);
@@ -1276,17 +1276,33 @@ persistUserExtAntenna(bool enabled)
 	preferences.end();
 }
 
-static void
+static bool
 persistUserPollingConfig(uint32_t intervalSeconds, const char *bucketMap)
 {
 	Preferences preferences;
-	preferences.begin(DEVICE_NAME, false);
-	preferences.putUInt(kPreferencePollInterval, intervalSeconds);
-	preferences.putString(kPreferenceBucketMap, bucketMap != nullptr ? bucketMap : "");
+	if (!preferences.begin(DEVICE_NAME, false)) {
+		return false;
+	}
+
+	const char *safeBucketMap = (bucketMap != nullptr) ? bucketMap : "";
+	const size_t bucketMapLen = strlen(safeBucketMap);
+	bool ok = preferences.putUInt(kPreferencePollInterval, intervalSeconds) == sizeof(uint32_t);
+	if (ok) {
+		// Polling config updates run from constrained HTTP/MQTT callback stacks on ESP8266.
+		// Verify writes by return value rather than allocating another full bucket-map buffer here.
+		if (bucketMapLen == 0) {
+			ok = !preferences.isKey(kPreferenceBucketMap) || preferences.remove(kPreferenceBucketMap) || !preferences.isKey(kPreferenceBucketMap);
+		} else {
+			ok = preferences.putString(kPreferenceBucketMap, safeBucketMap) == bucketMapLen;
+		}
+	}
 	// Writing the stable Bucket_Map makes it the authoritative config source.
 	// Mark migration complete so stale legacy Freq_* keys no longer reapply on boot.
-	preferences.putBool(kPreferenceBucketMapMigrated, true);
+	if (ok) {
+		ok = preferences.putBool(kPreferenceBucketMapMigrated, true) == sizeof(uint8_t);
+	}
 	preferences.end();
+	return ok;
 }
 
 static void
@@ -1892,12 +1908,16 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 		hadError = true;
 	}
 
-	if (mapBuilt) {
-		persistUserPollingConfig(storedIntervalSeconds, outMap);
-		pollIntervalSeconds = storedIntervalSeconds;
-		if (mqttEntitiesRtAvailable() && mqttEntityApplyBuckets(buckets, entityCount)) {
+	if (mapBuilt && persistUserPollingConfig(storedIntervalSeconds, outMap)) {
+		const bool bucketsApplied = !mqttEntitiesRtAvailable() || mqttEntityApplyBuckets(buckets, entityCount);
+		if (bucketsApplied) {
+			pollIntervalSeconds = storedIntervalSeconds;
 			recomputeBucketCounts();
+		} else {
+			hadError = true;
 		}
+	} else if (mapBuilt) {
+		hadError = true;
 	}
 	// Polling save is user-driven config edit only. Never auto-reboot from this path.
 	portalRebootScheduled = false;
@@ -3806,11 +3826,11 @@ handlePollingConfigSet(const char *payload)
 		persistLoadErr = 1;
 		return false;
 	}
-
-	if (ctx.pollIntervalChanged) {
-		pollIntervalSeconds = ctx.stagedPollInterval;
-		ctx.anyChange = true;
-		resendAllData = true;
+	if ((ctx.pollIntervalChanged || ctx.bucketAssignmentsChanged) &&
+	    !persistUserPollingConfig(ctx.stagedPollInterval, g_portalBucketMapScratch)) {
+		persistLoadOk = 0;
+		persistLoadErr = 1;
+		return false;
 	}
 
 	if (ctx.bucketAssignmentsChanged) {
@@ -3821,12 +3841,17 @@ handlePollingConfigSet(const char *payload)
 		} else {
 			persistLoadOk = 0;
 			persistLoadErr = 1;
+			return false;
 		}
+	}
+	if (ctx.pollIntervalChanged) {
+		pollIntervalSeconds = ctx.stagedPollInterval;
+		ctx.anyChange = true;
+		resendAllData = true;
 	}
 
 	if (ctx.anyChange) {
 		recomputeBucketCounts();
-		persistUserPollingConfig(pollIntervalSeconds, g_portalBucketMapScratch);
 		updatePollingLastChange();
 		publishPollingConfig();
 		resendAllData = true;
