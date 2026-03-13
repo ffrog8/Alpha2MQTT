@@ -2545,6 +2545,8 @@ def main() -> int:
             raise E2EError("portal polling page missing unsaved-changes warning text")
         if "sessionStorage" not in html or "bucket_map_full" not in html:
             raise E2EError("portal polling page missing draft-preservation script/hooks")
+        if "Advisory estimates only" not in html or "Current family estimate" not in html or "All active buckets" not in html:
+            raise E2EError("portal polling page missing advisory estimate sections")
 
         # Find which row index corresponds to a known stable mqttName.
         target = "State_of_Charge"

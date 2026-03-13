@@ -13,6 +13,23 @@ enum class PortalPostWifiAction {
 	RedirectToMqttParams
 };
 
+enum class PortalEstimateLevel : uint8_t {
+	Idle = 0,
+	Light,
+	Moderate,
+	Tight,
+	Over
+};
+
+struct PortalPollingEstimate {
+	BucketId bucketId = BucketId::Disabled;
+	size_t entityCount = 0;
+	size_t transactionCount = 0;
+	uint32_t estimatedUsedMs = 0;
+	uint32_t budgetMs = 0;
+	PortalEstimateLevel level = PortalEstimateLevel::Idle;
+};
+
 bool mqttServerIsBlank(const char *server);
 PortalPostWifiAction portalPostWifiActionAfterWifiSave(const char *storedMqttServer);
 const char *portalMenuPollingHtml(void);
@@ -42,6 +59,21 @@ bool portalPollingFamilyFromKey(const char *key, MqttEntityFamily *outFamily);
 MqttEntityFamily portalNormalizePollingFamily(const mqttState *entities,
                                              size_t entityCount,
                                              const char *requestedKey);
+PortalPollingEstimate portalBuildPollingEstimate(const mqttState *entities,
+                                                 size_t entityCount,
+                                                 const BucketId *buckets,
+                                                 BucketId bucket,
+                                                 uint32_t userIntervalMs,
+                                                 uint32_t maxBudgetMs);
+PortalPollingEstimate portalBuildFamilyPollingEstimate(const mqttState *entities,
+                                                       size_t entityCount,
+                                                       const BucketId *buckets,
+                                                       MqttEntityFamily family,
+                                                       BucketId bucket,
+                                                       uint32_t userIntervalMs,
+                                                       uint32_t maxBudgetMs);
+const char *portalEstimateLevelKey(PortalEstimateLevel level);
+const char *portalEstimateLevelLabel(PortalEstimateLevel level);
 PortalFamilyPage portalBuildFamilyPage(const mqttState *entities,
                                        size_t entityCount,
                                        MqttEntityFamily family,

@@ -1,6 +1,8 @@
 // Purpose: Keep portal decision logic testable on host (doctest).
 #include "../include/PortalConfig.h"
 
+#include "../include/BucketScheduler.h"
+
 #include <cstring>
 
 namespace {
@@ -58,6 +60,8 @@ constexpr MqttEntityFamily kPortalPollingFamilies[] = {
 	MqttEntityFamily::Controller,
 };
 
+constexpr uint32_t kPortalEstimateTxnCostMs = 250;
+
 static size_t
 countFamilyEntities(const mqttState *entities, size_t entityCount, MqttEntityFamily family)
 {
@@ -72,6 +76,85 @@ countFamilyEntities(const mqttState *entities, size_t entityCount, MqttEntityFam
 		}
 	}
 	return count;
+}
+
+static size_t
+countMatchingTransactions(const mqttState *entities,
+                          size_t entityCount,
+                          const BucketId *buckets,
+                          BucketId bucket,
+                          MqttEntityFamily *familyFilter)
+{
+	if (entities == nullptr || buckets == nullptr || entityCount == 0) {
+		return 0;
+	}
+
+	bool hasSnapshotFanout = false;
+	size_t transactionCount = 0;
+
+	for (size_t i = 0; i < entityCount; ++i) {
+		if (buckets[i] != bucket) {
+			continue;
+		}
+		if (familyFilter != nullptr && entities[i].family != *familyFilter) {
+			continue;
+		}
+
+		if (entities[i].needsEssSnapshot) {
+			if (!hasSnapshotFanout) {
+				hasSnapshotFanout = true;
+				transactionCount++;
+			}
+			continue;
+		}
+
+		if (entities[i].readKind == MqttEntityReadKind::Register) {
+			bool seenKey = false;
+			for (size_t prev = 0; prev < i; ++prev) {
+				if (buckets[prev] != bucket) {
+					continue;
+				}
+				if (familyFilter != nullptr && entities[prev].family != *familyFilter) {
+					continue;
+				}
+				if (entities[prev].needsEssSnapshot || entities[prev].readKind != MqttEntityReadKind::Register) {
+					continue;
+				}
+				if (entities[prev].readKey == entities[i].readKey) {
+					seenKey = true;
+					break;
+				}
+			}
+			if (!seenKey) {
+				transactionCount++;
+			}
+			continue;
+		}
+
+		transactionCount++;
+	}
+
+	return transactionCount;
+}
+
+static PortalEstimateLevel
+estimateLevelFor(const PortalPollingEstimate &estimate)
+{
+	if (estimate.entityCount == 0 || estimate.transactionCount == 0 || estimate.budgetMs == 0) {
+		return PortalEstimateLevel::Idle;
+	}
+	if (estimate.estimatedUsedMs >= estimate.budgetMs) {
+		return PortalEstimateLevel::Over;
+	}
+
+	const uint32_t usedPct = static_cast<uint32_t>((estimate.estimatedUsedMs * 100UL) / estimate.budgetMs);
+	if (usedPct >= 70U) {
+		return PortalEstimateLevel::Tight;
+	}
+	if (usedPct >= 35U) {
+		return PortalEstimateLevel::Moderate;
+	}
+	return PortalEstimateLevel::Light;
 }
 }
 
@@ -208,6 +291,95 @@ portalNormalizePollingFamily(const mqttState *entities,
 	}
 
 	return portalPollingFamilyAt(0);
+}
+
+PortalPollingEstimate
+portalBuildPollingEstimate(const mqttState *entities,
+                           size_t entityCount,
+                           const BucketId *buckets,
+                           BucketId bucket,
+                           uint32_t userIntervalMs,
+                           uint32_t maxBudgetMs)
+{
+	PortalPollingEstimate estimate{};
+	estimate.bucketId = bucket;
+	if (entities == nullptr || buckets == nullptr || entityCount == 0) {
+		return estimate;
+	}
+
+	for (size_t i = 0; i < entityCount; ++i) {
+		if (buckets[i] == bucket) {
+			estimate.entityCount++;
+		}
+	}
+	estimate.transactionCount = countMatchingTransactions(entities, entityCount, buckets, bucket, nullptr);
+	estimate.budgetMs = bucketBudgetMs(bucket, userIntervalMs, maxBudgetMs);
+	estimate.estimatedUsedMs = static_cast<uint32_t>(estimate.transactionCount * kPortalEstimateTxnCostMs);
+	estimate.level = estimateLevelFor(estimate);
+	return estimate;
+}
+
+PortalPollingEstimate
+portalBuildFamilyPollingEstimate(const mqttState *entities,
+                                 size_t entityCount,
+                                 const BucketId *buckets,
+                                 MqttEntityFamily family,
+                                 BucketId bucket,
+                                 uint32_t userIntervalMs,
+                                 uint32_t maxBudgetMs)
+{
+	PortalPollingEstimate estimate{};
+	estimate.bucketId = bucket;
+	if (entities == nullptr || buckets == nullptr || entityCount == 0) {
+		return estimate;
+	}
+
+	for (size_t i = 0; i < entityCount; ++i) {
+		if (buckets[i] == bucket && entities[i].family == family) {
+			estimate.entityCount++;
+		}
+	}
+	estimate.transactionCount = countMatchingTransactions(entities, entityCount, buckets, bucket, &family);
+	estimate.budgetMs = bucketBudgetMs(bucket, userIntervalMs, maxBudgetMs);
+	estimate.estimatedUsedMs = static_cast<uint32_t>(estimate.transactionCount * kPortalEstimateTxnCostMs);
+	estimate.level = estimateLevelFor(estimate);
+	return estimate;
+}
+
+const char *
+portalEstimateLevelKey(PortalEstimateLevel level)
+{
+	switch (level) {
+	case PortalEstimateLevel::Light:
+		return "light";
+	case PortalEstimateLevel::Moderate:
+		return "moderate";
+	case PortalEstimateLevel::Tight:
+		return "tight";
+	case PortalEstimateLevel::Over:
+		return "over";
+	case PortalEstimateLevel::Idle:
+	default:
+		return "idle";
+	}
+}
+
+const char *
+portalEstimateLevelLabel(PortalEstimateLevel level)
+{
+	switch (level) {
+	case PortalEstimateLevel::Light:
+		return "Light";
+	case PortalEstimateLevel::Moderate:
+		return "Moderate";
+	case PortalEstimateLevel::Tight:
+		return "Tight";
+	case PortalEstimateLevel::Over:
+		return "Over";
+	case PortalEstimateLevel::Idle:
+	default:
+		return "Idle";
+	}
 }
 
 PortalFamilyPage

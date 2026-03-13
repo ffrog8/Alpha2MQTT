@@ -1687,6 +1687,14 @@ handlePortalRebootNormalRequest(WiFiManager& wifiManager)
 }
 
 static constexpr uint8_t kPollingPortalPageSize = 8;
+static constexpr BucketId kPortalEstimateBuckets[] = {
+	BucketId::TenSec,
+	BucketId::OneMin,
+	BucketId::FiveMin,
+	BucketId::OneHour,
+	BucketId::OneDay,
+	BucketId::User,
+};
 
 static void
 portalLogHeap(const char *label)
@@ -1917,6 +1925,7 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 	static const char kErrMsg[] PROGMEM = "<div class=\"msg D\"><strong>Some values were invalid and were ignored.</strong></div>";
 	static const char kFormOpen[] PROGMEM = "<form id=\"polling-form\" method=\"POST\" action=\"/config/polling/save\" oninput=\"pDirty()\" onchange=\"pDirty()\" onsubmit=\"return pPrepareSave();\">";
 	static const char kTableOpen[] PROGMEM = "<table><tr><th>Entity</th><th>Bucket</th></tr>";
+	static const char kPlainTableClose[] PROGMEM = "</table>";
 	static const char kTableClose[] PROGMEM = "</table><br><button type=\"submit\">Save</button></form>";
 	static const char kNavOpen[] PROGMEM = "<div class=\"row\">";
 	static const char kNavClose[] PROGMEM = "</div></div></body></html>";
@@ -1929,6 +1938,12 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		"<button type=\"submit\"%s>%s</button>"
 		"</form>";
 	static const char kPageHintFmt[] PROGMEM = "<p class=\"hint\">Family %s · Page %u of %u · %u entities</p>";
+	static const char kEstimateIntro[] PROGMEM =
+		"<p class=\"hint\">Advisory estimates only. They are based on grouped polling transactions, not strict wire-time guarantees.</p>";
+	static const char kEstimateTableOpenFmt[] PROGMEM =
+		"<h4>%s</h4><table><tr><th>Bucket</th><th>Entities</th><th>Tx</th><th>~Used ms</th><th>Budget ms</th><th>~Headroom ms</th><th>Risk</th></tr>";
+	static const char kEstimateRowFmt[] PROGMEM =
+		"<tr><td>%s</td><td>%u</td><td>%u</td><td>%lu</td><td>%lu</td><td>%lu</td><td>%s</td></tr>";
 	static const char kFormMetaFmt[] PROGMEM =
 		"<input type=\"hidden\" name=\"family\" value=\"%s\">"
 		"<input type=\"hidden\" name=\"page\" value=\"%u\">"
@@ -1997,6 +2012,57 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 	           static_cast<unsigned>(familyPage.maxPage + 1),
 	           static_cast<unsigned>(familyPage.totalEntityCount));
 	portalSendContentAndFeed(wifiManager, buf);
+	portalSendContentPAndFeed(wifiManager, kEstimateIntro);
+
+	snprintf_P(buf, sizeof(buf), kEstimateTableOpenFmt, "Current family estimate");
+	portalSendContentAndFeed(wifiManager, buf);
+	for (BucketId estimateBucket : kPortalEstimateBuckets) {
+		const PortalPollingEstimate estimate = portalBuildFamilyPollingEstimate(
+			entities, entityCount, buckets, family, estimateBucket, pollIntervalSeconds * 1000UL, kPollOverrunMs);
+		if (estimate.entityCount == 0) {
+			continue;
+		}
+		const uint32_t headroomMs = (estimate.budgetMs > estimate.estimatedUsedMs)
+			? (estimate.budgetMs - estimate.estimatedUsedMs)
+			: 0;
+		snprintf_P(buf,
+		           sizeof(buf),
+		           kEstimateRowFmt,
+		           bucketIdToString(estimate.bucketId),
+		           static_cast<unsigned>(estimate.entityCount),
+		           static_cast<unsigned>(estimate.transactionCount),
+		           static_cast<unsigned long>(estimate.estimatedUsedMs),
+		           static_cast<unsigned long>(estimate.budgetMs),
+		           static_cast<unsigned long>(headroomMs),
+		           portalEstimateLevelLabel(estimate.level));
+		portalSendContentAndFeed(wifiManager, buf);
+	}
+	portalSendContentPAndFeed(wifiManager, kPlainTableClose);
+
+	snprintf_P(buf, sizeof(buf), kEstimateTableOpenFmt, "All active buckets");
+	portalSendContentAndFeed(wifiManager, buf);
+	for (BucketId estimateBucket : kPortalEstimateBuckets) {
+		const PortalPollingEstimate estimate = portalBuildPollingEstimate(
+			entities, entityCount, buckets, estimateBucket, pollIntervalSeconds * 1000UL, kPollOverrunMs);
+		if (estimate.entityCount == 0) {
+			continue;
+		}
+		const uint32_t headroomMs = (estimate.budgetMs > estimate.estimatedUsedMs)
+			? (estimate.budgetMs - estimate.estimatedUsedMs)
+			: 0;
+		snprintf_P(buf,
+		           sizeof(buf),
+		           kEstimateRowFmt,
+		           bucketIdToString(estimate.bucketId),
+		           static_cast<unsigned>(estimate.entityCount),
+		           static_cast<unsigned>(estimate.transactionCount),
+		           static_cast<unsigned long>(estimate.estimatedUsedMs),
+		           static_cast<unsigned long>(estimate.budgetMs),
+		           static_cast<unsigned long>(headroomMs),
+		           portalEstimateLevelLabel(estimate.level));
+		portalSendContentAndFeed(wifiManager, buf);
+	}
+	portalSendContentPAndFeed(wifiManager, kPlainTableClose);
 
 	portalSendContentPAndFeed(wifiManager, kFormOpen);
 	snprintf_P(buf, sizeof(buf),

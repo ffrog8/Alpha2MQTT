@@ -4,6 +4,7 @@
 #include <doctest/doctest.h>
 
 #include <cstring>
+#include <string>
 
 #include "PortalConfig.h"
 
@@ -127,6 +128,61 @@ TEST_CASE("portal config: requested family falls back to first non-empty family"
 	CHECK(portalNormalizePollingFamily(entities, 2, "pv") == MqttEntityFamily::Pv);
 	CHECK(portalNormalizePollingFamily(entities, 2, "battery") == MqttEntityFamily::Pv);
 	CHECK(portalNormalizePollingFamily(entities, 2, nullptr) == MqttEntityFamily::Pv);
+}
+
+TEST_CASE("portal config: polling estimate collapses snapshot and shared register reads")
+{
+	mqttState entities[] = {
+		makeEntity("Battery_Temp", MqttEntityFamily::Battery),
+		makeEntity("Max_Cell_Temp", MqttEntityFamily::Battery),
+		makeEntity("Op_Mode", MqttEntityFamily::Inverter),
+	};
+	entities[0].needsEssSnapshot = true;
+	entities[1].needsEssSnapshot = true;
+	entities[2].readKind = MqttEntityReadKind::Control;
+	const BucketId buckets[] = { BucketId::TenSec, BucketId::TenSec, BucketId::TenSec };
+
+	PortalPollingEstimate estimate = portalBuildPollingEstimate(entities, 3, buckets, BucketId::TenSec, 13000, 5000);
+	CHECK(estimate.entityCount == 3);
+	CHECK(estimate.transactionCount == 2);
+	CHECK(estimate.estimatedUsedMs == 500);
+	CHECK(estimate.budgetMs == 5000);
+	CHECK(estimate.level == PortalEstimateLevel::Light);
+}
+
+TEST_CASE("portal config: family estimate filters to the selected family only")
+{
+	mqttState entities[] = {
+		makeEntity("Battery_Voltage", MqttEntityFamily::Battery),
+		makeEntity("Battery_Status", MqttEntityFamily::Battery),
+		makeEntity("Grid_Power", MqttEntityFamily::Grid),
+	};
+	entities[0].readKey = 101;
+	entities[1].readKey = 101;
+	entities[2].readKey = 202;
+	const BucketId buckets[] = { BucketId::TenSec, BucketId::TenSec, BucketId::TenSec };
+
+	PortalPollingEstimate estimate = portalBuildFamilyPollingEstimate(
+		entities, 3, buckets, MqttEntityFamily::Battery, BucketId::TenSec, 13000, 5000);
+	CHECK(estimate.entityCount == 2);
+	CHECK(estimate.transactionCount == 1);
+	CHECK(estimate.level == PortalEstimateLevel::Light);
+}
+
+TEST_CASE("portal config: estimate levels escalate with transaction load")
+{
+	PortalPollingEstimate idle{};
+	CHECK(portalEstimateLevelKey(idle.level) == std::string("idle"));
+	CHECK(portalEstimateLevelLabel(idle.level) == std::string("Idle"));
+
+	PortalPollingEstimate tight{};
+	tight.entityCount = 1;
+	tight.transactionCount = 14;
+	tight.estimatedUsedMs = 3500;
+	tight.budgetMs = 4000;
+	tight.level = PortalEstimateLevel::Tight;
+	CHECK(portalEstimateLevelKey(tight.level) == std::string("tight"));
+	CHECK(portalEstimateLevelLabel(tight.level) == std::string("Tight"));
 }
 
 TEST_CASE("portal config: family page normalizes requested page within matching entities only")
