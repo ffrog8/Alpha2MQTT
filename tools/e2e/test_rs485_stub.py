@@ -35,9 +35,9 @@ Runtime stub control
 The firmware listens for stub-control messages on:
   <device_root>/debug/rs485_stub/set
 Accepted payloads are intentionally lightweight:
-  - "offline" / {"mode":"offline"}
-  - "online"  / {"mode":"online"}
-  - "fail 2"  / {"mode":"fail","fail_n":2}
+  - {"mode":"offline"}
+  - {"mode":"online"}
+  - {"mode":"fail","fail_n":2}
 Optional:
   - include "reg" or "register" to fail a specific starting register for ESS snapshot reads.
 The E2E checks behavior via the existing poll status topic:
@@ -1732,6 +1732,7 @@ def main() -> int:
 
     def case_two_device_discovery() -> None:
         print("[e2e] case: two-device discovery model")
+        ensure_stub_online_backend('{"mode":"online"}', label="two-device discovery baseline")
         mqtt.subscribe(f"{device_root}/+/inverter_serial/state", force=True)
         controller_topic = ""
         controller_serial = ""

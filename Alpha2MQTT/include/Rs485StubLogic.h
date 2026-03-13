@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 
 enum class Rs485StubMode : uint8_t {
 	OfflineForever = 0,
@@ -90,6 +91,65 @@ rs485StubModeUsesProbeLifecycle(Rs485StubMode mode)
 	default:
 		return true;
 	}
+}
+
+static inline bool
+rs485StubParseModeField(const char *payload, Rs485StubMode &mode)
+{
+	if (payload == nullptr) {
+		return false;
+	}
+
+	const char *pos = strstr(payload, "\"mode\"");
+	if (pos == nullptr) {
+		return false;
+	}
+
+	pos = strchr(pos, ':');
+	if (pos == nullptr) {
+		return false;
+	}
+
+	pos++;
+	while (*pos == ' ' || *pos == '\t' || *pos == '\r' || *pos == '\n') {
+		pos++;
+	}
+	if (*pos != '"') {
+		return false;
+	}
+	pos++;
+
+	char modeBuf[24] = { 0 };
+	size_t idx = 0;
+	while (*pos != '\0' && *pos != '"' && idx + 1 < sizeof(modeBuf)) {
+		modeBuf[idx++] = *pos++;
+	}
+	if (*pos != '"') {
+		return false;
+	}
+	modeBuf[idx] = '\0';
+
+	if (!strcmp(modeBuf, "online")) {
+		mode = Rs485StubMode::OnlineAlways;
+		return true;
+	}
+	if (!strcmp(modeBuf, "offline")) {
+		mode = Rs485StubMode::OfflineForever;
+		return true;
+	}
+	if (!strcmp(modeBuf, "fail") || !strcmp(modeBuf, "fail_then_recover")) {
+		mode = Rs485StubMode::FailFirstNThenRecover;
+		return true;
+	}
+	if (!strcmp(modeBuf, "flap")) {
+		mode = Rs485StubMode::FlapTime;
+		return true;
+	}
+	if (!strcmp(modeBuf, "probe_delayed")) {
+		mode = Rs485StubMode::ProbeDelayedOnline;
+		return true;
+	}
+	return false;
 }
 
 static inline uint16_t

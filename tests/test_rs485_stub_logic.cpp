@@ -54,3 +54,25 @@ TEST_CASE("rs485 stub: offline-like modes keep probe lifecycle")
 	CHECK(rs485StubModeUsesProbeLifecycle(Rs485StubMode::OfflineForever));
 	CHECK(rs485StubModeUsesProbeLifecycle(Rs485StubMode::ProbeDelayedOnline));
 }
+
+TEST_CASE("rs485 stub: parse mode from explicit mode field only")
+{
+	Rs485StubMode mode = Rs485StubMode::OfflineForever;
+	CHECK(rs485StubParseModeField("{\"mode\":\"online\"}", mode));
+	CHECK(mode == Rs485StubMode::OnlineAlways);
+	CHECK(rs485StubParseModeField("{\"mode\":\"fail_then_recover\"}", mode));
+	CHECK(mode == Rs485StubMode::FailFirstNThenRecover);
+	CHECK(rs485StubParseModeField("{\"mode\": \"probe_delayed\"}", mode));
+	CHECK(mode == Rs485StubMode::ProbeDelayedOnline);
+}
+
+TEST_CASE("rs485 stub: advanced keys do not imply mode")
+{
+	Rs485StubMode mode = Rs485StubMode::OfflineForever;
+	CHECK_FALSE(rs485StubParseModeField("{\"flap_online_ms\":3000,\"flap_offline_ms\":3000}", mode));
+	CHECK(mode == Rs485StubMode::OfflineForever);
+	CHECK_FALSE(rs485StubParseModeField("{\"fail_every_n\":2}", mode));
+	CHECK(mode == Rs485StubMode::OfflineForever);
+	CHECK_FALSE(rs485StubParseModeField("{\"mode_hint\":\"online\"}", mode));
+	CHECK(mode == Rs485StubMode::OfflineForever);
+}

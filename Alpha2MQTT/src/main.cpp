@@ -7300,68 +7300,7 @@ parseFirstStubControlInt(const char *payload, int32_t &out)
 static bool
 parseStubControlMode(const char *payload, Rs485StubMode &mode)
 {
-	if (payload == nullptr) {
-		return false;
-	}
-
-	const char *pos = strstr(payload, "\"mode\"");
-	if (pos != nullptr) {
-		pos = strchr(pos, ':');
-		if (pos != nullptr) {
-			char modeBuf[24] = { 0 };
-			pos++;
-			while (*pos == ' ' || *pos == '"') {
-				pos++;
-			}
-			size_t idx = 0;
-			while (*pos != '\0' && *pos != '"' && *pos != ',' && idx + 1 < sizeof(modeBuf)) {
-				modeBuf[idx++] = *pos++;
-			}
-			modeBuf[idx] = '\0';
-			if (!strcmp(modeBuf, "online")) {
-				mode = Rs485StubMode::OnlineAlways;
-				return true;
-			}
-			if (!strcmp(modeBuf, "offline")) {
-				mode = Rs485StubMode::OfflineForever;
-				return true;
-			}
-			if (!strcmp(modeBuf, "fail") || !strcmp(modeBuf, "fail_then_recover")) {
-				mode = Rs485StubMode::FailFirstNThenRecover;
-				return true;
-			}
-			if (!strcmp(modeBuf, "flap")) {
-				mode = Rs485StubMode::FlapTime;
-				return true;
-			}
-			if (!strcmp(modeBuf, "probe_delayed")) {
-				mode = Rs485StubMode::ProbeDelayedOnline;
-				return true;
-			}
-		}
-	}
-
-	if (payloadHasToken(payload, "probe_delayed", "PROBE_DELAYED")) {
-		mode = Rs485StubMode::ProbeDelayedOnline;
-		return true;
-	}
-	if (payloadHasToken(payload, "online", "ONLINE")) {
-		mode = Rs485StubMode::OnlineAlways;
-		return true;
-	}
-	if (payloadHasToken(payload, "offline", "OFFLINE")) {
-		mode = Rs485StubMode::OfflineForever;
-		return true;
-	}
-	if (payloadHasToken(payload, "flap", "FLAP")) {
-		mode = Rs485StubMode::FlapTime;
-		return true;
-	}
-	if (payloadHasToken(payload, "fail", "FAIL")) {
-		mode = Rs485StubMode::FailFirstNThenRecover;
-		return true;
-	}
-	return false;
+	return rs485StubParseModeField(payload, mode);
 }
 
 static void
