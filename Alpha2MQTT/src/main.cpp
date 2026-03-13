@@ -1921,7 +1921,12 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 		hadError = true;
 	}
 
-	if (mapBuilt && persistUserPollingConfig(storedIntervalSeconds, outMap)) {
+	const bool bucketsCanApply = !mqttEntitiesRtAvailable() || mqttEntityCanApplyBuckets(buckets, entityCount);
+	if (mapBuilt && !bucketsCanApply) {
+		hadError = true;
+	}
+
+	if (mapBuilt && bucketsCanApply && persistUserPollingConfig(storedIntervalSeconds, outMap)) {
 		const bool bucketsApplied = !mqttEntitiesRtAvailable() || mqttEntityApplyBuckets(buckets, entityCount);
 		if (bucketsApplied) {
 			pollIntervalSeconds = storedIntervalSeconds;
@@ -3854,6 +3859,14 @@ handlePollingConfigSet(const char *payload)
 		persistLoadErr = 1;
 		return false;
 	}
+
+	if (ctx.bucketAssignmentsChanged) {
+		if (!mqttEntityCanApplyBuckets(buckets, entityCount)) {
+			persistLoadOk = 0;
+			persistLoadErr = 1;
+			return false;
+		}
+	}
 	if ((ctx.pollIntervalChanged || ctx.bucketAssignmentsChanged) &&
 	    !persistUserPollingConfig(ctx.stagedPollInterval, g_portalBucketMapScratch)) {
 		persistLoadOk = 0;
@@ -4603,10 +4616,6 @@ mqttReconnect(void)
 	static int tries = 0;
 	static bool mqttTargetLogged = false;
 
-	initMqttEntitiesRtIfNeeded(true);
-	if (!pendingPollingConfigSet) {
-		loadPollingConfig();
-	}
 	bool subscribed = false;
 	char subscriptionDef[192];
 	char line3[OLED_CHARACTER_WIDTH];
@@ -4641,6 +4650,11 @@ mqttReconnect(void)
 		return;
 	}
 	lastAttemptMs = nowMs;
+
+	initMqttEntitiesRtIfNeeded(true);
+	if (!pendingPollingConfigSet) {
+		loadPollingConfig();
+	}
 
 	unsigned long attemptStart = nowMs;
 	// Keep the ESP8266 watchdog happy even if the broker is unreachable.

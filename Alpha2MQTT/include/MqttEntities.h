@@ -66,6 +66,7 @@ bool mqttEntityNeedsEssSnapshotByIndex(size_t idx);
 BucketId mqttEntityBucketByIndex(size_t idx);
 mqttUpdateFreq mqttEntityEffectiveFreqByIndex(size_t idx);
 bool mqttEntityCopyBuckets(BucketId *outBuckets, size_t entityCount);
+bool mqttEntityCanApplyBuckets(const BucketId *buckets, size_t entityCount);
 bool mqttEntityApplyBuckets(const BucketId *buckets, size_t entityCount);
 
 const MqttEntityActivePlan *mqttActivePlan();

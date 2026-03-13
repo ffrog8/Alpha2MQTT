@@ -84,13 +84,13 @@ defaultBucketForIndex(size_t idx)
 }
 
 static BucketId
-bucketOverrideForIndex(size_t idx)
+bucketOverrideForIndex(const MqttEntityBucketOverride *overrides, size_t overrideCount, size_t idx)
 {
-	for (size_t i = 0; i < g_runtime.overrideCount; ++i) {
-		if (g_runtime.overrides[i].entityIndex == idx) {
-			return g_runtime.overrides[i].bucketId;
+	for (size_t i = 0; i < overrideCount; ++i) {
+		if (overrides[i].entityIndex == idx) {
+			return overrides[i].bucketId;
 		}
-		if (g_runtime.overrides[i].entityIndex > idx) {
+		if (overrides[i].entityIndex > idx) {
 			break;
 		}
 	}
@@ -98,13 +98,19 @@ bucketOverrideForIndex(size_t idx)
 }
 
 static BucketId
-bucketForIndex(size_t idx)
+bucketForIndex(const MqttEntityBucketOverride *overrides, size_t overrideCount, size_t idx)
 {
-	BucketId bucket = bucketOverrideForIndex(idx);
+	BucketId bucket = bucketOverrideForIndex(overrides, overrideCount, idx);
 	if (bucket != BucketId::Unknown) {
 		return bucket;
 	}
 	return defaultBucketForIndex(idx);
+}
+
+static BucketId
+bucketForIndex(size_t idx)
+{
+	return bucketForIndex(g_runtime.overrides, g_runtime.overrideCount, idx);
 }
 
 static uint16_t *
@@ -154,7 +160,10 @@ transactionMatches(const TempTransactionSpec &spec, const mqttState &entity)
 }
 
 static bool
-buildBucketTransactions(MqttEntityActiveBucket &bucket, BucketId bucketId)
+buildBucketTransactions(MqttEntityActiveBucket &bucket,
+                       BucketId bucketId,
+                       const MqttEntityBucketOverride *overrides,
+                       size_t overrideCount)
 {
 	if (bucket.count == 0) {
 		return true;
@@ -173,7 +182,7 @@ buildBucketTransactions(MqttEntityActiveBucket &bucket, BucketId bucketId)
 	size_t txnCount = 0;
 	size_t matchedEntityCount = 0;
 	for (size_t idx = 0; idx < kMqttEntityDescriptorCount; ++idx) {
-		if (bucketForIndex(idx) != bucketId) {
+		if (bucketForIndex(overrides, overrideCount, idx) != bucketId) {
 			continue;
 		}
 		const mqttState &entity = kMqttEntities[idx];
@@ -232,7 +241,7 @@ buildBucketTransactions(MqttEntityActiveBucket &bucket, BucketId bucketId)
 	}
 
 	for (size_t idx = 0; idx < kMqttEntityDescriptorCount; ++idx) {
-		if (bucketForIndex(idx) != bucketId) {
+		if (bucketForIndex(overrides, overrideCount, idx) != bucketId) {
 			continue;
 		}
 		const uint16_t txnIndex = entityTxnIndex[idx];
@@ -265,13 +274,13 @@ buildBucketTransactions(MqttEntityActiveBucket &bucket, BucketId bucketId)
 }
 
 static bool
-rebuildActivePlan(void)
+rebuildActivePlanForOverrides(MqttEntityActivePlan &nextPlan,
+                              const MqttEntityBucketOverride *overrides,
+                              size_t overrideCount)
 {
-	MqttEntityActivePlan nextPlan{};
-
 	for (size_t idx = 0; idx < kMqttEntityDescriptorCount; ++idx) {
 		const bool needsEssSnapshot = kMqttEntities[idx].needsEssSnapshot;
-		switch (bucketForIndex(idx)) {
+		switch (bucketForIndex(overrides, overrideCount, idx)) {
 		case BucketId::TenSec:
 			nextPlan.tenSec.count++;
 			nextPlan.tenSec.hasEssSnapshot = nextPlan.tenSec.hasEssSnapshot || needsEssSnapshot;
@@ -309,19 +318,72 @@ rebuildActivePlan(void)
 		}
 	}
 
-	if (!buildBucketTransactions(nextPlan.tenSec, BucketId::TenSec) ||
-	    !buildBucketTransactions(nextPlan.oneMin, BucketId::OneMin) ||
-	    !buildBucketTransactions(nextPlan.fiveMin, BucketId::FiveMin) ||
-	    !buildBucketTransactions(nextPlan.oneHour, BucketId::OneHour) ||
-	    !buildBucketTransactions(nextPlan.oneDay, BucketId::OneDay) ||
-	    !buildBucketTransactions(nextPlan.user, BucketId::User)) {
+	if (!buildBucketTransactions(nextPlan.tenSec, BucketId::TenSec, overrides, overrideCount) ||
+	    !buildBucketTransactions(nextPlan.oneMin, BucketId::OneMin, overrides, overrideCount) ||
+	    !buildBucketTransactions(nextPlan.fiveMin, BucketId::FiveMin, overrides, overrideCount) ||
+	    !buildBucketTransactions(nextPlan.oneHour, BucketId::OneHour, overrides, overrideCount) ||
+	    !buildBucketTransactions(nextPlan.oneDay, BucketId::OneDay, overrides, overrideCount) ||
+	    !buildBucketTransactions(nextPlan.user, BucketId::User, overrides, overrideCount)) {
 		resetActivePlan(nextPlan);
 		return false;
 	}
+	return true;
+}
 
+static bool
+rebuildActivePlan(void)
+{
+	MqttEntityActivePlan nextPlan{};
+	if (!rebuildActivePlanForOverrides(nextPlan, g_runtime.overrides, g_runtime.overrideCount)) {
+		return false;
+	}
 	resetActivePlan(g_runtime.plan);
 	g_runtime.plan = nextPlan;
 	g_runtime.planDirty = false;
+	return true;
+}
+
+static bool
+buildOverridesFromBuckets(const BucketId *buckets,
+                          size_t entityCount,
+                          MqttEntityBucketOverride *&nextOverrides,
+                          size_t &nextOverrideCount)
+{
+	if (buckets == nullptr || entityCount != kMqttEntityDescriptorCount) {
+		return false;
+	}
+
+	nextOverrideCount = 0;
+	for (size_t i = 0; i < entityCount; ++i) {
+		const BucketId bucket = buckets[i];
+		if (bucket == BucketId::Unknown) {
+			return false;
+		}
+		if (bucket != defaultBucketForIndex(i)) {
+			nextOverrideCount++;
+		}
+	}
+
+	nextOverrides = nullptr;
+	if (nextOverrideCount == 0) {
+		return true;
+	}
+
+	nextOverrides = new (std::nothrow) MqttEntityBucketOverride[nextOverrideCount];
+	if (nextOverrides == nullptr) {
+		return false;
+	}
+
+	size_t nextIdx = 0;
+	for (size_t i = 0; i < entityCount; ++i) {
+		const BucketId bucket = buckets[i];
+		if (bucket == defaultBucketForIndex(i)) {
+			continue;
+		}
+		nextOverrides[nextIdx].entityIndex = static_cast<uint16_t>(i);
+		nextOverrides[nextIdx].bucketId = bucket;
+		nextIdx++;
+	}
 	return true;
 }
 
@@ -424,41 +486,47 @@ mqttEntityApplyBuckets(const BucketId *buckets, size_t entityCount)
 		return false;
 	}
 
+	MqttEntityBucketOverride *nextOverrides = nullptr;
 	size_t nextOverrideCount = 0;
-	for (size_t i = 0; i < entityCount; ++i) {
-		const BucketId bucket = buckets[i];
-		if (bucket == BucketId::Unknown) {
-			return false;
-		}
-		if (bucket != defaultBucketForIndex(i)) {
-			nextOverrideCount++;
-		}
+	if (!buildOverridesFromBuckets(buckets, entityCount, nextOverrides, nextOverrideCount)) {
+		delete[] nextOverrides;
+		return false;
 	}
 
-	MqttEntityBucketOverride *nextOverrides = nullptr;
-	if (nextOverrideCount > 0) {
-		nextOverrides = new (std::nothrow) MqttEntityBucketOverride[nextOverrideCount];
-		if (nextOverrides == nullptr) {
-			return false;
-		}
-		size_t nextIdx = 0;
-		for (size_t i = 0; i < entityCount; ++i) {
-			const BucketId bucket = buckets[i];
-			if (bucket == defaultBucketForIndex(i)) {
-				continue;
-			}
-			nextOverrides[nextIdx].entityIndex = static_cast<uint16_t>(i);
-			nextOverrides[nextIdx].bucketId = bucket;
-			nextIdx++;
-		}
+	MqttEntityActivePlan nextPlan{};
+	if (!rebuildActivePlanForOverrides(nextPlan, nextOverrides, nextOverrideCount)) {
+		delete[] nextOverrides;
+		return false;
 	}
 
 	delete[] g_runtime.overrides;
 	g_runtime.overrides = nextOverrides;
 	g_runtime.overrideCount = nextOverrideCount;
 	resetActivePlan(g_runtime.plan);
-	g_runtime.planDirty = true;
+	g_runtime.plan = nextPlan;
+	g_runtime.planDirty = false;
 	return true;
+}
+
+bool
+mqttEntityCanApplyBuckets(const BucketId *buckets, size_t entityCount)
+{
+	if (!g_runtime.initialized || buckets == nullptr || entityCount != kMqttEntityDescriptorCount) {
+		return false;
+	}
+
+	MqttEntityBucketOverride *nextOverrides = nullptr;
+	size_t nextOverrideCount = 0;
+	if (!buildOverridesFromBuckets(buckets, entityCount, nextOverrides, nextOverrideCount)) {
+		delete[] nextOverrides;
+		return false;
+	}
+
+	MqttEntityActivePlan nextPlan{};
+	const bool ok = rebuildActivePlanForOverrides(nextPlan, nextOverrides, nextOverrideCount);
+	resetActivePlan(nextPlan);
+	delete[] nextOverrides;
+	return ok;
 }
 
 const MqttEntityActivePlan *

@@ -257,3 +257,34 @@ TEST_CASE("mqtt entities: bucket overrides are queryable before rebuilding the a
 	REQUIRE(plan != nullptr);
 	CHECK(plan->oneMin.count > 0);
 }
+
+TEST_CASE("mqtt entities: preview bucket apply does not mutate runtime state")
+{
+	initMqttEntitiesRtIfNeeded(true);
+
+	BucketId current[kMqttEntityDescriptorCount]{};
+	REQUIRE(mqttEntityCopyBuckets(current, kMqttEntityDescriptorCount));
+
+	const mqttState *desc = mqttEntitiesDesc();
+	size_t uptimeIdx = kMqttEntityDescriptorCount;
+	for (size_t i = 0; i < kMqttEntityDescriptorCount; ++i) {
+		if (mqttEntityNameEquals(&desc[i], "A2M_uptime")) {
+			uptimeIdx = i;
+			break;
+		}
+	}
+	REQUIRE(uptimeIdx < kMqttEntityDescriptorCount);
+
+	BucketId preview[kMqttEntityDescriptorCount]{};
+	std::memcpy(preview, current, sizeof(preview));
+	const BucketId original = current[uptimeIdx];
+	const BucketId alternate = (original == BucketId::OneMin) ? BucketId::TenSec : BucketId::OneMin;
+	preview[uptimeIdx] = alternate;
+
+	REQUIRE(mqttEntityCanApplyBuckets(preview, kMqttEntityDescriptorCount));
+	CHECK(mqttEntityBucketByIndex(uptimeIdx) == original);
+
+	BucketId after[kMqttEntityDescriptorCount]{};
+	REQUIRE(mqttEntityCopyBuckets(after, kMqttEntityDescriptorCount));
+	CHECK(after[uptimeIdx] == original);
+}
