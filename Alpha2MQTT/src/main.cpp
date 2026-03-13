@@ -478,14 +478,14 @@ void updateRunstate(void);
 uint32_t getUptimeSeconds(void);
 bool checkTimer(unsigned long *lastRun, unsigned long interval);
 void emptyPayload(void);
-void sendMqtt(const char*, bool);
+bool sendMqtt(const char*, bool);
 void sendDataFromMqttState(const mqttState*, bool, const modbusRequestAndResponse *preparedResponse = nullptr);
 void loadPollingConfig(void);
 void recomputeBucketCounts(void);
 void publishPollingConfig(void);
 void publishConfigDiscovery(void);
 void publishHaEntityDiscovery(const mqttState*);
-void clearHaEntityDiscovery(const mqttState*, const char *deviceId);
+bool clearHaEntityDiscovery(const mqttState*, const char *deviceId);
 void publishControllerInverterSerialDiscovery(void);
 void publishControllerInverterSerialState(void);
 bool handlePollingConfigSet(const char*);
@@ -3354,7 +3354,7 @@ beginPollingConfigPayload(void)
 	return true;
 }
 
-static void
+static bool
 publishPollingConfigChunkClear(size_t startIndex, size_t endIndex)
 {
 	char topic[128];
@@ -3363,9 +3363,12 @@ publishPollingConfigChunkClear(size_t startIndex, size_t endIndex)
 		         deviceName,
 		         static_cast<unsigned long>(i));
 		emptyPayload();
-		sendMqtt(topic, MQTT_RETAIN);
+		if (!sendMqtt(topic, MQTT_RETAIN)) {
+			return false;
+		}
 		maybeYield();
 	}
+	return true;
 }
 
 static bool
@@ -3434,13 +3437,16 @@ publishPollingConfigChunked(const mqttState *entities, size_t entityCount, const
 		         "%s/config/entity_intervals/%lu",
 		         deviceName,
 		         static_cast<unsigned long>(chunkIndex));
-		sendMqtt(topic, MQTT_RETAIN);
+		if (!sendMqtt(topic, MQTT_RETAIN)) {
+			return false;
+		}
 		startIndex = nextIndex;
 		maybeYield();
 	}
 
-	if (g_lastPublishedPollingConfigChunkCount > chunkCount) {
-		publishPollingConfigChunkClear(chunkCount, g_lastPublishedPollingConfigChunkCount);
+	if (g_lastPublishedPollingConfigChunkCount > chunkCount &&
+	    !publishPollingConfigChunkClear(chunkCount, g_lastPublishedPollingConfigChunkCount)) {
+		return false;
 	}
 
 	emptyPayload();
@@ -3456,7 +3462,9 @@ publishPollingConfigChunked(const mqttState *entities, size_t entityCount, const
 		return false;
 	}
 	snprintf(topic, sizeof(topic), "%s/config", deviceName);
-	sendMqtt(topic, MQTT_RETAIN);
+	if (!sendMqtt(topic, MQTT_RETAIN)) {
+		return false;
+	}
 	g_lastPublishedPollingConfigChunkCount = chunkCount;
 	return true;
 }
@@ -3503,11 +3511,14 @@ publishPollingConfig(void)
 		if (_mqttPayload[0] != '\0' &&
 		    addToPayload("}}") != modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
 			snprintf(configTopic, sizeof(configTopic), "%s/config", deviceName);
-			sendMqtt(configTopic, MQTT_RETAIN);
-			if (g_lastPublishedPollingConfigChunkCount > 0) {
-				publishPollingConfigChunkClear(0, g_lastPublishedPollingConfigChunkCount);
-				g_lastPublishedPollingConfigChunkCount = 0;
+			if (!sendMqtt(configTopic, MQTT_RETAIN)) {
+				return;
 			}
+			if (g_lastPublishedPollingConfigChunkCount > 0 &&
+			    !publishPollingConfigChunkClear(0, g_lastPublishedPollingConfigChunkCount)) {
+				return;
+			}
+			g_lastPublishedPollingConfigChunkCount = 0;
 			return;
 		}
 	}
@@ -3670,13 +3681,13 @@ homeAssistantEntityType(const mqttState *entity)
 	}
 }
 
-void
+bool
 clearHaEntityDiscovery(const mqttState *entity, const char *deviceId)
 {
 	char topic[128];
 
 	if (entity == nullptr || deviceId == nullptr || deviceId[0] == '\0') {
-		return;
+		return false;
 	}
 
 	char entityName[64];
@@ -3688,7 +3699,7 @@ clearHaEntityDiscovery(const mqttState *entity, const char *deviceId)
 	         deviceId,
 	         entityName);
 	emptyPayload();
-	sendMqtt(topic, MQTT_RETAIN);
+	return sendMqtt(topic, MQTT_RETAIN);
 }
 
 static bool
@@ -3705,11 +3716,16 @@ publishPendingStaleInverterDiscoveryClears(void)
 	const size_t entityCount = mqttEntitiesCount();
 	size_t batchCount = 0;
 	while (resendHaClearStaleInverterIndex < entityCount && batchCount < kHaDiscoveryBatchSize) {
-		const mqttState *entity = &entities[resendHaClearStaleInverterIndex++];
+		const size_t idx = resendHaClearStaleInverterIndex;
+		const mqttState *entity = &entities[idx];
 		if (mqttEntityScope(entity->entityId) != DiscoveryDeviceScope::Inverter) {
+			resendHaClearStaleInverterIndex++;
 			continue;
 		}
-		clearHaEntityDiscovery(entity, resendHaClearStaleInverterDeviceId);
+		if (!clearHaEntityDiscovery(entity, resendHaClearStaleInverterDeviceId)) {
+			return true;
+		}
+		resendHaClearStaleInverterIndex++;
 		batchCount++;
 		maybeYield();
 	}
@@ -7595,7 +7611,7 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
  *
  * Sends whatever is in the modular level payload to the specified topic.
  */
-void sendMqtt(const char *topic, bool retain)
+bool sendMqtt(const char *topic, bool retain)
 {
 	static unsigned long lastFailureLogMs = 0;
 	const unsigned long nowMs = millis();
@@ -7613,7 +7629,7 @@ void sendMqtt(const char *topic, bool retain)
 #endif
 		maybeYield();
 		emptyPayload();
-		return;
+		return false;
 	}
 
 	// Attempt a send
@@ -7630,6 +7646,8 @@ void sendMqtt(const char *topic, bool retain)
 		}
 #endif
 		maybeYield();
+		emptyPayload();
+		return false;
 	} else {
 #ifdef DEBUG_OVER_SERIAL
 		//sprintf(_debugOutput, "MQTT publish success");
@@ -7639,7 +7657,7 @@ void sendMqtt(const char *topic, bool retain)
 
 	// Empty payload for next use.
 	emptyPayload();
-	return;
+	return true;
 }
 
 /*
