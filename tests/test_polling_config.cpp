@@ -211,6 +211,7 @@ TEST_CASE("bucket map supports compact descriptor indices")
 TEST_CASE("bucket map detects deprecated descriptor-index tokens")
 {
 	CHECK(bucketMapUsesDescriptorIndices("#1=user;#0=five_min;"));
+	CHECK(bucketMapUsesDescriptorIndices("Op_Mode=one_min;#0=five_min;"));
 	CHECK_FALSE(bucketMapUsesDescriptorIndices("Op_Mode=one_min;SOC_Target=disabled;"));
 	CHECK_FALSE(bucketMapUsesDescriptorIndices(""));
 }

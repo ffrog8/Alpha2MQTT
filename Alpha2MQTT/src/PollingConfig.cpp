@@ -83,7 +83,12 @@ bucketMapUsesDescriptorIndices(const char *map)
 		if (*cursor == '\0') {
 			return false;
 		}
-		return *cursor == '#';
+		if (*cursor == '#') {
+			return true;
+		}
+		while (*cursor != '\0' && *cursor != ';') {
+			cursor++;
+		}
 	}
 	return false;
 }
