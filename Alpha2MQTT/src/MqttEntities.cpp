@@ -464,7 +464,18 @@ mqttEntityBucketByIndex(size_t idx)
 mqttUpdateFreq
 mqttEntityEffectiveFreqByIndex(size_t idx)
 {
-	return bucketIdToFreq(mqttEntityBucketByIndex(idx));
+	if (idx >= kMqttEntityDescriptorCount) {
+		return mqttUpdateFreq::freqDisabled;
+	}
+	if (!g_runtime.initialized) {
+		return kMqttEntities[idx].updateFreq;
+	}
+
+	const BucketId overrideBucket = bucketOverrideForIndex(g_runtime.overrides, g_runtime.overrideCount, idx);
+	if (overrideBucket == BucketId::Unknown && kMqttEntities[idx].updateFreq == mqttUpdateFreq::freqNever) {
+		return mqttUpdateFreq::freqNever;
+	}
+	return bucketIdToFreq(bucketForIndex(idx));
 }
 
 bool

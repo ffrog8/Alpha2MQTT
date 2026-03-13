@@ -158,6 +158,41 @@ TEST_CASE("mqtt entities: controller diagnostics include runtime polling signals
 	CHECK(budgetUsed1m->family == MqttEntityFamily::Controller);
 }
 
+TEST_CASE("mqtt entities: freqNever defaults stay discoverable without joining poll buckets")
+{
+	initMqttEntitiesRtIfNeeded(true);
+
+	const mqttState *rs485Avail = mqttEntityById(mqttEntityId::entityRs485Avail);
+	REQUIRE(rs485Avail != nullptr);
+
+	const size_t idx = static_cast<size_t>(rs485Avail - mqttEntitiesDesc());
+	REQUIRE(idx < kMqttEntityDescriptorCount);
+
+	CHECK(mqttEntityBucketByIndex(idx) == BucketId::Disabled);
+	CHECK(mqttEntityEffectiveFreqByIndex(idx) == mqttUpdateFreq::freqNever);
+}
+
+TEST_CASE("mqtt entities: freqNever defaults can still be overridden into a real poll bucket")
+{
+	initMqttEntitiesRtIfNeeded(true);
+	BucketId buckets[kMqttEntityDescriptorCount]{};
+	REQUIRE(mqttEntityCopyBuckets(buckets, kMqttEntityDescriptorCount));
+
+	const mqttState *gridAvail = mqttEntityById(mqttEntityId::entityGridAvail);
+	REQUIRE(gridAvail != nullptr);
+
+	const size_t idx = static_cast<size_t>(gridAvail - mqttEntitiesDesc());
+	REQUIRE(idx < kMqttEntityDescriptorCount);
+
+	buckets[idx] = BucketId::OneMin;
+	REQUIRE(mqttEntityApplyBuckets(buckets, kMqttEntityDescriptorCount));
+	CHECK(mqttEntityEffectiveFreqByIndex(idx) == mqttUpdateFreq::freqOneMin);
+
+	buckets[idx] = BucketId::Disabled;
+	REQUIRE(mqttEntityApplyBuckets(buckets, kMqttEntityDescriptorCount));
+	CHECK(mqttEntityEffectiveFreqByIndex(idx) == mqttUpdateFreq::freqNever);
+}
+
 TEST_CASE("mqtt entities: controller diagnostics append after the legacy persisted entity set")
 {
 	const mqttState *desc = mqttEntitiesDesc();
