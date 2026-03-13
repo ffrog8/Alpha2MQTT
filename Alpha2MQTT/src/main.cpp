@@ -788,10 +788,10 @@ rs485TryReadIdentityOnce(void)
 	                                                                 response.dataValueFormatted,
 	                                                                 staleInverterIdentifier,
 	                                                                 sizeof(staleInverterIdentifier));
-	char currentInverterIdentifier[64];
-	buildInverterIdentifier(response.dataValueFormatted,
-	                       currentInverterIdentifier,
-	                       sizeof(currentInverterIdentifier));
+	char currentLegacyHaUniqueId[sizeof(haUniqueId)];
+	buildInverterHaUniqueId(response.dataValueFormatted,
+	                        currentLegacyHaUniqueId,
+	                        sizeof(currentLegacyHaUniqueId));
 
 	strlcpy(deviceSerialNumber, response.dataValueFormatted, sizeof(deviceSerialNumber));
 	persistUserDeviceSerial(deviceSerialNumber);
@@ -811,14 +811,14 @@ rs485TryReadIdentityOnce(void)
 		if (staleInverterNamespace) {
 			queueStaleInverterDiscoveryClear(staleInverterIdentifier);
 		}
+		if (haUniqueId[0] != '\0' &&
+		    strcmp(haUniqueId, "A2M-UNKNOWN") != 0 &&
+		    strcmp(haUniqueId, currentLegacyHaUniqueId) != 0) {
+			// Upgrades from the legacy HA namespace used the prior haUniqueId as the discovery topic path.
+			// Compare legacy ids directly so reconnects do not requeue the same clear once the live serial matches.
+			queueStaleInverterDiscoveryClear(haUniqueId);
+		}
 		setMqttIdentifiersFromSerial(deviceSerialNumber);
-	}
-	if (haUniqueId[0] != '\0' &&
-	    currentInverterIdentifier[0] != '\0' &&
-	    strcmp(haUniqueId, currentInverterIdentifier) != 0) {
-		// Upgrades from the legacy HA namespace used haUniqueId as the discovery topic path.
-		// Clear that retained namespace as well, even when the inverter serial itself did not change.
-		queueStaleInverterDiscoveryClear(haUniqueId);
 	}
 
 #ifdef DEBUG_OVER_SERIAL

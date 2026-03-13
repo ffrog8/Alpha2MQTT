@@ -7,11 +7,11 @@
     "cases": []
   },
   "env": {
-    "MQTT_HOST": "192.168.11.5",
+    "MQTT_HOST": "your-broker-host-or-ip",
     "MQTT_PORT": 1883,
-    "MQTT_USER": "codex",
-    "MQTT_PASSFILE": "/home/coder/tmp/mqtt_pass.txt",
-    "DEVICE_HTTP_BASE": "http://192.168.11.168",
-    "DEVICE_TOPIC": "Alpha2MQTT-0F8626"
+    "MQTT_USER": "your-mqtt-username",
+    "MQTT_PASSFILE": "/path/to/local/mqtt-pass.txt",
+    "DEVICE_HTTP_BASE": "http://device-ip",
+    "DEVICE_TOPIC": "Alpha2MQTT-DEVICE"
   }
 }
