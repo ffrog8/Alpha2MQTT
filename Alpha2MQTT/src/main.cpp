@@ -1642,7 +1642,45 @@ handlePortalRebootNormalRequest(WiFiManager& wifiManager)
 		return;
 	}
 
-	wifiManager.server->send(200, "text/html", portalRebootToNormalHtml());
+	static const char kPortalRebootNormalPage[] PROGMEM =
+		"<!doctype html><html><head>"
+		"<meta charset='utf-8'>"
+		"<meta name='viewport' content='width=device-width,initial-scale=1'>"
+		"<title>Rebooting…</title>"
+		"</head><body>"
+		"<h3>Rebooting into normal runtime…</h3>"
+		"<p>This page will auto-redirect when runtime mode is available.</p>"
+		"<pre id='s'>waiting…</pre>"
+		"<script>"
+		"(function(){"
+		"var start=Date.now();"
+		"function tick(){"
+		"document.getElementById('s').textContent='waiting '+Math.floor((Date.now()-start)/1000)+'s';"
+		"}"
+		"async function probe(){"
+		"try{"
+		"var r=await fetch('/',{cache:'no-store'});"
+		"if(r&&r.ok){"
+		"var t=await r.text();"
+		"if(t&&t.indexOf('Alpha2MQTT Control')>=0){window.location.href='/';return;}"
+		"}"
+		"}catch(e){}"
+		"tick();"
+		"setTimeout(probe,1000);"
+		"}"
+		"setTimeout(probe,1000);"
+		"})();"
+		"</script>"
+		"</body></html>";
+
+	wifiManager.server->setContentLength(CONTENT_LENGTH_UNKNOWN);
+	wifiManager.server->sendHeader("Connection", "close");
+	wifiManager.server->send(200, "text/html", "");
+	wifiManager.server->sendContent_P(kPortalRebootNormalPage, strlen_P(kPortalRebootNormalPage));
+#if defined(MP_ESP8266)
+	ESP.wdtFeed();
+#endif
+	wifiManager.server->sendContent("");
 	portalNeedsMqttConfig = false;
 	portalRebootScheduled = true;
 	portalRebootAt = millis() + 1500;
@@ -1735,6 +1773,18 @@ portalSendContentAndFeed(WiFiManager &wifiManager, const char *content)
 #endif
 }
 
+static inline void
+portalSendContentPAndFeed(WiFiManager &wifiManager, PGM_P content)
+{
+	if (!wifiManager.server || content == nullptr) {
+		return;
+	}
+	wifiManager.server->sendContent_P(content, strlen_P(content));
+#if defined(MP_ESP8266)
+	ESP.wdtFeed();
+#endif
+}
+
 static void
 handlePortalPollingPage(WiFiManager &wifiManager)
 {
@@ -1751,16 +1801,23 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		return;
 	}
 
-	const uint16_t page = portalArgToU16(wifiManager.server->arg("page"), 0);
-	const uint16_t maxPage = (entityCount == 0) ? 0 : static_cast<uint16_t>((entityCount - 1) / kPollingPortalPageSize);
-	const uint16_t safePage = (page > maxPage) ? maxPage : page;
-	const size_t startIdx = static_cast<size_t>(safePage) * kPollingPortalPageSize;
-	const size_t endIdx = std::min(entityCount, startIdx + kPollingPortalPageSize);
+	const String familyArg = wifiManager.server->arg("family");
+	const MqttEntityFamily family = portalNormalizePollingFamily(entities, entityCount, familyArg.c_str());
+	const char *familyKey = portalPollingFamilyKey(family);
+	const char *familyLabel = portalPollingFamilyLabel(family);
+	const uint16_t requestedPage = portalArgToU16(wifiManager.server->arg("page"), 0);
+	const PortalFamilyPage familyPage = portalBuildFamilyPage(entities, entityCount, family, requestedPage, kPollingPortalPageSize);
+	uint16_t visibleIndices[kPollingPortalPageSize] = {};
+	const size_t visibleCount = portalCollectFamilyPageEntityIndices(entities,
+	                                                                entityCount,
+	                                                                familyPage,
+	                                                                visibleIndices,
+	                                                                kPollingPortalPageSize);
 
 	const bool saved = wifiManager.server->hasArg("saved") && wifiManager.server->arg("saved") == "1";
 	const bool err = wifiManager.server->hasArg("err") && wifiManager.server->arg("err") == "1";
 
-	static const char kPageHeadA[] =
+	static const char kPageHeadA[] PROGMEM =
 		"<!DOCTYPE html><html><head>"
 		"<meta charset=\"utf-8\">"
 		"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
@@ -1780,13 +1837,13 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		".row form{flex:1;min-width:130px}"
 		".hint{font-size:.95em;color:#444}"
 		"</style>";
-	static const char kPageHeadB[] =
+	static const char kPageHeadB[] PROGMEM =
 		"<script>"
 		"window._d=0;"
 		"function pDirty(){window._d=1;}"
 		"function pNav(){return !window._d||window.confirm('Unsaved polling changes will be lost. Continue?');}"
 		"</script>";
-	static const char kPageHeadC[] =
+	static const char kPageHeadC[] PROGMEM =
 		"</head><body class=\"c\"><div class=\"wrap\">"
 		"<h1>Setup</h1><h3>Polling schedule</h3>"
 		"<div class=\"row\">"
@@ -1794,14 +1851,39 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		"<form data-nav-away=\"1\" action=\"/param\" method=\"get\" onsubmit=\"return pNav()\"><button type=\"submit\">MQTT Setup</button></form>"
 		"<form data-nav-away=\"1\" action=\"/reboot/normal\" method=\"post\" onsubmit=\"return pNav()\"><button type=\"submit\">Reboot Normal</button></form>"
 		"</div>";
-	static const char kSavedMsg[] = "<div class=\"msg S\"><strong>Saved.</strong></div>";
-	static const char kErrMsg[] = "<div class=\"msg D\"><strong>Some values were invalid and were ignored.</strong></div>";
-	static const char kFormOpen[] = "<form id=\"polling-form\" method=\"POST\" action=\"/config/polling/save\" oninput=\"pDirty()\" onchange=\"pDirty()\" onsubmit=\"window._d=0;\">";
-	static const char kTableOpen[] = "<table><tr><th>Entity</th><th>Bucket</th></tr>";
-	static const char kTableClose[] = "</table><br><button type=\"submit\">Save</button></form>";
-	static const char kNavOpen[] = "<div class=\"row\">";
-	static const char kNavClose[] = "</div></div></body></html>";
-	static const char kRowFmt[] =
+	static const char kSavedMsg[] PROGMEM = "<div class=\"msg S\"><strong>Saved.</strong></div>";
+	static const char kErrMsg[] PROGMEM = "<div class=\"msg D\"><strong>Some values were invalid and were ignored.</strong></div>";
+	static const char kFormOpen[] PROGMEM = "<form id=\"polling-form\" method=\"POST\" action=\"/config/polling/save\" oninput=\"pDirty()\" onchange=\"pDirty()\" onsubmit=\"window._d=0;\">";
+	static const char kTableOpen[] PROGMEM = "<table><tr><th>Entity</th><th>Bucket</th></tr>";
+	static const char kTableClose[] PROGMEM = "</table><br><button type=\"submit\">Save</button></form>";
+	static const char kNavOpen[] PROGMEM = "<div class=\"row\">";
+	static const char kNavClose[] PROGMEM = "</div></div></body></html>";
+	static const char kFamilyNavOpen[] PROGMEM = "<div class=\"row\">";
+	static const char kFamilyNavClose[] PROGMEM = "</div>";
+	static const char kFamilyNavFmt[] PROGMEM =
+		"<form data-nav-away=\"1\" action=\"/config/polling\" method=\"get\" onsubmit=\"return pNav()\">"
+		"<input type=\"hidden\" name=\"family\" value=\"%s\">"
+		"<input type=\"hidden\" name=\"page\" value=\"0\">"
+		"<button type=\"submit\"%s>%s</button>"
+		"</form>";
+	static const char kPageHintFmt[] PROGMEM = "<p class=\"hint\">Family %s · Page %u of %u · %u entities</p>";
+	static const char kFormMetaFmt[] PROGMEM =
+		"<input type=\"hidden\" name=\"family\" value=\"%s\">"
+		"<input type=\"hidden\" name=\"page\" value=\"%u\">"
+		"<label>poll_interval_s <input name=\"poll_interval_s\" type=\"number\" min=\"1\" max=\"86400\" value=\"%lu\"></label><br><br>";
+	static const char kPrevFmt[] PROGMEM =
+		"<form data-nav-away=\"1\" action=\"/config/polling\" method=\"get\" onsubmit=\"return pNav()\">"
+		"<input type=\"hidden\" name=\"family\" value=\"%s\">"
+		"<input type=\"hidden\" name=\"page\" value=\"%u\">"
+		"<button type=\"submit\">Prev</button>"
+		"</form>";
+	static const char kNextFmt[] PROGMEM =
+		"<form data-nav-away=\"1\" action=\"/config/polling\" method=\"get\" onsubmit=\"return pNav()\">"
+		"<input type=\"hidden\" name=\"family\" value=\"%s\">"
+		"<input type=\"hidden\" name=\"page\" value=\"%u\">"
+		"<button type=\"submit\">Next</button>"
+		"</form>";
+	static const char kRowFmt[] PROGMEM =
 		"<tr data-entity=\"%s\"><td>%s</td><td><select name=\"b%u\">"
 		"<option value=\"%s\"%s>%s</option>"
 		"<option value=\"%s\"%s>%s</option>"
@@ -1811,53 +1893,63 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		"<option value=\"%s\"%s>%s</option>"
 		"<option value=\"%s\"%s>%s</option>"
 		"</select></td></tr>";
-	static const char kPrevFmt[] =
-		"<form data-nav-away=\"1\" action=\"/config/polling\" method=\"get\" onsubmit=\"return pNav()\">"
-		"<input type=\"hidden\" name=\"page\" value=\"%d\">"
-		"<button type=\"submit\">Prev</button>"
-		"</form>";
-	static const char kNextFmt[] =
-		"<form data-nav-away=\"1\" action=\"/config/polling\" method=\"get\" onsubmit=\"return pNav()\">"
-		"<input type=\"hidden\" name=\"page\" value=\"%d\">"
-		"<button type=\"submit\">Next</button>"
-		"</form>";
-
-	const int prevPage = static_cast<int>(safePage) - 1;
-	const int nextPage = static_cast<int>(safePage) + 1;
 	wifiManager.server->setContentLength(CONTENT_LENGTH_UNKNOWN);
 	wifiManager.server->sendHeader("Connection", "close");
 	wifiManager.server->send(200, "text/html", "");
 
 	char buf[256];
-	portalSendContentAndFeed(wifiManager, kPageHeadA);
-	portalSendContentAndFeed(wifiManager, kPageHeadB);
-	portalSendContentAndFeed(wifiManager, kPageHeadC);
+	portalSendContentPAndFeed(wifiManager, kPageHeadA);
+	portalSendContentPAndFeed(wifiManager, kPageHeadB);
+	portalSendContentPAndFeed(wifiManager, kPageHeadC);
 
 	if (saved) {
-		portalSendContentAndFeed(wifiManager, kSavedMsg);
+		portalSendContentPAndFeed(wifiManager, kSavedMsg);
 	}
 	if (err) {
-		portalSendContentAndFeed(wifiManager, kErrMsg);
+		portalSendContentPAndFeed(wifiManager, kErrMsg);
 	}
 
-	snprintf(buf, sizeof(buf), "<p class=\"hint\">Page %u of %u</p>", static_cast<unsigned>(safePage + 1), static_cast<unsigned>(maxPage + 1));
+	portalSendContentPAndFeed(wifiManager, kFamilyNavOpen);
+	for (uint8_t i = 0; i < portalPollingFamilyCount(); ++i) {
+		const MqttEntityFamily navFamily = portalPollingFamilyAt(i);
+		const PortalFamilyPage navPage = portalBuildFamilyPage(entities, entityCount, navFamily, 0, kPollingPortalPageSize);
+		if (navPage.totalEntityCount == 0) {
+			continue;
+		}
+		snprintf_P(buf,
+		           sizeof(buf),
+		           kFamilyNavFmt,
+		           portalPollingFamilyKey(navFamily),
+		           (navFamily == family) ? " disabled" : "",
+		           portalPollingFamilyLabel(navFamily));
+		portalSendContentAndFeed(wifiManager, buf);
+	}
+	portalSendContentPAndFeed(wifiManager, kFamilyNavClose);
+
+	snprintf_P(buf,
+	           sizeof(buf),
+	           kPageHintFmt,
+	           familyLabel,
+	           static_cast<unsigned>(familyPage.safePage + 1),
+	           static_cast<unsigned>(familyPage.maxPage + 1),
+	           static_cast<unsigned>(familyPage.totalEntityCount));
 	portalSendContentAndFeed(wifiManager, buf);
 
-	portalSendContentAndFeed(wifiManager, kFormOpen);
-	snprintf(buf, sizeof(buf),
-	         "<input type=\"hidden\" name=\"page\" value=\"%u\">"
-	         "<label>poll_interval_s <input name=\"poll_interval_s\" type=\"number\" min=\"1\" max=\"86400\" value=\"%lu\"></label><br><br>",
-	         static_cast<unsigned>(safePage),
-	         static_cast<unsigned long>(storedIntervalSeconds));
+	portalSendContentPAndFeed(wifiManager, kFormOpen);
+	snprintf_P(buf, sizeof(buf),
+	           kFormMetaFmt,
+	           familyKey,
+	           static_cast<unsigned>(familyPage.safePage),
+	           static_cast<unsigned long>(storedIntervalSeconds));
 	portalSendContentAndFeed(wifiManager, buf);
 
-	portalSendContentAndFeed(wifiManager, kTableOpen);
-	for (size_t idx = startIdx; idx < endIdx; ++idx) {
-		const size_t row = idx - startIdx;
+	portalSendContentPAndFeed(wifiManager, kTableOpen);
+	for (size_t row = 0; row < visibleCount; ++row) {
+		const size_t idx = visibleIndices[row];
 		const BucketId cur = buckets[idx];
 		char entityName[64];
 		mqttEntityNameCopy(&entities[idx], entityName, sizeof(entityName));
-		const int rowLen = snprintf(
+		const int rowLen = snprintf_P(
 			g_portalRowRenderBuf,
 			sizeof(g_portalRowRenderBuf),
 			kRowFmt,
@@ -1875,18 +1967,26 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 			portalSendContentAndFeed(wifiManager, g_portalRowRenderBuf);
 		}
 	}
-	portalSendContentAndFeed(wifiManager, kTableClose);
+	portalSendContentPAndFeed(wifiManager, kTableClose);
 
-	portalSendContentAndFeed(wifiManager, kNavOpen);
-	if (prevPage >= 0) {
-		snprintf(buf, sizeof(buf), kPrevFmt, prevPage);
+	portalSendContentPAndFeed(wifiManager, kNavOpen);
+	if (familyPage.safePage > 0) {
+		snprintf_P(buf,
+		           sizeof(buf),
+		           kPrevFmt,
+		           familyKey,
+		           static_cast<unsigned>(familyPage.safePage - 1));
 		portalSendContentAndFeed(wifiManager, buf);
 	}
-	if (nextPage <= static_cast<int>(maxPage)) {
-		snprintf(buf, sizeof(buf), kNextFmt, nextPage);
+	if (familyPage.safePage < familyPage.maxPage) {
+		snprintf_P(buf,
+		           sizeof(buf),
+		           kNextFmt,
+		           familyKey,
+		           static_cast<unsigned>(familyPage.safePage + 1));
 		portalSendContentAndFeed(wifiManager, buf);
 	}
-	portalSendContentAndFeed(wifiManager, kNavClose);
+	portalSendContentPAndFeed(wifiManager, kNavClose);
 	portalSendContentAndFeed(wifiManager, "");
 
 }
@@ -1908,11 +2008,17 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 		memcpy(originalBuckets, buckets, sizeof(originalBuckets));
 	}
 
-	const uint16_t page = portalArgToU16(wifiManager.server->arg("page"), 0);
-	const uint16_t maxPage = (entityCount == 0) ? 0 : static_cast<uint16_t>((entityCount - 1) / kPollingPortalPageSize);
-	const uint16_t safePage = (page > maxPage) ? maxPage : page;
-	const size_t startIdx = static_cast<size_t>(safePage) * kPollingPortalPageSize;
-	const size_t endIdx = std::min(entityCount, startIdx + kPollingPortalPageSize);
+	const String familyArg = wifiManager.server->arg("family");
+	const MqttEntityFamily family = portalNormalizePollingFamily(entities, entityCount, familyArg.c_str());
+	const char *familyKey = portalPollingFamilyKey(family);
+	const uint16_t requestedPage = portalArgToU16(wifiManager.server->arg("page"), 0);
+	const PortalFamilyPage familyPage = portalBuildFamilyPage(entities, entityCount, family, requestedPage, kPollingPortalPageSize);
+	uint16_t visibleIndices[kPollingPortalPageSize] = {};
+	const size_t visibleCount = portalCollectFamilyPageEntityIndices(entities,
+	                                                                entityCount,
+	                                                                familyPage,
+	                                                                visibleIndices,
+	                                                                kPollingPortalPageSize);
 
 	bool hadError = false;
 
@@ -1928,8 +2034,8 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 		}
 	}
 
-	for (size_t idx = startIdx; idx < endIdx; ++idx) {
-		const size_t row = idx - startIdx;
+	for (size_t row = 0; row < visibleCount; ++row) {
+		const size_t idx = visibleIndices[row];
 		char argName[8];
 		snprintf(argName, sizeof(argName), "b%u", static_cast<unsigned>(row));
 		if (!wifiManager.server->hasArg(argName)) {
@@ -1981,8 +2087,9 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 	}
 
 	char location[96];
-	snprintf(location, sizeof(location), "/config/polling?page=%u&saved=1%s",
-	         static_cast<unsigned>(safePage),
+	snprintf(location, sizeof(location), "/config/polling?family=%s&page=%u&saved=1%s",
+	         familyKey,
+	         static_cast<unsigned>(familyPage.safePage),
 	         hadError ? "&err=1" : "");
 	wifiManager.server->sendHeader("Location", location);
 	wifiManager.server->send(302, "text/plain", "");

@@ -117,6 +117,18 @@ TEST_CASE("portal config: polling family keys round-trip")
 	CHECK_FALSE(portalPollingFamilyFromKey(nullptr, &family));
 }
 
+TEST_CASE("portal config: requested family falls back to first non-empty family")
+{
+	const mqttState entities[] = {
+		makeEntity("PV1_Power", MqttEntityFamily::Pv),
+		makeEntity("A2M_uptime", MqttEntityFamily::Controller),
+	};
+
+	CHECK(portalNormalizePollingFamily(entities, 2, "pv") == MqttEntityFamily::Pv);
+	CHECK(portalNormalizePollingFamily(entities, 2, "battery") == MqttEntityFamily::Pv);
+	CHECK(portalNormalizePollingFamily(entities, 2, nullptr) == MqttEntityFamily::Pv);
+}
+
 TEST_CASE("portal config: family page normalizes requested page within matching entities only")
 {
 	const mqttState entities[] = {

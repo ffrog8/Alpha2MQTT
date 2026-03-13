@@ -757,7 +757,7 @@ def _discover_polling_menu_path(menu_html: str) -> str:
     return m.group(1)
 
 def _load_polling_page_via_menu(base: str) -> tuple[str, str]:
-    direct_path = "/config/polling?page=0"
+    direct_path = "/config/polling"
     status_poll, poll_body = _http_request_full("GET", base + direct_path, headers={}, body=b"", timeout_s=20)
     if status_poll == 200:
         return direct_path, poll_body.decode("utf-8", errors="replace")
@@ -791,7 +791,7 @@ def _load_polling_page_via_menu(base: str) -> tuple[str, str]:
     return polling_path, poll_html
 
 def _extract_polling_page_bounds(poll_html: str) -> tuple[int, int]:
-    m = re.search(r'<p class="hint">Page\s+(\d+)\s+of\s+(\d+)</p>', poll_html)
+    m = re.search(r'<p class="hint">[^<]*Page\s+(\d+)\s+of\s+(\d+)[^<]*</p>', poll_html)
     if not m:
         raise E2EError("could not locate polling page bounds")
     page = int(m.group(1)) - 1
@@ -800,16 +800,39 @@ def _extract_polling_page_bounds(poll_html: str) -> tuple[int, int]:
         raise E2EError(f"invalid polling page bounds page={page} total={total}")
     return page, total
 
-def _load_polling_page(base: str, page: int) -> str:
+def _extract_polling_page_family_key(poll_html: str) -> str:
+    m = re.search(
+        r'<form id="polling-form"[^>]*>.*?name="family"\s+value="([^"]+)"',
+        poll_html,
+        flags=re.DOTALL,
+    )
+    if not m:
+        raise E2EError("could not locate polling family key")
+    return m.group(1)
+
+def _extract_polling_page_family_keys(poll_html: str) -> list[str]:
+    keys: list[str] = []
+    for match in re.finditer(r'action="/config/polling"[^>]*>.*?name="family"\s+value="([^"]+)"',
+                             poll_html,
+                             flags=re.DOTALL):
+        key = match.group(1)
+        if key not in keys:
+            keys.append(key)
+    current = _extract_polling_page_family_key(poll_html)
+    if current not in keys:
+        keys.insert(0, current)
+    return keys
+
+def _load_polling_page(base: str, family: str, page: int) -> str:
     status_poll, poll_body = _http_request_full(
         "GET",
-        f"{base}/config/polling?page={page}",
+        f"{base}/config/polling?family={urllib.parse.quote(family)}&page={page}",
         headers={},
         body=b"",
         timeout_s=20,
     )
     if status_poll != 200:
-        raise E2EError(f"portal polling page {page} not reachable: status={status_poll}")
+        raise E2EError(f"portal polling page {family}/{page} not reachable: status={status_poll}")
     return poll_body.decode("utf-8", errors="replace")
 
 def _extract_entity_row_and_selected_bucket(poll_html: str, entity_name: str) -> tuple[str, str]:
@@ -825,17 +848,22 @@ def _extract_entity_row_and_selected_bucket(poll_html: str, entity_name: str) ->
         raise E2EError(f"could not locate selected bucket for {entity_name}")
     return row_idx.group(1), selected.group(1)
 
-def _locate_entity_on_polling_pages(base: str, first_page_html: str, entity_name: str) -> tuple[int, int, str, str]:
-    first_page, total_pages = _extract_polling_page_bounds(first_page_html)
-    pages = [first_page] + [page for page in range(total_pages) if page != first_page]
-    for page in pages:
-        page_html = first_page_html if page == first_page else _load_polling_page(base, page)
-        try:
-            row, bucket = _extract_entity_row_and_selected_bucket(page_html, entity_name)
-            return page, total_pages, row, bucket
-        except E2EError:
-            continue
-    raise E2EError(f"could not locate {entity_name} row on any polling page")
+def _locate_entity_on_polling_pages(base: str, first_page_html: str, entity_name: str) -> tuple[str, int, int, str, str, list[str]]:
+    first_family = _extract_polling_page_family_key(first_page_html)
+    family_keys = _extract_polling_page_family_keys(first_page_html)
+    family_order = [first_family] + [family for family in family_keys if family != first_family]
+    for family in family_order:
+        family_first_html = first_page_html if family == first_family else _load_polling_page(base, family, 0)
+        first_page, total_pages = _extract_polling_page_bounds(family_first_html)
+        pages = [first_page] + [page for page in range(total_pages) if page != first_page]
+        for page in pages:
+            page_html = family_first_html if page == first_page else _load_polling_page(base, family, page)
+            try:
+                row, bucket = _extract_entity_row_and_selected_bucket(page_html, entity_name)
+                return family, page, total_pages, row, bucket, family_keys
+            except E2EError:
+                continue
+    raise E2EError(f"could not locate {entity_name} row on any polling family/page")
 
 
 def _discover_device_topic(mqtt: MqttClient, status_poll_suffix: str) -> str:
@@ -2518,34 +2546,44 @@ def main() -> int:
 
         # Find which row index corresponds to a known stable mqttName.
         target = "State_of_Charge"
-        target_page, total_pages, row, initial_bucket = _locate_entity_on_polling_pages(base, html, target)
+        target_family, target_page, total_pages, row, initial_bucket, family_keys = _locate_entity_on_polling_pages(base, html, target)
         desired_bucket = "user" if initial_bucket != "user" else "ten_sec"
 
         # Navigate away without save and ensure no persistence happened.
-        nav_page = 0 if target_page != 0 else (1 if total_pages > 1 else 0)
-        _http_request_full("GET", f"{base}/config/polling?page={nav_page}", headers={}, body=b"", timeout_s=20)
-        html_back_text = _load_polling_page(base, target_page)
+        nav_family = target_family
+        nav_page = target_page
+        if total_pages > 1:
+            nav_page = 0 if target_page != 0 else 1
+        else:
+            for family in family_keys:
+                if family != target_family:
+                    nav_family = family
+                    nav_page = 0
+                    break
+        _http_request_full("GET", f"{base}/config/polling?family={urllib.parse.quote(nav_family)}&page={nav_page}", headers={}, body=b"", timeout_s=20)
+        html_back_text = _load_polling_page(base, target_family, target_page)
         _, after_nav_bucket = _extract_entity_row_and_selected_bucket(html_back_text, target)
         if after_nav_bucket != initial_bucket:
             raise E2EError(f"unsaved bucket changed after page navigation: before={initial_bucket!r} after={after_nav_bucket!r}")
 
         # Change poll_interval_s and move target to an alternate bucket.
         fields = {
+            "family": target_family,
             "page": str(target_page),
             "poll_interval_s": "13",
             f"b{row}": desired_bucket,
         }
         save_url = base + "/config/polling/save"
-        print(f"[e2e] POST {save_url} fields: page={target_page} poll_interval_s=13 b{row}={desired_bucket}")
+        print(f"[e2e] POST {save_url} fields: family={target_family} page={target_page} poll_interval_s=13 b{row}={desired_bucket}")
         save_status = _http_post_form(save_url, fields, timeout_s=20)
         if save_status not in (200, 302):
             raise E2EError(f"polling save failed status={save_status}")
 
         # Save should not reboot out of portal; page should remain reachable after save.
-        _wait_for_http_ok(f"{base}/config/polling?page={target_page}", timeout_s=10)
+        _wait_for_http_ok(f"{base}/config/polling?family={urllib.parse.quote(target_family)}&page={target_page}", timeout_s=10)
         _sleep_with_mqtt(mqtt, 3)
-        _wait_for_http_ok(f"{base}/config/polling?page={target_page}", timeout_s=10)
-        html_saved_text = _load_polling_page(base, target_page)
+        _wait_for_http_ok(f"{base}/config/polling?family={urllib.parse.quote(target_family)}&page={target_page}", timeout_s=10)
+        html_saved_text = _load_polling_page(base, target_family, target_page)
         interval_match_saved = re.search(r'name="poll_interval_s"[^>]*value="(\d+)"', html_saved_text)
         if not interval_match_saved or int(interval_match_saved.group(1)) != 13:
             raise E2EError("poll_interval_s UI value not updated immediately after save")
@@ -2644,9 +2682,12 @@ def main() -> int:
         if int(interval_match.group(1)) != 13:
             raise E2EError(f"poll_interval_s UI value not restored after reboot: {interval_match.group(1)}")
 
-        restored_page, _, _, restored_bucket = _locate_entity_on_polling_pages(base, html2, target)
-        if restored_page != target_page:
-            raise E2EError(f"{target} moved to a different portal page across reboot: before={target_page} after={restored_page}")
+        restored_family, restored_page, _, _, restored_bucket, _ = _locate_entity_on_polling_pages(base, html2, target)
+        if restored_family != target_family or restored_page != target_page:
+            raise E2EError(
+                f"{target} moved to a different portal location across reboot: "
+                f"before={target_family}/{target_page} after={restored_family}/{restored_page}"
+            )
         if restored_bucket != desired_bucket:
             raise E2EError(f"{target} bucket UI value not restored after reboot (expected {desired_bucket!r}, got {restored_bucket!r})")
 

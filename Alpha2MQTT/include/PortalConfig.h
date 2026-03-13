@@ -39,6 +39,9 @@ MqttEntityFamily portalPollingFamilyAt(uint8_t index);
 const char *portalPollingFamilyKey(MqttEntityFamily family);
 const char *portalPollingFamilyLabel(MqttEntityFamily family);
 bool portalPollingFamilyFromKey(const char *key, MqttEntityFamily *outFamily);
+MqttEntityFamily portalNormalizePollingFamily(const mqttState *entities,
+                                             size_t entityCount,
+                                             const char *requestedKey);
 PortalFamilyPage portalBuildFamilyPage(const mqttState *entities,
                                        size_t entityCount,
                                        MqttEntityFamily family,

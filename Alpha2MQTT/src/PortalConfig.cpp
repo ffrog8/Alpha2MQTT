@@ -15,6 +15,7 @@ constexpr const char *kPortalMenuIds[] = {
 };
 constexpr char kPortalMenuPolling[] =
 	"<form action='/config/polling' method='get'><button>Polling</button></form><br/>\n";
+#if !defined(MP_ESP8266) || !defined(ARDUINO)
 constexpr char kPortalRebootNormal[] =
 	"<!doctype html><html><head>"
 	"<meta charset='utf-8'>"
@@ -45,6 +46,7 @@ constexpr char kPortalRebootNormal[] =
 	"})();"
 	"</script>"
 	"</body></html>";
+#endif
 
 constexpr MqttEntityFamily kPortalPollingFamilies[] = {
 	MqttEntityFamily::Battery,
@@ -94,7 +96,11 @@ portalMenuPollingHtml(void)
 const char *
 portalRebootToNormalHtml(void)
 {
+#if defined(MP_ESP8266) && defined(ARDUINO)
+	return "";
+#else
 	return kPortalRebootNormal;
+#endif
 }
 
 PortalMenu
@@ -181,6 +187,27 @@ portalPollingFamilyFromKey(const char *key, MqttEntityFamily *outFamily)
 		}
 	}
 	return false;
+}
+
+MqttEntityFamily
+portalNormalizePollingFamily(const mqttState *entities,
+                             size_t entityCount,
+                             const char *requestedKey)
+{
+	MqttEntityFamily requestedFamily = portalPollingFamilyAt(0);
+	if (portalPollingFamilyFromKey(requestedKey, &requestedFamily) &&
+	    countFamilyEntities(entities, entityCount, requestedFamily) > 0) {
+		return requestedFamily;
+	}
+
+	for (uint8_t i = 0; i < portalPollingFamilyCount(); ++i) {
+		const MqttEntityFamily family = portalPollingFamilyAt(i);
+		if (countFamilyEntities(entities, entityCount, family) > 0) {
+			return family;
+		}
+	}
+
+	return portalPollingFamilyAt(0);
 }
 
 PortalFamilyPage
