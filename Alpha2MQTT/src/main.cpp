@@ -595,7 +595,6 @@ setMqttIdentifiersFromSerial(const char *serial)
 	}
 
 	buildInverterHaUniqueId(serial, haUniqueId, sizeof(haUniqueId));
-	inverterReady = true;
 	// Subscriptions are bound to the HA unique id; if identity changes from unknown/persisted, resubscribe.
 	inverterSubscriptionsSet = false;
 }
@@ -779,6 +778,7 @@ rs485TryReadIdentityOnce(void)
 	strlcpy(deviceSerialNumber, response.dataValueFormatted, sizeof(deviceSerialNumber));
 	persistUserDeviceSerial(deviceSerialNumber);
 	_registerHandler->setSerialNumberPrefix(deviceSerialNumber[0], deviceSerialNumber[1]);
+	inverterReady = true;
 
 	// Battery type is helpful for diagnostics, but it is not required to establish inverter identity.
 	result = _registerHandler->readHandledRegister(REG_BATTERY_HOME_R_BATTERY_TYPE, &response);
@@ -4243,8 +4243,10 @@ getSerialNumber()
 		result = _registerHandler->readHandledRegister(REG_SYSTEM_INFO_R_EMS_SN_BYTE_1_2, &response);
 	}
 #endif // DEBUG_NO_RS485
-	if ((result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) &&
-	    (strlen(response.dataValueFormatted) >= 15)) {
+	const bool liveSerialReadOk =
+		(result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) &&
+		(strlen(response.dataValueFormatted) >= 15);
+	if (liveSerialReadOk) {
 		strlcpy(deviceSerialNumber, response.dataValueFormatted, sizeof(deviceSerialNumber));
 		persistUserDeviceSerial(deviceSerialNumber);
 	} else {
@@ -4259,9 +4261,10 @@ getSerialNumber()
 			strlcpy(deviceSerialNumber, "UNKNOWN", sizeof(deviceSerialNumber));
 		}
 	}
+	inverterReady = liveSerialReadOk;
 
 #ifdef DEBUG_NO_RS485
-	result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
+result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
 	strcpy(response.dataValueFormatted, "FAKE-BAT");
 #else // DEBUG_NO_RS485
 	// Get the Battery Type
