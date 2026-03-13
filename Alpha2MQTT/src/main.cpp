@@ -1172,8 +1172,11 @@ subscribeInverterTopics(void)
 	if (!mqttEntitiesRtAvailable()) {
 		return;
 	}
+	if (inverterSubscriptionsSet) {
+		return;
+	}
 	const uint32_t nowMs = millis();
-	if (inverterSubscriptionsSet && ((nowMs - lastSubscribeAttemptMs) < 5000U)) {
+	if ((nowMs - lastSubscribeAttemptMs) < 5000U) {
 		return;
 	}
 	lastSubscribeAttemptMs = nowMs;
@@ -1188,7 +1191,9 @@ subscribeInverterTopics(void)
 	Serial.println(_debugOutput);
 #endif
 
-	inverterSubscriptionsSet = subscribed;
+	if (subscribed) {
+		inverterSubscriptionsSet = true;
+	}
 }
 
 void
