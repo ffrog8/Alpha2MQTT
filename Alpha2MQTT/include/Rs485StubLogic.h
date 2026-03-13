@@ -5,6 +5,7 @@
 */
 #pragma once
 
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 
@@ -148,6 +149,48 @@ rs485StubParseModeField(const char *payload, Rs485StubMode &mode)
 	if (!strcmp(modeBuf, "probe_delayed")) {
 		mode = Rs485StubMode::ProbeDelayedOnline;
 		return true;
+	}
+	return false;
+}
+
+static inline bool
+rs485StubParseIntField(const char *payload, const char *key, int32_t &out)
+{
+	if (payload == nullptr || key == nullptr) {
+		return false;
+	}
+
+	const size_t keyLen = strlen(key);
+	const auto isTokenChar = [](char ch) -> bool {
+		return (ch >= '0' && ch <= '9') ||
+		       (ch >= 'A' && ch <= 'Z') ||
+		       (ch >= 'a' && ch <= 'z') ||
+		       ch == '_';
+	};
+
+	const char *search = payload;
+	while (const char *pos = strstr(search, key)) {
+		const char prev = (pos == payload) ? '\0' : pos[-1];
+		const char next = pos[keyLen];
+		if ((pos == payload || !isTokenChar(prev)) &&
+		    (next == '\0' || !isTokenChar(next))) {
+			pos += keyLen;
+			while (*pos == ' ' || *pos == ':' || *pos == '=' || *pos == '"') {
+				pos++;
+			}
+			if (*pos == '\0') {
+				return false;
+			}
+
+			char *endPtr = nullptr;
+			long parsed = strtol(pos, &endPtr, 10);
+			if (endPtr == pos) {
+				return false;
+			}
+			out = static_cast<int32_t>(parsed);
+			return true;
+		}
+		search = pos + keyLen;
 	}
 	return false;
 }

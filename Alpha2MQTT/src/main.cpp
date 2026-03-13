@@ -5530,8 +5530,11 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 #endif
 	const char *gridStatusStr;
 	modbusRequestAndResponseStatusValues resultAddedToPayload;
-	String ssid = WiFi.SSID();
-	String ip = WiFi.localIP().toString();
+	char ssidBuf[33];
+	char ipBuf[16];
+	strlcpy(ssidBuf, appConfig.wifiSSID.c_str(), sizeof(ssidBuf));
+	const IPAddress localIp = WiFi.localIP();
+	snprintf(ipBuf, sizeof(ipBuf), "%u.%u.%u.%u", localIp[0], localIp[1], localIp[2], localIp[3]);
 	const bool essSnapshotOkNow = includeEssSnapshot && essSnapshotValid;
 
 	if (essSnapshotOkNow) {
@@ -5569,8 +5572,8 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 	net.uptimeS = getUptimeSeconds();
 	net.freeHeap = ESP.getFreeHeap();
 	net.rssiDbm = WiFi.RSSI();
-	net.ip = ip.c_str();
-	net.ssid = ssid.c_str();
+	net.ip = ipBuf;
+	net.ssid = ssidBuf;
 	net.mqttConnected = _mqtt.connected();
 	net.mqttReconnects = mqttReconnectCount;
 	net.wifiStatus = wifiStatusLabel(WiFi.status());
@@ -7248,67 +7251,7 @@ payloadHasToken(const char *payload, const char *lower, const char *upper)
 static bool
 parseStubControlInt(const char *payload, const char *key, int32_t &out)
 {
-	if (payload == nullptr || key == nullptr) {
-		return false;
-	}
-
-	const size_t keyLen = strlen(key);
-	const auto isTokenChar = [](char ch) -> bool {
-		return (ch >= '0' && ch <= '9') ||
-		       (ch >= 'A' && ch <= 'Z') ||
-		       (ch >= 'a' && ch <= 'z') ||
-		       ch == '_';
-	};
-
-	const char *search = payload;
-	while (const char *pos = strstr(search, key)) {
-		const char prev = (pos == payload) ? '\0' : pos[-1];
-		const char next = pos[keyLen];
-		if ((pos == payload || !isTokenChar(prev)) &&
-		    (next == '\0' || !isTokenChar(next))) {
-			pos += keyLen;
-			while (*pos == ' ' || *pos == ':' || *pos == '=' || *pos == '"') {
-				pos++;
-			}
-			if (*pos == '\0') {
-				return false;
-			}
-
-			char *endPtr = nullptr;
-			long parsed = strtol(pos, &endPtr, 10);
-			if (endPtr == pos) {
-				return false;
-			}
-			out = static_cast<int32_t>(parsed);
-			return true;
-		}
-		search = pos + keyLen;
-	}
-	return false;
-}
-
-static bool
-parseFirstStubControlInt(const char *payload, int32_t &out)
-{
-	if (payload == nullptr) {
-		return false;
-	}
-
-	const char *pos = payload;
-	while (*pos != '\0' && *pos != '-' && (*pos < '0' || *pos > '9')) {
-		pos++;
-	}
-	if (*pos == '\0') {
-		return false;
-	}
-
-	char *endPtr = nullptr;
-	long parsed = strtol(pos, &endPtr, 10);
-	if (endPtr == pos) {
-		return false;
-	}
-	out = static_cast<int32_t>(parsed);
-	return true;
+	return rs485StubParseIntField(payload, key, out);
 }
 
 static bool
@@ -7325,8 +7268,7 @@ parseRs485StubControlPayload(const char *payload, Rs485StubControlRequest &reque
 	parseStubControlMode(payload, request.mode);
 
 	if (parseStubControlInt(payload, "fail_n", value) ||
-	    parseStubControlInt(payload, "failFirstN", value) ||
-	    parseFirstStubControlInt(payload, value)) {
+	    parseStubControlInt(payload, "failFirstN", value)) {
 		if (value > 0) {
 			request.failN = static_cast<uint32_t>(value);
 		}
@@ -7434,6 +7376,8 @@ applyRs485StubControlPayload(const char *payload)
 	// Chose a helper-based parser here because ESP8266 loop stack is tight and the
 	// earlier monolithic local-heavy parser triggered watchdog resets on control publish.
 	Rs485StubControlRequest request{};
+	const Rs485StubConfig &currentCfg = _modBus->stubConfig();
+	request.mode = currentCfg.mode;
 	parseRs485StubControlPayload(payload, request);
 	maybeYield();
 

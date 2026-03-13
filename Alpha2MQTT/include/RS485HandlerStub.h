@@ -342,6 +342,11 @@ class RS485Handler
 			}
 		}
 
+		const Rs485StubConfig &stubConfig() const
+		{
+			return _cfg;
+		}
+
 		uint32_t stubFailRemaining() const
 		{
 			if (_cfg.mode != Rs485StubMode::FailFirstNThenRecover) {

@@ -76,3 +76,12 @@ TEST_CASE("rs485 stub: advanced keys do not imply mode")
 	CHECK_FALSE(rs485StubParseModeField("{\"mode_hint\":\"online\"}", mode));
 	CHECK(mode == Rs485StubMode::OfflineForever);
 }
+
+TEST_CASE("rs485 stub: integer field parsing does not steal unrelated numeric values")
+{
+	int32_t value = 0;
+	CHECK_FALSE(rs485StubParseIntField("{\"mode\":\"fail\",\"reg\":123}", "fail_n", value));
+	CHECK(rs485StubParseIntField("{\"fail_n\":2,\"reg\":123}", "fail_n", value));
+	CHECK(value == 2);
+	CHECK_FALSE(rs485StubParseIntField("{\"dispatch_soc\":55}", "soc", value));
+}
