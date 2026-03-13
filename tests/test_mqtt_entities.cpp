@@ -52,6 +52,14 @@ TEST_CASE("mqtt entities: ids and mqtt names are unique and id lookup round-trip
 	}
 }
 
+TEST_CASE("mqtt entities: legacy identity ids keep their pre-catalog ordering")
+{
+	CHECK(static_cast<uint16_t>(mqttEntityId::entityInverterSn)
+	      < static_cast<uint16_t>(mqttEntityId::entityInverterVersion));
+	CHECK(static_cast<uint16_t>(mqttEntityId::entityEmsSn)
+	      < static_cast<uint16_t>(mqttEntityId::entityEmsVersion));
+}
+
 TEST_CASE("mqtt entities: runtime initializes without allocating a full mutable descriptor array")
 {
 	const bool initialAvailable = mqttEntitiesRtAvailable();
