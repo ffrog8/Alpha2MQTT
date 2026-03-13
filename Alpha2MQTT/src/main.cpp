@@ -4604,7 +4604,9 @@ mqttReconnect(void)
 	static bool mqttTargetLogged = false;
 
 	initMqttEntitiesRtIfNeeded(true);
-	loadPollingConfig();
+	if (!pendingPollingConfigSet) {
+		loadPollingConfig();
+	}
 	bool subscribed = false;
 	char subscriptionDef[192];
 	char line3[OLED_CHARACTER_WIDTH];
@@ -7236,26 +7238,39 @@ parseStubControlInt(const char *payload, const char *key, int32_t &out)
 		return false;
 	}
 
-	const char *pos = strstr(payload, key);
-	if (pos == nullptr) {
-		return false;
-	}
+	const size_t keyLen = strlen(key);
+	const auto isTokenChar = [](char ch) -> bool {
+		return (ch >= '0' && ch <= '9') ||
+		       (ch >= 'A' && ch <= 'Z') ||
+		       (ch >= 'a' && ch <= 'z') ||
+		       ch == '_';
+	};
 
-	pos += strlen(key);
-	while (*pos == ' ' || *pos == ':' || *pos == '=' || *pos == '"') {
-		pos++;
-	}
-	if (*pos == '\0') {
-		return false;
-	}
+	const char *search = payload;
+	while (const char *pos = strstr(search, key)) {
+		const char prev = (pos == payload) ? '\0' : pos[-1];
+		const char next = pos[keyLen];
+		if ((pos == payload || !isTokenChar(prev)) &&
+		    (next == '\0' || !isTokenChar(next))) {
+			pos += keyLen;
+			while (*pos == ' ' || *pos == ':' || *pos == '=' || *pos == '"') {
+				pos++;
+			}
+			if (*pos == '\0') {
+				return false;
+			}
 
-	char *endPtr = nullptr;
-	long parsed = strtol(pos, &endPtr, 10);
-	if (endPtr == pos) {
-		return false;
+			char *endPtr = nullptr;
+			long parsed = strtol(pos, &endPtr, 10);
+			if (endPtr == pos) {
+				return false;
+			}
+			out = static_cast<int32_t>(parsed);
+			return true;
+		}
+		search = pos + keyLen;
 	}
-	out = static_cast<int32_t>(parsed);
-	return true;
+	return false;
 }
 
 static bool
