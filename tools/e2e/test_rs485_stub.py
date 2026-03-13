@@ -2547,6 +2547,8 @@ def main() -> int:
             raise E2EError("portal polling page missing draft-preservation script/hooks")
         if "Advisory estimates only" not in html or "Current family estimate" not in html or "All active buckets" not in html:
             raise E2EError("portal polling page missing advisory estimate sections")
+        if "Current runtime state" not in html or "Runtime state reflects what the scheduler is actually doing now." not in html:
+            raise E2EError("portal polling page missing runtime diagnostics section")
 
         # Find which row index corresponds to a known stable mqttName.
         target = "State_of_Charge"

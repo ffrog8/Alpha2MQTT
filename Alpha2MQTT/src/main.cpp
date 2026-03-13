@@ -1949,6 +1949,14 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		"<h4>%s</h4><table><tr><th>Bucket</th><th>Entities</th><th>Tx</th><th>~Used ms</th><th>Budget ms</th><th>~Headroom ms</th><th>Risk</th></tr>";
 	static const char kEstimateRowFmt[] PROGMEM =
 		"<tr><td>%s</td><td>%u</td><td>%u</td><td>%lu</td><td>%lu</td><td>%lu</td><td>%s</td></tr>";
+	static const char kRuntimeIntro[] PROGMEM =
+		"<p class=\"hint\">Runtime state reflects what the scheduler is actually doing now. Stale values are expected when a bucket keeps truncating.</p>";
+	static const char kRuntimeWarnFmt[] PROGMEM =
+		"<p class=\"hint\">Runtime overruns observed: %lu</p>";
+	static const char kRuntimeTableOpenFmt[] PROGMEM =
+		"<h4>%s</h4><table><tr><th>Bucket</th><th>Used ms</th><th>Limit ms</th><th>Backlog</th><th>Oldest backlog ms</th><th>Last full cycle age ms</th><th>State</th></tr>";
+	static const char kRuntimeRowFmt[] PROGMEM =
+		"<tr><td>%s</td><td>%lu</td><td>%lu</td><td>%u</td><td>%lu</td><td>%lu</td><td>%s</td></tr>";
 	static const char kFormMetaFmt[] PROGMEM =
 		"<input type=\"hidden\" name=\"family\" value=\"%s\">"
 		"<input type=\"hidden\" name=\"page\" value=\"%u\">"
@@ -2066,10 +2074,46 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		           static_cast<unsigned long>(headroomMs),
 		           portalEstimateLevelLabel(estimate.level));
 		portalSendContentAndFeed(wifiManager, buf);
-	}
-	portalSendContentPAndFeed(wifiManager, kPlainTableClose);
+		}
+		portalSendContentPAndFeed(wifiManager, kPlainTableClose);
 
-	portalSendContentPAndFeed(wifiManager, kFormOpen);
+		portalSendContentPAndFeed(wifiManager, kRuntimeIntro);
+		if (pollingBudgetOverrunCount != 0) {
+			snprintf_P(buf,
+			           sizeof(buf),
+			           kRuntimeWarnFmt,
+			           static_cast<unsigned long>(pollingBudgetOverrunCount));
+			portalSendContentAndFeed(wifiManager, buf);
+		}
+		snprintf_P(buf, sizeof(buf), kRuntimeTableOpenFmt, "Current runtime state");
+		portalSendContentAndFeed(wifiManager, buf);
+		const uint32_t runtimeNowMs = millis();
+		for (BucketId runtimeBucket : kPortalEstimateBuckets) {
+			const PortalPollingEstimate estimate = portalBuildPollingEstimate(
+				entities, entityCount, buckets, runtimeBucket, pollIntervalSeconds * 1000UL, kPollOverrunMs);
+			if (estimate.entityCount == 0) {
+				continue;
+			}
+			BucketRuntimeBudgetState *state = bucketBudgetStateFor(runtimeBucket);
+			if (state == nullptr) {
+				continue;
+			}
+			const PortalRuntimeBucketSummary summary = portalBuildRuntimeBucketSummary(runtimeBucket, *state, runtimeNowMs);
+			snprintf_P(buf,
+			           sizeof(buf),
+			           kRuntimeRowFmt,
+			           bucketIdToString(summary.bucketId),
+			           static_cast<unsigned long>(summary.usedMs),
+			           static_cast<unsigned long>(summary.limitMs),
+			           static_cast<unsigned>(summary.backlogCount),
+			           static_cast<unsigned long>(summary.backlogOldestAgeMs),
+			           static_cast<unsigned long>(summary.lastFullCycleAgeMs),
+			           portalRuntimeLevelLabel(summary.level));
+			portalSendContentAndFeed(wifiManager, buf);
+		}
+		portalSendContentPAndFeed(wifiManager, kPlainTableClose);
+
+		portalSendContentPAndFeed(wifiManager, kFormOpen);
 	snprintf_P(buf, sizeof(buf),
 	           kFormMetaFmt,
 	           familyKey,

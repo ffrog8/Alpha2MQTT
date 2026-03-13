@@ -185,6 +185,47 @@ TEST_CASE("portal config: estimate levels escalate with transaction load")
 	CHECK(portalEstimateLevelLabel(tight.level) == std::string("Tight"));
 }
 
+TEST_CASE("portal config: runtime summary reports healthy buckets")
+{
+	BucketRuntimeBudgetState state{};
+	state.observed = true;
+	state.usedMsLast = 1800;
+	state.limitMsLast = 5000;
+	state.lastFullCycleCompletedMs = 9000;
+
+	const PortalRuntimeBucketSummary summary = portalBuildRuntimeBucketSummary(BucketId::TenSec, state, 10000);
+	CHECK(summary.bucketId == BucketId::TenSec);
+	CHECK(summary.observed);
+	CHECK_FALSE(summary.budgetExceeded);
+	CHECK(summary.usedMs == 1800);
+	CHECK(summary.limitMs == 5000);
+	CHECK(summary.backlogCount == 0);
+	CHECK(summary.lastFullCycleAgeMs == 1000);
+	CHECK(summary.level == PortalRuntimeLevel::Healthy);
+	CHECK(portalRuntimeLevelKey(summary.level) == std::string("healthy"));
+	CHECK(portalRuntimeLevelLabel(summary.level) == std::string("Healthy"));
+}
+
+TEST_CASE("portal config: runtime summary flags routine truncation")
+{
+	BucketRuntimeBudgetState state{};
+	state.observed = true;
+	state.usedMsLast = 5200;
+	state.limitMsLast = 5000;
+	state.backlogCount = 3;
+	state.deferredSinceMs = 1000;
+	state.lastFullCycleCompletedMs = 250;
+
+	const PortalRuntimeBucketSummary summary = portalBuildRuntimeBucketSummary(BucketId::OneMin, state, 8000);
+	CHECK(summary.budgetExceeded);
+	CHECK(summary.backlogCount == 3);
+	CHECK(summary.backlogOldestAgeMs == 7000);
+	CHECK(summary.lastFullCycleAgeMs == 7750);
+	CHECK(summary.level == PortalRuntimeLevel::RoutinelyTruncating);
+	CHECK(portalRuntimeLevelKey(summary.level) == std::string("routine"));
+	CHECK(portalRuntimeLevelLabel(summary.level) == std::string("Routinely truncating"));
+}
+
 TEST_CASE("portal config: family page normalizes requested page within matching entities only")
 {
 	const mqttState entities[] = {

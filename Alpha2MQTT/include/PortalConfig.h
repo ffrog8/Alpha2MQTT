@@ -7,6 +7,7 @@
 #include <cstdint>
 
 #include "Definitions.h"
+#include "Scheduler.h"
 
 enum class PortalPostWifiAction {
 	Reboot,
@@ -21,6 +22,13 @@ enum class PortalEstimateLevel : uint8_t {
 	Over
 };
 
+enum class PortalRuntimeLevel : uint8_t {
+	Idle = 0,
+	Healthy,
+	Truncating,
+	RoutinelyTruncating
+};
+
 struct PortalPollingEstimate {
 	BucketId bucketId = BucketId::Disabled;
 	size_t entityCount = 0;
@@ -28,6 +36,18 @@ struct PortalPollingEstimate {
 	uint32_t estimatedUsedMs = 0;
 	uint32_t budgetMs = 0;
 	PortalEstimateLevel level = PortalEstimateLevel::Idle;
+};
+
+struct PortalRuntimeBucketSummary {
+	BucketId bucketId = BucketId::Disabled;
+	bool observed = false;
+	bool budgetExceeded = false;
+	uint32_t usedMs = 0;
+	uint32_t limitMs = 0;
+	uint16_t backlogCount = 0;
+	uint32_t backlogOldestAgeMs = 0;
+	uint32_t lastFullCycleAgeMs = 0;
+	PortalRuntimeLevel level = PortalRuntimeLevel::Idle;
 };
 
 bool mqttServerIsBlank(const char *server);
@@ -74,6 +94,11 @@ PortalPollingEstimate portalBuildFamilyPollingEstimate(const mqttState *entities
                                                        uint32_t maxBudgetMs);
 const char *portalEstimateLevelKey(PortalEstimateLevel level);
 const char *portalEstimateLevelLabel(PortalEstimateLevel level);
+PortalRuntimeBucketSummary portalBuildRuntimeBucketSummary(BucketId bucketId,
+                                                          const BucketRuntimeBudgetState &state,
+                                                          uint32_t nowMs);
+const char *portalRuntimeLevelKey(PortalRuntimeLevel level);
+const char *portalRuntimeLevelLabel(PortalRuntimeLevel level);
 PortalFamilyPage portalBuildFamilyPage(const mqttState *entities,
                                        size_t entityCount,
                                        MqttEntityFamily family,

@@ -156,6 +156,21 @@ estimateLevelFor(const PortalPollingEstimate &estimate)
 	}
 	return PortalEstimateLevel::Light;
 }
+
+static PortalRuntimeLevel
+runtimeLevelFor(const PortalRuntimeBucketSummary &summary)
+{
+	if (!summary.observed) {
+		return PortalRuntimeLevel::Idle;
+	}
+	if (!summary.budgetExceeded) {
+		return PortalRuntimeLevel::Healthy;
+	}
+	if (summary.limitMs != 0 && summary.backlogOldestAgeMs > summary.limitMs) {
+		return PortalRuntimeLevel::RoutinelyTruncating;
+	}
+	return PortalRuntimeLevel::Truncating;
+}
 }
 
 bool
@@ -377,6 +392,56 @@ portalEstimateLevelLabel(PortalEstimateLevel level)
 	case PortalEstimateLevel::Over:
 		return "Over";
 	case PortalEstimateLevel::Idle:
+	default:
+		return "Idle";
+	}
+}
+
+PortalRuntimeBucketSummary
+portalBuildRuntimeBucketSummary(BucketId bucketId,
+                                const BucketRuntimeBudgetState &state,
+                                uint32_t nowMs)
+{
+	PortalRuntimeBucketSummary summary{};
+	summary.bucketId = bucketId;
+	summary.observed = state.observed;
+	summary.budgetExceeded = bucketRuntimeBudgetExceeded(state);
+	summary.usedMs = state.usedMsLast;
+	summary.limitMs = state.limitMsLast;
+	summary.backlogCount = state.backlogCount;
+	summary.backlogOldestAgeMs = bucketBacklogOldestAgeMs(state, nowMs);
+	summary.lastFullCycleAgeMs = bucketLastFullCycleAgeMs(state, nowMs);
+	summary.level = runtimeLevelFor(summary);
+	return summary;
+}
+
+const char *
+portalRuntimeLevelKey(PortalRuntimeLevel level)
+{
+	switch (level) {
+	case PortalRuntimeLevel::Healthy:
+		return "healthy";
+	case PortalRuntimeLevel::Truncating:
+		return "truncating";
+	case PortalRuntimeLevel::RoutinelyTruncating:
+		return "routine";
+	case PortalRuntimeLevel::Idle:
+	default:
+		return "idle";
+	}
+}
+
+const char *
+portalRuntimeLevelLabel(PortalRuntimeLevel level)
+{
+	switch (level) {
+	case PortalRuntimeLevel::Healthy:
+		return "Healthy";
+	case PortalRuntimeLevel::Truncating:
+		return "Truncating";
+	case PortalRuntimeLevel::RoutinelyTruncating:
+		return "Routinely truncating";
+	case PortalRuntimeLevel::Idle:
 	default:
 		return "Idle";
 	}
