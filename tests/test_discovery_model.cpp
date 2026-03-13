@@ -40,6 +40,7 @@ TEST_CASE("discovery model routes controller entities and inverter unique_id use
 {
 	CHECK(mqttEntityScope(mqttEntityId::entityA2MUptime) == DiscoveryDeviceScope::Controller);
 	CHECK(mqttEntityScope(mqttEntityId::entityBatSoc) == DiscoveryDeviceScope::Inverter);
+	CHECK(mqttEntityScope(mqttEntityId::entityPollingBudgetExceeded) == DiscoveryDeviceScope::Controller);
 
 	char uidController[96];
 	buildEntityUniqueId(DiscoveryDeviceScope::Controller,
@@ -58,6 +59,28 @@ TEST_CASE("discovery model routes controller entities and inverter unique_id use
 	                    uidInverter,
 	                    sizeof(uidInverter));
 	CHECK(std::string(uidInverter) == "alpha2mqtt_inv_AL12345678901234_State_of_Charge");
+}
+
+TEST_CASE("discovery model builds stable controller and inverter topic bases")
+{
+	char topicBase[160];
+	CHECK(buildEntityTopicBase("Alpha2MQTT-123456",
+	                          DiscoveryDeviceScope::Controller,
+	                          "alpha2mqtt_deadbeef1234",
+	                          "AL12345678901234",
+	                          "Polling_Budget_Exceeded",
+	                          topicBase,
+	                          sizeof(topicBase)));
+	CHECK(std::string(topicBase) == "Alpha2MQTT-123456/alpha2mqtt_deadbeef1234/Polling_Budget_Exceeded");
+
+	CHECK(buildEntityTopicBase("Alpha2MQTT-123456",
+	                          DiscoveryDeviceScope::Inverter,
+	                          "alpha2mqtt_deadbeef1234",
+	                          "AL12345678901234",
+	                          "State_of_Charge",
+	                          topicBase,
+	                          sizeof(topicBase)));
+	CHECK(std::string(topicBase) == "Alpha2MQTT-123456/alpha2mqtt_inv_AL12345678901234/State_of_Charge");
 }
 
 TEST_CASE("discovery model refreshes HA identity when serial changes")

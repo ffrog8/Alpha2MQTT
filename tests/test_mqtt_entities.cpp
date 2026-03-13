@@ -1,7 +1,9 @@
 // Purpose: Verify catalog metadata stays flash-friendly and runtime state is
 // derived from enabled entities rather than a full mutable per-entity array.
 
+#include <set>
 #include <cstring>
+#include <string>
 
 #include <doctest/doctest.h>
 
@@ -21,6 +23,32 @@ TEST_CASE("mqtt entities: descriptor table exists")
 		char name[64];
 		mqttEntityNameCopy(&desc[i], name, sizeof(name));
 		CHECK(std::strlen(name) > 0);
+	}
+}
+
+TEST_CASE("mqtt entities: ids and mqtt names are unique and id lookup round-trips")
+{
+	const mqttState *desc = mqttEntitiesDesc();
+	REQUIRE(desc != nullptr);
+	const size_t count = mqttEntitiesCount();
+	REQUIRE(count > 0);
+
+	std::set<int> ids;
+	std::set<std::string> names;
+
+	for (size_t i = 0; i < count; ++i) {
+		char name[64];
+		mqttEntityNameCopy(&desc[i], name, sizeof(name));
+		REQUIRE(name[0] != '\0');
+
+		const int idValue = static_cast<int>(desc[i].entityId);
+		CHECK(ids.insert(idValue).second);
+		CHECK(names.insert(name).second);
+
+		const mqttState *lookup = mqttEntityById(desc[i].entityId);
+		REQUIRE(lookup != nullptr);
+		CHECK(lookup == &desc[i]);
+		CHECK(mqttEntityNameEquals(lookup, name));
 	}
 }
 
