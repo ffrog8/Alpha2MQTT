@@ -2543,6 +2543,8 @@ def main() -> int:
             raise E2EError("portal polling page missing shared portal wrapper/header style")
         if "Unsaved polling changes will be lost. Continue?" not in html:
             raise E2EError("portal polling page missing unsaved-changes warning text")
+        if "sessionStorage" not in html or "bucket_map_full" not in html:
+            raise E2EError("portal polling page missing draft-preservation script/hooks")
 
         # Find which row index corresponds to a known stable mqttName.
         target = "State_of_Charge"
@@ -2566,21 +2568,21 @@ def main() -> int:
         if after_nav_bucket != initial_bucket:
             raise E2EError(f"unsaved bucket changed after page navigation: before={initial_bucket!r} after={after_nav_bucket!r}")
 
-        # Change poll_interval_s and move target to an alternate bucket.
+        # Change poll_interval_s and save a full draft map from a different page/family when possible.
         fields = {
-            "family": target_family,
-            "page": str(target_page),
+            "family": nav_family,
+            "page": str(nav_page),
             "poll_interval_s": "13",
-            f"b{row}": desired_bucket,
+            "bucket_map_full": f"{target}={desired_bucket};",
         }
         save_url = base + "/config/polling/save"
-        print(f"[e2e] POST {save_url} fields: family={target_family} page={target_page} poll_interval_s=13 b{row}={desired_bucket}")
+        print(f"[e2e] POST {save_url} fields: family={nav_family} page={nav_page} poll_interval_s=13 bucket_map_full={target}={desired_bucket}")
         save_status = _http_post_form(save_url, fields, timeout_s=20)
         if save_status not in (200, 302):
             raise E2EError(f"polling save failed status={save_status}")
 
         # Save should not reboot out of portal; page should remain reachable after save.
-        _wait_for_http_ok(f"{base}/config/polling?family={urllib.parse.quote(target_family)}&page={target_page}", timeout_s=10)
+        _wait_for_http_ok(f"{base}/config/polling?family={urllib.parse.quote(nav_family)}&page={nav_page}", timeout_s=10)
         _sleep_with_mqtt(mqtt, 3)
         _wait_for_http_ok(f"{base}/config/polling?family={urllib.parse.quote(target_family)}&page={target_page}", timeout_s=10)
         html_saved_text = _load_polling_page(base, target_family, target_page)

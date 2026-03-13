@@ -1840,8 +1840,70 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 	static const char kPageHeadB[] PROGMEM =
 		"<script>"
 		"window._d=0;"
+		"window._pk='a2m_polling_draft_v1';"
+		"function pRead(){"
+		"try{var raw=sessionStorage.getItem(window._pk);return raw?JSON.parse(raw):{entities:{}};}"
+		"catch(e){sessionStorage.removeItem(window._pk);return {entities:{}};}"
+		"}"
+		"function pWrite(v){"
+		"if(!v||!v.entities){sessionStorage.removeItem(window._pk);return;}"
+		"var keys=Object.keys(v.entities);"
+		"if(!keys.length&&(!v.poll_interval_s||v.poll_interval_s==='')){sessionStorage.removeItem(window._pk);return;}"
+		"sessionStorage.setItem(window._pk,JSON.stringify(v));"
+		"}"
+		"function pCapture(){"
+		"var form=document.getElementById('polling-form');if(!form){return;}"
+		"var draft=pRead();draft.entities=draft.entities||{};"
+		"var pi=form.elements['poll_interval_s'];if(pi){draft.poll_interval_s=pi.value;}"
+		"var rows=document.querySelectorAll('tr[data-entity]');"
+		"for(var i=0;i<rows.length;i++){"
+		"var row=rows[i],entity=row.getAttribute('data-entity');"
+		"var sel=row.querySelector('select[name^=\"b\"]');"
+		"if(entity&&sel){draft.entities[entity]=sel.value;}"
+		"}"
+		"pWrite(draft);"
+		"}"
+		"function pRestore(){"
+		"if(window.location.search.indexOf('saved=1')>=0){sessionStorage.removeItem(window._pk);return;}"
+		"var form=document.getElementById('polling-form');if(!form){return;}"
+		"var draft=pRead();var hasDraft=false;"
+		"var pi=form.elements['poll_interval_s'];"
+		"if(pi&&draft.poll_interval_s!==undefined){pi.value=draft.poll_interval_s;hasDraft=true;}"
+		"var rows=document.querySelectorAll('tr[data-entity]');"
+		"for(var i=0;i<rows.length;i++){"
+		"var row=rows[i],entity=row.getAttribute('data-entity');"
+		"var sel=row.querySelector('select[name^=\"b\"]');"
+		"if(entity&&sel&&draft.entities&&draft.entities[entity]!==undefined){sel.value=draft.entities[entity];hasDraft=true;}"
+		"}"
+		"if(hasDraft){window._d=1;}"
+		"}"
+		"function pPrepareSave(){"
+		"var form=document.getElementById('polling-form');if(!form){return true;}"
+		"var draft=pRead();draft.entities=draft.entities||{};"
+		"var pi=form.elements['poll_interval_s'];if(pi){draft.poll_interval_s=pi.value;}"
+		"var rows=document.querySelectorAll('tr[data-entity]');"
+		"for(var i=0;i<rows.length;i++){"
+		"var row=rows[i],entity=row.getAttribute('data-entity');"
+		"var sel=row.querySelector('select[name^=\"b\"]');"
+		"if(entity&&sel){draft.entities[entity]=sel.value;}"
+		"}"
+		"var keys=Object.keys(draft.entities).sort();"
+		"var parts=[];"
+		"for(var i=0;i<keys.length;i++){parts.push(keys[i]+'='+draft.entities[keys[i]]);}"
+		"var full=form.elements['bucket_map_full'];"
+		"if(full){full.value=parts.length?parts.join(';')+';':'';}"
+		"sessionStorage.removeItem(window._pk);"
+		"window._d=0;"
+		"return true;"
+		"}"
 		"function pDirty(){window._d=1;}"
-		"function pNav(){return !window._d||window.confirm('Unsaved polling changes will be lost. Continue?');}"
+		"function pNav(){"
+		"if(!window._d){return true;}"
+		"if(!window.confirm('Unsaved polling changes will be lost. Continue?')){return false;}"
+		"pCapture();"
+		"return true;"
+		"}"
+		"window.addEventListener('DOMContentLoaded',pRestore);"
 		"</script>";
 	static const char kPageHeadC[] PROGMEM =
 		"</head><body class=\"c\"><div class=\"wrap\">"
@@ -1853,7 +1915,7 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		"</div>";
 	static const char kSavedMsg[] PROGMEM = "<div class=\"msg S\"><strong>Saved.</strong></div>";
 	static const char kErrMsg[] PROGMEM = "<div class=\"msg D\"><strong>Some values were invalid and were ignored.</strong></div>";
-	static const char kFormOpen[] PROGMEM = "<form id=\"polling-form\" method=\"POST\" action=\"/config/polling/save\" oninput=\"pDirty()\" onchange=\"pDirty()\" onsubmit=\"window._d=0;\">";
+	static const char kFormOpen[] PROGMEM = "<form id=\"polling-form\" method=\"POST\" action=\"/config/polling/save\" oninput=\"pDirty()\" onchange=\"pDirty()\" onsubmit=\"return pPrepareSave();\">";
 	static const char kTableOpen[] PROGMEM = "<table><tr><th>Entity</th><th>Bucket</th></tr>";
 	static const char kTableClose[] PROGMEM = "</table><br><button type=\"submit\">Save</button></form>";
 	static const char kNavOpen[] PROGMEM = "<div class=\"row\">";
@@ -1870,6 +1932,7 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 	static const char kFormMetaFmt[] PROGMEM =
 		"<input type=\"hidden\" name=\"family\" value=\"%s\">"
 		"<input type=\"hidden\" name=\"page\" value=\"%u\">"
+		"<input type=\"hidden\" name=\"bucket_map_full\" value=\"\">"
 		"<label>poll_interval_s <input name=\"poll_interval_s\" type=\"number\" min=\"1\" max=\"86400\" value=\"%lu\"></label><br><br>";
 	static const char kPrevFmt[] PROGMEM =
 		"<form data-nav-away=\"1\" action=\"/config/polling\" method=\"get\" onsubmit=\"return pNav()\">"
@@ -2034,20 +2097,43 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 		}
 	}
 
-	for (size_t row = 0; row < visibleCount; ++row) {
-		const size_t idx = visibleIndices[row];
-		char argName[8];
-		snprintf(argName, sizeof(argName), "b%u", static_cast<unsigned>(row));
-		if (!wifiManager.server->hasArg(argName)) {
-			continue;
-		}
-		const String argVal = wifiManager.server->arg(argName);
-		BucketId bucket = bucketIdFromString(argVal.c_str());
-		if (bucket == BucketId::Unknown) {
+	if (wifiManager.server->hasArg("bucket_map_full")) {
+		const String fullMap = wifiManager.server->arg("bucket_map_full");
+		if (fullMap.length() >= kPrefBucketMapMaxLen) {
 			hadError = true;
-			continue;
+		} else {
+			strlcpy(g_portalBucketMapScratch, fullMap.c_str(), kPrefBucketMapMaxLen);
+			if (g_portalBucketMapScratch[0] != '\0') {
+				uint32_t unknownCount = 0;
+				uint32_t invalidCount = 0;
+				uint32_t duplicateCount = 0;
+				if (!applyBucketMapString(g_portalBucketMapScratch,
+				                          entities,
+				                          entityCount,
+				                          buckets,
+				                          unknownCount,
+				                          invalidCount,
+				                          duplicateCount)) {
+					hadError = true;
+				}
+			}
 		}
-		buckets[idx] = bucket;
+	} else {
+		for (size_t row = 0; row < visibleCount; ++row) {
+			const size_t idx = visibleIndices[row];
+			char argName[8];
+			snprintf(argName, sizeof(argName), "b%u", static_cast<unsigned>(row));
+			if (!wifiManager.server->hasArg(argName)) {
+				continue;
+			}
+			const String argVal = wifiManager.server->arg(argName);
+			BucketId bucket = bucketIdFromString(argVal.c_str());
+			if (bucket == BucketId::Unknown) {
+				hadError = true;
+				continue;
+			}
+			buckets[idx] = bucket;
+		}
 	}
 
 	char *outMap = g_portalBucketMapScratch;
