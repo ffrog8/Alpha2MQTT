@@ -864,7 +864,11 @@ rs485ProbeTick(void)
 			rs485CycleBackoffMs = kRs485ProbeAttemptDelayMs;
 
 			// Now that inverter identity is known, discovery/config can be published under the real HA unique id.
-			loadPollingConfig();
+			// If a deferred config/set payload is already queued, let loop() apply that first instead of
+			// reusing the shared bucket-map scratch and clobbering the pending MQTT command.
+			if (!pendingPollingConfigSet) {
+				loadPollingConfig();
+			}
 			requestHaDataResend();
 			resendAllData = true;
 			return;
