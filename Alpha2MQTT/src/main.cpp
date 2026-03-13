@@ -1876,8 +1876,12 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 	const mqttState *entities = mqttEntitiesDesc();
 	const size_t entityCount = mqttEntitiesCount();
 	BucketId *buckets = g_portalBucketsScratch;
+	BucketId originalBuckets[kMqttEntityDescriptorCount]{};
 	uint32_t storedIntervalSeconds = kPollIntervalDefaultSeconds;
 	(void)loadPollingBucketsForPortal(entities, entityCount, buckets, storedIntervalSeconds);
+	if (mqttEntitiesRtAvailable()) {
+		memcpy(originalBuckets, buckets, sizeof(originalBuckets));
+	}
 
 	const uint16_t page = portalArgToU16(wifiManager.server->arg("page"), 0);
 	const uint16_t maxPage = (entityCount == 0) ? 0 : static_cast<uint16_t>((entityCount - 1) / kPollingPortalPageSize);
@@ -1926,12 +1930,16 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 		hadError = true;
 	}
 
-	if (mapBuilt && bucketsCanApply && persistUserPollingConfig(storedIntervalSeconds, outMap)) {
-		const bool bucketsApplied = !mqttEntitiesRtAvailable() || mqttEntityApplyBuckets(buckets, entityCount);
-		if (bucketsApplied) {
+	bool bucketsApplied = false;
+	if (mapBuilt && bucketsCanApply) {
+		bucketsApplied = !mqttEntitiesRtAvailable() || mqttEntityApplyBuckets(buckets, entityCount);
+		if (bucketsApplied && persistUserPollingConfig(storedIntervalSeconds, outMap)) {
 			pollIntervalSeconds = storedIntervalSeconds;
 			recomputeBucketCounts();
 		} else {
+			if (bucketsApplied && mqttEntitiesRtAvailable()) {
+				mqttEntityApplyBuckets(originalBuckets, entityCount);
+			}
 			hadError = true;
 		}
 	} else if (mapBuilt) {
@@ -3754,10 +3762,12 @@ handlePollingConfigSet(const char *payload)
 	struct PollingConfigSetContext {
 		bool anyChange = false;
 		bool bucketAssignmentsChanged = false;
+		bool bucketsApplied = false;
 		bool pollIntervalChanged = false;
 		const mqttState *entities = nullptr;
 		size_t entityCount = 0;
 		BucketId *buckets = nullptr;
+		BucketId *originalBuckets = nullptr;
 		bool bucketsLoaded = false;
 		uint32_t stagedPollInterval = kPollIntervalDefaultSeconds;
 	};
@@ -3766,10 +3776,15 @@ handlePollingConfigSet(const char *payload)
 	const size_t entityCount = mqttEntitiesCount();
 	BucketId *buckets = g_portalBucketsScratch;
 	const bool bucketsLoaded = mqttEntitiesRtAvailable() && mqttEntityCopyBuckets(buckets, entityCount);
+	BucketId originalBuckets[kMqttEntityDescriptorCount]{};
+	if (bucketsLoaded) {
+		memcpy(originalBuckets, buckets, sizeof(originalBuckets));
+	}
 	PollingConfigSetContext ctx{};
 	ctx.entities = entities;
 	ctx.entityCount = entityCount;
 	ctx.buckets = buckets;
+	ctx.originalBuckets = originalBuckets;
 	ctx.bucketsLoaded = bucketsLoaded;
 	ctx.stagedPollInterval = pollIntervalSeconds;
 
@@ -3861,29 +3876,27 @@ handlePollingConfigSet(const char *payload)
 	}
 
 	if (ctx.bucketAssignmentsChanged) {
-		if (!mqttEntityCanApplyBuckets(buckets, entityCount)) {
+		if (!mqttEntityApplyBuckets(buckets, entityCount)) {
 			persistLoadOk = 0;
 			persistLoadErr = 1;
 			return false;
 		}
+		ctx.bucketsApplied = true;
 	}
 	if ((ctx.pollIntervalChanged || ctx.bucketAssignmentsChanged) &&
 	    !persistUserPollingConfig(ctx.stagedPollInterval, g_portalBucketMapScratch)) {
+		if (ctx.bucketsApplied) {
+			mqttEntityApplyBuckets(ctx.originalBuckets, entityCount);
+		}
 		persistLoadOk = 0;
 		persistLoadErr = 1;
 		return false;
 	}
 
 	if (ctx.bucketAssignmentsChanged) {
-		if (mqttEntityApplyBuckets(buckets, entityCount)) {
-			ctx.anyChange = true;
-			requestHaDataResend();
-			resendAllData = true;
-		} else {
-			persistLoadOk = 0;
-			persistLoadErr = 1;
-			return false;
-		}
+		ctx.anyChange = true;
+		requestHaDataResend();
+		resendAllData = true;
 	}
 	if (ctx.pollIntervalChanged) {
 		pollIntervalSeconds = ctx.stagedPollInterval;
