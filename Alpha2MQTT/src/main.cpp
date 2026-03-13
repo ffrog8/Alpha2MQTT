@@ -230,8 +230,11 @@ bool resendHaData = false;
 bool resendHaPreludePending = false;
 size_t resendHaNextEntityIndex = 0;
 bool resendHaClearStaleInverterPending = false;
+static constexpr size_t kStaleInverterDiscoveryQueueMax = 2;
 size_t resendHaClearStaleInverterIndex = 0;
-char resendHaClearStaleInverterDeviceId[64] = "";
+size_t resendHaClearStaleInverterQueueIndex = 0;
+size_t resendHaClearStaleInverterQueueCount = 0;
+char resendHaClearStaleInverterDeviceIds[kStaleInverterDiscoveryQueueMax][64] = {{0}};
 bool resendAllData = false;
 static constexpr size_t kHaDiscoveryBatchSize = 1;
 // Human-readable timestamp of the most recent polling-config mutation.
@@ -605,9 +608,20 @@ queueStaleInverterDiscoveryClear(const char *deviceId)
 	if (deviceId == nullptr || deviceId[0] == '\0') {
 		return;
 	}
-	strlcpy(resendHaClearStaleInverterDeviceId, deviceId, sizeof(resendHaClearStaleInverterDeviceId));
+	for (size_t i = 0; i < resendHaClearStaleInverterQueueCount; ++i) {
+		if (strcmp(resendHaClearStaleInverterDeviceIds[i], deviceId) == 0) {
+			resendHaClearStaleInverterPending = true;
+			return;
+		}
+	}
+	if (resendHaClearStaleInverterQueueCount >= kStaleInverterDiscoveryQueueMax) {
+		return;
+	}
+	strlcpy(resendHaClearStaleInverterDeviceIds[resendHaClearStaleInverterQueueCount],
+	        deviceId,
+	        sizeof(resendHaClearStaleInverterDeviceIds[0]));
+	resendHaClearStaleInverterQueueCount++;
 	resendHaClearStaleInverterPending = true;
-	resendHaClearStaleInverterIndex = 0;
 }
 
 void
@@ -774,6 +788,10 @@ rs485TryReadIdentityOnce(void)
 	                                                                 response.dataValueFormatted,
 	                                                                 staleInverterIdentifier,
 	                                                                 sizeof(staleInverterIdentifier));
+	char currentInverterIdentifier[64];
+	buildInverterIdentifier(response.dataValueFormatted,
+	                       currentInverterIdentifier,
+	                       sizeof(currentInverterIdentifier));
 
 	strlcpy(deviceSerialNumber, response.dataValueFormatted, sizeof(deviceSerialNumber));
 	persistUserDeviceSerial(deviceSerialNumber);
@@ -794,6 +812,13 @@ rs485TryReadIdentityOnce(void)
 			queueStaleInverterDiscoveryClear(staleInverterIdentifier);
 		}
 		setMqttIdentifiersFromSerial(deviceSerialNumber);
+	}
+	if (haUniqueId[0] != '\0' &&
+	    currentInverterIdentifier[0] != '\0' &&
+	    strcmp(haUniqueId, currentInverterIdentifier) != 0) {
+		// Upgrades from the legacy HA namespace used haUniqueId as the discovery topic path.
+		// Clear that retained namespace as well, even when the inverter serial itself did not change.
+		queueStaleInverterDiscoveryClear(haUniqueId);
 	}
 
 #ifdef DEBUG_OVER_SERIAL
@@ -3705,7 +3730,9 @@ clearHaEntityDiscovery(const mqttState *entity, const char *deviceId)
 static bool
 publishPendingStaleInverterDiscoveryClears(void)
 {
-	if (!resendHaClearStaleInverterPending || resendHaClearStaleInverterDeviceId[0] == '\0') {
+	if (!resendHaClearStaleInverterPending ||
+	    resendHaClearStaleInverterQueueIndex >= resendHaClearStaleInverterQueueCount ||
+	    resendHaClearStaleInverterDeviceIds[resendHaClearStaleInverterQueueIndex][0] == '\0') {
 		return false;
 	}
 	if (!mqttEntitiesRtAvailable()) {
@@ -3722,7 +3749,8 @@ publishPendingStaleInverterDiscoveryClears(void)
 			resendHaClearStaleInverterIndex++;
 			continue;
 		}
-		if (!clearHaEntityDiscovery(entity, resendHaClearStaleInverterDeviceId)) {
+		if (!clearHaEntityDiscovery(entity,
+		                            resendHaClearStaleInverterDeviceIds[resendHaClearStaleInverterQueueIndex])) {
 			return true;
 		}
 		resendHaClearStaleInverterIndex++;
@@ -3733,9 +3761,16 @@ publishPendingStaleInverterDiscoveryClears(void)
 		return true;
 	}
 
-	resendHaClearStaleInverterPending = false;
 	resendHaClearStaleInverterIndex = 0;
-	resendHaClearStaleInverterDeviceId[0] = '\0';
+	resendHaClearStaleInverterDeviceIds[resendHaClearStaleInverterQueueIndex][0] = '\0';
+	resendHaClearStaleInverterQueueIndex++;
+	if (resendHaClearStaleInverterQueueIndex < resendHaClearStaleInverterQueueCount) {
+		return true;
+	}
+
+	resendHaClearStaleInverterPending = false;
+	resendHaClearStaleInverterQueueIndex = 0;
+	resendHaClearStaleInverterQueueCount = 0;
 	return false;
 }
 
@@ -3843,6 +3878,8 @@ handlePollingConfigSet(const char *payload)
 
 			if (!strcmp(key, "bucket_map")) {
 				if (ctx.bucketsLoaded) {
+					BucketId beforeBuckets[kMqttEntityDescriptorCount]{};
+					memcpy(beforeBuckets, ctx.buckets, ctx.entityCount * sizeof(BucketId));
 					persistUnknownEntityCount = 0;
 					persistInvalidBucketCount = 0;
 					persistDuplicateEntityCount = 0;
@@ -3858,7 +3895,9 @@ handlePollingConfigSet(const char *payload)
 					if (!applied) {
 						return false;
 					}
-					ctx.bucketAssignmentsChanged = true;
+					if (memcmp(beforeBuckets, ctx.buckets, ctx.entityCount * sizeof(BucketId)) != 0) {
+						ctx.bucketAssignmentsChanged = true;
+					}
 				}
 				handled = true;
 			}
