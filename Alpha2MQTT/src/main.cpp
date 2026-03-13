@@ -159,6 +159,8 @@ constexpr size_t kPollingConfigChunkMapMaxLen = 1024;
 constexpr size_t kPrefPollingLastChangeMaxLen = 32;
 // Portal handlers run on a constrained callback stack on ESP8266.
 // Keep large polling map buffers in static storage to avoid stack corruption/panics.
+// `g_portalBucketMapScratch` is also the deferred `config/set` payload buffer, so
+// long-lived discovery/status code must not reuse it while MQTT callbacks can fire.
 static BucketId g_portalBucketsScratch[kMqttEntityDescriptorCount];
 static char g_portalBucketMapScratch[kPrefBucketMapMaxLen];
 static size_t g_lastPublishedPollingConfigChunkCount = 0;
@@ -5708,8 +5710,9 @@ addConfig(const mqttState *singleEntity,
           modbusRequestAndResponseStatusValues& resultAddedToPayload)
 {
 	// HA discovery generation runs on a constrained ESP8266 loop/callback stack.
-	// Reuse the existing polling scratch buffer instead of allocating another 1 KB stack frame.
-	char (&stateAddition)[kPrefBucketMapMaxLen] = g_portalBucketMapScratch;
+	// Use the smaller row-render scratch here so the 2 KB bucket-map scratch remains
+	// reserved for deferred `config/set` payloads while MQTT callbacks are active.
+	char (&stateAddition)[sizeof(g_portalRowRenderBuf)] = g_portalRowRenderBuf;
 	char prettyName[64];
 	char uniqueId[128];
 	const char *deviceId = discoveryDeviceIdForScope(scope);
