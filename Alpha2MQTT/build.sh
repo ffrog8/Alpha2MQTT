@@ -17,13 +17,28 @@ BASE_BUILD_FLAGS="-DMP_ESP8266 -UMP_ESP32 -UMP_XIAO_ESP32C6 -DBUILD_TS_MS=${BUIL
 OUTDIR="Alpha2MQTT/build/firmware"
 OUTFILE_REAL="${OUTDIR}/Alpha2MQTT_${BUILD_TS_MS}_real.bin"
 OUTFILE_STUB="${OUTDIR}/Alpha2MQTT_${BUILD_TS_MS}_stub.bin"
-TOOLCHAIN_NM="$(find /root/.arduino15 -name xtensa-lx106-elf-nm -print -quit || true)"
-TOOLCHAIN_BIN=""
-if [[ -n "${TOOLCHAIN_NM}" ]]; then
-	TOOLCHAIN_BIN="$(dirname "${TOOLCHAIN_NM}")"
-fi
+ESP8266_INDEX_URL="https://arduino.esp8266.com/stable/package_esp8266com_index.json"
 
 mkdir -p "${OUTDIR}"
+
+ensure_arduino_bootstrap() {
+	arduino-cli core update-index --additional-urls "${ESP8266_INDEX_URL}"
+	arduino-cli core install esp8266:esp8266@3.1.2 --additional-urls "${ESP8266_INDEX_URL}"
+	arduino-cli lib install "Adafruit BusIO"
+	arduino-cli lib install "Adafruit SSD1306"
+	arduino-cli lib install "Adafruit GFX Library"
+	arduino-cli lib install "WiFiManager"
+	arduino-cli lib install "Preferences"
+	arduino-cli lib install PubSubClient
+}
+
+find_toolchain_bin() {
+	local toolchain_nm
+	toolchain_nm="$(find /root/.arduino15 -name xtensa-lx106-elf-nm -print -quit || true)"
+	if [[ -n "${toolchain_nm}" ]]; then
+		dirname "${toolchain_nm}"
+	fi
+}
 
 compile_one() {
 	local label="$1"
@@ -46,6 +61,9 @@ compile_one() {
 		arduino-cli compile -e --build-property build.extra_flags="${extra_flags}" --build-property compiler.c.elf.extra_flags="${elf_flags}" --fqbn esp8266:esp8266:d1_mini Alpha2MQTT
 	fi
 
+	local toolchain_bin=""
+	toolchain_bin="$(find_toolchain_bin)"
+
 	mv Alpha2MQTT/build/esp8266.esp8266.d1_mini/Alpha2MQTT.ino.bin "${outfile}"
 	echo "[build] Wrote ${outfile} ($(wc -c < "${outfile}") bytes)"
 
@@ -63,23 +81,25 @@ compile_one() {
 		echo "[build] WARNING: map file not found at ${map_path}"
 	fi
 
-	if [[ -f "${elf_path}" && -n "${TOOLCHAIN_BIN}" ]]; then
+	if [[ -f "${elf_path}" && -n "${toolchain_bin}" ]]; then
 		{
 			echo "[ram] totals (bytes)"
-			"${TOOLCHAIN_BIN}/xtensa-lx106-elf-size" -A -d "${elf_path}" | awk '$1 == ".data" || $1 == ".bss" { print }'
+			"${toolchain_bin}/xtensa-lx106-elf-size" -A -d "${elf_path}" | awk '$1 == ".data" || $1 == ".bss" { print }'
 			echo
 			echo "[ram] top 30 .bss symbols"
-			"${TOOLCHAIN_BIN}/xtensa-lx106-elf-nm" -S --size-sort -t d "${elf_path}" | awk '$3 ~ /[bB]/ { print }' | tail -n 30
+			"${toolchain_bin}/xtensa-lx106-elf-nm" -S --size-sort -t d "${elf_path}" | awk '$3 ~ /[bB]/ { print }' | tail -n 30
 			echo
 			echo "[ram] top 30 .data symbols"
-			"${TOOLCHAIN_BIN}/xtensa-lx106-elf-nm" -S --size-sort -t d "${elf_path}" | awk '$3 ~ /[dD]/ { print }' | tail -n 30
+			"${toolchain_bin}/xtensa-lx106-elf-nm" -S --size-sort -t d "${elf_path}" | awk '$3 ~ /[dD]/ { print }' | tail -n 30
 		} > "${out_report}"
 		echo "[build] Wrote ${out_report}"
 		cat "${out_report}"
-	elif [[ -z "${TOOLCHAIN_BIN}" ]]; then
+	elif [[ -z "${toolchain_bin}" ]]; then
 		echo "[build] WARNING: xtensa toolchain not found for RAM symbol report."
 	fi
 }
+
+ensure_arduino_bootstrap
 
 # Build the real RS485/Modbus backend firmware.
 compile_one "real" "${BASE_BUILD_FLAGS}" "${OUTFILE_REAL}"
