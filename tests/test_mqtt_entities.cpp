@@ -52,6 +52,29 @@ TEST_CASE("mqtt entities: ids and mqtt names are unique and id lookup round-trip
 	}
 }
 
+TEST_CASE("mqtt entities: copy and index helpers round-trip by id")
+{
+	const mqttState *desc = mqttEntitiesDesc();
+	REQUIRE(desc != nullptr);
+	const size_t count = mqttEntitiesCount();
+	REQUIRE(count > 0);
+
+	for (size_t i = 0; i < count; ++i) {
+		mqttState byIndex{};
+		mqttState byId{};
+		size_t idx = count;
+		REQUIRE(mqttEntityCopyByIndex(i, &byIndex));
+		REQUIRE(mqttEntityCopyById(desc[i].entityId, &byId));
+		REQUIRE(mqttEntityIndexById(desc[i].entityId, &idx));
+		CHECK(idx == i);
+		CHECK(byIndex.entityId == desc[i].entityId);
+		CHECK(byId.entityId == desc[i].entityId);
+		char name[64];
+		mqttEntityNameCopy(&byIndex, name, sizeof(name));
+		CHECK(mqttEntityNameEquals(&desc[i], name));
+	}
+}
+
 TEST_CASE("mqtt entities: legacy identity ids keep their pre-catalog ordering")
 {
 	CHECK(static_cast<uint16_t>(mqttEntityId::entityInverterSn)

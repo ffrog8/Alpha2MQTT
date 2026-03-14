@@ -110,7 +110,7 @@ static bool inMqttCallback = false;
 static bool pendingPollingConfigSet = false;
 static bool pendingRs485StubControlSet = false;
 static bool pendingEntityCommandSet = false;
-static const mqttState *pendingEntityCommand = nullptr;
+static mqttEntityId pendingEntityCommandId = mqttEntityId::entityRegNum;
 // Shared deferred-control payload buffer for small MQTT commands. MQTT pumping is
 // blocked while any deferred command is pending, so stub/entity commands never
 // overlap in this storage.
@@ -492,6 +492,9 @@ bool clearHaEntityDiscovery(const mqttState*, const char *deviceId);
 bool publishControllerInverterSerialDiscovery(void);
 void publishControllerInverterSerialState(void);
 bool handlePollingConfigSet(char*);
+static bool lookupSubscription(char *entityName, mqttState *outEntity);
+static bool lookupEntity(mqttEntityId entityId, mqttState *outEntity);
+static bool lookupEntityIndex(mqttEntityId entityId, size_t *outIdx);
 const char* mqttUpdateFreqToString(mqttUpdateFreq);
 bool mqttUpdateFreqFromString(const char*, mqttUpdateFreq*);
 void updatePollingLastChange(void);
@@ -4207,8 +4210,8 @@ publishHaEntityDiscovery(const mqttState *entity)
 	if (!mqttEntitiesRtAvailable()) {
 		return true;
 	}
-	size_t idx = static_cast<size_t>(entity - mqttEntitiesDesc());
-	if (idx >= mqttEntitiesCount()) {
+	size_t idx = 0;
+	if (!lookupEntityIndex(entity->entityId, &idx)) {
 		return true;
 	}
 	mqttUpdateFreq effectiveFreq = mqttEntityEffectiveFreqByIndex(idx);
@@ -5311,31 +5314,39 @@ mqttReconnect(void)
 		return;
 }
 
-const mqttState *
-lookupSubscription(char *entityName)
+static bool
+lookupSubscription(char *entityName, mqttState *outEntity)
 {
-	const mqttState *entities = mqttEntitiesDesc();
+	if (outEntity == nullptr) {
+		return false;
+	}
+	mqttState entity{};
 	int numberOfEntities = static_cast<int>(mqttEntitiesCount());
 	for (int i = 0; i < numberOfEntities; i++) {
-		if (entities[i].subscribe &&
-		    mqttEntityNameEquals(&entities[i], entityName)) {
-			return &entities[i];
+		if (!mqttEntityCopyByIndex(static_cast<size_t>(i), &entity)) {
+			continue;
+		}
+		if (entity.subscribe && mqttEntityNameEquals(&entity, entityName)) {
+			*outEntity = entity;
+			return true;
 		}
 	}
-	return NULL;
+	return false;
 }
 
-const mqttState *
-lookupEntity(mqttEntityId entityId)
+static bool
+lookupEntity(mqttEntityId entityId, mqttState *outEntity)
 {
-	const mqttState *entities = mqttEntitiesDesc();
-	int numberOfEntities = static_cast<int>(mqttEntitiesCount());
-	for (int i = 0; i < numberOfEntities; i++) {
-		if (entities[i].entityId == entityId) {
-			return &entities[i];
-		}
+	return mqttEntityCopyById(entityId, outEntity);
+}
+
+static bool
+lookupEntityIndex(mqttEntityId entityId, size_t *outIdx)
+{
+	if (outIdx == nullptr) {
+		return false;
 	}
-	return NULL;
+	return mqttEntityIndexById(entityId, outIdx);
 }
 
 modbusRequestAndResponseStatusValues
@@ -6764,7 +6775,9 @@ sendHaData()
 
 	size_t batchCount = 0;
 	while (resendHaNextEntityIndex < numberOfEntities && batchCount < kHaDiscoveryBatchSize) {
-		if (!publishHaEntityDiscovery(&entities[resendHaNextEntityIndex])) {
+		mqttState entity{};
+		if (!mqttEntityCopyByIndex(resendHaNextEntityIndex, &entity) ||
+		    !publishHaEntityDiscovery(&entity)) {
 			return;
 		}
 		++resendHaNextEntityIndex;
@@ -7351,8 +7364,8 @@ sendDataFromMqttState(const mqttState *singleEntity, bool doHomeAssistant, const
 	if (!mqttEntitiesRtAvailable()) {
 		return true;
 	}
-	size_t idx = static_cast<size_t>(singleEntity - mqttEntitiesDesc());
-	if (idx >= mqttEntitiesCount()) {
+	size_t idx = 0;
+	if (!lookupEntityIndex(singleEntity->entityId, &idx)) {
 		return true;
 	}
 	mqttUpdateFreq effectiveFreq = mqttEntityEffectiveFreqByIndex(idx);
@@ -7446,8 +7459,8 @@ publishManualRegisterValueState(const mqttState *valueEntity, const modbusReques
 	if (valueEntity == nullptr || !mqttEntitiesRtAvailable()) {
 		return false;
 	}
-	const size_t idx = static_cast<size_t>(valueEntity - mqttEntitiesDesc());
-	if (idx >= mqttEntitiesCount()) {
+	size_t idx = 0;
+	if (!lookupEntityIndex(valueEntity->entityId, &idx)) {
 		return false;
 	}
 	mqttUpdateFreq effectiveFreq = mqttEntityEffectiveFreqByIndex(idx);
@@ -7503,23 +7516,23 @@ publishManualRegisterReadStatus(int32_t requestedReg, const modbusRequestAndResp
 static void
 publishManualRegisterReadState(int32_t requestedReg)
 {
-	const mqttState *valueEntity = lookupEntity(mqttEntityId::entityRegValue);
-	if (valueEntity == nullptr) {
+	mqttState valueEntity{};
+	if (!lookupEntity(mqttEntityId::entityRegValue, &valueEntity)) {
 		return;
 	}
 	modbusRequestAndResponse response;
-	const modbusRequestAndResponseStatusValues result = readEntity(valueEntity, &response);
+	const modbusRequestAndResponseStatusValues result = readEntity(&valueEntity, &response);
 	if (result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
 		return;
 	}
-	publishManualRegisterValueState(valueEntity, response);
+	publishManualRegisterValueState(&valueEntity, response);
 	publishManualRegisterReadStatus(requestedReg, response);
 }
 
 static void
 processPendingEntityCommand(void)
 {
-	if (!pendingEntityCommandSet || pendingEntityCommand == NULL) {
+	if (!pendingEntityCommandSet) {
 		return;
 	}
 
@@ -7527,12 +7540,15 @@ processPendingEntityCommand(void)
 		~PendingEntityCommandGuard()
 		{
 			pendingEntityCommandSet = false;
-			pendingEntityCommand = NULL;
+			pendingEntityCommandId = mqttEntityId::entityRegNum;
 			pendingDeferredControlPayload[0] = '\0';
 		}
 	} guard;
 
-	const mqttState *mqttEntity = pendingEntityCommand;
+	mqttState mqttEntity{};
+	if (!mqttEntityCopyById(pendingEntityCommandId, &mqttEntity)) {
+		return;
+	}
 	const char *mqttIncomingPayload = pendingDeferredControlPayload;
 
 	int32_t singleInt32 = -1;
@@ -7541,7 +7557,7 @@ processPendingEntityCommand(void)
 	bool valueProcessingError = false;
 
 	// First, process value.
-	switch (mqttEntity->entityId) {
+	switch (mqttEntity.entityId) {
 	case mqttEntityId::entitySocTarget:
 	case mqttEntityId::entityChargePwr:
 	case mqttEntityId::entityDischargePwr:
@@ -7557,7 +7573,7 @@ processPendingEntityCommand(void)
 		break;
 	default:
 #ifdef DEBUG_OVER_SERIAL
-		sprintf(_debugOutput, "Trying to update an unhandled entity! %d", mqttEntity->entityId);
+		sprintf(_debugOutput, "Trying to update an unhandled entity! %d", mqttEntity.entityId);
 		Serial.println(_debugOutput);
 #endif
 #ifdef DEBUG_CALLBACKS
@@ -7569,7 +7585,7 @@ processPendingEntityCommand(void)
 	if (valueProcessingError) {
 #ifdef DEBUG_OVER_SERIAL
 		char entityName[64];
-		mqttEntityNameCopy(mqttEntity, entityName, sizeof(entityName));
+		mqttEntityNameCopy(&mqttEntity, entityName, sizeof(entityName));
 		snprintf(_debugOutput, sizeof(_debugOutput), "Callback for %s with bad value: ", entityName);
 		Serial.print(_debugOutput);
 		Serial.println(mqttIncomingPayload);
@@ -7581,7 +7597,7 @@ processPendingEntityCommand(void)
 	}
 
 	// Now set the value and take appropriate action(s)
-	switch (mqttEntity->entityId) {
+	switch (mqttEntity.entityId) {
 	case mqttEntityId::entitySocTarget:
 		if ((singleInt32 < SOC_TARGET_MIN) || (singleInt32 > SOC_TARGET_MAX)) {
 #ifdef DEBUG_OVER_SERIAL
@@ -7661,14 +7677,14 @@ processPendingEntityCommand(void)
 		break;
 	default:
 #ifdef DEBUG_OVER_SERIAL
-		sprintf(_debugOutput, "Trying to write an unhandled entity! %d", mqttEntity->entityId);
+		sprintf(_debugOutput, "Trying to write an unhandled entity! %d", mqttEntity.entityId);
 		Serial.println(_debugOutput);
 #endif
 		break;
 	}
 
 	// Send (hopefully) updated state. If we failed to update, sender should notice value not changing.
-	sendDataFromMqttState(mqttEntity, false);
+	sendDataFromMqttState(&mqttEntity, false);
 }
 
 #if RS485_STUB
@@ -7906,7 +7922,8 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 	} guard(inMqttCallback);
 
 	char mqttIncomingPayload[512] = ""; // Should be enough to cover command requests
-	const mqttState *mqttEntity = NULL;
+	mqttState mqttEntity{};
+	bool haveMqttEntity = false;
 
 #ifdef DEBUG_OVER_SERIAL
 	sprintf(_debugOutput, "Topic: %s", topic);
@@ -8012,12 +8029,12 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 					strlcpy(topicDeviceId, topicAfterDevice, topicDeviceIdLen + 1);
 					strlcpy(topicEntityName, entitySep + 1, topicEntityLen + 1);
 					if (!strcmp(topicDeviceId, inverterDeviceId)) {
-						mqttEntity = lookupSubscription(topicEntityName);
+						haveMqttEntity = lookupSubscription(topicEntityName, &mqttEntity);
 					}
 				}
 			}
 		}
-		if (mqttEntity == NULL) {
+		if (!haveMqttEntity) {
 	#ifdef DEBUG_CALLBACKS
 			unknownCallbacks++;
 	#endif // DEBUG_CALLBACKS
@@ -8032,7 +8049,7 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 	#endif // DEBUG_CALLBACKS
 			return;
 		}
-		pendingEntityCommand = mqttEntity;
+		pendingEntityCommandId = mqttEntity.entityId;
 		strlcpy(pendingDeferredControlPayload, mqttIncomingPayload, sizeof(pendingDeferredControlPayload));
 		pendingEntityCommandSet = true;
 		return;

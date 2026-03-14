@@ -406,6 +406,41 @@ mqttEntityById(mqttEntityId id)
 	return nullptr;
 }
 
+bool
+mqttEntityCopyByIndex(size_t idx, mqttState *out)
+{
+	if (out == nullptr || idx >= kMqttEntityDescriptorCount) {
+		return false;
+	}
+	*out = kMqttEntities[idx];
+	return true;
+}
+
+bool
+mqttEntityCopyById(mqttEntityId id, mqttState *out)
+{
+	size_t idx = 0;
+	if (!mqttEntityIndexById(id, &idx)) {
+		return false;
+	}
+	return mqttEntityCopyByIndex(idx, out);
+}
+
+bool
+mqttEntityIndexById(mqttEntityId id, size_t *outIdx)
+{
+	if (outIdx == nullptr) {
+		return false;
+	}
+	for (size_t i = 0; i < kMqttEntityDescriptorCount; ++i) {
+		if (kMqttEntities[i].entityId == id) {
+			*outIdx = i;
+			return true;
+		}
+	}
+	return false;
+}
+
 size_t
 mqttEntitiesCount()
 {

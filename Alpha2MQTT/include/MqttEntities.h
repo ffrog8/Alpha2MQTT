@@ -57,6 +57,9 @@ constexpr size_t kMqttEntityDescriptorCount =
 
 const mqttState *mqttEntitiesDesc();
 const mqttState *mqttEntityById(mqttEntityId id);
+bool mqttEntityCopyByIndex(size_t idx, mqttState *out);
+bool mqttEntityCopyById(mqttEntityId id, mqttState *out);
+bool mqttEntityIndexById(mqttEntityId id, size_t *outIdx);
 size_t mqttEntitiesCount();
 
 bool mqttEntityNameEquals(const mqttState *entity, const char *name);
