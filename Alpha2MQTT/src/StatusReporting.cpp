@@ -148,6 +148,7 @@ eventCodeName(MqttEventCode code)
 EventLimiter::EventLimiter()
 {
 	memset(_lastPublishMs, 0, sizeof(_lastPublishMs));
+	_publishedMask = 0;
 }
 
 bool
@@ -157,11 +158,13 @@ EventLimiter::shouldPublish(MqttEventCode code, uint32_t nowMs, uint32_t minInte
 	if (index >= static_cast<uint8_t>(MqttEventCode::MaxValue)) {
 		return false;
 	}
+	uint32_t mask = static_cast<uint32_t>(1u << index);
 	uint32_t last = _lastPublishMs[index];
-	if (last != 0 && (nowMs - last) < minIntervalMs) {
+	if ((_publishedMask & mask) != 0 && (nowMs - last) < minIntervalMs) {
 		return false;
 	}
 	_lastPublishMs[index] = nowMs;
+	_publishedMask |= mask;
 	return true;
 }
 

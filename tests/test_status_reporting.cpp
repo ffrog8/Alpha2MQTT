@@ -22,6 +22,14 @@ TEST_CASE("event limiter enforces min interval per code")
 	CHECK(limiter.shouldPublish(MqttEventCode::MqttDisconnect, 40000, 30000));
 }
 
+TEST_CASE("event limiter treats zero timestamp as a real prior publish")
+{
+	EventLimiter limiter;
+	CHECK(limiter.shouldPublish(MqttEventCode::WifiDisconnect, 0, 30000));
+	CHECK_FALSE(limiter.shouldPublish(MqttEventCode::WifiDisconnect, 1000, 30000));
+	CHECK(limiter.shouldPublish(MqttEventCode::WifiDisconnect, 30000, 30000));
+}
+
 TEST_CASE("status core JSON builder includes required keys")
 {
 	StatusCoreSnapshot snapshot{};

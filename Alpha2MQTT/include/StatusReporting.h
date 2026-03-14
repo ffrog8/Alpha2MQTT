@@ -30,6 +30,7 @@ public:
 
 private:
 	uint32_t _lastPublishMs[static_cast<uint8_t>(MqttEventCode::MaxValue)];
+	uint32_t _publishedMask = 0;
 };
 
 struct StatusCoreSnapshot {
