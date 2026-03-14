@@ -1440,11 +1440,14 @@ httpMethodToString(HTTPMethod method)
 #endif
 
 #ifdef DEBUG_OVER_SERIAL
-static void
-portalLog(const char *format, ...)
-{
-	(void)format;
-}
+#define portalLog(...)                   \
+	do {                                 \
+		Serial.print(F("[portal] "));    \
+		Serial.printf(__VA_ARGS__);      \
+		Serial.print(F("\r\n"));         \
+	} while (0)
+#else
+#define portalLog(...) do { } while (0)
 #endif
 
 #if defined(MP_ESP8266)
