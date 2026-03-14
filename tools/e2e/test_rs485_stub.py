@@ -1009,6 +1009,12 @@ def _fetch_config(mqtt: MqttClient, topic: str) -> dict[str, Any]:
     cfg["entity_intervals"] = intervals
     return cfg
 
+
+def _normalize_label_for_entity_id(label: str) -> str:
+    lowered = re.sub(r"[^a-z0-9]+", "_", label.lower())
+    lowered = re.sub(r"_+", "_", lowered)
+    return lowered.strip("_")
+
 def _fetch_status_core(mqtt: MqttClient, topic: str) -> dict[str, Any]:
     return _fetch_latest_json(mqtt, topic, label="core")
 
@@ -1693,6 +1699,13 @@ def main() -> int:
             label=f"{label_prefix} mismatch backend",
         )
 
+        current_config = _fetch_config(mqtt, config_topic)
+        current_poll_interval = int(current_config.get("poll_interval_s", 4) or 4)
+        set_polling_config(
+            current_poll_interval,
+            "Op_Mode=one_min;SOC_Target=one_min;Charge_Power=one_min;Discharge_Power=one_min;Push_Power=one_min;",
+        )
+
         publish_ready_commands()
         wait_for_state("Op_Mode", op_mode_target)
         wait_for_state("SOC_Target", "80")
@@ -1785,41 +1798,46 @@ def main() -> int:
         _sleep_with_mqtt(mqtt, 2)
 
         serial_known = str(controller_serial).strip().lower() not in ("", "unknown")
+        label_display = str(controller_serial)[-3:] if serial_known else ""
+        label_id = _normalize_label_for_entity_id(label_display)
         inverter_device_id = _wait_for_inverter_identity() if serial_known else ""
         inverter_serial_uid = f"{controller_id}_inverter_serial"
-        expected_topics = {
-            f"homeassistant/sensor/{controller_id}/inverter_serial/config",
-            f"homeassistant/sensor/{controller_id}/A2M_version/config",
-        }
-        if serial_known:
-            expected_topics.add(f"homeassistant/sensor/{inverter_device_id}/Inverter_SN/config")
+        controller_inverter_serial_topic = f"homeassistant/sensor/{controller_id}/inverter_serial/config"
+        inverter_discovery_filter = f"homeassistant/+/{inverter_device_id}/+/config" if serial_known else ""
 
-        seen_topics: set[str] = set()
-        mqtt.subscribe("homeassistant/+/+/+/config", force=True)
+        mqtt.subscribe(controller_inverter_serial_topic, force=True)
+        if inverter_discovery_filter:
+            mqtt.subscribe(inverter_discovery_filter, force=True)
         deadline = time.time() + 25
-        while time.time() < deadline and seen_topics != expected_topics:
+        saw_controller_inverter_serial = False
+        saw_inverter_entity = False
+        while time.time() < deadline and (not saw_controller_inverter_serial or (serial_known and not saw_inverter_entity)):
             try:
                 got_topic, raw_payload = mqtt.wait_for_publish(timeout_s=5.0)
             except E2EError as e:
                 if "Timeout waiting for MQTT publish" in str(e):
                     continue
                 raise
-            if got_topic not in expected_topics:
-                continue
-            try:
+            if got_topic == controller_inverter_serial_topic:
                 payload = _parse_json(raw_payload)
-            except Exception:
-                continue
-            if got_topic.endswith("/inverter_serial/config"):
                 if str(payload.get("unique_id", "")) != inverter_serial_uid:
                     raise E2EError(
                         f"controller inverter_serial unique_id mismatch: "
                         f"expected {inverter_serial_uid!r} got {payload.get('unique_id')!r}"
                     )
-            elif got_topic.endswith("/A2M_version/config"):
-                if not str(payload.get("unique_id", "")).startswith(f"{controller_id}_"):
-                    raise E2EError("controller discovery entities not found (unique_id prefix mismatch)")
-            elif got_topic.endswith("/Inverter_SN/config"):
+                saw_controller_inverter_serial = True
+                continue
+
+            if not serial_known or not got_topic.startswith(f"homeassistant/") or f"/{inverter_device_id}/" not in got_topic:
+                continue
+            try:
+                payload = _parse_json(raw_payload)
+            except Exception:
+                continue
+            if not isinstance(payload, dict) or not payload:
+                continue
+
+            if not saw_inverter_entity:
                 inverter_device = payload.get("device", {})
                 if not isinstance(inverter_device, dict):
                     raise E2EError(f"inverter discovery missing device block: {payload}")
@@ -1831,9 +1849,24 @@ def main() -> int:
                 via = str(inverter_device.get("via_device", ""))
                 if via != controller_id:
                     raise E2EError(f"inverter via_device mismatch: via={via!r} expected={controller_id!r}")
-            seen_topics.add(got_topic)
+                expected_device_name = f"Alpha {label_display}"
+                if str(inverter_device.get("name", "")) != expected_device_name:
+                    raise E2EError(
+                        f"inverter device name mismatch: expected {expected_device_name!r} got {inverter_device.get('name')!r}"
+                    )
+                default_entity_id = str(payload.get("default_entity_id", ""))
+                if not default_entity_id.startswith(f"{got_topic.split('/')[1]}.alpha_{label_id}_"):
+                    raise E2EError(
+                        f"inverter default_entity_id prefix mismatch: expected prefix "
+                        f"{got_topic.split('/')[1]}.alpha_{label_id}_ got {default_entity_id!r}"
+                    )
+                saw_inverter_entity = True
 
-        missing = sorted(expected_topics - seen_topics)
+        missing: list[str] = []
+        if not saw_controller_inverter_serial:
+            missing.append(controller_inverter_serial_topic)
+        if serial_known and not saw_inverter_entity:
+            missing.append(f"{inverter_discovery_filter} (non-empty payload)")
         if missing:
             raise E2EError(f"missing discovery topic(s): {missing}")
 
@@ -1947,6 +1980,12 @@ def main() -> int:
         print("[e2e] case: dispatch write feedback (Register_Value reflects new dispatch state)")
         ha_unique = _wait_for_inverter_identity()
         _, reg_dispatch_start, dispatch_start_start = ensure_dispatch_write(ha_unique, label_prefix="dispatch feedback")
+        current_config = _fetch_config(mqtt, config_topic)
+        current_poll_interval = int(current_config.get("poll_interval_s", 4) or 4)
+        set_polling_config(
+            current_poll_interval,
+            "Register_Number=one_min;Register_Value=one_min;",
+        )
         manual_after = _select_register_and_wait_manual_read(
             mqtt,
             _command_topic(ha_unique, "Register_Number"),

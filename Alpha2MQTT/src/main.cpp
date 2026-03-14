@@ -141,6 +141,7 @@ void *portalRoutesBoundServer = nullptr;
 const char kPreferenceBootIntent[] = "Boot_Intent";
 const char kPreferenceBootMode[] = "Boot_Mode";
 const char kPreferenceDeviceSerial[] = "Device_Serial";
+const char kPreferenceInverterLabel[] = "Inverter_Label";
 const char kPreferenceBucketMap[] = "Bucket_Map";
 const char kPreferencePollInterval[] = "poll_interval_s";
 const char kPreferenceBucketMapMigrated[] = "Bucket_Map_Migrated";
@@ -152,6 +153,7 @@ const char kInverterModelFallback[] = "Alpha ESS";
 constexpr size_t kPrefBootIntentMaxLen = 24;
 constexpr size_t kPrefBootModeMaxLen = 24;
 constexpr size_t kPrefDeviceSerialMaxLen = 32;
+constexpr size_t kPrefInverterLabelMaxLen = 11;
 constexpr size_t kPrefWifiSsidMaxLen = 64;
 constexpr size_t kPrefWifiPasswordMaxLen = 64;
 constexpr size_t kPrefMqttServerMaxLen = 64;
@@ -291,6 +293,7 @@ struct AppConfig {
 	int mqttPort;
 	String mqttUser;
 	String mqttPass;
+	String inverterLabel;
 #if defined(MP_XIAO_ESP32C6) || defined(MP_ESPUNO_ESP32C6)
 	bool extAntenna;
 #endif // MP_XIAO_ESP32C6 || MP_ESPUNO_ESP32C6
@@ -536,6 +539,7 @@ static void persistUserBootMode(BootMode mode);
 static void persistUserMqttConfig(const char *server, int port, const char *user, const char *pass);
 static void persistUserWifiCredentials(const char *ssid, const char *pass);
 static void persistUserExtAntenna(bool enabled);
+static void persistUserInverterLabel(const char *label);
 static bool persistUserPollingConfig(uint32_t intervalSeconds, const char *bucketMap);
 static void persistUserPollingLastChange(const char *lastChange);
 static void handlePortalPollingClear(WiFiManager &wifiManager);
@@ -1320,6 +1324,27 @@ persistUserExtAntenna(bool enabled)
 	Preferences preferences;
 	preferences.begin(DEVICE_NAME, false);
 	preferences.putBool("Ext_Antenna", enabled);
+	preferences.end();
+}
+
+static void
+persistUserInverterLabel(const char *label)
+{
+	Preferences preferences;
+	if (!preferences.begin(DEVICE_NAME, false)) {
+		return;
+	}
+	const char *safeLabel = (label != nullptr) ? label : "";
+	if (safeLabel[0] == '\0') {
+		if (preferences.isKey(kPreferenceInverterLabel)) {
+			(void)preferences.remove(kPreferenceInverterLabel);
+		}
+		preferences.end();
+		return;
+	}
+	char bounded[kPrefInverterLabelMaxLen];
+	strlcpy(bounded, safeLabel, sizeof(bounded));
+	preferences.putString(kPreferenceInverterLabel, bounded);
 	preferences.end();
 }
 
@@ -2570,6 +2595,7 @@ void setup()
 	char storedIntent[kPrefBootIntentMaxLen] = "";
 	char storedMode[kPrefBootModeMaxLen] = "";
 	char storedSerial[kPrefDeviceSerialMaxLen] = "";
+	char storedInverterLabel[kPrefInverterLabelMaxLen] = "";
 	char wifiSsid[kPrefWifiSsidMaxLen] = "";
 	char wifiPass[kPrefWifiPasswordMaxLen] = "";
 	char mqttServer[kPrefMqttServerMaxLen] = "";
@@ -2580,6 +2606,7 @@ void setup()
 	preferences.getString(kPreferenceBootIntent, storedIntent, sizeof(storedIntent));
 	preferences.getString(kPreferenceBootMode, storedMode, sizeof(storedMode));
 	preferences.getString(kPreferenceDeviceSerial, storedSerial, sizeof(storedSerial));
+	preferences.getString(kPreferenceInverterLabel, storedInverterLabel, sizeof(storedInverterLabel));
 	preferences.getString("WiFi_SSID", wifiSsid, sizeof(wifiSsid));
 	preferences.getString("WiFi_Password", wifiPass, sizeof(wifiPass));
 	preferences.getString("MQTT_Server", mqttServer, sizeof(mqttServer));
@@ -2609,6 +2636,7 @@ void setup()
 	appConfig.mqttSrvr = mqttServer;
 	appConfig.mqttUser = mqttUser;
 	appConfig.mqttPass = mqttPass;
+	appConfig.inverterLabel = storedInverterLabel;
 
 	if (storedSerial[0] != '\0') {
 		strlcpy(deviceSerialNumber, storedSerial, sizeof(deviceSerialNumber));
@@ -2872,6 +2900,7 @@ configHandlerSta(void)
 	WiFiManagerParameter custom_mqtt_port("port", "MQTT port", mqttPortDefault.c_str(), 6);
 	WiFiManagerParameter custom_mqtt_user("user", "MQTT user", appConfig.mqttUser.c_str(), 32);
 	WiFiManagerParameter custom_mqtt_pass("mpass", "MQTT password", appConfig.mqttPass.c_str(), 32);
+	WiFiManagerParameter custom_inverter_label("inverter_label", "Inverter label (optional)", appConfig.inverterLabel.c_str(), kPrefInverterLabelMaxLen);
 	WiFiManagerParameter p_polling_link("<p><a href=\"/config/polling\">Polling schedule</a></p>");
 
 	wifiManager.addParameter(&p_lineBreak_text);
@@ -2879,6 +2908,7 @@ configHandlerSta(void)
 	wifiManager.addParameter(&custom_mqtt_port);
 	wifiManager.addParameter(&custom_mqtt_user);
 	wifiManager.addParameter(&custom_mqtt_pass);
+	wifiManager.addParameter(&custom_inverter_label);
 	wifiManager.addParameter(&p_polling_link);
 
 	portalStatus = portalStatusIdle;
@@ -2944,6 +2974,8 @@ configHandlerSta(void)
 			port = 0;
 		}
 		persistUserMqttConfig(custom_mqtt_server.getValue(), port, custom_mqtt_user.getValue(), custom_mqtt_pass.getValue());
+		persistUserInverterLabel(custom_inverter_label.getValue());
+		appConfig.inverterLabel = custom_inverter_label.getValue();
 
 		portalMqttSaved = true;
 		portalNeedsMqttConfig = mqttServerIsBlank(custom_mqtt_server.getValue());
@@ -3143,6 +3175,7 @@ configHandler(void)
 	WiFiManagerParameter custom_mqtt_port("port", "MQTT port", mqttPortDefault.c_str(), 6);
 	WiFiManagerParameter custom_mqtt_user("user", "MQTT user", appConfig.mqttUser.c_str(), 32);
 	WiFiManagerParameter custom_mqtt_pass("mpass", "MQTT password", appConfig.mqttPass.c_str(), 32);
+	WiFiManagerParameter custom_inverter_label("inverter_label", "Inverter label (optional)", appConfig.inverterLabel.c_str(), kPrefInverterLabelMaxLen);
 	WiFiManagerParameter p_polling_link("<p><a href=\"/config/polling\">Polling schedule</a></p>");
 #ifdef MP_XIAO_ESP32C6
 	const char _customHtml_checkbox[] = "type=\"checkbox\"";
@@ -3173,6 +3206,7 @@ configHandler(void)
 	wifiManager.addParameter(&custom_mqtt_port);
 	wifiManager.addParameter(&custom_mqtt_user);
 	wifiManager.addParameter(&custom_mqtt_pass);
+	wifiManager.addParameter(&custom_inverter_label);
 	wifiManager.addParameter(&p_polling_link);
 
 	portalStatus = portalStatusIdle;
@@ -3270,6 +3304,8 @@ configHandler(void)
 			port = 0;
 		}
 		persistUserMqttConfig(custom_mqtt_server.getValue(), port, custom_mqtt_user.getValue(), custom_mqtt_pass.getValue());
+		persistUserInverterLabel(custom_inverter_label.getValue());
+		appConfig.inverterLabel = custom_inverter_label.getValue();
 
 		portalMqttSaved = true;
 		portalNeedsMqttConfig = mqttServerIsBlank(custom_mqtt_server.getValue());
@@ -6473,20 +6509,27 @@ emitEntityDiscoveryPayload(CountedMqttPayload &payload, void *context)
 	const char *topicBase = ctx.topicBase;
 	char stateAddition[256];
 	char prettyName[64];
+	char metricId[64];
 	char uniqueId[128];
+	char deviceDisplayName[48];
+	char labelDisplay[16];
+	char labelId[16];
+	char defaultEntityId[96];
 	const char *deviceId = discoveryDeviceIdForScope(scope);
 	const bool inverterScope = (scope == DiscoveryDeviceScope::Inverter);
 	char entityKey[64];
+	const char *entityType = "sensor";
 	stateAddition[0] = '\0';
 	if (singleEntity == nullptr || deviceId[0] == '\0' || topicBase == nullptr || topicBase[0] == '\0') {
 		payload.ok = false;
 		return false;
 	}
 	mqttEntityNameCopy(singleEntity, entityKey, sizeof(entityKey));
+	buildEntityMetricId(singleEntity, metricId, sizeof(metricId));
 	buildEntityUniqueId(scope,
 	                    controllerIdentifier,
 	                    deviceSerialNumber,
-	                    entityKey,
+	                    (inverterScope && metricId[0] != '\0') ? metricId : entityKey,
 	                    uniqueId,
 	                    sizeof(uniqueId));
 
@@ -6499,15 +6542,19 @@ emitEntityDiscoveryPayload(CountedMqttPayload &payload, void *context)
 	case homeAssistantClass::haClassBox:
 	case homeAssistantClass::haClassNumber:
 		sprintf(stateAddition, "\"component\": \"number\"");
+		entityType = "number";
 		break;
 	case homeAssistantClass::haClassSelect:
 		sprintf(stateAddition, "\"component\": \"select\"");
+		entityType = "select";
 		break;
 	case homeAssistantClass::haClassBinaryProblem:
 		sprintf(stateAddition, "\"component\": \"binary_sensor\"");
+		entityType = "binary_sensor";
 		break;
 	default:
 		sprintf(stateAddition, "\"component\": \"sensor\"");
+		entityType = "sensor";
 		break;
 	}
 	if (!appendCountedMqttText(payload, stateAddition)) {
@@ -6515,11 +6562,18 @@ emitEntityDiscoveryPayload(CountedMqttPayload &payload, void *context)
 	}
 
 	if (inverterScope) {
+		if (!buildInverterDeviceDisplayName(deviceSerialNumber,
+		                                    appConfig.inverterLabel.c_str(),
+		                                    deviceDisplayName,
+		                                    sizeof(deviceDisplayName))) {
+			payload.ok = false;
+			return false;
+		}
 		snprintf(stateAddition, sizeof(stateAddition),
 		         ", \"device\": {"
 		         " \"name\": \"%s\", \"model\": \"%s\", \"manufacturer\": \"AlphaESS\","
 		         " \"identifiers\": [\"%s\"], \"via_device\": \"%s\"}",
-		         haUniqueId,
+		         deviceDisplayName,
 		         (deviceBatteryType[0] != '\0' ? deviceBatteryType : kInverterModelFallback),
 		         deviceId,
 		         controllerIdentifier);
@@ -6536,13 +6590,35 @@ emitEntityDiscoveryPayload(CountedMqttPayload &payload, void *context)
 		return false;
 	}
 
-	strlcpy(prettyName, entityKey, sizeof(prettyName));
-	while(char *ch = strchr(prettyName, '_')) {
-		*ch = ' ';
-	}
+	buildEntityDisplayName(singleEntity, scope, prettyName, sizeof(prettyName));
 	snprintf(stateAddition, sizeof(stateAddition), ", \"name\": \"%s\"", prettyName);
 	if (!appendCountedMqttText(payload, stateAddition)) {
 		return false;
+	}
+
+	if (inverterScope) {
+		if (!buildInverterLabelDisplay(deviceSerialNumber,
+		                               appConfig.inverterLabel.c_str(),
+		                               labelDisplay,
+		                               sizeof(labelDisplay))) {
+			payload.ok = false;
+			return false;
+		}
+		buildInverterLabelId(labelDisplay, labelId, sizeof(labelId));
+		if (labelId[0] == '\0') {
+			payload.ok = false;
+			return false;
+		}
+		snprintf(defaultEntityId, sizeof(defaultEntityId), "%s.alpha_%s_%s",
+		         entityType,
+		         labelId,
+		         (metricId[0] != '\0' ? metricId : entityKey));
+		snprintf(stateAddition, sizeof(stateAddition),
+		         ", \"default_entity_id\": \"%s\", \"has_entity_name\": true",
+		         defaultEntityId);
+		if (!appendCountedMqttText(payload, stateAddition)) {
+			return false;
+		}
 	}
 
 	snprintf(stateAddition, sizeof(stateAddition), ", \"unique_id\": \"%s\"", uniqueId);

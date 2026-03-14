@@ -4,6 +4,7 @@
 #include "doctest/doctest.h"
 
 #include "DiscoveryModel.h"
+#include "MqttEntities.h"
 
 TEST_CASE("discovery model builds stable controller and inverter identifiers")
 {
@@ -55,10 +56,10 @@ TEST_CASE("discovery model routes controller entities and inverter unique_id use
 	buildEntityUniqueId(DiscoveryDeviceScope::Inverter,
 	                    "alpha2mqtt_deadbeef1234",
 	                    "AL12345678901234",
-	                    "State_of_Charge",
+	                    "battery_soc",
 	                    uidInverter,
 	                    sizeof(uidInverter));
-	CHECK(std::string(uidInverter) == "alpha2mqtt_inv_AL12345678901234_State_of_Charge");
+	CHECK(std::string(uidInverter) == "alpha2mqtt_inv_AL12345678901234_battery_soc");
 }
 
 TEST_CASE("discovery model builds stable controller and inverter topic bases")
@@ -108,4 +109,49 @@ TEST_CASE("discovery model returns the stale inverter namespace when serial chan
 	                                        "AL00000000000000",
 	                                        staleId,
 	                                        sizeof(staleId)));
+}
+
+TEST_CASE("discovery model derives inverter labels for display and ids")
+{
+	char display[16];
+	char id[16];
+	CHECK(buildInverterLabelDisplay("STUBSN000000054", "", display, sizeof(display)));
+	CHECK(std::string(display) == "054");
+	buildInverterLabelId(display, id, sizeof(id));
+	CHECK(std::string(id) == "054");
+
+	CHECK(buildInverterLabelDisplay("STUBSN000000054", "Shed-A", display, sizeof(display)));
+	CHECK(std::string(display) == "Shed-A");
+	buildInverterLabelId(display, id, sizeof(id));
+	CHECK(std::string(id) == "shed_a");
+
+	char deviceName[32];
+	CHECK(buildInverterDeviceDisplayName("STUBSN000000054", "Shed-A", deviceName, sizeof(deviceName)));
+	CHECK(std::string(deviceName) == "Alpha Shed-A");
+}
+
+TEST_CASE("discovery model builds canonical inverter metric ids and display names")
+{
+	mqttState batterySoc{};
+	REQUIRE(mqttEntityCopyById(mqttEntityId::entityBatSoc, &batterySoc));
+	char metricId[64];
+	char displayName[64];
+	buildEntityMetricId(&batterySoc, metricId, sizeof(metricId));
+	buildEntityDisplayName(&batterySoc, DiscoveryDeviceScope::Inverter, displayName, sizeof(displayName));
+	CHECK(std::string(metricId) == "battery_soc");
+	CHECK(std::string(displayName) == "Battery SOC");
+
+	mqttState batteryCurrent{};
+	REQUIRE(mqttEntityCopyById(mqttEntityId::entityBatteryCurrent, &batteryCurrent));
+	buildEntityMetricId(&batteryCurrent, metricId, sizeof(metricId));
+	buildEntityDisplayName(&batteryCurrent, DiscoveryDeviceScope::Inverter, displayName, sizeof(displayName));
+	CHECK(std::string(metricId) == "battery_current");
+	CHECK(std::string(displayName) == "Battery Current");
+
+	mqttState controllerUptime{};
+	REQUIRE(mqttEntityCopyById(mqttEntityId::entityA2MUptime, &controllerUptime));
+	buildEntityMetricId(&controllerUptime, metricId, sizeof(metricId));
+	buildEntityDisplayName(&controllerUptime, DiscoveryDeviceScope::Controller, displayName, sizeof(displayName));
+	CHECK(std::string(metricId) == "a2m_uptime");
+	CHECK(std::string(displayName) == "A2M uptime");
 }

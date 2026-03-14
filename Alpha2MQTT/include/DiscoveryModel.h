@@ -27,6 +27,22 @@ bool inverterHaUniqueIdMatchesSerial(const char *uniqueId, const char *serial);
 // Returns true only for non-empty serials that are not placeholder values.
 bool inverterSerialIsValid(const char *serial);
 
+// Writes the effective display label for inverter naming. Prefers the user
+// override when present, otherwise uses the raw last 3 chars of the serial.
+bool buildInverterLabelDisplay(const char *serial,
+                               const char *labelOverride,
+                               char *out,
+                               size_t outLen);
+
+// Normalizes a display label into a lowercase snake_case id segment.
+void buildInverterLabelId(const char *labelDisplay, char *out, size_t outLen);
+
+// Writes the HA-facing inverter device display name: "Alpha <label>".
+bool buildInverterDeviceDisplayName(const char *serial,
+                                    const char *labelOverride,
+                                    char *out,
+                                    size_t outLen);
+
 // Writes the previous inverter discovery identifier when the serial changed
 // from one valid value to another. Returns false when there is no stale
 // inverter namespace to clear.
@@ -38,11 +54,21 @@ bool buildStaleInverterIdentifier(const char *previousSerial,
 // Returns device scope for a compiled MQTT entity.
 DiscoveryDeviceScope mqttEntityScope(mqttEntityId id);
 
-// Writes stable unique_id: "<controller|inverter id>_<entity key>".
+// Writes the HA-facing metric id used for inverter entity ids / unique ids.
+void buildEntityMetricId(const mqttState *entity, char *out, size_t outLen);
+
+// Writes the HA-facing metric display name. Inverter names are label-agnostic;
+// Home Assistant combines them with the inverter device name.
+void buildEntityDisplayName(const mqttState *entity,
+                            DiscoveryDeviceScope scope,
+                            char *out,
+                            size_t outLen);
+
+// Writes stable unique_id: "<controller|inverter id>_<metric key>".
 void buildEntityUniqueId(DiscoveryDeviceScope scope,
                          const char *controllerId,
                          const char *serial,
-                         const char *entityKey,
+                         const char *metricKey,
                          char *out,
                          size_t outLen);
 
