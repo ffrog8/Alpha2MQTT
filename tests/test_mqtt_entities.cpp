@@ -235,7 +235,7 @@ TEST_CASE("mqtt entities: freqNever defaults can still be overridden into a real
 
 	buckets[idx] = BucketId::Disabled;
 	REQUIRE(mqttEntityApplyBuckets(buckets, kMqttEntityDescriptorCount));
-	CHECK(mqttEntityEffectiveFreqByIndex(idx) == mqttUpdateFreq::freqNever);
+	CHECK(mqttEntityEffectiveFreqByIndex(idx) == mqttUpdateFreq::freqDisabled);
 }
 
 TEST_CASE("mqtt entities: controller diagnostics append after the legacy persisted entity set")

@@ -105,6 +105,24 @@ defaultBucketForIndex(size_t idx)
 	return bucketIdFromFreq(entity.updateFreq);
 }
 
+static bool
+bucketMatchesStoredDefault(size_t idx, BucketId bucket)
+{
+	if (bucket == BucketId::Unknown) {
+		return false;
+	}
+	mqttState entity{};
+	if (!copyEntityFromCatalog(idx, &entity)) {
+		return false;
+	}
+	if (entity.updateFreq == mqttUpdateFreq::freqNever) {
+		// `freqNever` defaults render as Disabled in the portal, but dropping an
+		// explicit Disabled override would resurrect discovery/state publishing.
+		return false;
+	}
+	return bucket == bucketIdFromFreq(entity.updateFreq);
+}
+
 static BucketId
 bucketOverrideForIndex(const MqttEntityBucketOverride *overrides, size_t overrideCount, size_t idx)
 {
@@ -390,7 +408,7 @@ buildOverridesFromBuckets(const BucketId *buckets,
 		if (bucket == BucketId::Unknown) {
 			return false;
 		}
-		if (bucket != defaultBucketForIndex(i)) {
+		if (!bucketMatchesStoredDefault(i, bucket)) {
 			nextOverrideCount++;
 		}
 	}
@@ -408,7 +426,7 @@ buildOverridesFromBuckets(const BucketId *buckets,
 	size_t nextIdx = 0;
 	for (size_t i = 0; i < entityCount; ++i) {
 		const BucketId bucket = buckets[i];
-		if (bucket == defaultBucketForIndex(i)) {
+		if (bucketMatchesStoredDefault(i, bucket)) {
 			continue;
 		}
 		nextOverrides[nextIdx].entityIndex = static_cast<uint16_t>(i);

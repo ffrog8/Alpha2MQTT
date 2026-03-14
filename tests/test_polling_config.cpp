@@ -468,6 +468,31 @@ TEST_CASE("assignment builder emits stable name overrides and round-trips")
 	CHECK(roundTrip[1] == BucketId::User);
 }
 
+TEST_CASE("assignment builder preserves explicit disabled overrides for freqNever entities")
+{
+	mqttState entities[1]{};
+	entities[0] = makeEntity(mqttEntityId::entityRs485Avail,
+	                         "RS485_Connected",
+	                         mqttUpdateFreq::freqNever,
+	                         homeAssistantClass::haClassBinaryProblem);
+	entities[0].readKind = MqttEntityReadKind::Derived;
+
+	BucketId buckets[1] = { BucketId::Disabled };
+	char out[128];
+	size_t applied = 0;
+
+	CHECK(buildBucketMapFromAssignments(entities, 1, buckets, out, sizeof(out), applied));
+	CHECK(applied == 1);
+	CHECK(std::string(out) == "RS485_Connected=disabled;");
+
+	BucketId roundTrip[1] = { BucketId::Disabled };
+	uint32_t unknown = 0;
+	uint32_t invalid = 0;
+	uint32_t dup = 0;
+	CHECK(applyBucketMapString(out, entities, 1, roundTrip, unknown, invalid, dup));
+	CHECK(roundTrip[0] == BucketId::Disabled);
+}
+
 TEST_CASE("active assignment chunk builder includes defaults and resumes from the next descriptor")
 {
 	mqttState entities[3]{};

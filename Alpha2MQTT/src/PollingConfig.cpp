@@ -415,6 +415,20 @@ appendActiveBucketAssignment(const mqttState &entity,
 	return appendBucketMapOverride(entity, bucket, out, outSize, used);
 }
 
+static bool
+bucketMatchesPersistedDefault(const mqttState &entity, BucketId bucket)
+{
+	if (bucket == BucketId::Unknown) {
+		return false;
+	}
+	if (entity.updateFreq == mqttUpdateFreq::freqNever) {
+		// A saved Disabled override must survive round-trips for freqNever
+		// descriptors; otherwise they silently revert to active discovery/state.
+		return false;
+	}
+	return bucket == bucketIdFromFreq(entity.updateFreq);
+}
+
 bool
 buildBucketMapFromLegacy(const mqttState *entities,
                          size_t entityCount,
@@ -472,14 +486,13 @@ buildBucketMapFromLegacyReader(const mqttState *entities,
 		if (!reader(i, &entities[i], defaultValue, storedValue, context)) {
 			return false;
 		}
-		if (!isValidMqttUpdateFreq(storedValue)) {
-			continue;
-		}
-		const BucketId bucket = bucketIdFromLegacyFreq(storedValue);
-		const BucketId defaultBucket = bucketIdFromFreq(entities[i].updateFreq);
-		if (bucket == BucketId::Unknown || bucket == defaultBucket) {
-			continue;
-		}
+			if (!isValidMqttUpdateFreq(storedValue)) {
+				continue;
+			}
+			const BucketId bucket = bucketIdFromLegacyFreq(storedValue);
+			if (bucket == BucketId::Unknown || bucketMatchesPersistedDefault(entities[i], bucket)) {
+				continue;
+			}
 		if (!appendBucketMapOverride(entities[i], bucket, out, outSize, used)) {
 			return false;
 		}
@@ -505,15 +518,14 @@ buildBucketMapFromAssignments(const mqttState *entities,
 	out[0] = '\0';
 	size_t used = 0;
 
-	for (size_t i = 0; i < entityCount; ++i) {
-		const BucketId bucket = buckets[i];
-		if (bucket == BucketId::Unknown) {
-			continue;
-		}
-		const BucketId defaultBucket = bucketIdFromFreq(entities[i].updateFreq);
-		if (bucket == defaultBucket) {
-			continue;
-		}
+		for (size_t i = 0; i < entityCount; ++i) {
+			const BucketId bucket = buckets[i];
+			if (bucket == BucketId::Unknown) {
+				continue;
+			}
+			if (bucketMatchesPersistedDefault(entities[i], bucket)) {
+				continue;
+			}
 		if (!appendBucketMapOverride(entities[i], bucket, out, outSize, used)) {
 			return false;
 		}
