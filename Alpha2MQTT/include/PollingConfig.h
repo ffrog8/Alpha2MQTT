@@ -28,6 +28,7 @@ const mqttState *lookupEntityByName(const char *name,
                                     size_t entityCount);
 
 using PollingConfigEntryVisitor = bool (*)(const char *key, const char *value, void *context);
+using MutablePollingConfigEntryVisitor = bool (*)(const char *key, char *value, void *context);
 using LegacyPollingValueReader = bool (*)(size_t index,
                                           const mqttState *entity,
                                           int defaultValue,
@@ -42,6 +43,12 @@ bool visitPollingConfigEntries(const char *payload,
                                size_t valueScratchSize,
                                PollingConfigEntryVisitor visitor,
                                void *context);
+
+// Variant for deferred config/set buffers that can be tokenized in-place to
+// avoid borrowing a second large scratch buffer from the MQTT publish path.
+bool visitMutablePollingConfigEntries(char *payload,
+                                      MutablePollingConfigEntryVisitor visitor,
+                                      void *context);
 
 // Validate the polling config payload shape without applying side effects.
 bool validatePollingConfigEntries(const char *payload,

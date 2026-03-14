@@ -491,7 +491,7 @@ static bool publishHaEntityDiscovery(const mqttState*);
 bool clearHaEntityDiscovery(const mqttState*, const char *deviceId);
 bool publishControllerInverterSerialDiscovery(void);
 void publishControllerInverterSerialState(void);
-bool handlePollingConfigSet(const char*);
+bool handlePollingConfigSet(char*);
 const char* mqttUpdateFreqToString(mqttUpdateFreq);
 bool mqttUpdateFreqFromString(const char*, mqttUpdateFreq*);
 void updatePollingLastChange(void);
@@ -2529,10 +2529,14 @@ void setup()
 #endif
 
 		if (_mqtt.setBufferSize(_bufferSize)) {
-			
-			_maxPayloadSize = _bufferSize - MQTT_HEADER_SIZE;
+			const int mqttBufferPayloadSize = _bufferSize - MQTT_HEADER_SIZE;
+			_maxPayloadSize = MIN_MQTT_PAYLOAD_SIZE;
 #ifdef DEBUG_OVER_SERIAL
-			sprintf(_debugOutput, "_bufferSize: %d,\r\n\r\n_maxPayload (Including null terminator): %d", _bufferSize, _maxPayloadSize);
+			sprintf(_debugOutput,
+			        "_bufferSize: %d,\r\n\r\n_bufferPayload (Including null terminator): %d\r\n\r\n_publishScratch: %d",
+			        _bufferSize,
+			        mqttBufferPayloadSize,
+			        _maxPayloadSize);
 			Serial.println(_debugOutput);
 #endif
 			_mqttPayload = new char[_maxPayloadSize];
@@ -3660,31 +3664,229 @@ buildPersistedPollingConfigMap(const BucketId *buckets, char *map, size_t mapLen
 }
 
 static bool
-beginPollingConfigPayload(void)
+streamMqttWrite(const char *data, size_t len)
+{
+	if (data == nullptr) {
+		return false;
+	}
+	if (len == 0) {
+		return true;
+	}
+	return _mqtt.write(reinterpret_cast<const uint8_t *>(data), len) == len;
+}
+
+struct CountedMqttPayload {
+	bool counting = true;
+	bool ok = true;
+	size_t length = 0;
+};
+
+static bool
+appendCountedMqttText(CountedMqttPayload &payload, const char *text)
+{
+	if (text == nullptr) {
+		payload.ok = false;
+		return false;
+	}
+	const size_t len = strlen(text);
+	if (payload.counting) {
+		payload.length += len;
+		return true;
+	}
+	if (!streamMqttWrite(text, len)) {
+		payload.ok = false;
+		return false;
+	}
+	payload.length += len;
+	return true;
+}
+
+static bool
+appendCountedMqttFmt(CountedMqttPayload &payload, char *scratch, size_t scratchSize, const char *fmt, ...)
+{
+	if (scratch == nullptr || scratchSize == 0 || fmt == nullptr) {
+		payload.ok = false;
+		return false;
+	}
+	va_list args;
+	va_start(args, fmt);
+	const int written = vsnprintf(scratch, scratchSize, fmt, args);
+	va_end(args);
+	if (written < 0 || static_cast<size_t>(written) >= scratchSize) {
+		payload.ok = false;
+		return false;
+	}
+	return appendCountedMqttText(payload, scratch);
+}
+
+using CountedMqttEmitter = bool (*)(CountedMqttPayload&, void *);
+
+static bool
+publishCountedMqttPayload(const char *topic, bool retain, CountedMqttEmitter emit, void *context)
+{
+	static unsigned long lastFailureLogMs = 0;
+	const unsigned long nowMs = millis();
+	if (topic == nullptr || emit == nullptr) {
+		return false;
+	}
+	if (!_mqtt.connected()) {
+#ifdef DEBUG_OVER_SERIAL
+		if ((nowMs - lastFailureLogMs) >= 3000) {
+			lastFailureLogMs = nowMs;
+			Serial.printf("MQTT streamed publish skipped (disconnected): topic=%s\r\n", topic);
+		}
+#endif
+		maybeYield();
+		return false;
+	}
+
+	CountedMqttPayload countPass{};
+	if (!emit(countPass, context) || !countPass.ok) {
+		return false;
+	}
+	if (countPass.length == 0) {
+		return _mqtt.publish(topic, "", retain);
+	}
+	if (!_mqtt.beginPublish(topic, static_cast<unsigned int>(countPass.length), retain)) {
+#ifdef DEBUG_OVER_SERIAL
+		if ((nowMs - lastFailureLogMs) >= 3000) {
+			lastFailureLogMs = nowMs;
+			Serial.printf("MQTT beginPublish failed: topic=%s bytes=%u\r\n",
+			              topic,
+			              static_cast<unsigned>(countPass.length));
+		}
+#endif
+		maybeYield();
+		return false;
+	}
+
+	CountedMqttPayload streamPass{};
+	streamPass.counting = false;
+	const bool emitOk = emit(streamPass, context) && streamPass.ok;
+	const bool endOk = _mqtt.endPublish();
+	if (!emitOk || !endOk) {
+#ifdef DEBUG_OVER_SERIAL
+		if ((nowMs - lastFailureLogMs) >= 3000) {
+			lastFailureLogMs = nowMs;
+			Serial.printf("MQTT streamed publish failed: topic=%s bytes=%u emit_ok=%d end_ok=%d\r\n",
+			              topic,
+			              static_cast<unsigned>(countPass.length),
+			              emitOk ? 1 : 0,
+			              endOk ? 1 : 0);
+		}
+#endif
+		maybeYield();
+		return false;
+	}
+	return true;
+}
+
+static bool
+emitPollingConfigPrelude(CountedMqttPayload &payload)
 {
 	char addition[256];
 	bool first = true;
-	modbusRequestAndResponseStatusValues resultAddedToPayload = addToPayload("{");
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+	if (!appendCountedMqttText(payload, "{")) {
 		return false;
 	}
-
-	snprintf(addition, sizeof(addition), "\"last_change\": \"%s\", \"poll_interval_s\": %lu, \"allowed_intervals\": [",
-	         _pollingConfigLastChange, static_cast<unsigned long>(pollIntervalSeconds));
-	resultAddedToPayload = addToPayload(addition);
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+	if (!appendCountedMqttFmt(payload,
+	                          addition,
+	                          sizeof(addition),
+	                          "\"last_change\": \"%s\", \"poll_interval_s\": %lu, \"allowed_intervals\": [",
+	                          _pollingConfigLastChange,
+	                          static_cast<unsigned long>(pollIntervalSeconds))) {
 		return false;
 	}
-
 	for (size_t i = 0; i < _pollingAllowedIntervalCount; i++) {
-		snprintf(addition, sizeof(addition), "%s\"%s\"", first ? "" : ", ", _pollingAllowedIntervals[i]);
-		first = false;
-		resultAddedToPayload = addToPayload(addition);
-		if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		if (!appendCountedMqttFmt(payload,
+		                          addition,
+		                          sizeof(addition),
+		                          "%s\"%s\"",
+		                          first ? "" : ", ",
+		                          _pollingAllowedIntervals[i])) {
 			return false;
 		}
+		first = false;
 	}
 	return true;
+}
+
+struct PollingConfigChunkPayloadContext {
+	size_t chunkIndex = 0;
+	size_t chunkCount = 0;
+	const char *chunkMap = nullptr;
+};
+
+static bool
+emitPollingConfigChunkPayload(CountedMqttPayload &payload, void *context)
+{
+	auto &chunk = *static_cast<PollingConfigChunkPayloadContext *>(context);
+	char addition[256];
+	return appendCountedMqttText(payload, "{") &&
+	       appendCountedMqttFmt(payload,
+	                            addition,
+	                            sizeof(addition),
+	                            "\"chunk_index\": %lu, \"chunk_count\": %lu, \"active_bucket_map\": \"",
+	                            static_cast<unsigned long>(chunk.chunkIndex),
+	                            static_cast<unsigned long>(chunk.chunkCount)) &&
+	       appendCountedMqttText(payload, chunk.chunkMap) &&
+	       appendCountedMqttText(payload, "\"}");
+}
+
+struct PollingConfigChunkSummaryContext {
+	size_t chunkCount = 0;
+	size_t activeCount = 0;
+};
+
+static bool
+emitPollingConfigChunkSummary(CountedMqttPayload &payload, void *context)
+{
+	auto &summary = *static_cast<PollingConfigChunkSummaryContext *>(context);
+	char addition[256];
+	return emitPollingConfigPrelude(payload) &&
+	       appendCountedMqttFmt(payload,
+	                            addition,
+	                            sizeof(addition),
+	                            "], \"entity_intervals_encoding\": \"bucket_map_chunks\", \"entity_intervals_chunks\": %lu, \"entity_intervals_count\": %lu}",
+	                            static_cast<unsigned long>(summary.chunkCount),
+	                            static_cast<unsigned long>(summary.activeCount));
+}
+
+struct PollingConfigInlinePayloadContext {
+	const mqttState *entities = nullptr;
+	size_t entityCount = 0;
+	const BucketId *buckets = nullptr;
+};
+
+static bool
+emitPollingConfigInlinePayload(CountedMqttPayload &payload, void *context)
+{
+	auto &inlinePayload = *static_cast<PollingConfigInlinePayloadContext *>(context);
+	char addition[256];
+	bool first = true;
+	if (!emitPollingConfigPrelude(payload) ||
+	    !appendCountedMqttText(payload, "], \"entity_intervals\": {")) {
+		return false;
+	}
+
+	for (size_t i = 0; i < inlinePayload.entityCount; i++) {
+		if (inlinePayload.buckets[i] == BucketId::Disabled) {
+			continue;
+		}
+		char entityName[64];
+		mqttEntityNameCopy(&inlinePayload.entities[i], entityName, sizeof(entityName));
+		if (!appendCountedMqttFmt(payload,
+		                          addition,
+		                          sizeof(addition),
+		                          "%s\"%s\": \"%s\"",
+		                          first ? "" : ", ",
+		                          entityName,
+		                          bucketIdToString(inlinePayload.buckets[i]))) {
+			return false;
+		}
+		first = false;
+	}
+	return appendCountedMqttText(payload, "}}");
 }
 
 static bool
@@ -3695,8 +3897,7 @@ publishPollingConfigChunkClear(size_t startIndex, size_t endIndex)
 		snprintf(topic, sizeof(topic), "%s/config/entity_intervals/%lu",
 		         deviceName,
 		         static_cast<unsigned long>(i));
-		emptyPayload();
-		if (!sendMqtt(topic, MQTT_RETAIN)) {
+		if (!_mqtt.publish(topic, "", MQTT_RETAIN)) {
 			return false;
 		}
 		maybeYield();
@@ -3708,7 +3909,6 @@ static bool
 publishPollingConfigChunked(const mqttState *entities, size_t entityCount, const BucketId *buckets)
 {
 	char *chunkMap = g_portalBucketMapScratch;
-	char addition[256];
 	char topic[128];
 	size_t chunkCount = 0;
 	size_t activeCount = 0;
@@ -3751,26 +3951,13 @@ publishPollingConfigChunked(const mqttState *entities, size_t entityCount, const
 			return false;
 		}
 
-		emptyPayload();
-		if (addToPayload("{") == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-			return false;
-		}
-		snprintf(addition,
-		         sizeof(addition),
-		         "\"chunk_index\": %lu, \"chunk_count\": %lu, \"active_bucket_map\": \"",
-		         static_cast<unsigned long>(chunkIndex),
-		         static_cast<unsigned long>(chunkCount));
-		if (addToPayload(addition) == modbusRequestAndResponseStatusValues::payloadExceededCapacity ||
-		    addToPayload(chunkMap) == modbusRequestAndResponseStatusValues::payloadExceededCapacity ||
-		    addToPayload("\"}") == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-			return false;
-		}
+		PollingConfigChunkPayloadContext chunkPayload{ chunkIndex, chunkCount, chunkMap };
 		snprintf(topic,
 		         sizeof(topic),
 		         "%s/config/entity_intervals/%lu",
 		         deviceName,
 		         static_cast<unsigned long>(chunkIndex));
-		if (!sendMqtt(topic, MQTT_RETAIN)) {
+		if (!publishCountedMqttPayload(topic, MQTT_RETAIN, emitPollingConfigChunkPayload, &chunkPayload)) {
 			return false;
 		}
 		startIndex = nextIndex;
@@ -3782,20 +3969,9 @@ publishPollingConfigChunked(const mqttState *entities, size_t entityCount, const
 		return false;
 	}
 
-	emptyPayload();
-	if (!beginPollingConfigPayload()) {
-		return false;
-	}
-	snprintf(addition,
-	         sizeof(addition),
-	         "], \"entity_intervals_encoding\": \"bucket_map_chunks\", \"entity_intervals_chunks\": %lu, \"entity_intervals_count\": %lu}",
-	         static_cast<unsigned long>(chunkCount),
-	         static_cast<unsigned long>(activeCount));
-	if (addToPayload(addition) == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return false;
-	}
+	PollingConfigChunkSummaryContext summary{ chunkCount, activeCount };
 	snprintf(topic, sizeof(topic), "%s/config", deviceName);
-	if (!sendMqtt(topic, MQTT_RETAIN)) {
+	if (!publishCountedMqttPayload(topic, MQTT_RETAIN, emitPollingConfigChunkSummary, &summary)) {
 		return false;
 	}
 	g_lastPublishedPollingConfigChunkCount = chunkCount;
@@ -3808,9 +3984,6 @@ publishPollingConfig(void)
 	if (!mqttEntitiesRtAvailable()) {
 		return;
 	}
-	char addition[256];
-	char configTopic[64];
-	bool first = true;
 	const mqttState *entities = mqttEntitiesDesc();
 	const size_t entityCount = mqttEntitiesCount();
 	BucketId *buckets = g_portalBucketsScratch;
@@ -3818,159 +3991,102 @@ publishPollingConfig(void)
 		return;
 	}
 
-	emptyPayload();
-	if (beginPollingConfigPayload() &&
-	    addToPayload("], \"entity_intervals\": {") != modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		for (size_t i = 0; i < entityCount; i++) {
-			if (buckets[i] == BucketId::Disabled) {
-				continue;
-			}
-			char entityName[64];
-			mqttEntityNameCopy(&entities[i], entityName, sizeof(entityName));
-			snprintf(addition, sizeof(addition), "%s\"%s\": \"%s\"",
-			         first ? "" : ", ",
-			         entityName,
-			         bucketIdToString(buckets[i]));
-			first = false;
-			if (addToPayload(addition) == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-				emptyPayload();
-				break;
-			}
-			if ((i % 8) == 0) {
-				diagYield();
-			}
-		}
+	char configTopic[64];
+	snprintf(configTopic, sizeof(configTopic), "%s/config", deviceName);
 
-		if (_mqttPayload[0] != '\0' &&
-		    addToPayload("}}") != modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-			snprintf(configTopic, sizeof(configTopic), "%s/config", deviceName);
-			if (!sendMqtt(configTopic, MQTT_RETAIN)) {
-				return;
-			}
-			if (g_lastPublishedPollingConfigChunkCount > 0 &&
-			    !publishPollingConfigChunkClear(0, g_lastPublishedPollingConfigChunkCount)) {
-				return;
-			}
-			g_lastPublishedPollingConfigChunkCount = 0;
+	PollingConfigInlinePayloadContext inlinePayload{ entities, entityCount, buckets };
+	if (publishCountedMqttPayload(configTopic, MQTT_RETAIN, emitPollingConfigInlinePayload, &inlinePayload)) {
+		if (g_lastPublishedPollingConfigChunkCount > 0 &&
+		    !publishPollingConfigChunkClear(0, g_lastPublishedPollingConfigChunkCount)) {
 			return;
 		}
+		g_lastPublishedPollingConfigChunkCount = 0;
+		return;
 	}
 
 	publishPollingConfigChunked(entities, entityCount, buckets);
 }
 
+static bool
+emitConfigDiscoveryPayload(CountedMqttPayload &payload, void * /* context */)
+{
+	const char *sensorName = "MQTT_Config";
+	const char *prettyName = "MQTT Config";
+	char addition[256];
+	return appendCountedMqttText(payload, "{") &&
+	       appendCountedMqttText(payload, "\"component\": \"sensor\"") &&
+	       appendCountedMqttFmt(payload,
+	                            addition,
+	                            sizeof(addition),
+	                            ", \"device\": {"
+	                            " \"name\": \"%s\", \"model\": \"%s\", \"manufacturer\": \"AlphaESS\","
+	                            " \"identifiers\": [\"%s\"]}",
+	                            deviceName,
+	                            kControllerModel,
+	                            controllerIdentifier) &&
+	       appendCountedMqttFmt(payload, addition, sizeof(addition), ", \"name\": \"%s\"", prettyName) &&
+	       appendCountedMqttFmt(payload,
+	                            addition,
+	                            sizeof(addition),
+	                            ", \"unique_id\": \"%s_%s\"",
+	                            controllerIdentifier,
+	                            sensorName) &&
+	       appendCountedMqttFmt(payload,
+	                            addition,
+	                            sizeof(addition),
+	                            ", \"state_topic\": \"%s/config\""
+	                            ", \"value_template\": \"{{ value_json.last_change | default(\\\"\\\") }}\""
+	                            ", \"json_attributes_topic\": \"%s/config\""
+	                            ", \"entity_category\": \"diagnostic\"",
+	                            deviceName,
+	                            deviceName) &&
+	       appendCountedMqttText(payload, "}");
+}
+
 bool
 publishConfigDiscovery(void)
 {
-	char addition[256];
-	modbusRequestAndResponseStatusValues resultAddedToPayload;
-	const char *sensorName = "MQTT_Config";
-	const char *prettyName = "MQTT Config";
 	char topic[128];
+	snprintf(topic, sizeof(topic), "homeassistant/sensor/%s/%s/config", controllerIdentifier, "MQTT_Config");
+	return publishCountedMqttPayload(topic, MQTT_RETAIN, emitConfigDiscoveryPayload, nullptr);
+}
 
-	emptyPayload();
-
-	resultAddedToPayload = addToPayload("{");
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return true;
-	}
-
-	snprintf(addition, sizeof(addition), "\"component\": \"sensor\"");
-	resultAddedToPayload = addToPayload(addition);
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return true;
-	}
-
-	snprintf(addition, sizeof(addition),
-		 ", \"device\": {"
-		 " \"name\": \"%s\", \"model\": \"%s\", \"manufacturer\": \"AlphaESS\","
-		 " \"identifiers\": [\"%s\"]}",
-		 deviceName, kControllerModel,
-		 controllerIdentifier);
-	resultAddedToPayload = addToPayload(addition);
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return true;
-	}
-
-	snprintf(addition, sizeof(addition), ", \"name\": \"%s\"", prettyName);
-	resultAddedToPayload = addToPayload(addition);
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return true;
-	}
-
-	snprintf(addition, sizeof(addition), ", \"unique_id\": \"%s_%s\"", controllerIdentifier, sensorName);
-	resultAddedToPayload = addToPayload(addition);
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return true;
-	}
-
-	snprintf(addition, sizeof(addition),
-		", \"state_topic\": \"%s/config\""
-		", \"value_template\": \"{{ value_json.last_change | default(\\\"\\\") }}\""
-		", \"json_attributes_topic\": \"%s/config\""
-		", \"entity_category\": \"diagnostic\"",
-		deviceName, deviceName);
-	resultAddedToPayload = addToPayload(addition);
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return true;
-	}
-
-	resultAddedToPayload = addToPayload("}");
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return true;
-	}
-
-	snprintf(topic, sizeof(topic), "homeassistant/sensor/%s/%s/config", controllerIdentifier, sensorName);
-	return sendMqtt(topic, MQTT_RETAIN);
+static bool
+emitControllerInverterSerialDiscoveryPayload(CountedMqttPayload &payload, void * /* context */)
+{
+	char addition[256];
+	return appendCountedMqttText(payload, "{") &&
+	       appendCountedMqttText(payload, "\"component\": \"sensor\"") &&
+	       appendCountedMqttFmt(payload,
+	                            addition,
+	                            sizeof(addition),
+	                            ", \"device\": { \"name\": \"%s\", \"model\": \"%s\", \"manufacturer\": \"AlphaESS\", \"identifiers\": [\"%s\"]}",
+	                            deviceName,
+	                            kControllerModel,
+	                            controllerIdentifier) &&
+	       appendCountedMqttText(payload, ", \"name\": \"Inverter Serial\"") &&
+	       appendCountedMqttFmt(payload,
+	                            addition,
+	                            sizeof(addition),
+	                            ", \"unique_id\": \"%s_%s\"",
+	                            controllerIdentifier,
+	                            kControllerInverterSerialEntity) &&
+	       appendCountedMqttFmt(payload,
+	                            addition,
+	                            sizeof(addition),
+	                            ", \"state_topic\": \"%s/%s/%s/state\", \"entity_category\": \"diagnostic\"",
+	                            deviceName,
+	                            controllerIdentifier,
+	                            kControllerInverterSerialEntity) &&
+	       appendCountedMqttText(payload, "}");
 }
 
 bool
 publishControllerInverterSerialDiscovery(void)
 {
-	char addition[256];
-	modbusRequestAndResponseStatusValues resultAddedToPayload;
 	char topic[160];
-
-	emptyPayload();
-
-	resultAddedToPayload = addToPayload("{");
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return true;
-	}
-	resultAddedToPayload = addToPayload("\"component\": \"sensor\"");
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return true;
-	}
-	snprintf(addition, sizeof(addition),
-	         ", \"device\": { \"name\": \"%s\", \"model\": \"%s\", \"manufacturer\": \"AlphaESS\", \"identifiers\": [\"%s\"]}",
-	         deviceName, kControllerModel, controllerIdentifier);
-	resultAddedToPayload = addToPayload(addition);
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return true;
-	}
-	resultAddedToPayload = addToPayload(", \"name\": \"Inverter Serial\"");
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return true;
-	}
-	snprintf(addition, sizeof(addition), ", \"unique_id\": \"%s_%s\"", controllerIdentifier, kControllerInverterSerialEntity);
-	resultAddedToPayload = addToPayload(addition);
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return true;
-	}
-	snprintf(addition, sizeof(addition),
-	         ", \"state_topic\": \"%s/%s/%s/state\", \"entity_category\": \"diagnostic\"",
-	         deviceName, controllerIdentifier, kControllerInverterSerialEntity);
-	resultAddedToPayload = addToPayload(addition);
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return true;
-	}
-	resultAddedToPayload = addToPayload("}");
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return true;
-	}
-
 	snprintf(topic, sizeof(topic), "homeassistant/sensor/%s/%s/config", controllerIdentifier, kControllerInverterSerialEntity);
-	return sendMqtt(topic, MQTT_RETAIN);
+	return publishCountedMqttPayload(topic, MQTT_RETAIN, emitControllerInverterSerialDiscoveryPayload, nullptr);
 }
 
 void
@@ -4115,7 +4231,7 @@ publishHaEntityDiscovery(const mqttState *entity)
 }
 
 bool
-handlePollingConfigSet(const char *payload)
+handlePollingConfigSet(char *payload)
 {
 	struct PollingConfigSetContext {
 		bool anyChange = false;
@@ -4146,26 +4262,9 @@ handlePollingConfigSet(const char *payload)
 	ctx.bucketsLoaded = bucketsLoaded;
 	ctx.stagedPollInterval = pollIntervalSeconds;
 
-	char *valueScratch = _mqttPayload;
-	size_t valueScratchSize = (_mqttPayload != nullptr && _maxPayloadSize > 0)
-		? static_cast<size_t>(_maxPayloadSize)
-		: sizeof(g_portalRowRenderBuf);
-	if (valueScratch == nullptr || valueScratchSize < 2) {
-		valueScratch = g_portalRowRenderBuf;
-		valueScratchSize = sizeof(g_portalRowRenderBuf);
-	}
-
-	if (!validatePollingConfigEntries(payload,
-	                                  valueScratch,
-	                                  valueScratchSize)) {
-		return false;
-	}
-
-	const bool parsed = visitPollingConfigEntries(
+	const bool parsed = visitMutablePollingConfigEntries(
 		payload,
-		valueScratch,
-		valueScratchSize,
-		[](const char *key, const char *value, void *opaque) -> bool {
+		[](const char *key, char *value, void *opaque) -> bool {
 			PollingConfigSetContext &ctx = *static_cast<PollingConfigSetContext *>(opaque);
 			bool handled = false;
 
@@ -6104,15 +6203,19 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 #endif
 }
 
-modbusRequestAndResponseStatusValues
-addConfig(const mqttState *singleEntity,
-          DiscoveryDeviceScope scope,
-          const char *topicBase,
-          modbusRequestAndResponseStatusValues& resultAddedToPayload)
+struct EntityDiscoveryPayloadContext {
+	const mqttState *singleEntity = nullptr;
+	DiscoveryDeviceScope scope = DiscoveryDeviceScope::Inverter;
+	const char *topicBase = nullptr;
+};
+
+static bool
+emitEntityDiscoveryPayload(CountedMqttPayload &payload, void *context)
 {
-	// HA discovery generation runs on a constrained ESP8266 loop/callback stack.
-	// Use the smaller row-render scratch here so the 2 KB bucket-map scratch remains
-	// reserved for deferred `config/set` payloads while MQTT callbacks are active.
+	auto &ctx = *static_cast<EntityDiscoveryPayloadContext *>(context);
+	const mqttState *singleEntity = ctx.singleEntity;
+	const DiscoveryDeviceScope scope = ctx.scope;
+	const char *topicBase = ctx.topicBase;
 	char (&stateAddition)[sizeof(g_portalRowRenderBuf)] = g_portalRowRenderBuf;
 	char prettyName[64];
 	char uniqueId[128];
@@ -6120,8 +6223,9 @@ addConfig(const mqttState *singleEntity,
 	const bool inverterScope = (scope == DiscoveryDeviceScope::Inverter);
 	char entityKey[64];
 	stateAddition[0] = '\0';
-	if (deviceId[0] == '\0' || topicBase == nullptr || topicBase[0] == '\0') {
-		return modbusRequestAndResponseStatusValues::preProcessing;
+	if (singleEntity == nullptr || deviceId[0] == '\0' || topicBase == nullptr || topicBase[0] == '\0') {
+		payload.ok = false;
+		return false;
 	}
 	mqttEntityNameCopy(singleEntity, entityKey, sizeof(entityKey));
 	buildEntityUniqueId(scope,
@@ -6132,9 +6236,8 @@ addConfig(const mqttState *singleEntity,
 	                    sizeof(uniqueId));
 
 	sprintf(stateAddition, "{");
-	resultAddedToPayload = addToPayload(stateAddition);
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return resultAddedToPayload;
+	if (!appendCountedMqttText(payload, stateAddition)) {
+		return false;
 	}
 
 	switch (singleEntity->haClass) {
@@ -6152,9 +6255,8 @@ addConfig(const mqttState *singleEntity,
 		sprintf(stateAddition, "\"component\": \"sensor\"");
 		break;
 	}
-	resultAddedToPayload = addToPayload(stateAddition);
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return resultAddedToPayload;
+	if (!appendCountedMqttText(payload, stateAddition)) {
+		return false;
 	}
 
 	if (inverterScope) {
@@ -6175,9 +6277,8 @@ addConfig(const mqttState *singleEntity,
 		         kControllerModel,
 		         deviceId);
 	}
-	resultAddedToPayload = addToPayload(stateAddition);
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return resultAddedToPayload;
+	if (!appendCountedMqttText(payload, stateAddition)) {
+		return false;
 	}
 
 	strlcpy(prettyName, entityKey, sizeof(prettyName));
@@ -6185,15 +6286,13 @@ addConfig(const mqttState *singleEntity,
 		*ch = ' ';
 	}
 	snprintf(stateAddition, sizeof(stateAddition), ", \"name\": \"%s\"", prettyName);
-	resultAddedToPayload = addToPayload(stateAddition);
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return resultAddedToPayload;
+	if (!appendCountedMqttText(payload, stateAddition)) {
+		return false;
 	}
 
 	snprintf(stateAddition, sizeof(stateAddition), ", \"unique_id\": \"%s\"", uniqueId);
-	resultAddedToPayload = addToPayload(stateAddition);
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return resultAddedToPayload;
+	if (!appendCountedMqttText(payload, stateAddition)) {
+		return false;
 	}
 
 	switch (singleEntity->haClass) {
@@ -6317,8 +6416,7 @@ addConfig(const mqttState *singleEntity,
 		break;
 	case homeAssistantClass::haClassSelect:
 		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"device_class\": \"enum\""
-			);
+			 ", \"device_class\": \"enum\"");
 		break;
 	case homeAssistantClass::haClassNumber:
 		snprintf(stateAddition, sizeof(stateAddition),
@@ -6329,11 +6427,8 @@ addConfig(const mqttState *singleEntity,
 		strcpy(stateAddition, "");
 		break;
 	}
-	if (strlen(stateAddition) != 0) {
-		resultAddedToPayload = addToPayload(stateAddition);
-		if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-			return resultAddedToPayload;
-		}
+	if (strlen(stateAddition) != 0 && !appendCountedMqttText(payload, stateAddition)) {
+		return false;
 	}
 
 	stateAddition[0] = '\0';
@@ -6523,27 +6618,22 @@ addConfig(const mqttState *singleEntity,
 		}
 		break;
 	}
-	if (strlen(stateAddition) != 0) {
-		resultAddedToPayload = addToPayload(stateAddition);
-		if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-			return resultAddedToPayload;
-		}
+	if (strlen(stateAddition) != 0 && !appendCountedMqttText(payload, stateAddition)) {
+		return false;
 	}
 
 	if (singleEntity->subscribe) {
 #ifdef HA_IS_OP_MODE_AUTHORITY
 		if (singleEntity->retain) {
 			sprintf(stateAddition, ", \"retain\": \"true\"");
-			resultAddedToPayload = addToPayload(stateAddition);
-			if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-				return resultAddedToPayload;
+			if (!appendCountedMqttText(payload, stateAddition)) {
+				return false;
 			}
 		}
 #endif // HA_IS_OP_MODE_AUTHORITY
 		sprintf(stateAddition, ", \"qos\": %d", MQTT_SUBSCRIBE_QOS);
-		resultAddedToPayload = addToPayload(stateAddition);
-		if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-			return resultAddedToPayload;
+		if (!appendCountedMqttText(payload, stateAddition)) {
+			return false;
 		}
 	}
 
@@ -6588,16 +6678,14 @@ addConfig(const mqttState *singleEntity,
 			topicBase);
 		break;
 	}
-	resultAddedToPayload = addToPayload(stateAddition);
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return resultAddedToPayload;
+	if (!appendCountedMqttText(payload, stateAddition)) {
+		return false;
 	}
 
 	if (singleEntity->subscribe) {
 		snprintf(stateAddition, sizeof(stateAddition), ", \"command_topic\": \"%s/command\"", topicBase);
-		resultAddedToPayload = addToPayload(stateAddition);
-		if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-			return resultAddedToPayload;
+		if (!appendCountedMqttText(payload, stateAddition)) {
+			return false;
 		}
 	}
 
@@ -6622,18 +6710,11 @@ addConfig(const mqttState *singleEntity,
 			", \"availability_template\": \"{{ \\\"online\\\" if value_json.a2mStatus == \\\"online\\\" and value_json.rs485Status == \\\"OK\\\" else \\\"offline\\\" }}\""
 			", \"availability_topic\": \"%s\"", statusTopic);
 	}
-	resultAddedToPayload = addToPayload(stateAddition);
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return resultAddedToPayload;
+	if (!appendCountedMqttText(payload, stateAddition)) {
+		return false;
 	}
 
-	strcpy(stateAddition, "}");
-	resultAddedToPayload = addToPayload(stateAddition);
-	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
-		return resultAddedToPayload;
-	}
-
-	return modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
+	return appendCountedMqttText(payload, "}");
 }
 
 
@@ -7320,7 +7401,8 @@ sendDataFromMqttState(const mqttState *singleEntity, bool doHomeAssistant, const
 		}
 
 		snprintf(topic, sizeof(topic), "homeassistant/%s/%s/%s/config", entityType, deviceId, entityKey);
-		result = addConfig(singleEntity, scope, topicBase, resultAddedToPayload);
+		EntityDiscoveryPayloadContext discoveryPayload{ singleEntity, scope, topicBase };
+		return publishCountedMqttPayload(topic, singleEntity->retain ? MQTT_RETAIN : false, emitEntityDiscoveryPayload, &discoveryPayload);
 	} else {
 		bool skip = false;
 		if (!opData.a2mReadyToUseOpMode && (singleEntity->entityId == mqttEntityId::entityOpMode)) {

@@ -125,6 +125,26 @@ copyQuotedString(const char *&cursor, char *out, size_t outSize)
 	return true;
 }
 
+static bool
+terminateQuotedString(char *&cursor, char *&out)
+{
+	if (cursor == nullptr || *cursor != '"') {
+		return false;
+	}
+
+	cursor++;
+	out = cursor;
+	while (*cursor != '\0' && *cursor != '"') {
+		cursor++;
+	}
+	if (*cursor != '"') {
+		return false;
+	}
+	*cursor = '\0';
+	cursor++;
+	return true;
+}
+
 bool
 visitPollingConfigEntries(const char *payload,
                           char *valueScratch,
@@ -169,6 +189,64 @@ visitPollingConfigEntries(const char *payload,
 		}
 
 		cursor = skipWhitespace(cursor);
+		if (cursor == nullptr || *cursor == '\0') {
+			return false;
+		}
+		if (*cursor == ',') {
+			cursor++;
+			continue;
+		}
+		if (*cursor == '}') {
+			return true;
+		}
+		return false;
+	}
+}
+
+bool
+visitMutablePollingConfigEntries(char *payload,
+                                 MutablePollingConfigEntryVisitor visitor,
+                                 void *context)
+{
+	if (payload == nullptr || visitor == nullptr) {
+		return false;
+	}
+
+	char *cursor = const_cast<char *>(skipWhitespace(payload));
+	if (cursor == nullptr || *cursor != '{') {
+		return false;
+	}
+	cursor++;
+
+	while (true) {
+		char key[64];
+		char *value = nullptr;
+
+		cursor = const_cast<char *>(skipWhitespace(cursor));
+		if (cursor == nullptr || *cursor == '\0') {
+			return false;
+		}
+		if (*cursor == '}') {
+			return true;
+		}
+		const char *keyCursor = cursor;
+		if (!copyQuotedString(keyCursor, key, sizeof(key))) {
+			return false;
+		}
+		cursor = const_cast<char *>(skipWhitespace(keyCursor));
+		if (cursor == nullptr || *cursor != ':') {
+			return false;
+		}
+		cursor++;
+		cursor = const_cast<char *>(skipWhitespace(cursor));
+		if (cursor == nullptr || !terminateQuotedString(cursor, value)) {
+			return false;
+		}
+		if (!visitor(key, value, context)) {
+			return false;
+		}
+
+		cursor = const_cast<char *>(skipWhitespace(cursor));
 		if (cursor == nullptr || *cursor == '\0') {
 			return false;
 		}

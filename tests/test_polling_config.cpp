@@ -35,6 +35,12 @@ struct VisitCapture {
 	size_t visited = 0;
 };
 
+struct MutableVisitCapture {
+	std::string bucketMapValue;
+	std::string pollIntervalValue;
+	size_t visited = 0;
+};
+
 struct LegacyReaderCapture {
 	int values[4]{};
 	bool fail = false;
@@ -44,6 +50,19 @@ static bool
 captureConfigEntry(const char *key, const char *value, void *context)
 {
 	auto &capture = *static_cast<VisitCapture *>(context);
+	capture.visited++;
+	if (std::string(key) == "bucket_map") {
+		capture.bucketMapValue = value;
+	} else if (std::string(key) == "poll_interval_s") {
+		capture.pollIntervalValue = value;
+	}
+	return true;
+}
+
+static bool
+captureMutableConfigEntry(const char *key, char *value, void *context)
+{
+	auto &capture = *static_cast<MutableVisitCapture *>(context);
 	capture.visited++;
 	if (std::string(key) == "bucket_map") {
 		capture.bucketMapValue = value;
@@ -95,6 +114,23 @@ TEST_CASE("config entry visitor accepts large bucket_map values")
 	VisitCapture capture{};
 
 	CHECK(visitPollingConfigEntries(payload.c_str(), scratch, sizeof(scratch), captureConfigEntry, &capture));
+	CHECK(capture.visited == 2);
+	CHECK(capture.bucketMapValue == largeMap);
+	CHECK(capture.pollIntervalValue == "45");
+}
+
+TEST_CASE("mutable config entry visitor tokenizes large bucket_map values in place")
+{
+	std::string largeMap;
+	for (int i = 0; i < 80; ++i) {
+		largeMap += "Battery_Voltage=disabled;";
+	}
+	std::string payload = "{\"bucket_map\":\"" + largeMap + "\",\"poll_interval_s\":\"45\"}";
+	std::vector<char> mutablePayload(payload.begin(), payload.end());
+	mutablePayload.push_back('\0');
+	MutableVisitCapture capture{};
+
+	CHECK(visitMutablePollingConfigEntries(mutablePayload.data(), captureMutableConfigEntry, &capture));
 	CHECK(capture.visited == 2);
 	CHECK(capture.bucketMapValue == largeMap);
 	CHECK(capture.pollIntervalValue == "45");
