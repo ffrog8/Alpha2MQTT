@@ -110,3 +110,4 @@ size_t portalCollectFamilyPageEntityIndices(const mqttState *entities,
                                             const PortalFamilyPage &page,
                                             uint16_t *outIndices,
                                             size_t outCapacity);
+void portalSetAllBuckets(BucketId *buckets, size_t entityCount, BucketId bucket);

@@ -264,6 +264,30 @@ TEST_CASE("bucket map supports compact descriptor indices")
 	CHECK(buckets[1] == BucketId::User);
 }
 
+TEST_CASE("disable-all bucket map clears every assignment")
+{
+	mqttState entities[3]{};
+	entities[0] = makeEntity(mqttEntityId::entityOpMode, "Op_Mode", mqttUpdateFreq::freqTenSec, homeAssistantClass::haClassSelect);
+	entities[1] = makeEntity(mqttEntityId::entitySocTarget, "SOC_Target", mqttUpdateFreq::freqOneMin, homeAssistantClass::haClassNumber);
+	entities[2] = makeEntity(mqttEntityId::entityChargePwr, "Charge_Power", mqttUpdateFreq::freqFiveMin, homeAssistantClass::haClassNumber);
+
+	BucketId buckets[3] = { BucketId::TenSec, BucketId::OneMin, BucketId::User };
+	uint32_t unknown = 0;
+	uint32_t invalid = 0;
+	uint32_t dup = 0;
+	char out[32];
+
+	CHECK(copyDisableAllBucketMap(out, sizeof(out)));
+	CHECK(isDisableAllBucketMap(out));
+	CHECK(applyBucketMapString(out, entities, 3, buckets, unknown, invalid, dup));
+	CHECK(unknown == 0);
+	CHECK(invalid == 0);
+	CHECK(dup == 0);
+	CHECK(buckets[0] == BucketId::Disabled);
+	CHECK(buckets[1] == BucketId::Disabled);
+	CHECK(buckets[2] == BucketId::Disabled);
+}
+
 TEST_CASE("bucket map detects deprecated descriptor-index tokens")
 {
 	CHECK(bucketMapUsesDescriptorIndices("#1=user;#0=five_min;"));

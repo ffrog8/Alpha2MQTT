@@ -292,3 +292,21 @@ TEST_CASE("portal config: empty families produce empty pages")
 	CHECK(page.pageCount == 0);
 	CHECK(portalCollectFamilyPageEntityIndices(entities, 2, page, indices, 1) == 0);
 }
+
+TEST_CASE("portal config: set all buckets assigns every entity slot")
+{
+	BucketId buckets[] = {
+		BucketId::TenSec,
+		BucketId::OneMin,
+		BucketId::User,
+	};
+
+	portalSetAllBuckets(buckets, 3, BucketId::Disabled);
+	CHECK(buckets[0] == BucketId::Disabled);
+	CHECK(buckets[1] == BucketId::Disabled);
+	CHECK(buckets[2] == BucketId::Disabled);
+
+	portalSetAllBuckets(nullptr, 3, BucketId::TenSec);
+	portalSetAllBuckets(buckets, 0, BucketId::TenSec);
+	CHECK(buckets[0] == BucketId::Disabled);
+}

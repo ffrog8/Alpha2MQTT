@@ -9,6 +9,10 @@
 #include <cstdio>
 #include <cstring>
 
+namespace {
+constexpr char kDisableAllBucketMap[] = "__all__=disabled;";
+}
+
 bool
 isValidMqttUpdateFreq(int value)
 {
@@ -122,6 +126,16 @@ parseStrictUint32(const char *text, uint32_t maxValue, uint32_t &outValue)
 	return true;
 }
 
+bool
+copyDisableAllBucketMap(char *out, size_t outSize)
+{
+	if (out == nullptr || outSize <= strlen(kDisableAllBucketMap)) {
+		return false;
+	}
+	memcpy(out, kDisableAllBucketMap, sizeof(kDisableAllBucketMap));
+	return true;
+}
+
 static const char *
 skipWhitespace(const char *cursor)
 {
@@ -129,6 +143,25 @@ skipWhitespace(const char *cursor)
 		cursor++;
 	}
 	return cursor;
+}
+
+bool
+isDisableAllBucketMap(const char *map)
+{
+	if (map == nullptr) {
+		return false;
+	}
+	const char *cursor = skipWhitespace(map);
+	if (cursor == nullptr) {
+		return false;
+	}
+	const size_t sentinelLen = strlen(kDisableAllBucketMap);
+	if (strncmp(cursor, kDisableAllBucketMap, sentinelLen) != 0) {
+		return false;
+	}
+	cursor += sentinelLen;
+	cursor = skipWhitespace(cursor);
+	return cursor != nullptr && *cursor == '\0';
 }
 
 static bool
@@ -348,6 +381,12 @@ applyBucketMapString(const char *map,
 	}
 	if (entityCount > kMqttEntityDescriptorCount) {
 		return false;
+	}
+	if (isDisableAllBucketMap(map)) {
+		for (size_t i = 0; i < entityCount; ++i) {
+			buckets[i] = BucketId::Disabled;
+		}
+		return true;
 	}
 
 	BucketId staged[kMqttEntityDescriptorCount];

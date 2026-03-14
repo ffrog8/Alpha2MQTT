@@ -519,3 +519,14 @@ portalCollectFamilyPageEntityIndices(const mqttState *entities,
 	}
 	return collected;
 }
+
+void
+portalSetAllBuckets(BucketId *buckets, size_t entityCount, BucketId bucket)
+{
+	if (buckets == nullptr || entityCount == 0) {
+		return;
+	}
+	for (size_t i = 0; i < entityCount; ++i) {
+		buckets[i] = bucket;
+	}
+}

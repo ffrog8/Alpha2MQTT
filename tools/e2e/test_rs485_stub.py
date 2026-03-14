@@ -2522,6 +2522,11 @@ def main() -> int:
     def case_portal_polling_ui() -> None:
         print("[e2e] case: portal UI updates polling schedule (WiFiManager, paged)")
         base = _resolve_device_http_base(mqtt, device_root)
+        config_before = _fetch_config(mqtt, config_topic)
+        original_interval = int(config_before.get("poll_interval_s", 0))
+        original_intervals = config_before.get("entity_intervals", {})
+        if not isinstance(original_intervals, dict):
+            raise E2EError(f"config entity_intervals missing before portal case: {config_before}")
 
         reboot_wifi_path = _discover_reboot_wifi_path_from_code()
         if not reboot_wifi_path:
@@ -2539,6 +2544,8 @@ def main() -> int:
             raise E2EError(f"unexpected polling menu path: {polling_path!r}")
         if "poll_interval_s" not in html or "/config/polling/save" not in html:
             raise E2EError("portal polling page HTML missing expected form fields")
+        if "/config/polling/clear" not in html or "Disable All Entities" not in html:
+            raise E2EError("portal polling page missing clear-all action")
         if "class=\"wrap\"" not in html or "<h1>Setup</h1>" not in html:
             raise E2EError("portal polling page missing shared portal wrapper/header style")
         if "Unsaved polling changes will be lost. Continue?" not in html:
@@ -2693,9 +2700,69 @@ def main() -> int:
             raise E2EError(
                 f"{target} moved to a different portal location across reboot: "
                 f"before={target_family}/{target_page} after={restored_family}/{restored_page}"
-            )
+        )
         if restored_bucket != desired_bucket:
             raise E2EError(f"{target} bucket UI value not restored after reboot (expected {desired_bucket!r}, got {restored_bucket!r})")
+
+        print(f"[e2e] POST {base}/config/polling/clear (clear-all check)")
+        clear_status = _http_post_form(
+            base + "/config/polling/clear",
+            {
+                "family": target_family,
+                "page": str(target_page),
+            },
+            timeout_s=20,
+        )
+        if clear_status not in (200, 302):
+            raise E2EError(f"polling clear failed status={clear_status}")
+
+        print(f"[e2e] rebooting to normal via {reboot_normal_url} (clear-all check)")
+        reboot_status, reboot_body = _http_request("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
+        if reboot_status != 200:
+            raise E2EError(f"/reboot/normal after clear returned unexpected status={reboot_status}")
+        if reboot_body:
+            reboot_html = reboot_body.decode("utf-8", errors="replace")
+            if "Rebooting into normal runtime" not in reboot_html:
+                raise E2EError("/reboot/normal after clear response missing reboot-to-normal heading")
+
+        _assert_eventually(
+            "device publishes status/poll after clear-all reboot to normal",
+            lambda: (True, "ok") if _fetch_poll(mqtt, poll_topic).get("poll_interval_s") else (False, "waiting"),
+            timeout_s=60,
+            poll_s=3.0,
+        )
+
+        def cleared_pred() -> Tuple[bool, str]:
+            cfg_cur = _fetch_config(mqtt, config_topic)
+            intervals_cur = cfg_cur.get("entity_intervals", {})
+            if not isinstance(intervals_cur, dict):
+                return False, f"entity_intervals invalid: {cfg_cur}"
+            if intervals_cur:
+                return False, f"remaining={len(intervals_cur)}"
+            return True, "ok"
+
+        _assert_eventually("clear-all removes active entity intervals", cleared_pred, timeout_s=60, poll_s=3.0)
+
+        restore_bucket_map = "".join(
+            f"{name}={bucket};" for name, bucket in sorted(original_intervals.items())
+        )
+        set_polling_config(original_interval, restore_bucket_map)
+
+        def restored_pred() -> Tuple[bool, str]:
+            cur = _fetch_poll(mqtt, poll_topic)
+            cfg_cur = _fetch_config(mqtt, config_topic)
+            cur_interval = int(cur.get("poll_interval_s", 0))
+            intervals_cur = cfg_cur.get("entity_intervals", {})
+            detail = f"poll_interval_s={cur_interval} count={len(intervals_cur) if isinstance(intervals_cur, dict) else 'invalid'}"
+            if cur_interval != original_interval:
+                return False, detail
+            if not isinstance(intervals_cur, dict):
+                return False, detail
+            if intervals_cur != original_intervals:
+                return False, detail
+            return True, detail
+
+        _assert_eventually("polling config restored after clear-all portal check", restored_pred, timeout_s=60, poll_s=3.0)
 
     cases: list[Tuple[str, Callable[[], None]]] = [
         ("two_device_discovery", case_two_device_discovery),

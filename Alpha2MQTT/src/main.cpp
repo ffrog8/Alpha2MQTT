@@ -538,6 +538,7 @@ static void persistUserWifiCredentials(const char *ssid, const char *pass);
 static void persistUserExtAntenna(bool enabled);
 static bool persistUserPollingConfig(uint32_t intervalSeconds, const char *bucketMap);
 static void persistUserPollingLastChange(const char *lastChange);
+static void handlePortalPollingClear(WiFiManager &wifiManager);
 static void persistUserDeviceSerial(const char *serial);
 static void persistDefaultsIfMissing(void);
 void setupHttpControlPlane(void);
@@ -1997,6 +1998,12 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		"return true;"
 		"}"
 		"function pDirty(){window._d=1;}"
+		"function pClear(){"
+		"if(!window.confirm('Disable all polling entities?')){return false;}"
+		"sessionStorage.removeItem(window._pk);"
+		"window._d=0;"
+		"return true;"
+		"}"
 		"function pNav(){"
 		"if(!window._d){return true;}"
 		"if(!window.confirm('Unsaved polling changes will be lost. Continue?')){return false;}"
@@ -2049,6 +2056,12 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		"<input type=\"hidden\" name=\"page\" value=\"%u\">"
 		"<input type=\"hidden\" name=\"bucket_map_full\" value=\"\">"
 		"<label>poll_interval_s <input name=\"poll_interval_s\" type=\"number\" min=\"1\" max=\"86400\" value=\"%lu\"></label><br><br>";
+	static const char kClearFormFmt[] PROGMEM =
+		"<form action=\"/config/polling/clear\" method=\"post\" onsubmit=\"return pClear()\">"
+		"<input type=\"hidden\" name=\"family\" value=\"%s\">"
+		"<input type=\"hidden\" name=\"page\" value=\"%u\">"
+		"<button type=\"submit\">Disable All Entities</button>"
+		"</form><br>";
 	static const char kPrevFmt[] PROGMEM =
 		"<form data-nav-away=\"1\" action=\"/config/polling\" method=\"get\" onsubmit=\"return pNav()\">"
 		"<input type=\"hidden\" name=\"family\" value=\"%s\">"
@@ -2233,6 +2246,12 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		}
 	}
 	portalSendContentPAndFeed(wifiManager, kTableClose);
+	snprintf_P(buf,
+	           sizeof(buf),
+	           kClearFormFmt,
+	           familyKey,
+	           static_cast<unsigned>(familyPage.safePage));
+	portalSendContentAndFeed(wifiManager, buf);
 
 	portalSendContentPAndFeed(wifiManager, kNavOpen);
 	if (familyPage.safePage > 0) {
@@ -2384,6 +2403,80 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 		setBootIntentAndReboot(BootIntent::Normal);
 		return;
 	}
+
+	char location[96];
+	snprintf(location, sizeof(location), "/config/polling?family=%s&page=%u&saved=1%s",
+	         familyKey,
+	         static_cast<unsigned>(familyPage.safePage),
+	         hadError ? "&err=1" : "");
+	wifiManager.server->sendHeader("Location", location);
+	wifiManager.server->send(302, "text/plain", "");
+}
+
+static void
+handlePortalPollingClear(WiFiManager &wifiManager)
+{
+	if (!wifiManager.server) {
+		return;
+	}
+
+	ScopedEntityCatalogCopy catalog;
+	if (!catalog.load()) {
+		wifiManager.server->send(500, "text/plain", "polling config unavailable");
+		return;
+	}
+	const mqttState *entities = catalog.entities;
+	const size_t entityCount = catalog.count;
+	BucketId *buckets = g_portalBucketsScratch;
+	ScopedCharBuffer persistedMap(kPrefBucketMapMaxLen);
+	if (!persistedMap.ok()) {
+		wifiManager.server->send(500, "text/plain", "polling config unavailable");
+		return;
+	}
+	BucketId originalBuckets[kMqttEntityDescriptorCount]{};
+	uint32_t storedIntervalSeconds = kPollIntervalDefaultSeconds;
+	(void)loadPollingBucketsForPortal(entities, entityCount, buckets, storedIntervalSeconds);
+	if (mqttEntitiesRtAvailable()) {
+		memcpy(originalBuckets, buckets, sizeof(originalBuckets));
+	}
+
+	const String familyArg = wifiManager.server->arg("family");
+	const MqttEntityFamily family = portalNormalizePollingFamily(entities, entityCount, familyArg.c_str());
+	const char *familyKey = portalPollingFamilyKey(family);
+	const uint16_t requestedPage = portalArgToU16(wifiManager.server->arg("page"), 0);
+	const PortalFamilyPage familyPage = portalBuildFamilyPage(entities, entityCount, family, requestedPage, kPollingPortalPageSize);
+
+	bool hadError = false;
+	portalSetAllBuckets(buckets, entityCount, BucketId::Disabled);
+	char *outMap = persistedMap.data;
+	const bool mapBuilt = copyDisableAllBucketMap(outMap, kPrefBucketMapMaxLen);
+	if (!mapBuilt) {
+		hadError = true;
+	}
+
+	const bool bucketsCanApply = !mqttEntitiesRtAvailable() || mqttEntityCanApplyBuckets(buckets, entityCount);
+	if (mapBuilt && !bucketsCanApply) {
+		hadError = true;
+	}
+
+	bool bucketsApplied = false;
+	if (mapBuilt && bucketsCanApply) {
+		bucketsApplied = !mqttEntitiesRtAvailable() || mqttEntityApplyBuckets(buckets, entityCount);
+		if (bucketsApplied && persistUserPollingConfig(storedIntervalSeconds, outMap)) {
+			pollIntervalSeconds = storedIntervalSeconds;
+			recomputeBucketCounts();
+			pollingConfigLoadedFromStorage = true;
+		} else {
+			if (bucketsApplied && mqttEntitiesRtAvailable()) {
+				mqttEntityApplyBuckets(originalBuckets, entityCount);
+			}
+			hadError = true;
+		}
+	} else if (mapBuilt) {
+		hadError = true;
+	}
+	portalRebootScheduled = false;
+	portalMqttSaved = false;
 
 	char location[96];
 	snprintf(location, sizeof(location), "/config/polling?family=%s&page=%u&saved=1%s",
@@ -2816,6 +2909,9 @@ configHandlerSta(void)
 			wifiManager.server->on("/config/polling/save", HTTP_POST, [&]() {
 				handlePortalPollingSave(wifiManager);
 			});
+			wifiManager.server->on("/config/polling/clear", HTTP_POST, [&]() {
+				handlePortalPollingClear(wifiManager);
+			});
 			wifiManager.server->on("/reboot/normal", HTTP_POST, [&]() {
 				handlePortalRebootNormalRequest(wifiManager);
 			});
@@ -3137,6 +3233,9 @@ configHandler(void)
 			});
 			wifiManager.server->on("/config/polling/save", HTTP_POST, [&]() {
 				handlePortalPollingSave(wifiManager);
+			});
+			wifiManager.server->on("/config/polling/clear", HTTP_POST, [&]() {
+				handlePortalPollingClear(wifiManager);
 			});
 			wifiManager.server->on("/reboot/normal", HTTP_POST, [&]() {
 				handlePortalRebootNormalRequest(wifiManager);
