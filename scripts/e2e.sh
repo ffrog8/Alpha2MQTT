@@ -17,5 +17,7 @@ LOG_FILE="${LOG_DIR}/e2e_${TS}.log"
 LATEST_LOG="${LOG_DIR}/e2e_latest.log"
 
 echo "[e2e.sh] writing log: ${LOG_FILE}"
-python3 -u "${ROOT_DIR}/tools/e2e/test_rs485_stub.py" 2>&1 | tee "${LOG_FILE}"
+status=0
+python3 -u "${ROOT_DIR}/tools/e2e/test_rs485_stub.py" 2>&1 | tee "${LOG_FILE}" || status=$?
 cp -f "${LOG_FILE}" "${LATEST_LOG}"
+exit "${status}"

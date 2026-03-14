@@ -93,6 +93,15 @@ TEST_CASE("portal config: reboot-to-normal html includes runtime redirect probe"
 	CHECK(strstr(html, "Alpha2MQTT Control") != nullptr);
 }
 
+TEST_CASE("portal config: strict uint16 parser rejects malformed and overflowing values")
+{
+	CHECK(portalParseU16Strict(nullptr, 7) == 7);
+	CHECK(portalParseU16Strict("", 7) == 7);
+	CHECK(portalParseU16Strict("12", 7) == 12);
+	CHECK(portalParseU16Strict("1abc", 7) == 7);
+	CHECK(portalParseU16Strict("70000", 7) == 7);
+}
+
 TEST_CASE("portal config: polling family order is stable and controller diagnostics remain last")
 {
 	REQUIRE(portalPollingFamilyCount() == 7);

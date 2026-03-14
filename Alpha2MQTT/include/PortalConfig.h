@@ -54,6 +54,7 @@ bool mqttServerIsBlank(const char *server);
 PortalPostWifiAction portalPostWifiActionAfterWifiSave(const char *storedMqttServer);
 const char *portalMenuPollingHtml(void);
 const char *portalRebootToNormalHtml(void);
+uint16_t portalParseU16Strict(const char *text, uint16_t defaultValue);
 
 struct PortalMenu {
 	const char **items;

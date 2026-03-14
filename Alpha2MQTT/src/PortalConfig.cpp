@@ -3,6 +3,8 @@
 
 #include "../include/BucketScheduler.h"
 
+#include <cerrno>
+#include <cstdlib>
 #include <cstring>
 
 namespace {
@@ -199,6 +201,22 @@ portalRebootToNormalHtml(void)
 #else
 	return kPortalRebootNormal;
 #endif
+}
+
+uint16_t
+portalParseU16Strict(const char *text, uint16_t defaultValue)
+{
+	if (text == nullptr || text[0] == '\0') {
+		return defaultValue;
+	}
+
+	char *endPtr = nullptr;
+	errno = 0;
+	unsigned long parsed = strtoul(text, &endPtr, 10);
+	if (errno != 0 || endPtr == text || *endPtr != '\0' || parsed > UINT16_MAX) {
+		return defaultValue;
+	}
+	return static_cast<uint16_t>(parsed);
 }
 
 PortalMenu

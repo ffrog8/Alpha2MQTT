@@ -1766,16 +1766,7 @@ loadPollingBucketsForPortal(const mqttState *entities,
 static uint16_t
 portalArgToU16(const String &arg, uint16_t defaultValue)
 {
-	if (arg.length() == 0) {
-		return defaultValue;
-	}
-	char *endPtr = nullptr;
-	errno = 0;
-	unsigned long parsed = strtoul(arg.c_str(), &endPtr, 10);
-	if (errno != 0 || endPtr == arg.c_str()) {
-		return defaultValue;
-	}
-	return static_cast<uint16_t>(parsed);
+	return portalParseU16Strict(arg.c_str(), defaultValue);
 }
 
 const char *
