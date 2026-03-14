@@ -6674,6 +6674,13 @@ emitEntityDiscoveryPayload(CountedMqttPayload &payload, void *context)
 			 ", \"min\": %d, \"max\": %d",
 			 0, INVERTER_POWER_MAX);
 		break;
+	case mqttEntityId::entityMaxFeedinPercent:
+		snprintf(stateAddition, sizeof(stateAddition),
+			 ", \"state_class\": \"measurement\""
+			 ", \"unit_of_measurement\": \"%%\""
+			 ", \"icon\": \"mdi:transmission-tower-export\""
+			 ", \"min\": 0, \"max\": 100");
+		break;
 #ifdef A2M_DEBUG_WIFI
 	case mqttEntityId::entityRSSI:
 	case mqttEntityId::entityBSSID:

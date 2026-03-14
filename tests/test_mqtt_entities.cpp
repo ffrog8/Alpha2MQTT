@@ -182,6 +182,54 @@ TEST_CASE("mqtt entities: expanded catalog exposes metadata for direct register 
 	CHECK(gridVoltage->readKey == REG_GRID_METER_R_VOLTAGE_OF_A_PHASE);
 }
 
+TEST_CASE("mqtt entities: legacy-compatible direct readbacks are exposed as register entities")
+{
+	const mqttState *batteryCurrent = mqttEntityById(mqttEntityId::entityBatteryCurrent);
+	REQUIRE(batteryCurrent != nullptr);
+	CHECK(mqttEntityNameEquals(batteryCurrent, "Battery_Current"));
+	CHECK(batteryCurrent->family == MqttEntityFamily::Battery);
+	CHECK(batteryCurrent->scope == MqttEntityScope::Inverter);
+	CHECK(batteryCurrent->readKind == MqttEntityReadKind::Register);
+	CHECK(batteryCurrent->updateFreq == mqttUpdateFreq::freqDisabled);
+	CHECK(batteryCurrent->readKey == REG_BATTERY_HOME_R_CURRENT);
+
+	const mqttState *dispatchStart = mqttEntityById(mqttEntityId::entityDispatchStart);
+	REQUIRE(dispatchStart != nullptr);
+	CHECK(mqttEntityNameEquals(dispatchStart, "Dispatch_Start"));
+	CHECK(dispatchStart->readKind == MqttEntityReadKind::Register);
+	CHECK(dispatchStart->readKey == REG_DISPATCH_RW_DISPATCH_START);
+
+	const mqttState *dispatchMode = mqttEntityById(mqttEntityId::entityDispatchMode);
+	REQUIRE(dispatchMode != nullptr);
+	CHECK(mqttEntityNameEquals(dispatchMode, "Dispatch_Mode"));
+	CHECK(dispatchMode->readKind == MqttEntityReadKind::Register);
+	CHECK(dispatchMode->readKey == REG_DISPATCH_RW_DISPATCH_MODE);
+
+	const mqttState *dispatchPower = mqttEntityById(mqttEntityId::entityDispatchPower);
+	REQUIRE(dispatchPower != nullptr);
+	CHECK(mqttEntityNameEquals(dispatchPower, "Dispatch_Power"));
+	CHECK(dispatchPower->haClass == homeAssistantClass::haClassPower);
+	CHECK(dispatchPower->readKey == REG_DISPATCH_RW_ACTIVE_POWER_1);
+
+	const mqttState *dispatchSoc = mqttEntityById(mqttEntityId::entityDispatchSoc);
+	REQUIRE(dispatchSoc != nullptr);
+	CHECK(mqttEntityNameEquals(dispatchSoc, "Dispatch_SOC"));
+	CHECK(dispatchSoc->haClass == homeAssistantClass::haClassBattery);
+	CHECK(dispatchSoc->readKey == REG_DISPATCH_RW_DISPATCH_SOC);
+
+	const mqttState *dispatchTime = mqttEntityById(mqttEntityId::entityDispatchTime);
+	REQUIRE(dispatchTime != nullptr);
+	CHECK(mqttEntityNameEquals(dispatchTime, "Dispatch_Time"));
+	CHECK(dispatchTime->haClass == homeAssistantClass::haClassDuration);
+	CHECK(dispatchTime->readKey == REG_DISPATCH_RW_DISPATCH_TIME_1);
+
+	const mqttState *maxFeedin = mqttEntityById(mqttEntityId::entityMaxFeedinPercent);
+	REQUIRE(maxFeedin != nullptr);
+	CHECK(mqttEntityNameEquals(maxFeedin, "Max_Feedin_Percent"));
+	CHECK(maxFeedin->haClass == homeAssistantClass::haClassNumber);
+	CHECK(maxFeedin->readKey == REG_SYSTEM_CONFIG_RW_MAX_FEED_INTO_GRID_PERCENT);
+}
+
 TEST_CASE("mqtt entities: controller diagnostics include runtime polling signals")
 {
 	const mqttState *rs485Err = mqttEntityById(mqttEntityId::entityRs485Errors);
@@ -243,12 +291,20 @@ TEST_CASE("mqtt entities: controller diagnostics append after the legacy persist
 	const mqttState *desc = mqttEntitiesDesc();
 	const size_t count = mqttEntitiesCount();
 	size_t registerValueIdx = count;
+	size_t batteryCurrentIdx = count;
+	size_t maxFeedinIdx = count;
 	size_t rs485ErrorsIdx = count;
 	size_t budgetExceededIdx = count;
 
 	for (size_t i = 0; i < count; ++i) {
 		if (mqttEntityNameEquals(&desc[i], "Register_Value")) {
 			registerValueIdx = i;
+		}
+		if (mqttEntityNameEquals(&desc[i], "Battery_Current")) {
+			batteryCurrentIdx = i;
+		}
+		if (mqttEntityNameEquals(&desc[i], "Max_Feedin_Percent")) {
+			maxFeedinIdx = i;
 		}
 		if (mqttEntityNameEquals(&desc[i], "A2M_RS485_Errors")) {
 			rs485ErrorsIdx = i;
@@ -259,8 +315,13 @@ TEST_CASE("mqtt entities: controller diagnostics append after the legacy persist
 	}
 
 	REQUIRE(registerValueIdx < count);
+	REQUIRE(batteryCurrentIdx < count);
+	REQUIRE(maxFeedinIdx < count);
 	REQUIRE(rs485ErrorsIdx < count);
 	REQUIRE(budgetExceededIdx < count);
+	CHECK(registerValueIdx < batteryCurrentIdx);
+	CHECK(batteryCurrentIdx < maxFeedinIdx);
+	CHECK(maxFeedinIdx < rs485ErrorsIdx);
 	CHECK(registerValueIdx < rs485ErrorsIdx);
 	CHECK(registerValueIdx < budgetExceededIdx);
 }

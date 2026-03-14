@@ -141,6 +141,16 @@ MQTT_ENTITY_ROW(entityInverterPowerFactor, "Inverter_Power_Factor", freqDisabled
 MQTT_ENTITY_ROW(entityInverterPvTotalPower, "Inverter_PV_Total_Power", freqDisabled, false, true, haClassPower, MqttEntityFamily::Pv, MqttEntityScope::Inverter, MqttEntityReadKind::Register, REG_INVERTER_HOME_R_PV_TOTAL_POWER_1, false)
 MQTT_ENTITY_ROW(entityInverterArmSoftwareVersion, "Inverter_ARM_Software_Version", freqDisabled, false, true, haClassInfo, MqttEntityFamily::Inverter, MqttEntityScope::Inverter, MqttEntityReadKind::Identity, REG_INVERTER_INFO_R_ARM_SOFTWARE_VERSION_1, false)
 
+// Legacy-compatible direct readbacks added after the long-lived stable catalog
+// so existing compact Bucket_Map indices for prior entities remain unchanged.
+MQTT_ENTITY_ROW(entityBatteryCurrent, "Battery_Current", freqDisabled, false, true, haClassCurrent, MqttEntityFamily::Battery, MqttEntityScope::Inverter, MqttEntityReadKind::Register, REG_BATTERY_HOME_R_CURRENT, false)
+MQTT_ENTITY_ROW(entityDispatchStart, "Dispatch_Start", freqDisabled, false, true, haClassInfo, MqttEntityFamily::System, MqttEntityScope::Inverter, MqttEntityReadKind::Register, REG_DISPATCH_RW_DISPATCH_START, false)
+MQTT_ENTITY_ROW(entityDispatchMode, "Dispatch_Mode", freqDisabled, false, true, haClassInfo, MqttEntityFamily::System, MqttEntityScope::Inverter, MqttEntityReadKind::Register, REG_DISPATCH_RW_DISPATCH_MODE, false)
+MQTT_ENTITY_ROW(entityDispatchPower, "Dispatch_Power", freqDisabled, false, true, haClassPower, MqttEntityFamily::System, MqttEntityScope::Inverter, MqttEntityReadKind::Register, REG_DISPATCH_RW_ACTIVE_POWER_1, false)
+MQTT_ENTITY_ROW(entityDispatchSoc, "Dispatch_SOC", freqDisabled, false, true, haClassBattery, MqttEntityFamily::System, MqttEntityScope::Inverter, MqttEntityReadKind::Register, REG_DISPATCH_RW_DISPATCH_SOC, false)
+MQTT_ENTITY_ROW(entityDispatchTime, "Dispatch_Time", freqDisabled, false, true, haClassDuration, MqttEntityFamily::System, MqttEntityScope::Inverter, MqttEntityReadKind::Register, REG_DISPATCH_RW_DISPATCH_TIME_1, false)
+MQTT_ENTITY_ROW(entityMaxFeedinPercent, "Max_Feedin_Percent", freqDisabled, false, true, haClassNumber, MqttEntityFamily::System, MqttEntityScope::Inverter, MqttEntityReadKind::Register, REG_SYSTEM_CONFIG_RW_MAX_FEED_INTO_GRID_PERCENT, false)
+
 // Append controller diagnostics after the stable register catalog so legacy
 // compact Bucket_Map indices continue to refer to the long-lived entity set.
 MQTT_ENTITY_ROW(entityRs485Errors, "A2M_RS485_Errors", freqOneMin, false, false, haClassInfo, MqttEntityFamily::Controller, MqttEntityScope::Controller, MqttEntityReadKind::Derived, 0, false)
