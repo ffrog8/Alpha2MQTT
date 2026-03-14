@@ -113,6 +113,7 @@ static bool pollingConfigLoadedFromStorage = false;
 static bool pendingRs485StubControlSet = false;
 static bool pendingEntityCommandSet = false;
 static mqttEntityId pendingEntityCommandId = mqttEntityId::entityRegNum;
+static char *pendingPollingConfigPayload = nullptr;
 // Shared deferred-control payload buffer for small MQTT commands. MQTT pumping is
 // blocked while any deferred command is pending, so stub/entity commands never
 // overlap in this storage.
@@ -160,13 +161,10 @@ constexpr size_t kPrefBucketMapMaxLen = 2048;
 constexpr size_t kPollingConfigChunkMapMaxLen = 1024;
 constexpr size_t kPrefPollingLastChangeMaxLen = 32;
 // Portal handlers run on a constrained callback stack on ESP8266.
-// Keep large polling map buffers in static storage to avoid stack corruption/panics.
-// `g_portalBucketMapScratch` is also the deferred `config/set` payload buffer, so
-// long-lived discovery/status code must not reuse it while MQTT callbacks can fire.
+// Keep only the small bucket assignment array persistent. Large text buffers are
+// allocated on demand so NORMAL-mode runtime does not carry portal/config scratch.
 static BucketId g_portalBucketsScratch[kMqttEntityDescriptorCount];
-static char g_portalBucketMapScratch[kPrefBucketMapMaxLen];
 static size_t g_lastPublishedPollingConfigChunkCount = 0;
-static char g_portalRowRenderBuf[768];
 BootIntent currentBootIntent = BootIntent::Normal;
 BootIntent bootIntentForPublish = BootIntent::Normal;
 BootMode currentBootMode = BootMode::Normal;
@@ -1741,6 +1739,57 @@ struct ScopedEntityCatalogCopy {
 	}
 };
 
+struct ScopedCharBuffer {
+	char *data = nullptr;
+	size_t size = 0;
+
+	explicit ScopedCharBuffer(size_t bufferSize)
+	{
+		if (bufferSize == 0) {
+			return;
+		}
+		data = new (std::nothrow) char[bufferSize];
+		if (data != nullptr) {
+			size = bufferSize;
+			data[0] = '\0';
+		}
+	}
+
+	~ScopedCharBuffer()
+	{
+		delete[] data;
+	}
+
+	bool ok() const
+	{
+		return data != nullptr;
+	}
+};
+
+static bool
+queuePendingPollingConfigPayload(const char *src, size_t length)
+{
+	if (src == nullptr || length == 0 || length >= kPrefBucketMapMaxLen) {
+		return false;
+	}
+	char *buffer = new (std::nothrow) char[length + 1];
+	if (buffer == nullptr) {
+		return false;
+	}
+	memcpy(buffer, src, length);
+	buffer[length] = '\0';
+	delete[] pendingPollingConfigPayload;
+	pendingPollingConfigPayload = buffer;
+	return true;
+}
+
+static void
+clearPendingPollingConfigPayload(void)
+{
+	delete[] pendingPollingConfigPayload;
+	pendingPollingConfigPayload = nullptr;
+}
+
 static bool
 loadPollingBucketsForPortal(const mqttState *entities,
                             size_t entityCount,
@@ -1856,6 +1905,11 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 	                                                                familyPage,
 	                                                                visibleIndices,
 	                                                                kPollingPortalPageSize);
+	ScopedCharBuffer rowBuffer(768);
+	if (!rowBuffer.ok()) {
+		wifiManager.server->send(500, "text/plain", "polling config unavailable");
+		return;
+	}
 
 	const bool saved = wifiManager.server->hasArg("saved") && wifiManager.server->arg("saved") == "1";
 	const bool err = wifiManager.server->hasArg("err") && wifiManager.server->arg("err") == "1";
@@ -2158,8 +2212,8 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		char entityName[64];
 		mqttEntityNameCopy(&entities[idx], entityName, sizeof(entityName));
 		const int rowLen = snprintf_P(
-			g_portalRowRenderBuf,
-			sizeof(g_portalRowRenderBuf),
+			rowBuffer.data,
+			rowBuffer.size,
 			kRowFmt,
 			entityName,
 			entityName,
@@ -2171,8 +2225,8 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 			bucketIdToString(BucketId::OneDay), (cur == BucketId::OneDay) ? " selected" : "", "1d",
 			bucketIdToString(BucketId::User), (cur == BucketId::User) ? " selected" : "", "usr",
 			bucketIdToString(BucketId::Disabled), (cur == BucketId::Disabled) ? " selected" : "", "off");
-		if (rowLen > 0 && static_cast<size_t>(rowLen) < sizeof(g_portalRowRenderBuf)) {
-			portalSendContentAndFeed(wifiManager, g_portalRowRenderBuf);
+		if (rowLen > 0 && static_cast<size_t>(rowLen) < rowBuffer.size) {
+			portalSendContentAndFeed(wifiManager, rowBuffer.data);
 		}
 	}
 	portalSendContentPAndFeed(wifiManager, kTableClose);
@@ -2214,6 +2268,11 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 	const mqttState *entities = catalog.entities;
 	const size_t entityCount = catalog.count;
 	BucketId *buckets = g_portalBucketsScratch;
+	ScopedCharBuffer persistedMap(kPrefBucketMapMaxLen);
+	if (!persistedMap.ok()) {
+		wifiManager.server->send(500, "text/plain", "polling config unavailable");
+		return;
+	}
 	BucketId originalBuckets[kMqttEntityDescriptorCount]{};
 	uint32_t storedIntervalSeconds = kPollIntervalDefaultSeconds;
 	(void)loadPollingBucketsForPortal(entities, entityCount, buckets, storedIntervalSeconds);
@@ -2252,12 +2311,12 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 		if (fullMap.length() >= kPrefBucketMapMaxLen) {
 			hadError = true;
 		} else {
-			strlcpy(g_portalBucketMapScratch, fullMap.c_str(), kPrefBucketMapMaxLen);
-			if (g_portalBucketMapScratch[0] != '\0') {
+			strlcpy(persistedMap.data, fullMap.c_str(), persistedMap.size);
+			if (persistedMap.data[0] != '\0') {
 				uint32_t unknownCount = 0;
 				uint32_t invalidCount = 0;
 				uint32_t duplicateCount = 0;
-				if (!applyBucketMapString(g_portalBucketMapScratch,
+				if (!applyBucketMapString(persistedMap.data,
 				                          entities,
 				                          entityCount,
 				                          buckets,
@@ -2286,7 +2345,7 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 		}
 	}
 
-	char *outMap = g_portalBucketMapScratch;
+	char *outMap = persistedMap.data;
 	const bool mapBuilt = buildPersistedPollingConfigMap(buckets, outMap, kPrefBucketMapMaxLen);
 	if (!mapBuilt) {
 		hadError = true;
@@ -3313,8 +3372,10 @@ loop()
 
 	if (bootPlan.mqtt && pendingPollingConfigSet) {
 		pendingPollingConfigSet = false;
-		handlePollingConfigSet(g_portalBucketMapScratch);
-		g_portalBucketMapScratch[0] = '\0';
+		if (pendingPollingConfigPayload != nullptr) {
+			handlePollingConfigSet(pendingPollingConfigPayload);
+			clearPendingPollingConfigPayload();
+		}
 	}
 	if (bootPlan.mqtt && pendingRs485StubControlSet) {
 		pendingRs485StubControlSet = false;
@@ -3597,8 +3658,14 @@ loadPollingConfig(void)
 	Preferences preferences;
 	const size_t entityCount = mqttEntitiesCount();
 	BucketId *buckets = g_portalBucketsScratch;
-	char *bucketMap = g_portalBucketMapScratch;
+	ScopedCharBuffer bucketMapBuffer(kPrefBucketMapMaxLen);
 	bool appliedBucketMap = false;
+	if (!bucketMapBuffer.ok()) {
+		persistLoadOk = 0;
+		persistLoadErr = 1;
+		return;
+	}
+	char *bucketMap = bucketMapBuffer.data;
 
 	persistLoadOk = 0;
 	persistLoadErr = 0;
@@ -3971,7 +4038,10 @@ publishPollingConfigChunkClear(size_t startIndex, size_t endIndex)
 static bool
 publishPollingConfigChunked(const mqttState *entities, size_t entityCount, const BucketId *buckets)
 {
-	char *chunkMap = g_portalBucketMapScratch;
+	ScopedCharBuffer chunkMap(kPollingConfigChunkMapMaxLen);
+	if (!chunkMap.ok()) {
+		return false;
+	}
 	char topic[128];
 	size_t chunkCount = 0;
 	size_t activeCount = 0;
@@ -3984,7 +4054,7 @@ publishPollingConfigChunked(const mqttState *entities, size_t entityCount, const
 		                                              entityCount,
 		                                              buckets,
 		                                              startIndex,
-		                                              chunkMap,
+		                                              chunkMap.data,
 		                                              kPollingConfigChunkMapMaxLen,
 		                                              nextIndex,
 		                                              appliedCount)) {
@@ -4006,7 +4076,7 @@ publishPollingConfigChunked(const mqttState *entities, size_t entityCount, const
 		                                              entityCount,
 		                                              buckets,
 		                                              startIndex,
-		                                              chunkMap,
+		                                              chunkMap.data,
 		                                              kPollingConfigChunkMapMaxLen,
 		                                              nextIndex,
 		                                              appliedCount) ||
@@ -4014,7 +4084,7 @@ publishPollingConfigChunked(const mqttState *entities, size_t entityCount, const
 			return false;
 		}
 
-		PollingConfigChunkPayloadContext chunkPayload{ chunkIndex, chunkCount, chunkMap };
+		PollingConfigChunkPayloadContext chunkPayload{ chunkIndex, chunkCount, chunkMap.data };
 		snprintf(topic,
 		         sizeof(topic),
 		         "%s/config/entity_intervals/%lu",
@@ -4401,8 +4471,14 @@ handlePollingConfigSet(char *payload)
 	if (!parsed) {
 		return false;
 	}
+	ScopedCharBuffer persistedMap(kPrefBucketMapMaxLen);
+	if ((ctx.pollIntervalChanged || ctx.bucketAssignmentsChanged) && !persistedMap.ok()) {
+		persistLoadOk = 0;
+		persistLoadErr = 1;
+		return false;
+	}
 	if ((ctx.pollIntervalChanged || ctx.bucketAssignmentsChanged) &&
-	    !buildPersistedPollingConfigMap(ctx.buckets, g_portalBucketMapScratch, kPrefBucketMapMaxLen)) {
+	    !buildPersistedPollingConfigMap(ctx.buckets, persistedMap.data, kPrefBucketMapMaxLen)) {
 		persistLoadOk = 0;
 		persistLoadErr = 1;
 		return false;
@@ -4417,7 +4493,7 @@ handlePollingConfigSet(char *payload)
 		ctx.bucketsApplied = true;
 	}
 	if ((ctx.pollIntervalChanged || ctx.bucketAssignmentsChanged) &&
-	    !persistUserPollingConfig(ctx.stagedPollInterval, g_portalBucketMapScratch)) {
+	    !persistUserPollingConfig(ctx.stagedPollInterval, persistedMap.data)) {
 		if (ctx.bucketsApplied) {
 			mqttEntityApplyBuckets(ctx.originalBuckets, entityCount);
 		}
@@ -6295,7 +6371,7 @@ emitEntityDiscoveryPayload(CountedMqttPayload &payload, void *context)
 	const mqttState *singleEntity = ctx.singleEntity;
 	const DiscoveryDeviceScope scope = ctx.scope;
 	const char *topicBase = ctx.topicBase;
-	char (&stateAddition)[sizeof(g_portalRowRenderBuf)] = g_portalRowRenderBuf;
+	char stateAddition[256];
 	char prettyName[64];
 	char uniqueId[128];
 	const char *deviceId = discoveryDeviceIdForScope(scope);
@@ -8013,14 +8089,9 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 #endif // DEBUG_CALLBACKS
 
 	if (strcmp(topic, configSetTopic) == 0) {
-		// Defer config/set out of callback context, but do not reuse `_mqttPayload`:
-		// sendData()/sendMqtt() may still be publishing with that shared buffer when
-		// callbacks arrive from RS485 service hooks. Reuse the polling scratch instead
-		// and copy it out in loop() before the config parser repurposes the scratch.
-		if (!copyLengthDelimitedString(reinterpret_cast<const char *>(message),
-		                               length,
-		                               g_portalBucketMapScratch,
-		                               sizeof(g_portalBucketMapScratch))) {
+		// Defer config/set out of callback context without pinning a 2 KB global scratch
+		// in NORMAL mode. Queue an exact-size copy and let loop() parse/free it later.
+		if (!queuePendingPollingConfigPayload(reinterpret_cast<const char *>(message), length)) {
 #ifdef DEBUG_OVER_SERIAL
 			sprintf(_debugOutput, "mqttCallback: bad config length: %d", length);
 			Serial.println(_debugOutput);
