@@ -4,6 +4,7 @@
 #include <set>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include <doctest/doctest.h>
 
@@ -71,6 +72,27 @@ TEST_CASE("mqtt entities: copy and index helpers round-trip by id")
 		CHECK(byId.entityId == desc[i].entityId);
 		char name[64];
 		mqttEntityNameCopy(&byIndex, name, sizeof(name));
+		CHECK(mqttEntityNameEquals(&desc[i], name));
+	}
+}
+
+TEST_CASE("mqtt entities: full catalog copy mirrors descriptor metadata")
+{
+	const mqttState *desc = mqttEntitiesDesc();
+	REQUIRE(desc != nullptr);
+	const size_t count = mqttEntitiesCount();
+	REQUIRE(count > 0);
+
+	std::vector<mqttState> copied(count);
+	REQUIRE(mqttEntityCopyCatalog(copied.data(), copied.size()));
+
+	for (size_t i = 0; i < count; ++i) {
+		CHECK(copied[i].entityId == desc[i].entityId);
+		CHECK(copied[i].readKey == desc[i].readKey);
+		CHECK(copied[i].family == desc[i].family);
+		CHECK(copied[i].scope == desc[i].scope);
+		char name[64];
+		mqttEntityNameCopy(&copied[i], name, sizeof(name));
 		CHECK(mqttEntityNameEquals(&desc[i], name));
 	}
 }

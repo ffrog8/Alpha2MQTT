@@ -90,11 +90,11 @@ buildStaleInverterIdentifier(const char *previousSerial,
 DiscoveryDeviceScope
 mqttEntityScope(mqttEntityId id)
 {
-	const mqttState *entity = mqttEntityById(id);
-	if (entity == nullptr) {
+	mqttState entity{};
+	if (!mqttEntityCopyById(id, &entity)) {
 		return DiscoveryDeviceScope::Inverter;
 	}
-	switch (entity->scope) {
+	switch (entity.scope) {
 	case MqttEntityScope::Controller:
 		return DiscoveryDeviceScope::Controller;
 	case MqttEntityScope::Inverter:

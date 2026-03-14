@@ -55,11 +55,14 @@ constexpr size_t kMqttEntityDescriptorCount =
 #undef MQTT_ENTITY_ROW
 ;
 
+// Host/test code can still inspect the raw descriptor table. Firmware paths
+// should prefer copy helpers so ESP8266 builds can keep the catalog in flash.
 const mqttState *mqttEntitiesDesc();
 const mqttState *mqttEntityById(mqttEntityId id);
 bool mqttEntityCopyByIndex(size_t idx, mqttState *out);
 bool mqttEntityCopyById(mqttEntityId id, mqttState *out);
 bool mqttEntityIndexById(mqttEntityId id, size_t *outIdx);
+bool mqttEntityCopyCatalog(mqttState *out, size_t count);
 size_t mqttEntitiesCount();
 
 bool mqttEntityNameEquals(const mqttState *entity, const char *name);

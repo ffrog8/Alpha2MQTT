@@ -16,6 +16,7 @@ First, go and customise options at the top of Definitions.h!
 #include <cctype>
 #include <cstdarg>
 #include <cstdint>
+#include <new>
 // Supporting files
 #include "../RegisterHandler.h"
 #include "../RS485Handler.h"
@@ -1710,6 +1711,35 @@ portalLogHeap(const char *label)
 	(void)label;
 }
 
+struct ScopedEntityCatalogCopy {
+	mqttState *entities = nullptr;
+	size_t count = 0;
+
+	~ScopedEntityCatalogCopy()
+	{
+		delete[] entities;
+	}
+
+	bool load()
+	{
+		count = mqttEntitiesCount();
+		if (count == 0) {
+			return false;
+		}
+		entities = new (std::nothrow) mqttState[count];
+		if (entities == nullptr) {
+			return false;
+		}
+		if (!mqttEntityCopyCatalog(entities, count)) {
+			delete[] entities;
+			entities = nullptr;
+			count = 0;
+			return false;
+		}
+		return true;
+	}
+};
+
 static bool
 loadPollingBucketsForPortal(const mqttState *entities,
                             size_t entityCount,
@@ -1808,8 +1838,13 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		return;
 	}
 
-	const mqttState *entities = mqttEntitiesDesc();
-	const size_t entityCount = mqttEntitiesCount();
+	ScopedEntityCatalogCopy catalog;
+	if (!catalog.load()) {
+		wifiManager.server->send(500, "text/plain", "polling config unavailable");
+		return;
+	}
+	const mqttState *entities = catalog.entities;
+	const size_t entityCount = catalog.count;
 	BucketId *buckets = g_portalBucketsScratch;
 	uint32_t storedIntervalSeconds = kPollIntervalDefaultSeconds;
 	if (!loadPollingBucketsForPortal(entities, entityCount, buckets, storedIntervalSeconds)) {
@@ -2179,8 +2214,13 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 		return;
 	}
 
-	const mqttState *entities = mqttEntitiesDesc();
-	const size_t entityCount = mqttEntitiesCount();
+	ScopedEntityCatalogCopy catalog;
+	if (!catalog.load()) {
+		wifiManager.server->send(500, "text/plain", "polling config unavailable");
+		return;
+	}
+	const mqttState *entities = catalog.entities;
+	const size_t entityCount = catalog.count;
 	BucketId *buckets = g_portalBucketsScratch;
 	BucketId originalBuckets[kMqttEntityDescriptorCount]{};
 	uint32_t storedIntervalSeconds = kPollIntervalDefaultSeconds;
@@ -3562,7 +3602,6 @@ loadPollingConfig(void)
 		return;
 	}
 	Preferences preferences;
-	const mqttState *entities = mqttEntitiesDesc();
 	const size_t entityCount = mqttEntitiesCount();
 	BucketId *buckets = g_portalBucketsScratch;
 	char *bucketMap = g_portalBucketMapScratch;
@@ -3590,8 +3629,30 @@ loadPollingConfig(void)
 	pollIntervalSeconds = clampPollInterval(storedPollInterval);
 
 	for (size_t i = 0; i < entityCount; i++) {
-		buckets[i] = bucketIdFromFreq(entities[i].updateFreq);
+		mqttState entity{};
+		if (!mqttEntityCopyByIndex(i, &entity)) {
+			preferences.end();
+			persistLoadOk = 0;
+			persistLoadErr = 1;
+			return;
+		}
+		buckets[i] = bucketIdFromFreq(entity.updateFreq);
 	}
+
+	ScopedEntityCatalogCopy catalog;
+	if (!catalog.load()) {
+		preferences.end();
+		if (!mqttEntityApplyBuckets(buckets, entityCount)) {
+			persistLoadOk = 0;
+			persistLoadErr = 1;
+			return;
+		}
+		persistLoadOk = 0;
+		persistLoadErr = 1;
+		recomputeBucketCounts();
+		return;
+	}
+	const mqttState *entities = catalog.entities;
 
 	bucketMap[0] = '\0';
 	preferences.getString(kPreferenceBucketMap, bucketMap, kPrefBucketMapMaxLen);
@@ -3655,8 +3716,12 @@ loadPollingConfig(void)
 static bool
 buildPersistedPollingConfigMap(const BucketId *buckets, char *map, size_t mapLen)
 {
-	const mqttState *entities = mqttEntitiesDesc();
-	const size_t entityCount = mqttEntitiesCount();
+	ScopedEntityCatalogCopy catalog;
+	if (!catalog.load()) {
+		return false;
+	}
+	const mqttState *entities = catalog.entities;
+	const size_t entityCount = catalog.count;
 
 	if (!mqttEntitiesRtAvailable() || buckets == nullptr || map == nullptr || mapLen == 0) {
 		return false;
@@ -3987,8 +4052,12 @@ publishPollingConfig(void)
 	if (!mqttEntitiesRtAvailable()) {
 		return;
 	}
-	const mqttState *entities = mqttEntitiesDesc();
-	const size_t entityCount = mqttEntitiesCount();
+	ScopedEntityCatalogCopy catalog;
+	if (!catalog.load()) {
+		return;
+	}
+	const mqttState *entities = catalog.entities;
+	const size_t entityCount = catalog.count;
 	BucketId *buckets = g_portalBucketsScratch;
 	if (!mqttEntityCopyBuckets(buckets, entityCount)) {
 		return;
@@ -4166,17 +4235,19 @@ publishPendingStaleInverterDiscoveryClears(void)
 		return false;
 	}
 
-	const mqttState *entities = mqttEntitiesDesc();
 	const size_t entityCount = mqttEntitiesCount();
 	size_t batchCount = 0;
 	while (resendHaClearStaleInverterIndex < entityCount && batchCount < kHaDiscoveryBatchSize) {
 		const size_t idx = resendHaClearStaleInverterIndex;
-		const mqttState *entity = &entities[idx];
-		if (mqttEntityScope(entity->entityId) != DiscoveryDeviceScope::Inverter) {
+		mqttState entity{};
+		if (!mqttEntityCopyByIndex(idx, &entity)) {
+			return true;
+		}
+		if (mqttEntityScope(entity.entityId) != DiscoveryDeviceScope::Inverter) {
 			resendHaClearStaleInverterIndex++;
 			continue;
 		}
-		if (!clearHaEntityDiscovery(entity,
+		if (!clearHaEntityDiscovery(&entity,
 		                            resendHaClearStaleInverterDeviceIds[resendHaClearStaleInverterQueueIndex])) {
 			return true;
 		}
@@ -4248,8 +4319,12 @@ handlePollingConfigSet(char *payload)
 		uint32_t stagedPollInterval = kPollIntervalDefaultSeconds;
 	};
 
-	const mqttState *entities = mqttEntitiesDesc();
-	const size_t entityCount = mqttEntitiesCount();
+	ScopedEntityCatalogCopy catalog;
+	if (!catalog.load()) {
+		return false;
+	}
+	const mqttState *entities = catalog.entities;
+	const size_t entityCount = catalog.count;
 	BucketId *buckets = g_portalBucketsScratch;
 	const bool bucketsLoaded = mqttEntitiesRtAvailable() && mqttEntityCopyBuckets(buckets, entityCount);
 	BucketId originalBuckets[kMqttEntityDescriptorCount]{};
@@ -5237,8 +5312,6 @@ mqttReconnect(void)
 #endif
 			diag_mqtt_result(mqttConnected, static_cast<int16_t>(_mqtt.state()), millis());
 			if (mqttConnected) {
-			const mqttState *entities = mqttEntitiesDesc();
-			int numberOfEntities = static_cast<int>(mqttEntitiesCount());
 #ifdef DEBUG_OVER_SERIAL
 			Serial.println("Connected MQTT");
 #endif
@@ -6752,7 +6825,6 @@ sendHaData()
 	if (!mqttEntitiesRtAvailable() || !_mqtt.connected()) {
 		return;
 	}
-	const mqttState *entities = mqttEntitiesDesc();
 	const size_t numberOfEntities = mqttEntitiesCount();
 
 	// Spread retained HA discovery publishes across multiple loop() turns so a config change
@@ -7113,10 +7185,9 @@ formatPollingBudgetEntityValue(mqttEntityId entityId, char *out, size_t outSize)
 static void
 executePollTransaction(const MqttEntityActiveBucket &bucketPlan,
                        const MqttPollTransaction &transaction,
-                       const mqttState *entities,
                        bool snapshotOkThisBucket)
 {
-	if (transaction.entityCount == 0 || entities == nullptr || bucketPlan.members == nullptr) {
+	if (transaction.entityCount == 0 || bucketPlan.members == nullptr) {
 		return;
 	}
 
@@ -7135,7 +7206,11 @@ executePollTransaction(const MqttEntityActiveBucket &bucketPlan,
 			if (offset >= bucketPlan.count) {
 				break;
 			}
-			sendDataFromMqttState(&entities[bucketPlan.members[offset]], false, nullptr);
+			mqttState entity{};
+			if (!mqttEntityCopyByIndex(bucketPlan.members[offset], &entity)) {
+				continue;
+			}
+			sendDataFromMqttState(&entity, false, nullptr);
 		}
 		return;
 	case MqttPollTransactionKind::RegisterFanout:
@@ -7145,8 +7220,12 @@ executePollTransaction(const MqttEntityActiveBucket &bucketPlan,
 	}
 
 	const size_t leaderIdx = bucketPlan.members[leaderOffset];
+	mqttState leader{};
+	if (!mqttEntityCopyByIndex(leaderIdx, &leader)) {
+		return;
+	}
 	modbusRequestAndResponse response;
-	const modbusRequestAndResponseStatusValues result = readEntity(&entities[leaderIdx], &response);
+	const modbusRequestAndResponseStatusValues result = readEntity(&leader, &response);
 	if (result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
 		return;
 	}
@@ -7156,7 +7235,11 @@ executePollTransaction(const MqttEntityActiveBucket &bucketPlan,
 		if (offset >= bucketPlan.count) {
 			break;
 		}
-		sendDataFromMqttState(&entities[bucketPlan.members[offset]], false, &response);
+		mqttState entity{};
+		if (!mqttEntityCopyByIndex(bucketPlan.members[offset], &entity)) {
+			continue;
+		}
+		sendDataFromMqttState(&entity, false, &response);
 	}
 }
 
@@ -7224,7 +7307,6 @@ sendData()
 		return;
 	}
 
-	const mqttState *entities = mqttEntitiesDesc();
 	const MqttEntityActivePlan *plan = mqttActivePlan();
 	if (plan == nullptr) {
 		return;
@@ -7278,7 +7360,7 @@ sendData()
 
 		while (processed < bucketPlan.transactionCount) {
 			const size_t txnIndex = (startCursor + processed) % bucketPlan.transactionCount;
-			executePollTransaction(bucketPlan, bucketPlan.transactions[txnIndex], entities, snapshotOkThisBucket);
+			executePollTransaction(bucketPlan, bucketPlan.transactions[txnIndex], snapshotOkThisBucket);
 			processed++;
 			if (processed < bucketPlan.transactionCount && timedOut(bucketStartMs, millis(), budgetMs)) {
 				truncated = true;

@@ -31,7 +31,11 @@ namespace {
 #define MQTT_ENTITY_ROW(id, name, freq, subscribe, retain, haClass, family, scope, readKind, readKey, needsEssSnapshot) \
 	{ id##_name, static_cast<uint16_t>(readKey), id, freq, haClass, family, scope, readKind, subscribe, retain, needsEssSnapshot },
 
+#if defined(ESP8266) || defined(ARDUINO_ARCH_ESP8266)
+static const mqttState kMqttEntities[] PROGMEM = {
+#else
 static const mqttState kMqttEntities[] = {
+#endif
 #include "../include/MqttEntityCatalogRows.h"
 };
 
@@ -39,6 +43,20 @@ static const mqttState kMqttEntities[] = {
 
 static_assert(sizeof(kMqttEntities) / sizeof(kMqttEntities[0]) == kMqttEntityDescriptorCount,
               "kMqttEntityDescriptorCount must match kMqttEntities length");
+
+static bool
+copyEntityFromCatalog(size_t idx, mqttState *out)
+{
+	if (out == nullptr || idx >= kMqttEntityDescriptorCount) {
+		return false;
+	}
+#if defined(ESP8266) || defined(ARDUINO_ARCH_ESP8266)
+	memcpy_P(out, &kMqttEntities[idx], sizeof(*out));
+#else
+	*out = kMqttEntities[idx];
+#endif
+	return true;
+}
 
 struct RuntimeState {
 	bool initialized = false;
@@ -80,7 +98,11 @@ defaultBucketForIndex(size_t idx)
 	if (idx >= kMqttEntityDescriptorCount) {
 		return BucketId::Unknown;
 	}
-	return bucketIdFromFreq(kMqttEntities[idx].updateFreq);
+	mqttState entity{};
+	if (!copyEntityFromCatalog(idx, &entity)) {
+		return BucketId::Unknown;
+	}
+	return bucketIdFromFreq(entity.updateFreq);
 }
 
 static BucketId
@@ -185,7 +207,11 @@ buildBucketTransactions(MqttEntityActiveBucket &bucket,
 		if (bucketForIndex(overrides, overrideCount, idx) != bucketId) {
 			continue;
 		}
-		const mqttState &entity = kMqttEntities[idx];
+		mqttState entity{};
+		if (!copyEntityFromCatalog(idx, &entity)) {
+			delete[] specs;
+			return false;
+		}
 		size_t txnIndex = txnCount;
 		for (size_t existing = 0; existing < txnCount; ++existing) {
 			if (transactionMatches(specs[existing], entity)) {
@@ -279,7 +305,12 @@ rebuildActivePlanForOverrides(MqttEntityActivePlan &nextPlan,
                               size_t overrideCount)
 {
 	for (size_t idx = 0; idx < kMqttEntityDescriptorCount; ++idx) {
-		const bool needsEssSnapshot = kMqttEntities[idx].needsEssSnapshot;
+		mqttState entity{};
+		if (!copyEntityFromCatalog(idx, &entity)) {
+			resetActivePlan(nextPlan);
+			return false;
+		}
+		const bool needsEssSnapshot = entity.needsEssSnapshot;
 		switch (bucketForIndex(overrides, overrideCount, idx)) {
 		case BucketId::TenSec:
 			nextPlan.tenSec.count++;
@@ -392,18 +423,26 @@ buildOverridesFromBuckets(const BucketId *buckets,
 const mqttState *
 mqttEntitiesDesc()
 {
+#if defined(ESP8266) || defined(ARDUINO_ARCH_ESP8266)
+	return nullptr;
+#else
 	return kMqttEntities;
+#endif
 }
 
 const mqttState *
 mqttEntityById(mqttEntityId id)
 {
+#if defined(ESP8266) || defined(ARDUINO_ARCH_ESP8266)
+	return nullptr;
+#else
 	for (size_t i = 0; i < kMqttEntityDescriptorCount; ++i) {
 		if (kMqttEntities[i].entityId == id) {
 			return &kMqttEntities[i];
 		}
 	}
 	return nullptr;
+#endif
 }
 
 bool
@@ -412,8 +451,7 @@ mqttEntityCopyByIndex(size_t idx, mqttState *out)
 	if (out == nullptr || idx >= kMqttEntityDescriptorCount) {
 		return false;
 	}
-	*out = kMqttEntities[idx];
-	return true;
+	return copyEntityFromCatalog(idx, out);
 }
 
 bool
@@ -433,12 +471,30 @@ mqttEntityIndexById(mqttEntityId id, size_t *outIdx)
 		return false;
 	}
 	for (size_t i = 0; i < kMqttEntityDescriptorCount; ++i) {
-		if (kMqttEntities[i].entityId == id) {
+		mqttState entity{};
+		if (!copyEntityFromCatalog(i, &entity)) {
+			return false;
+		}
+		if (entity.entityId == id) {
 			*outIdx = i;
 			return true;
 		}
 	}
 	return false;
+}
+
+bool
+mqttEntityCopyCatalog(mqttState *out, size_t count)
+{
+	if (out == nullptr || count != kMqttEntityDescriptorCount) {
+		return false;
+	}
+	for (size_t i = 0; i < count; ++i) {
+		if (!copyEntityFromCatalog(i, &out[i])) {
+			return false;
+		}
+	}
+	return true;
 }
 
 size_t
@@ -484,7 +540,11 @@ mqttEntityNeedsEssSnapshotByIndex(size_t idx)
 	if (idx >= kMqttEntityDescriptorCount) {
 		return false;
 	}
-	return kMqttEntities[idx].needsEssSnapshot;
+	mqttState entity{};
+	if (!copyEntityFromCatalog(idx, &entity)) {
+		return false;
+	}
+	return entity.needsEssSnapshot;
 }
 
 BucketId
@@ -502,12 +562,16 @@ mqttEntityEffectiveFreqByIndex(size_t idx)
 	if (idx >= kMqttEntityDescriptorCount) {
 		return mqttUpdateFreq::freqDisabled;
 	}
+	mqttState entity{};
+	if (!copyEntityFromCatalog(idx, &entity)) {
+		return mqttUpdateFreq::freqDisabled;
+	}
 	if (!g_runtime.initialized) {
-		return kMqttEntities[idx].updateFreq;
+		return entity.updateFreq;
 	}
 
 	const BucketId overrideBucket = bucketOverrideForIndex(g_runtime.overrides, g_runtime.overrideCount, idx);
-	if (overrideBucket == BucketId::Unknown && kMqttEntities[idx].updateFreq == mqttUpdateFreq::freqNever) {
+	if (overrideBucket == BucketId::Unknown && entity.updateFreq == mqttUpdateFreq::freqNever) {
 		return mqttUpdateFreq::freqNever;
 	}
 	return bucketIdToFreq(bucketForIndex(idx));
