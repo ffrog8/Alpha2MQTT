@@ -4226,8 +4226,7 @@ publishHaEntityDiscovery(const mqttState *entity)
 		return clearHaEntityDiscovery(entity, deviceId);
 	}
 
-	sendDataFromMqttState(entity, true);
-	return true;
+	return sendDataFromMqttState(entity, true);
 }
 
 bool
