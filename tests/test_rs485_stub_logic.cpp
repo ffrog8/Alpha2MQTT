@@ -77,6 +77,13 @@ TEST_CASE("rs485 stub: advanced keys do not imply mode")
 	CHECK(mode == Rs485StubMode::OfflineForever);
 }
 
+TEST_CASE("rs485 stub: invalid mode rejects payload even when other keys are present")
+{
+	Rs485StubMode mode = Rs485StubMode::OnlineAlways;
+	CHECK_FALSE(rs485StubParseModeField("{\"mode\":\"typo\",\"fail_n\":2,\"latency_ms\":50}", mode));
+	CHECK(mode == Rs485StubMode::OnlineAlways);
+}
+
 TEST_CASE("rs485 stub: integer field parsing does not steal unrelated numeric values")
 {
 	int32_t value = 0;

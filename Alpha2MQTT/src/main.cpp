@@ -7894,12 +7894,14 @@ parseStubControlMode(const char *payload, Rs485StubMode &mode)
 	return rs485StubParseModeField(payload, mode);
 }
 
-static void
+static bool
 parseRs485StubControlPayload(const char *payload, Rs485StubControlRequest &request)
 {
 	int32_t value = 0;
 
-	parseStubControlMode(payload, request.mode);
+	if (!parseStubControlMode(payload, request.mode)) {
+		return false;
+	}
 
 	if (parseStubControlInt(payload, "fail_n", value) ||
 	    parseStubControlInt(payload, "failFirstN", value)) {
@@ -7998,6 +8000,8 @@ parseRs485StubControlPayload(const char *payload, Rs485StubControlRequest &reque
 		request.virtualDispatchSoc = static_cast<uint16_t>(value);
 		request.hasVirtualDispatch = true;
 	}
+
+	return true;
 }
 
 static void
@@ -8010,9 +8014,9 @@ applyRs485StubControlPayload(const char *payload)
 	// Chose a helper-based parser here because ESP8266 loop stack is tight and the
 	// earlier monolithic local-heavy parser triggered watchdog resets on control publish.
 	Rs485StubControlRequest request{};
-	const Rs485StubConfig &currentCfg = _modBus->stubConfig();
-	request.mode = currentCfg.mode;
-	parseRs485StubControlPayload(payload, request);
+	if (!parseRs485StubControlPayload(payload, request)) {
+		return;
+	}
 	maybeYield();
 
 	_modBus->applyStubControl(request.mode, request.failN, request.failReg, request.failType, request.latencyMs);
