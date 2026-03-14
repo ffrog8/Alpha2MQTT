@@ -109,6 +109,7 @@ HttpServer httpServer(80);
 bool httpControlPlaneEnabled = false;
 static bool inMqttCallback = false;
 static bool pendingPollingConfigSet = false;
+static bool pollingConfigLoadedFromStorage = false;
 static bool pendingRs485StubControlSet = false;
 static bool pendingEntityCommandSet = false;
 static mqttEntityId pendingEntityCommandId = mqttEntityId::entityRegNum;
@@ -895,7 +896,7 @@ rs485ProbeTick(void)
 			// Now that inverter identity is known, discovery/config can be published under the real HA unique id.
 			// If a deferred config/set payload is already queued, let loop() apply that first instead of
 			// reusing the shared bucket-map scratch and clobbering the pending MQTT command.
-			if (!pendingPollingConfigSet) {
+			if (shouldReloadPollingConfigFromStorage(pendingPollingConfigSet, pollingConfigLoadedFromStorage)) {
 				loadPollingConfig();
 			}
 			requestHaDataResend();
@@ -2311,6 +2312,7 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 		if (bucketsApplied && persistUserPollingConfig(storedIntervalSeconds, outMap)) {
 			pollIntervalSeconds = storedIntervalSeconds;
 			recomputeBucketCounts();
+			pollingConfigLoadedFromStorage = true;
 		} else {
 			if (bucketsApplied && mqttEntitiesRtAvailable()) {
 				mqttEntityApplyBuckets(originalBuckets, entityCount);
@@ -3709,8 +3711,10 @@ loadPollingConfig(void)
 	if (!mqttEntityApplyBuckets(buckets, entityCount)) {
 		persistLoadOk = 0;
 		persistLoadErr = 1;
+		return;
 	}
 	recomputeBucketCounts();
+	pollingConfigLoadedFromStorage = true;
 }
 
 static bool
@@ -4445,6 +4449,7 @@ handlePollingConfigSet(char *payload)
 	if (ctx.anyChange) {
 		recomputeBucketCounts();
 		updatePollingLastChange();
+		pollingConfigLoadedFromStorage = true;
 		publishPollingConfig();
 		resendAllData = true;
 	}
@@ -5203,7 +5208,7 @@ mqttReconnect(void)
 	lastAttemptMs = nowMs;
 
 	initMqttEntitiesRtIfNeeded(true);
-	if (!pendingPollingConfigSet) {
+	if (shouldReloadPollingConfigFromStorage(pendingPollingConfigSet, pollingConfigLoadedFromStorage)) {
 		loadPollingConfig();
 	}
 

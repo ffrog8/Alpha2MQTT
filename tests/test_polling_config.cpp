@@ -103,6 +103,14 @@ TEST_CASE("length-delimited copy accepts payloads beyond the legacy 512-byte cal
 	CHECK_FALSE(copyLengthDelimitedString(input.c_str(), input.size(), tooSmall, sizeof(tooSmall)));
 }
 
+TEST_CASE("reconnect path reloads persisted polling config only until runtime is initialized")
+{
+	CHECK(shouldReloadPollingConfigFromStorage(false, false));
+	CHECK_FALSE(shouldReloadPollingConfigFromStorage(true, false));
+	CHECK_FALSE(shouldReloadPollingConfigFromStorage(false, true));
+	CHECK_FALSE(shouldReloadPollingConfigFromStorage(true, true));
+}
+
 TEST_CASE("config entry visitor accepts large bucket_map values")
 {
 	std::string largeMap;

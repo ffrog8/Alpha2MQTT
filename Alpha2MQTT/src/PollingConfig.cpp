@@ -93,6 +93,12 @@ bucketMapUsesDescriptorIndices(const char *map)
 	return false;
 }
 
+bool
+shouldReloadPollingConfigFromStorage(bool pendingConfigSet, bool configLoaded)
+{
+	return !pendingConfigSet && !configLoaded;
+}
+
 static const char *
 skipWhitespace(const char *cursor)
 {
