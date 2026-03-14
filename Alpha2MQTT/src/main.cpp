@@ -2296,11 +2296,11 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 
 	// poll_interval_s
 	if (wifiManager.server->hasArg("poll_interval_s")) {
-		char *endPtr = nullptr;
-		errno = 0;
-		unsigned long parsed = strtoul(wifiManager.server->arg("poll_interval_s").c_str(), &endPtr, 10);
-		if (errno == 0 && endPtr != nullptr && *endPtr == '\0') {
-			storedIntervalSeconds = clampPollInterval(static_cast<uint32_t>(parsed));
+		uint32_t parsedInterval = 0;
+		if (parseStrictUint32(wifiManager.server->arg("poll_interval_s").c_str(),
+		                     kPollIntervalMaxSeconds,
+		                     parsedInterval)) {
+			storedIntervalSeconds = clampPollInterval(parsedInterval);
 		} else {
 			hadError = true;
 		}
@@ -4411,11 +4411,9 @@ handlePollingConfigSet(char *payload)
 			bool handled = false;
 
 				if (!strcmp(key, kPreferencePollInterval)) {
-					char *endPtr = nullptr;
-					errno = 0;
-					unsigned long parsed = strtoul(value, &endPtr, 10);
-					if (errno == 0 && endPtr != value && *endPtr == '\0') {
-						uint32_t clamped = clampPollInterval(static_cast<uint32_t>(parsed));
+					uint32_t parsedInterval = 0;
+					if (parseStrictUint32(value, kPollIntervalMaxSeconds, parsedInterval)) {
+						uint32_t clamped = clampPollInterval(parsedInterval);
 						if (clamped != pollIntervalSeconds) {
 							ctx.stagedPollInterval = clamped;
 							ctx.pollIntervalChanged = true;

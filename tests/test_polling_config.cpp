@@ -111,6 +111,18 @@ TEST_CASE("reconnect path reloads persisted polling config only until runtime is
 	CHECK_FALSE(shouldReloadPollingConfigFromStorage(true, true));
 }
 
+TEST_CASE("strict uint32 parser rejects blank and signed polling intervals")
+{
+	uint32_t value = 0;
+	CHECK(parseStrictUint32("13", kPollIntervalMaxSeconds, value));
+	CHECK(value == 13);
+	CHECK_FALSE(parseStrictUint32("", kPollIntervalMaxSeconds, value));
+	CHECK_FALSE(parseStrictUint32("-1", kPollIntervalMaxSeconds, value));
+	CHECK_FALSE(parseStrictUint32("+1", kPollIntervalMaxSeconds, value));
+	CHECK_FALSE(parseStrictUint32("1abc", kPollIntervalMaxSeconds, value));
+	CHECK_FALSE(parseStrictUint32("86401", kPollIntervalMaxSeconds, value));
+}
+
 TEST_CASE("config entry visitor accepts large bucket_map values")
 {
 	std::string largeMap;

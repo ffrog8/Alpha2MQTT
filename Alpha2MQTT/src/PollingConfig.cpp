@@ -99,6 +99,29 @@ shouldReloadPollingConfigFromStorage(bool pendingConfigSet, bool configLoaded)
 	return !pendingConfigSet && !configLoaded;
 }
 
+bool
+parseStrictUint32(const char *text, uint32_t maxValue, uint32_t &outValue)
+{
+	if (text == nullptr || text[0] == '\0') {
+		return false;
+	}
+
+	uint32_t value = 0;
+	for (const char *cursor = text; *cursor != '\0'; ++cursor) {
+		if (!isdigit(static_cast<unsigned char>(*cursor))) {
+			return false;
+		}
+		const uint32_t digit = static_cast<uint32_t>(*cursor - '0');
+		if (value > ((maxValue - digit) / 10U)) {
+			return false;
+		}
+		value = (value * 10U) + digit;
+	}
+
+	outValue = value;
+	return true;
+}
+
 static const char *
 skipWhitespace(const char *cursor)
 {

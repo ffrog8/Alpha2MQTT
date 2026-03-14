@@ -14,6 +14,7 @@ BucketId bucketIdFromLegacyFreq(int storedValue);
 bool isValidMqttUpdateFreq(int value);
 bool bucketMapUsesDescriptorIndices(const char *map);
 bool shouldReloadPollingConfigFromStorage(bool pendingConfigSet, bool configLoaded);
+bool parseStrictUint32(const char *text, uint32_t maxValue, uint32_t &outValue);
 
 // Copy a length-delimited MQTT payload into a caller-owned text buffer and
 // append NUL. Chose a shared helper so the larger config/set path can be
