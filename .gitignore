@@ -394,3 +394,4 @@ com-bluino-esploader-17-64161482-7f6b82679a1c5e25c492a0cc66c85277(1).apk
 # Local secrets for Alpha2MQTT
 Alpha2MQTT/Secrets.h
 docs/step7_gap_report.md
+.secrets

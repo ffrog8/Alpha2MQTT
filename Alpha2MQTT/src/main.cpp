@@ -539,6 +539,8 @@ static void persistUserBootMode(BootMode mode);
 static void persistUserMqttConfig(const char *server, int port, const char *user, const char *pass);
 static void persistUserWifiCredentials(const char *ssid, const char *pass);
 static void clearUserWifiCredentials(void);
+static void clearSdkWifiCredentials(void);
+static void beginWifiStationWithStoredCredentials(void);
 static void persistUserExtAntenna(bool enabled);
 static void persistUserInverterLabel(const char *label);
 static bool persistUserPollingConfig(uint32_t intervalSeconds, const char *bucketMap);
@@ -1332,6 +1334,32 @@ clearUserWifiCredentials(void)
 		(void)preferences.remove("WiFi_Password");
 	}
 	preferences.end();
+}
+
+static void
+clearSdkWifiCredentials(void)
+{
+	// The firmware owns WiFi credentials in Preferences. Clear the SDK-side copy too
+	// so portal erase semantics and later reconnects cannot drift onto stale station
+	// config hidden inside the WiFi stack.
+	WiFi.disconnect(true);
+	diagDelay(100);
+}
+
+static void
+beginWifiStationWithStoredCredentials(void)
+{
+	// Always connect using the firmware-owned credentials rather than any SDK-
+	// persisted station config.
+	WiFi.persistent(false);
+	clearSdkWifiCredentials();
+	WiFi.mode(WIFI_STA);
+#if defined MP_ESP32
+	WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
+	WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+#endif // MP_ESP32
+	WiFi.hostname(deviceName);
+	WiFi.begin(appConfig.wifiSSID.c_str(), appConfig.wifiPass.c_str());
 }
 
 static void
@@ -2880,8 +2908,15 @@ configHandlerSta(void)
 	portalLog("STA portal: connecting to saved WiFi (ssid=%s)", appConfig.wifiSSID.c_str());
 #endif
 
-	WiFi.hostname(deviceName);
-	WiFi.begin(appConfig.wifiSSID.c_str(), appConfig.wifiPass.c_str());
+	if (appConfig.wifiSSID == "" || appConfig.wifiPass == "") {
+#ifdef DEBUG_OVER_SERIAL
+		portalLog("STA portal: no persisted WiFi credentials; falling back to AP config.");
+#endif
+		setBootIntentAndReboot(bootIntentAfterStaPortalConnectFailure());
+		return;
+	}
+
+	beginWifiStationWithStoredCredentials();
 
 	const unsigned long start = millis();
 	while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {
@@ -2890,9 +2925,9 @@ configHandlerSta(void)
 
 	if (WiFi.status() != WL_CONNECTED) {
 #ifdef DEBUG_OVER_SERIAL
-		portalLog("STA portal: connect failed; rebooting into normal. Hold D3/GPIO0 LOW at boot for AP portal.");
+		portalLog("STA portal: connect failed; falling back to AP config.");
 #endif
-		setBootIntentAndReboot(BootIntent::Normal);
+		setBootIntentAndReboot(bootIntentAfterStaPortalConnectFailure());
 		return;
 	}
 
@@ -2915,6 +2950,7 @@ configHandlerSta(void)
 	wifiManager.setCustomHeadElement(portalCustomHeadScript());
 	wifiManager.setConfigResetCallback([&]() {
 		clearUserWifiCredentials();
+		clearSdkWifiCredentials();
 		appConfig.wifiSSID = "";
 		appConfig.wifiPass = "";
 	});
@@ -3200,6 +3236,7 @@ configHandler(void)
 	wifiManager.setDisableConfigPortal(false);
 	wifiManager.setConfigResetCallback([&]() {
 		clearUserWifiCredentials();
+		clearSdkWifiCredentials();
 		appConfig.wifiSSID = "";
 		appConfig.wifiPass = "";
 	});
@@ -4718,8 +4755,6 @@ setupWifi(bool initialConnect)
 	Serial.println(_debugOutput);
 #endif
 	if (initialConnect) {
-		WiFi.disconnect(); // If it auto-started, restart it our way.
-		diagDelay(100);
 #if defined(MP_XIAO_ESP32C6) || defined(MP_ESPUNO_ESP32C6)
 		bool useExtAntenna = false;
 #ifdef MP_XIAO_ESP32C6
@@ -4762,21 +4797,7 @@ setupWifi(bool initialConnect)
 #endif // BUTTON_PIN
 
 		if (tries % 50 == 0) {
-			WiFi.disconnect();
-
-			// Set up in Station Mode - Will be connecting to an access point
-			WiFi.mode(WIFI_STA);
-			// Helps when multiple APs for our SSID
-#if defined MP_ESP32
-			WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
-			WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
-#endif // MP_ESP32
-
-			// Set the hostname for this Arduino
-			WiFi.hostname(deviceName);
-
-			// And connect to the details defined at the top
-			WiFi.begin(appConfig.wifiSSID.c_str(), appConfig.wifiPass.c_str());
+			beginWifiStationWithStoredCredentials();
 
 #if defined MP_ESP8266
 			wifiPower -= WIFI_POWER_DECREMENT;

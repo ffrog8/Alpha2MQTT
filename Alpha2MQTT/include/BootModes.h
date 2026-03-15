@@ -31,6 +31,7 @@ struct SubsystemPlan {
 SubsystemStates decideSubsystems(BootMode mode);
 SubsystemPlan planForBootMode(BootMode mode);
 BootMode bootModeAfterPortalSuccess(BootMode currentMode);
+BootIntent bootIntentAfterStaPortalConnectFailure(void);
 const char *bootModeToString(BootMode mode);
 BootMode bootModeFromString(const char *value);
 const char *bootIntentToString(BootIntent intent);

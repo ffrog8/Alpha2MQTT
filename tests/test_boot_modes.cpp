@@ -46,3 +46,8 @@ TEST_CASE("boot mode resets to normal after portal success")
 	CHECK(bootModeAfterPortalSuccess(BootMode::WifiConfig) == BootMode::Normal);
 	CHECK(bootModeAfterPortalSuccess(BootMode::Normal) == BootMode::Normal);
 }
+
+TEST_CASE("STA-only portal failure falls back to AP config")
+{
+	CHECK(bootIntentAfterStaPortalConnectFailure() == BootIntent::ApConfig);
+}

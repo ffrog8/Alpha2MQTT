@@ -44,6 +44,15 @@ bootModeAfterPortalSuccess(BootMode currentMode)
 	}
 }
 
+BootIntent
+bootIntentAfterStaPortalConnectFailure(void)
+{
+	// STA-only config is only reachable if the saved WiFi creds still work.
+	// Falling back to AP config keeps the device recoverable instead of silently
+	// returning to normal runtime with no usable config surface.
+	return BootIntent::ApConfig;
+}
+
 const char *
 bootModeToString(BootMode mode)
 {
