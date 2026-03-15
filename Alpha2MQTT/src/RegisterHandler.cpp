@@ -4695,6 +4695,12 @@ Sends all of the data for the Dispatch Registers as a single event
 This expects 3 values: Mode, ActivePower, and TargetSOC
 This writes 5 parameters (registers): Start (1), ActivePower (2), ReactivePower (2), Mode (1), SOC (1), Time (2)
 */
+modbusRequestAndResponseStatusValues RegisterHandler::writeDispatchStop(modbusRequestAndResponse* rs)
+{
+	rs->registerCount = 1;
+	return writeRawDataRegister(REG_DISPATCH_RW_DISPATCH_START, DISPATCH_START_STOP, rs);
+}
+
 modbusRequestAndResponseStatusValues RegisterHandler::writeDispatchRegisters(uint32_t activePower, uint16_t mode, uint16_t socTarget, modbusRequestAndResponse* rs)
 {
 	modbusRequestAndResponseStatusValues result;

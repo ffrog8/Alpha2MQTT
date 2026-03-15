@@ -509,7 +509,15 @@ buildStatusStubJson(const StatusStubSnapshot &snapshot, char *out, size_t outSiz
 		return false;
 	}
 	char lastFailType[32];
+	char lastWriteFailType[32];
+	char failType[32];
 	if (!appendEscapedJsonString(lastFailType, sizeof(lastFailType), snapshot.lastFailType)) {
+		return false;
+	}
+	if (!appendEscapedJsonString(lastWriteFailType, sizeof(lastWriteFailType), snapshot.lastWriteFailType)) {
+		return false;
+	}
+	if (!appendEscapedJsonString(failType, sizeof(failType), snapshot.failType)) {
 		return false;
 	}
 	int written = snprintf(
@@ -525,8 +533,15 @@ buildStatusStubJson(const StatusStubSnapshot &snapshot, char *out, size_t outSiz
 		"\"last_fail_reg\":%u,"
 		"\"last_fail_fn\":%u,"
 		"\"last_fail_type\":\"%s\","
+		"\"last_write_fail_reg\":%u,"
+		"\"last_write_fail_fn\":%u,"
+		"\"last_write_fail_type\":\"%s\","
+		"\"fail_reg\":%u,"
+		"\"fail_type\":\"%s\","
 		"\"latency_ms\":%u,"
 		"\"strict_unknown\":%s,"
+		"\"fail_reads\":%s,"
+		"\"fail_writes\":%s,"
 		"\"fail_every_n\":%lu,"
 		"\"fail_for_ms\":%lu,"
 		"\"flap_online_ms\":%lu,"
@@ -544,8 +559,15 @@ buildStatusStubJson(const StatusStubSnapshot &snapshot, char *out, size_t outSiz
 		static_cast<unsigned>(snapshot.lastFailStartReg),
 		static_cast<unsigned>(snapshot.lastFailFn),
 		lastFailType,
+		static_cast<unsigned>(snapshot.lastWriteFailStartReg),
+		static_cast<unsigned>(snapshot.lastWriteFailFn),
+		lastWriteFailType,
+		static_cast<unsigned>(snapshot.failRegister),
+		failType,
 		static_cast<unsigned>(snapshot.latencyMs),
 		snapshot.strictUnknown ? "true" : "false",
+		snapshot.failReads ? "true" : "false",
+		snapshot.failWrites ? "true" : "false",
 		static_cast<unsigned long>(snapshot.failEveryN),
 		static_cast<unsigned long>(snapshot.failForMs),
 		static_cast<unsigned long>(snapshot.flapOnlineMs),

@@ -385,7 +385,7 @@ uint32_t _statusLedColor = 0;
 //#define OP_DATA_AVG_CNT 4
 #define PUSH_FUDGE_FACTOR 200 // Watts
 struct {
-	opMode   a2mOpMode = opMode::opModeLoadFollow;
+	opMode   a2mOpMode = opMode::opModeNormal;
 	bool     a2mReadyToUseOpMode = false;
 	uint16_t a2mSocTarget = SOC_TARGET_MAX;   // Stored as percent (0-100)
 	bool     a2mReadyToUseSocTarget = false;
@@ -538,6 +538,7 @@ static void persistUserBootIntent(BootIntent intent);
 static void persistUserBootMode(BootMode mode);
 static void persistUserMqttConfig(const char *server, int port, const char *user, const char *pass);
 static void persistUserWifiCredentials(const char *ssid, const char *pass);
+static void clearUserWifiCredentials(void);
 static void persistUserExtAntenna(bool enabled);
 static void persistUserInverterLabel(const char *label);
 static bool persistUserPollingConfig(uint32_t intervalSeconds, const char *bucketMap);
@@ -1314,6 +1315,22 @@ persistUserWifiCredentials(const char *ssid, const char *pass)
 	preferences.begin(DEVICE_NAME, false);
 	preferences.putString("WiFi_SSID", ssid);
 	preferences.putString("WiFi_Password", pass);
+	preferences.end();
+}
+
+static void
+clearUserWifiCredentials(void)
+{
+	Preferences preferences;
+	if (!preferences.begin(DEVICE_NAME, false)) {
+		return;
+	}
+	if (preferences.isKey("WiFi_SSID")) {
+		(void)preferences.remove("WiFi_SSID");
+	}
+	if (preferences.isKey("WiFi_Password")) {
+		(void)preferences.remove("WiFi_Password");
+	}
 	preferences.end();
 }
 
@@ -2661,12 +2678,6 @@ void setup()
 	Serial.println(bootModeToString(currentBootMode));
 #endif
 
-	if (appConfig.wifiSSID == "" && String(WIFI_SSID).length() > 0) {
-		appConfig.wifiSSID = WIFI_SSID;
-	}
-	if (appConfig.wifiPass == "" && String(WIFI_PASSWORD).length() > 0) {
-		appConfig.wifiPass = WIFI_PASSWORD;
-	}
 	if (appConfig.mqttSrvr == "" && String(MQTT_SERVER).length() > 0) {
 		appConfig.mqttSrvr = MQTT_SERVER;
 	}
@@ -2902,6 +2913,11 @@ configHandlerSta(void)
 	wifiManager.setConfigPortalTimeout(0);
 	wifiManager.setDisableConfigPortal(false);
 	wifiManager.setCustomHeadElement(portalCustomHeadScript());
+	wifiManager.setConfigResetCallback([&]() {
+		clearUserWifiCredentials();
+		appConfig.wifiSSID = "";
+		appConfig.wifiPass = "";
+	});
 
 	String mqttPortDefault = String(appConfig.mqttPort);
 	WiFiManagerParameter p_lineBreak_text("<p>MQTT settings:</p>");
@@ -2961,7 +2977,12 @@ configHandlerSta(void)
 	wifiManager.setPreSaveConfigCallback([&]() {
 		portalStatus = portalStatusConnecting;
 		portalConnectStart = millis();
-		strlcpy(portalStatusSsid, wifiManager.getWiFiSSID().c_str(), sizeof(portalStatusSsid));
+		const String submittedSsid = wifiManager.getWiFiSSID();
+		const String submittedPass = wifiManager.getWiFiPass();
+		persistUserWifiCredentials(submittedSsid.c_str(), submittedPass.c_str());
+		appConfig.wifiSSID = submittedSsid;
+		appConfig.wifiPass = submittedPass;
+		strlcpy(portalStatusSsid, submittedSsid.c_str(), sizeof(portalStatusSsid));
 		portalStatusReason[0] = '\0';
 #ifdef DEBUG_OVER_SERIAL
 		portalLog("WiFi submit: SSID=%s", portalStatusSsid);
@@ -3048,7 +3069,6 @@ configHandlerSta(void)
 #endif
 				updateOLED(false, "Web", "config", "succeeded");
 
-				persistUserWifiCredentials(wifiManager.getWiFiSSID().c_str(), wifiManager.getWiFiPass().c_str());
 				{
 					Preferences prefsRo;
 					prefsRo.begin(DEVICE_NAME, true);
@@ -3178,6 +3198,11 @@ configHandler(void)
 	// WiFiManager defaults to shutting the portal down after connect, which breaks the
 	// intended flow where the user proceeds to configure MQTT settings.
 	wifiManager.setDisableConfigPortal(false);
+	wifiManager.setConfigResetCallback([&]() {
+		clearUserWifiCredentials();
+		appConfig.wifiSSID = "";
+		appConfig.wifiPass = "";
+	});
 	String mqttPortDefault = String(appConfig.mqttPort);
 	WiFiManagerParameter p_lineBreak_text("<p>MQTT settings:</p>");
 	WiFiManagerParameter custom_mqtt_server("server", "MQTT server", appConfig.mqttSrvr.c_str(), 40);
@@ -3290,7 +3315,12 @@ configHandler(void)
 	wifiManager.setPreSaveConfigCallback([&]() {
 		portalStatus = portalStatusConnecting;
 		portalConnectStart = millis();
-		strlcpy(portalStatusSsid, wifiManager.getWiFiSSID().c_str(), sizeof(portalStatusSsid));
+		const String submittedSsid = wifiManager.getWiFiSSID();
+		const String submittedPass = wifiManager.getWiFiPass();
+		persistUserWifiCredentials(submittedSsid.c_str(), submittedPass.c_str());
+		appConfig.wifiSSID = submittedSsid;
+		appConfig.wifiPass = submittedPass;
+		strlcpy(portalStatusSsid, submittedSsid.c_str(), sizeof(portalStatusSsid));
 		portalStatusReason[0] = '\0';
 #ifdef DEBUG_OVER_SERIAL
 		IPAddress ip = WiFi.softAPIP();
@@ -3381,8 +3411,6 @@ configHandler(void)
 #endif
 				updateOLED(false, "Web", "config", "succeeded");
 
-				// Save WiFi settings only here. MQTT settings are saved via setSaveParamsCallback (/paramsave).
-				persistUserWifiCredentials(wifiManager.getWiFiSSID().c_str(), wifiManager.getWiFiPass().c_str());
 				char storedMqttServer[kPrefMqttServerMaxLen] = "";
 				{
 					Preferences prefsRo;
@@ -4683,9 +4711,9 @@ setupWifi(bool initialConnect)
 	// We start by connecting to a WiFi network
 #ifdef DEBUG_OVER_SERIAL
 	if (initialConnect) {
-		sprintf(_debugOutput, "Connecting to %s", WIFI_SSID);
+		snprintf(_debugOutput, sizeof(_debugOutput), "Connecting to %s", appConfig.wifiSSID.c_str());
 	} else {
-		sprintf(_debugOutput, "Reconnect to %s", WIFI_SSID);
+		snprintf(_debugOutput, sizeof(_debugOutput), "Reconnect to %s", appConfig.wifiSSID.c_str());
 	}
 	Serial.println(_debugOutput);
 #endif
@@ -6483,8 +6511,15 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 		stub.lastFailStartReg = _modBus->stubLastFailStartReg();
 		stub.lastFailFn = _modBus->stubLastFailFn();
 		stub.lastFailType = _modBus->stubLastFailTypeLabel();
+		stub.lastWriteFailStartReg = _modBus->stubLastWriteFailStartReg();
+		stub.lastWriteFailFn = _modBus->stubLastWriteFailFn();
+		stub.lastWriteFailType = _modBus->stubLastWriteFailTypeLabel();
+		stub.failRegister = _modBus->stubFailRegister();
+		stub.failType = _modBus->stubFailTypeLabel();
 		stub.latencyMs = _modBus->stubLatencyMs();
 		stub.strictUnknown = _modBus->stubStrictUnknown();
+		stub.failReads = _modBus->stubFailReads();
+		stub.failWrites = _modBus->stubFailWrites();
 		stub.failEveryN = _modBus->stubFailEveryN();
 		stub.failForMs = _modBus->stubFailForMs();
 		stub.flapOnlineMs = _modBus->stubFlapOnlineMs();
@@ -6826,8 +6861,8 @@ emitEntityDiscoveryPayload(CountedMqttPayload &payload, void *context)
 		break;
 	case mqttEntityId::entityOpMode:
 		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"options\": [ \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\" ]",
-			 OP_MODE_DESC_LOAD_FOLLOW, OP_MODE_DESC_TARGET, OP_MODE_DESC_PUSH,
+			 ", \"options\": [ \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\" ]",
+			 OP_MODE_DESC_NORMAL, OP_MODE_DESC_LOAD_FOLLOW, OP_MODE_DESC_TARGET, OP_MODE_DESC_PUSH,
 			 OP_MODE_DESC_PV_CHARGE, OP_MODE_DESC_MAX_CHARGE, OP_MODE_DESC_NO_CHARGE);
 		break;
 	case mqttEntityId::entitySocTarget:
@@ -8010,6 +8045,16 @@ processPendingEntityCommand(void)
 			if (tempOpMode != (enum opMode)-1) {
 				opData.a2mOpMode = tempOpMode;
 				opData.a2mReadyToUseOpMode = true;
+				if (tempOpMode == opMode::opModeNormal &&
+				    _registerHandler != NULL) {
+					modbusRequestAndResponse response;
+					modbusRequestAndResponseStatusValues result = _registerHandler->writeDispatchStop(&response);
+					if (result == modbusRequestAndResponseStatusValues::writeDataRegisterSuccess) {
+						opData.essDispatchStart = DISPATCH_START_STOP;
+					} else {
+						rs485Errors++;
+					}
+				}
 			} else {
 #ifdef DEBUG_OVER_SERIAL
 				snprintf(_debugOutput, sizeof(_debugOutput), "Callback: Bad opMode: %s", singleString);
@@ -8096,14 +8141,14 @@ parseRs485StubControlPayload(const char *payload, Rs485StubControlRequest &reque
 
 	if (parseStubControlInt(payload, "fail_n", value) ||
 	    parseStubControlInt(payload, "failFirstN", value)) {
-		if (value > 0) {
+		if (value >= 0) {
 			request.failN = static_cast<uint32_t>(value);
 		}
 	}
 
 	if (parseStubControlInt(payload, "reg", value) ||
 	    parseStubControlInt(payload, "register", value)) {
-		if (value > 0) {
+		if (value >= 0) {
 			request.failReg = static_cast<uint16_t>(value);
 		}
 	}
@@ -8125,7 +8170,7 @@ parseRs485StubControlPayload(const char *payload, Rs485StubControlRequest &reque
 	     parseStubControlInt(payload, "strict", value)) && value >= 0) {
 		request.strictUnknown = (value != 0);
 	}
-	if (parseStubControlInt(payload, "fail_every_n", value) && value >= 1) {
+	if (parseStubControlInt(payload, "fail_every_n", value) && value >= 0) {
 		request.failEveryN = static_cast<uint32_t>(value);
 	}
 	if (parseStubControlInt(payload, "fail_reads", value) && value >= 0) {
@@ -8547,6 +8592,9 @@ getOpModeDesc(char *dest, size_t size, enum opMode mode)
 {
 	snprintf(dest, size, "Unknown %u", mode);
 	switch (mode) {
+	case opMode::opModeNormal:
+		strlcpy(dest, OP_MODE_DESC_NORMAL, size);
+		break;
 	case opMode::opModePvCharge:
 		strlcpy(dest, OP_MODE_DESC_PV_CHARGE, size);
 		break;
@@ -8571,6 +8619,8 @@ getOpModeDesc(char *dest, size_t size, enum opMode mode)
 enum opMode
 lookupOpMode(const char *opModeDesc)
 {
+	if (!strcmp(opModeDesc, OP_MODE_DESC_NORMAL))
+		return opMode::opModeNormal;
 	if (!strcmp(opModeDesc, OP_MODE_DESC_PV_CHARGE))
 		return opMode::opModePvCharge;
 	if (!strcmp(opModeDesc, OP_MODE_DESC_TARGET))
@@ -8600,7 +8650,21 @@ checkAndSetDispatchMode(void)
 		return;
 	}
 
-	if (!opData.a2mReadyToUseOpMode || !opData.a2mReadyToUseSocTarget || !opData.a2mReadyToUsePwrCharge ||
+	if (!opData.a2mReadyToUseOpMode) {
+		return;  // Don't set anything if op mode isn't ready.
+	}
+
+	if (opData.a2mOpMode == opMode::opModeNormal) {
+		if (opData.essDispatchStart == DISPATCH_START_START) {
+			result = _registerHandler->writeDispatchStop(&response);
+			if (result != modbusRequestAndResponseStatusValues::writeDataRegisterSuccess) {
+				rs485Errors++;
+			}
+		}
+		return;
+	}
+
+	if (!opData.a2mReadyToUseSocTarget || !opData.a2mReadyToUsePwrCharge ||
 	    !opData.a2mReadyToUsePwrDischarge || !opData.a2mReadyToUsePwrPush) {
 		return;  // Don't set anything if opData isn't ready.
 	}
@@ -8624,6 +8688,8 @@ checkAndSetDispatchMode(void)
 	}
 
 	switch (opData.a2mOpMode) {
+	case opMode::opModeNormal:
+		return;
 	case opMode::opModePvCharge:		// Honors Power and SOC
 		essDispatchMode = DISPATCH_MODE_BATTERY_ONLY_CHARGED_VIA_PV;	// Honors Power but not SOC
 		// use essDispatchActivePower from above
@@ -8688,7 +8754,7 @@ void
 getA2mOpDataFromEss(void)
 {
 #ifdef DEBUG_NO_RS485
-	opData.a2mOpMode = opMode::opModeNoCharge;
+	opData.a2mOpMode = opMode::opModeNormal;
 	opData.a2mSocTarget = SOC_TARGET_MAX;
 	opData.a2mPwrCharge = INVERTER_POWER_MAX;
 	opData.a2mPwrDischarge = INVERTER_POWER_MAX;
@@ -8696,7 +8762,7 @@ getA2mOpDataFromEss(void)
 	modbusRequestAndResponseStatusValues result;
 	modbusRequestAndResponse response;
 	// Defaults keep control logic in a safe, bounded state if ESS reads fail repeatedly.
-	opData.a2mOpMode = opMode::opModeNoCharge;
+	opData.a2mOpMode = opMode::opModeNormal;
 	opData.a2mSocTarget = SOC_TARGET_MAX;
 	opData.a2mPwrCharge = INVERTER_POWER_MAX;
 	opData.a2mPwrDischarge = INVERTER_POWER_MAX;
@@ -8724,34 +8790,47 @@ getA2mOpDataFromEss(void)
 		return false;
 	};
 
+	bool dispatchActive = false;
+	if (readWithRetries(REG_DISPATCH_RW_DISPATCH_START, "dispatch_start")) {
+		opData.essDispatchStart = response.unsignedShortValue;
+		dispatchActive = (response.unsignedShortValue == DISPATCH_START_START);
+		if (!dispatchActive) {
+			opData.a2mOpMode = opMode::opModeNormal;
+		}
+	}
+
 	if (readWithRetries(REG_DISPATCH_RW_DISPATCH_MODE, "dispatch_mode")) {
-		switch (response.unsignedShortValue) {
-		case DISPATCH_MODE_BATTERY_ONLY_CHARGED_VIA_PV:
-			opData.a2mOpMode = opMode::opModePvCharge;
-			break;
-		case DISPATCH_MODE_STATE_OF_CHARGE_CONTROL:
-			opData.a2mOpMode = opMode::opModeTarget;
-			break;
-		case DISPATCH_MODE_LOAD_FOLLOWING:
-		case DISPATCH_MODE_NORMAL_MODE:
-			opData.a2mOpMode = opMode::opModeLoadFollow;
-			break;
-		case DISPATCH_MODE_OPTIMISE_CONSUMPTION:
-		case DISPATCH_MODE_MAXIMISE_OUTPUT:
-		case DISPATCH_MODE_MAXIMISE_CONSUMPTION:
-			opData.a2mOpMode = opMode::opModeMaxCharge;
-			break;
-		case DISPATCH_MODE_NO_BATTERY_CHARGE:
-			opData.a2mOpMode = opMode::opModeNoCharge;
-			break;
-		default:
+		if (dispatchActive) {
+			switch (response.unsignedShortValue) {
+			case DISPATCH_MODE_BATTERY_ONLY_CHARGED_VIA_PV:
+				opData.a2mOpMode = opMode::opModePvCharge;
+				break;
+			case DISPATCH_MODE_STATE_OF_CHARGE_CONTROL:
+				opData.a2mOpMode = opMode::opModeTarget;
+				break;
+			case DISPATCH_MODE_LOAD_FOLLOWING:
+				opData.a2mOpMode = opMode::opModeLoadFollow;
+				break;
+			case DISPATCH_MODE_NORMAL_MODE:
+				opData.a2mOpMode = opMode::opModeNormal;
+				break;
+			case DISPATCH_MODE_OPTIMISE_CONSUMPTION:
+			case DISPATCH_MODE_MAXIMISE_OUTPUT:
+			case DISPATCH_MODE_MAXIMISE_CONSUMPTION:
+				opData.a2mOpMode = opMode::opModeMaxCharge;
+				break;
+			case DISPATCH_MODE_NO_BATTERY_CHARGE:
+				opData.a2mOpMode = opMode::opModeNoCharge;
+				break;
+			default:
 #ifdef DEBUG_OVER_SERIAL
-			snprintf(_debugOutput, sizeof(_debugOutput), "getA2mOpDataFromEss: Unhandled Dispatch Mode: %u/", response.unsignedShortValue);
-			Serial.print(_debugOutput);
-			Serial.println(response.dataValueFormatted);
+				snprintf(_debugOutput, sizeof(_debugOutput), "getA2mOpDataFromEss: Unhandled Dispatch Mode: %u/", response.unsignedShortValue);
+				Serial.print(_debugOutput);
+				Serial.println(response.dataValueFormatted);
 #endif
-			opData.a2mOpMode = opMode::opModeLoadFollow;
-			break;
+				opData.a2mOpMode = opMode::opModeLoadFollow;
+				break;
+			}
 		}
 	}
 

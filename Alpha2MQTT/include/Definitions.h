@@ -1370,6 +1370,7 @@ enum mqttEntityId : uint16_t {
 };
 
 enum opMode {
+	opModeNormal,
 	opModePvCharge,
 	opModeTarget,
 	opModePush,
@@ -1378,6 +1379,7 @@ enum opMode {
 	opModeNoCharge
 };
 
+#define OP_MODE_DESC_NORMAL		"Normal"
 #define OP_MODE_DESC_PV_CHARGE		"PV Charge"
 #define OP_MODE_DESC_TARGET		"Target SOC"
 #define OP_MODE_DESC_PUSH		"Push To Grid"

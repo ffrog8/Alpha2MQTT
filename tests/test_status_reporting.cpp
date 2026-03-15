@@ -409,8 +409,15 @@ TEST_CASE("status stub JSON builder includes required keys")
 	snapshot.lastFailStartReg = 456;
 	snapshot.lastFailFn = 16;
 	snapshot.lastFailType = "no_response";
+	snapshot.lastWriteFailStartReg = 2176;
+	snapshot.lastWriteFailFn = 16;
+	snapshot.lastWriteFailType = "slave_error";
+	snapshot.failRegister = 2176;
+	snapshot.failType = "slave_error";
 	snapshot.latencyMs = 150;
 	snapshot.strictUnknown = true;
+	snapshot.failReads = false;
+	snapshot.failWrites = true;
 	snapshot.failEveryN = 2;
 	snapshot.failForMs = 5000;
 	snapshot.flapOnlineMs = 30000;
@@ -419,7 +426,7 @@ TEST_CASE("status stub JSON builder includes required keys")
 	snapshot.probeSuccessAfterN = 9;
 	snapshot.socStepX10PerSnapshot = -5;
 
-	char buffer[512];
+	char buffer[768];
 	CHECK(buildStatusStubJson(snapshot, buffer, sizeof(buffer)));
 
 	std::string payload(buffer);
@@ -432,8 +439,15 @@ TEST_CASE("status stub JSON builder includes required keys")
 	CHECK(payload.find("\"last_fail_reg\":456") != std::string::npos);
 	CHECK(payload.find("\"last_fail_fn\":16") != std::string::npos);
 	CHECK(payload.find("\"last_fail_type\":\"no_response\"") != std::string::npos);
+	CHECK(payload.find("\"last_write_fail_reg\":2176") != std::string::npos);
+	CHECK(payload.find("\"last_write_fail_fn\":16") != std::string::npos);
+	CHECK(payload.find("\"last_write_fail_type\":\"slave_error\"") != std::string::npos);
+	CHECK(payload.find("\"fail_reg\":2176") != std::string::npos);
+	CHECK(payload.find("\"fail_type\":\"slave_error\"") != std::string::npos);
 	CHECK(payload.find("\"latency_ms\":150") != std::string::npos);
 	CHECK(payload.find("\"strict_unknown\":true") != std::string::npos);
+	CHECK(payload.find("\"fail_reads\":false") != std::string::npos);
+	CHECK(payload.find("\"fail_writes\":true") != std::string::npos);
 	CHECK(payload.find("\"fail_every_n\":2") != std::string::npos);
 	CHECK(payload.find("\"fail_for_ms\":5000") != std::string::npos);
 	CHECK(payload.find("\"flap_online_ms\":30000") != std::string::npos);

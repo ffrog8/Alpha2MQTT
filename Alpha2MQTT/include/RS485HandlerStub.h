@@ -83,6 +83,9 @@ class RS485Handler
 		uint16_t _lastFailStartReg = 0;
 		uint8_t _lastFailFn = 0;
 		Rs485StubFailType _lastFailType = Rs485StubFailType::NoResponse;
+		uint16_t _lastWriteFailStartReg = 0;
+		uint8_t _lastWriteFailFn = 0;
+		Rs485StubFailType _lastWriteFailType = Rs485StubFailType::NoResponse;
 		uint16_t _lastWriteStartReg = 0;
 		uint16_t _lastWriteRegCount = 0;
 		uint32_t _lastWriteMs = 0;
@@ -375,8 +378,33 @@ class RS485Handler
 				return "no_response";
 			}
 		}
+		uint16_t stubLastWriteFailStartReg() const { return _lastWriteFailStartReg; }
+		uint8_t stubLastWriteFailFn() const { return _lastWriteFailFn; }
+		const char *stubLastWriteFailTypeLabel() const
+		{
+			switch (_lastWriteFailType) {
+			case Rs485StubFailType::SlaveError:
+				return "slave_error";
+			case Rs485StubFailType::NoResponse:
+			default:
+				return "no_response";
+			}
+		}
+		uint16_t stubFailRegister() const { return _cfg.failRegister; }
+		const char *stubFailTypeLabel() const
+		{
+			switch (_cfg.failType) {
+			case Rs485StubFailType::SlaveError:
+				return "slave_error";
+			case Rs485StubFailType::NoResponse:
+			default:
+				return "no_response";
+			}
+		}
 		uint16_t stubLatencyMs() const { return _cfg.latencyMs; }
 		bool stubStrictUnknown() const { return _cfg.strictUnknownRegisters; }
+		bool stubFailReads() const { return _cfg.failReads; }
+		bool stubFailWrites() const { return _cfg.failWrites; }
 		uint32_t stubFailEveryN() const { return _cfg.failEveryN; }
 		uint32_t stubFailForMs() const { return _cfg.failForMs; }
 		uint32_t stubFlapOnlineMs() const { return _cfg.flapOnlineMs; }
@@ -502,6 +530,11 @@ class RS485Handler
 				_lastFailStartReg = startRegister;
 				_lastFailFn = fn;
 				_lastFailType = _cfg.failType;
+				if (fn == MODBUS_FN_WRITEDATAREGISTER) {
+					_lastWriteFailStartReg = startRegister;
+					_lastWriteFailFn = fn;
+					_lastWriteFailType = _cfg.failType;
+				}
 				if (_cfg.failType == Rs485StubFailType::SlaveError) {
 					strcpy(resp->statusMqttMessage, MODBUS_REQUEST_AND_RESPONSE_ERROR_MQTT_DESC);
 					strcpy(resp->displayMessage, MODBUS_REQUEST_AND_RESPONSE_ERROR_DISPLAY_DESC);
@@ -560,6 +593,9 @@ class RS485Handler
 				const uint16_t usableWords = (registerCount < words) ? registerCount : words;
 				if (usableWords > 0) {
 					const uint8_t *data = &frame[7];
+					if (startRegister == REG_DISPATCH_RW_DISPATCH_START && usableWords >= 1) {
+						_state.dispatchStart = static_cast<uint16_t>((data[0] << 8) | data[1]);
+					}
 					// Special-case dispatch block write, as used by writeDispatchRegisters().
 					if (startRegister == REG_DISPATCH_RW_DISPATCH_START && usableWords >= 7) {
 						const uint16_t w0 = static_cast<uint16_t>((data[0] << 8) | data[1]);

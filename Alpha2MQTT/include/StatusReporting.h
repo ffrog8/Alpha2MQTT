@@ -127,8 +127,15 @@ struct StatusStubSnapshot {
 	uint16_t lastFailStartReg;
 	uint8_t lastFailFn;
 	const char *lastFailType;
+	uint16_t lastWriteFailStartReg;
+	uint8_t lastWriteFailFn;
+	const char *lastWriteFailType;
+	uint16_t failRegister;
+	const char *failType;
 	uint16_t latencyMs;
 	bool strictUnknown;
+	bool failReads;
+	bool failWrites;
 	uint32_t failEveryN;
 	uint32_t failForMs;
 	uint32_t flapOnlineMs;
