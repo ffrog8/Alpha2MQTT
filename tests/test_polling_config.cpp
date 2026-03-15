@@ -406,6 +406,36 @@ TEST_CASE("legacy reader builds bucket map without staging the full value array"
 	CHECK(std::string(out) == "Op_Mode=one_hour;");
 }
 
+TEST_CASE("legacy reader preserves freqNever defaults when legacy key is absent")
+{
+	mqttState entities[1]{};
+	entities[0] = makeEntity(mqttEntityId::entityRs485Avail,
+	                         "RS485_Connected",
+	                         mqttUpdateFreq::freqNever,
+	                         homeAssistantClass::haClassBinaryProblem);
+
+	char out[64];
+	size_t applied = 0;
+
+	CHECK_FALSE(buildBucketMapFromLegacyReader(
+		entities,
+		1,
+		[](size_t /* index */,
+		   const mqttState * /* entity */,
+		   int defaultValue,
+		   int &storedValue,
+		   void * /* context */) -> bool {
+			storedValue = defaultValue;
+			return true;
+		},
+		nullptr,
+		out,
+		sizeof(out),
+		applied));
+	CHECK(applied == 0);
+	CHECK(std::string(out).empty());
+}
+
 TEST_CASE("legacy reader surfaces read failures")
 {
 	mqttState entities[1]{};

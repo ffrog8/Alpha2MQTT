@@ -802,7 +802,6 @@ rs485TryReadIdentityOnce(void)
 	                        sizeof(currentLegacyHaUniqueId));
 
 	strlcpy(deviceSerialNumber, response.dataValueFormatted, sizeof(deviceSerialNumber));
-	persistUserDeviceSerial(deviceSerialNumber);
 	_registerHandler->setSerialNumberPrefix(deviceSerialNumber[0], deviceSerialNumber[1]);
 	inverterReady = true;
 
@@ -2430,9 +2429,12 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 	}
 
 	char location[96];
-	snprintf(location, sizeof(location), "/config/polling?family=%s&page=%u&saved=1%s",
+	snprintf(location,
+	         sizeof(location),
+	         "/config/polling?family=%s&page=%u%s%s",
 	         familyKey,
 	         static_cast<unsigned>(familyPage.safePage),
+	         hadError ? "" : "&saved=1",
 	         hadError ? "&err=1" : "");
 	wifiManager.server->sendHeader("Location", location);
 	wifiManager.server->send(302, "text/plain", "");
@@ -2502,13 +2504,18 @@ handlePortalPollingClear(WiFiManager &wifiManager)
 	}
 	portalRebootScheduled = false;
 	portalMqttSaved = false;
-	persistUserInverterLabel("");
-	appConfig.inverterLabel = "";
+	if (!hadError) {
+		persistUserInverterLabel("");
+		appConfig.inverterLabel = "";
+	}
 
 	char location[96];
-	snprintf(location, sizeof(location), "/config/polling?family=%s&page=%u&saved=1%s",
+	snprintf(location,
+	         sizeof(location),
+	         "/config/polling?family=%s&page=%u%s%s",
 	         familyKey,
 	         static_cast<unsigned>(familyPage.safePage),
+	         hadError ? "" : "&saved=1",
 	         hadError ? "&err=1" : "");
 	wifiManager.server->sendHeader("Location", location);
 	wifiManager.server->send(302, "text/plain", "");

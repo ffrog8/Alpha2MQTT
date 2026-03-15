@@ -554,13 +554,20 @@ buildBucketMapFromLegacyReader(const mqttState *entities,
 		if (!reader(i, &entities[i], defaultValue, storedValue, context)) {
 			return false;
 		}
-			if (!isValidMqttUpdateFreq(storedValue)) {
-				continue;
-			}
-			const BucketId bucket = bucketIdFromLegacyFreq(storedValue);
-			if (bucket == BucketId::Unknown || bucketMatchesPersistedDefault(entities[i], bucket)) {
-				continue;
-			}
+		if (!isValidMqttUpdateFreq(storedValue)) {
+			continue;
+		}
+		const BucketId bucket = bucketIdFromLegacyFreq(storedValue);
+		if (bucket == BucketId::Unknown) {
+			continue;
+		}
+		const bool missingLegacyKey = (storedValue == defaultValue);
+		if (bucketMatchesPersistedDefault(entities[i], bucket) ||
+		    (missingLegacyKey &&
+		     entities[i].updateFreq == mqttUpdateFreq::freqNever &&
+		     bucket == BucketId::Disabled)) {
+			continue;
+		}
 		if (!appendBucketMapOverride(entities[i], bucket, out, outSize, used)) {
 			return false;
 		}

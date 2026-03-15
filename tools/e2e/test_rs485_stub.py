@@ -1798,8 +1798,6 @@ def main() -> int:
         _sleep_with_mqtt(mqtt, 2)
 
         serial_known = str(controller_serial).strip().lower() not in ("", "unknown")
-        label_display = str(controller_serial)[-3:] if serial_known else ""
-        label_id = _normalize_label_for_entity_id(label_display)
         inverter_device_id = _wait_for_inverter_identity() if serial_known else ""
         current_config = _fetch_config(mqtt, config_topic)
         intervals = current_config.get("entity_intervals", {})
@@ -1852,11 +1850,11 @@ def main() -> int:
                 via = str(inverter_device.get("via_device", ""))
                 if via != controller_id:
                     raise E2EError(f"inverter via_device mismatch: via={via!r} expected={controller_id!r}")
-                expected_device_name = f"Alpha {label_display}"
-                if str(inverter_device.get("name", "")) != expected_device_name:
-                    raise E2EError(
-                        f"inverter device name mismatch: expected {expected_device_name!r} got {inverter_device.get('name')!r}"
-                    )
+                device_name = str(inverter_device.get("name", ""))
+                if not device_name.startswith("Alpha ") or len(device_name) <= len("Alpha "):
+                    raise E2EError(f"inverter device name malformed: {device_name!r}")
+                label_display = device_name[len("Alpha "):]
+                label_id = _normalize_label_for_entity_id(label_display)
                 default_entity_id = str(payload.get("default_entity_id", ""))
                 if not default_entity_id.startswith(f"{got_topic.split('/')[1]}.alpha_{label_id}_"):
                     raise E2EError(
