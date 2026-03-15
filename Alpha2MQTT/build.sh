@@ -125,9 +125,42 @@ printf '%s\n' "$(basename "${OUTFILE_STUB}")" > "${OUTDIR}/Alpha2MQTT_latest_stu
 # Backwards-compatible pointer: keep Alpha2MQTT_latest.txt as the real backend firmware.
 printf '%s\n' "$(basename "${OUTFILE_REAL}")" > "${OUTDIR}/Alpha2MQTT_latest.txt"
 
-# Keep only the latest 3 artifacts per variant.
-ls -1t "${OUTDIR}"/Alpha2MQTT_*_real.bin 2>/dev/null | tail -n +4 | xargs -r rm -f
-ls -1t "${OUTDIR}"/Alpha2MQTT_*_stub.bin 2>/dev/null | tail -n +4 | xargs -r rm -f
+prune_variant_artifacts() {
+	local variant="$1"
+	mapfile -t keep_ts < <(
+		find "${OUTDIR}" -maxdepth 1 -type f -name "Alpha2MQTT_*_${variant}.bin" -printf '%f\n' \
+			| sed -E "s/^Alpha2MQTT_([0-9]+)_${variant}\\.bin$/\\1/" \
+			| sort -r \
+			| head -n 5
+	)
+
+	find "${OUTDIR}" -maxdepth 1 -type f \
+		\( -name "Alpha2MQTT_*_${variant}.bin" -o \
+		   -name "Alpha2MQTT_*_${variant}.elf" -o \
+		   -name "Alpha2MQTT_*_${variant}.map" -o \
+		   -name "Alpha2MQTT_*_${variant}_ram_symbols.txt" \) \
+		-print0 | while IFS= read -r -d '' path; do
+			local file base ts keep=0
+			file="$(basename "${path}")"
+			base="${file%.*}"
+			ts="${base#Alpha2MQTT_}"
+			ts="${ts%%_*}"
+			for kept in "${keep_ts[@]}"; do
+				if [[ "${ts}" == "${kept}" ]]; then
+					keep=1
+					break
+				fi
+			done
+			if [[ "${keep}" -eq 0 ]]; then
+				rm -f "${path}"
+			fi
+		done
+}
+
+# Keep only the latest 5 firmware versions per variant, including companion
+# ELF/map/RAM-report artifacts.
+prune_variant_artifacts "real"
+prune_variant_artifacts "stub"
 
 echo "Firmware (real): ${OUTFILE_REAL}"
 echo "Firmware (stub): ${OUTFILE_STUB}"
