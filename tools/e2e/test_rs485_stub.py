@@ -1801,9 +1801,12 @@ def main() -> int:
         label_display = str(controller_serial)[-3:] if serial_known else ""
         label_id = _normalize_label_for_entity_id(label_display)
         inverter_device_id = _wait_for_inverter_identity() if serial_known else ""
+        current_config = _fetch_config(mqtt, config_topic)
+        intervals = current_config.get("entity_intervals", {})
+        expect_inverter_entity = serial_known and isinstance(intervals, dict) and bool(intervals)
         inverter_serial_uid = f"{controller_id}_inverter_serial"
         controller_inverter_serial_topic = f"homeassistant/sensor/{controller_id}/inverter_serial/config"
-        inverter_discovery_filter = f"homeassistant/+/{inverter_device_id}/+/config" if serial_known else ""
+        inverter_discovery_filter = f"homeassistant/+/{inverter_device_id}/+/config" if expect_inverter_entity else ""
 
         mqtt.subscribe(controller_inverter_serial_topic, force=True)
         if inverter_discovery_filter:
@@ -1811,7 +1814,7 @@ def main() -> int:
         deadline = time.time() + 25
         saw_controller_inverter_serial = False
         saw_inverter_entity = False
-        while time.time() < deadline and (not saw_controller_inverter_serial or (serial_known and not saw_inverter_entity)):
+        while time.time() < deadline and (not saw_controller_inverter_serial or (expect_inverter_entity and not saw_inverter_entity)):
             try:
                 got_topic, raw_payload = mqtt.wait_for_publish(timeout_s=5.0)
             except E2EError as e:
@@ -1865,7 +1868,7 @@ def main() -> int:
         missing: list[str] = []
         if not saw_controller_inverter_serial:
             missing.append(controller_inverter_serial_topic)
-        if serial_known and not saw_inverter_entity:
+        if expect_inverter_entity and not saw_inverter_entity:
             missing.append(f"{inverter_discovery_filter} (non-empty payload)")
         if missing:
             raise E2EError(f"missing discovery topic(s): {missing}")

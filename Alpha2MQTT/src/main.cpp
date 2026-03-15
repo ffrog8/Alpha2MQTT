@@ -2502,6 +2502,8 @@ handlePortalPollingClear(WiFiManager &wifiManager)
 	}
 	portalRebootScheduled = false;
 	portalMqttSaved = false;
+	persistUserInverterLabel("");
+	appConfig.inverterLabel = "";
 
 	char location[96];
 	snprintf(location, sizeof(location), "/config/polling?family=%s&page=%u&saved=1%s",
