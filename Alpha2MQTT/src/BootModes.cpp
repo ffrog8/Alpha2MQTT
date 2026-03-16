@@ -53,6 +53,22 @@ bootIntentAfterStaPortalConnectFailure(void)
 	return BootIntent::ApConfig;
 }
 
+BootMode
+bootModeForIntent(BootIntent intent, BootMode currentMode)
+{
+	switch (intent) {
+	case BootIntent::ApConfig:
+		return BootMode::ApConfig;
+	case BootIntent::WifiConfig:
+		return BootMode::WifiConfig;
+	case BootIntent::Normal:
+		return BootMode::Normal;
+	case BootIntent::Ota:
+	default:
+		return currentMode;
+	}
+}
+
 const char *
 bootModeToString(BootMode mode)
 {

@@ -541,6 +541,7 @@ static void persistUserWifiCredentials(const char *ssid, const char *pass);
 static void clearUserWifiCredentials(void);
 static void clearSdkWifiCredentials(void);
 static void beginWifiStationWithStoredCredentials(void);
+static bool syncPortalWifiCredentials(WiFiManager *wifiManager, const char *ssidHint = nullptr, const char *passHint = nullptr);
 static void persistUserExtAntenna(bool enabled);
 static void persistUserInverterLabel(const char *label);
 static bool persistUserPollingConfig(uint32_t intervalSeconds, const char *bucketMap);
@@ -1362,6 +1363,37 @@ beginWifiStationWithStoredCredentials(void)
 	WiFi.begin(appConfig.wifiSSID.c_str(), appConfig.wifiPass.c_str());
 }
 
+static bool
+syncPortalWifiCredentials(WiFiManager *wifiManager, const char *ssidHint, const char *passHint)
+{
+	String ssid = ssidHint != nullptr ? String(ssidHint) : String();
+	String pass = passHint != nullptr ? String(passHint) : String();
+
+	if (wifiManager != nullptr) {
+		if (ssid.length() == 0) {
+			ssid = wifiManager->getWiFiSSID();
+		}
+		if (pass.length() == 0) {
+			pass = wifiManager->getWiFiPass();
+		}
+	}
+
+	if (ssid.length() == 0 && WiFi.status() == WL_CONNECTED) {
+		ssid = WiFi.SSID();
+	}
+	if (pass.length() == 0 && appConfig.wifiPass.length() > 0) {
+		pass = appConfig.wifiPass;
+	}
+	if (ssid.length() == 0) {
+		return false;
+	}
+
+	persistUserWifiCredentials(ssid.c_str(), pass.c_str());
+	appConfig.wifiSSID = ssid;
+	appConfig.wifiPass = pass;
+	return true;
+}
+
 static void
 persistUserExtAntenna(bool enabled)
 {
@@ -1476,10 +1508,10 @@ void
 setBootIntentAndReboot(BootIntent intent, bool persistIntent)
 {
 	if (persistIntent) {
-		// ESP8266 doesn't provide reset intent; persist requested reboot reason for next boot.
 		persistUserBootIntent(intent);
 	}
-	ESP.restart();
+	persistUserBootMode(bootModeForIntent(intent, currentBootMode));
+	triggerRestart();
 }
 
 #if defined(MP_ESP8266)
@@ -3015,9 +3047,7 @@ configHandlerSta(void)
 		portalConnectStart = millis();
 		const String submittedSsid = wifiManager.getWiFiSSID();
 		const String submittedPass = wifiManager.getWiFiPass();
-		persistUserWifiCredentials(submittedSsid.c_str(), submittedPass.c_str());
-		appConfig.wifiSSID = submittedSsid;
-		appConfig.wifiPass = submittedPass;
+		(void)syncPortalWifiCredentials(&wifiManager, submittedSsid.c_str(), submittedPass.c_str());
 		strlcpy(portalStatusSsid, submittedSsid.c_str(), sizeof(portalStatusSsid));
 		portalStatusReason[0] = '\0';
 #ifdef DEBUG_OVER_SERIAL
@@ -3091,6 +3121,7 @@ configHandlerSta(void)
 		if (portalStatus == portalStatusConnecting) {
 			if (WiFi.status() == WL_CONNECTED) {
 				portalStatus = portalStatusSuccess;
+				(void)syncPortalWifiCredentials(&wifiManager, portalStatusSsid, nullptr);
 				strlcpy(portalStatusIp, WiFi.localIP().toString().c_str(), sizeof(portalStatusIp));
 #ifdef DEBUG_OVER_SERIAL
 				portalLog("WiFi connected: SSID=%s IP=%s RSSI=%d channel=%d free=%u max=%u frag=%u",
@@ -3144,6 +3175,9 @@ configHandlerSta(void)
 		}
 
 		// Option B behavior: if MQTT params saved and WiFi credentials exist, reboot into normal.
+		if (portalMqttSaved && !portalNeedsMqttConfig) {
+			(void)syncPortalWifiCredentials(&wifiManager, portalStatusSsid, nullptr);
+		}
 		if (portalMqttSaved && !portalNeedsMqttConfig && portalHasPersistedWifiCredentials()) {
 			if (!portalRebootScheduled) {
 				portalRebootScheduled = true;
@@ -3354,9 +3388,7 @@ configHandler(void)
 		portalConnectStart = millis();
 		const String submittedSsid = wifiManager.getWiFiSSID();
 		const String submittedPass = wifiManager.getWiFiPass();
-		persistUserWifiCredentials(submittedSsid.c_str(), submittedPass.c_str());
-		appConfig.wifiSSID = submittedSsid;
-		appConfig.wifiPass = submittedPass;
+		(void)syncPortalWifiCredentials(&wifiManager, submittedSsid.c_str(), submittedPass.c_str());
 		strlcpy(portalStatusSsid, submittedSsid.c_str(), sizeof(portalStatusSsid));
 		portalStatusReason[0] = '\0';
 #ifdef DEBUG_OVER_SERIAL
@@ -3432,6 +3464,7 @@ configHandler(void)
 		if (portalStatus == portalStatusConnecting) {
 			if (WiFi.status() == WL_CONNECTED) {
 				portalStatus = portalStatusSuccess;
+				(void)syncPortalWifiCredentials(&wifiManager, portalStatusSsid, nullptr);
 				strlcpy(portalStatusIp, WiFi.localIP().toString().c_str(), sizeof(portalStatusIp));
 #ifdef DEBUG_OVER_SERIAL
 				portalLog("WiFi connected: SSID=%s IP=%s RSSI=%d channel=%d free=%u max=%u frag=%u",
@@ -3508,6 +3541,9 @@ configHandler(void)
 			// configured previously and the user only updated MQTT settings.
 			// Do not block inside nested loops here; it can run in a non-yieldable context depending on
 			// the WiFiManager call path and cause a core panic in __yield().
+			if (portalMqttSaved && !portalNeedsMqttConfig) {
+				(void)syncPortalWifiCredentials(&wifiManager, portalStatusSsid, nullptr);
+			}
 			if (portalMqttSaved && !portalNeedsMqttConfig && portalHasPersistedWifiCredentials()) {
 				if (!portalRebootScheduled) {
 					portalRebootScheduled = true;

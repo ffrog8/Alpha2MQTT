@@ -1365,8 +1365,9 @@ def _ensure_latest_stub_via_ota(
     if status == 404:
         print("[e2e] reboot endpoint not found (old firmware or not in NORMAL); continuing with direct upload")
 
-    # Give the device time to reboot and bring the portal up.
-    _sleep_with_mqtt(mqtt, 8)
+    # MODE_WIFI_CONFIG waits for STA reconnect before the portal is actually served.
+    # The firmware's connect timeout is 20s, so 8s is not long enough to make /u reliable.
+    _sleep_with_mqtt(mqtt, 25)
 
     print(f"[e2e] POST {upload_path} (upload firmware: {firmware_path.name})")
     status: Optional[int] = None

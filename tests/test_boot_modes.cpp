@@ -51,3 +51,11 @@ TEST_CASE("STA-only portal failure falls back to AP config")
 {
 	CHECK(bootIntentAfterStaPortalConnectFailure() == BootIntent::ApConfig);
 }
+
+TEST_CASE("boot intent maps to the next boot mode")
+{
+	CHECK(bootModeForIntent(BootIntent::Normal, BootMode::ApConfig) == BootMode::Normal);
+	CHECK(bootModeForIntent(BootIntent::ApConfig, BootMode::Normal) == BootMode::ApConfig);
+	CHECK(bootModeForIntent(BootIntent::WifiConfig, BootMode::Normal) == BootMode::WifiConfig);
+	CHECK(bootModeForIntent(BootIntent::Ota, BootMode::WifiConfig) == BootMode::WifiConfig);
+}

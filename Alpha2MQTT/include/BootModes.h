@@ -32,6 +32,7 @@ SubsystemStates decideSubsystems(BootMode mode);
 SubsystemPlan planForBootMode(BootMode mode);
 BootMode bootModeAfterPortalSuccess(BootMode currentMode);
 BootIntent bootIntentAfterStaPortalConnectFailure(void);
+BootMode bootModeForIntent(BootIntent intent, BootMode currentMode);
 const char *bootModeToString(BootMode mode);
 BootMode bootModeFromString(const char *value);
 const char *bootIntentToString(BootIntent intent);

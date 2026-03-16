@@ -391,6 +391,18 @@ def _wait_for_boot_fw_build_ts_ms(mqtt: MqttClient, boot_topic: str, expected_bu
     raise PortalTestError(f"Timeout waiting for boot fw_build_ts_ms={expected_build_ts_ms} on {boot_topic}")
 
 
+def _wait_for_topic_change(mqtt: MqttClient, topic: str, previous_payload: str, *, timeout_s: int, label: str) -> str:
+    mqtt.subscribe(topic, force=True)
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        got_topic, payload = mqtt.wait_for_publish(timeout_s=12.0)
+        if got_topic != topic:
+            continue
+        if payload != previous_payload:
+            return payload
+    raise PortalTestError(f"Timeout waiting for fresh {label} on {topic}")
+
+
 def _http_request(method: str, url: str, *, body: Optional[bytes] = None, headers: Optional[dict[str, str]] = None, timeout_s: int = 20) -> Tuple[int, bytes]:
     req = urllib.request.Request(url, data=body, headers=headers or {}, method=method)
     try:
@@ -622,11 +634,42 @@ def _wait_for_portal_status_connected(ssh: PiSsh, *, timeout_s: int) -> Tuple[di
     raise PortalTestError(f"Timed out waiting for portal connected status. Last body snippet: {last[:300]!r}")
 
 
-def _wait_for_runtime_ready(mqtt: MqttClient, *, device_root: str, expected_build_ts: int, timeout_s: int) -> Tuple[dict[str, Any], dict[str, Any]]:
-    _wait_for_boot_fw_build_ts_ms(mqtt, f"{device_root}/boot", expected_build_ts, timeout_s=timeout_s)
-    status = _fetch_latest_json(mqtt, f"{device_root}/status", "status", timeout_s=30)
-    net = _fetch_latest_json(mqtt, f"{device_root}/status/net", "status/net", timeout_s=30)
-    return status, net
+def _wait_for_runtime_ready(
+    mqtt: MqttClient,
+    *,
+    device_root: str,
+    expected_build_ts: int,
+    previous_boot_payload: str,
+    previous_status_payload: str,
+    previous_net_payload: str,
+    timeout_s: int,
+) -> Tuple[dict[str, Any], dict[str, Any]]:
+    boot_payload = _wait_for_topic_change(
+        mqtt,
+        f"{device_root}/boot",
+        previous_boot_payload,
+        timeout_s=timeout_s,
+        label="boot",
+    )
+    boot = _parse_json(boot_payload)
+    if int(boot.get("fw_build_ts_ms", 0)) != expected_build_ts:
+        raise PortalTestError(f"Fresh boot payload reported unexpected fw_build_ts_ms: {boot!r}")
+
+    status_payload = _wait_for_topic_change(
+        mqtt,
+        f"{device_root}/status",
+        previous_status_payload,
+        timeout_s=30,
+        label="status",
+    )
+    net_payload = _wait_for_topic_change(
+        mqtt,
+        f"{device_root}/status/net",
+        previous_net_payload,
+        timeout_s=30,
+        label="status/net",
+    )
+    return _parse_json(status_payload), _parse_json(net_payload)
 
 
 def _wait_for_runtime_root(ssh: PiSsh, base_url: str, *, timeout_s: int) -> str:
@@ -720,6 +763,31 @@ def main() -> int:
         device_root = ap_ssid
         _announce(f"joined portal AP {ap_ssid}")
 
+        previous_boot_payload = ""
+        previous_status_payload = ""
+        previous_net_payload = ""
+        mqtt.subscribe(f"{device_root}/boot", force=True)
+        try:
+            got_topic, payload = mqtt.wait_for_publish(timeout_s=2.0)
+            if got_topic == f"{device_root}/boot":
+                previous_boot_payload = payload
+        except Exception:
+            pass
+        mqtt.subscribe(f"{device_root}/status", force=True)
+        try:
+            got_topic, payload = mqtt.wait_for_publish(timeout_s=2.0)
+            if got_topic == f"{device_root}/status":
+                previous_status_payload = payload
+        except Exception:
+            pass
+        mqtt.subscribe(f"{device_root}/status/net", force=True)
+        try:
+            got_topic, payload = mqtt.wait_for_publish(timeout_s=2.0)
+            if got_topic == f"{device_root}/status/net":
+                previous_net_payload = payload
+        except Exception:
+            pass
+
         root_resp = _pi_http_request(ssh, method="GET", url="http://192.168.4.1/")
         if int(root_resp.get("status", 0)) != 200:
             raise PortalTestError(f"Portal GET / returned {root_resp.get('status')}")
@@ -746,45 +814,52 @@ def main() -> int:
         _assert_contains(str(save_wifi.get("body", "")), "Trying to connect", "wifisave response")
 
         _connected_status, portal_runtime_ip = _wait_for_portal_status_connected(ssh, timeout_s=60)
-        portal_runtime_base = f"http://{portal_runtime_ip}"
-        _announce(f"portal connected via {portal_runtime_base}")
+        _announce(f"portal connected via http://{portal_runtime_ip}")
 
-        param_status, param_body_bytes = _http_request("GET", portal_runtime_base + "/param", timeout_s=20)
+        param_resp = _pi_http_request(ssh, method="GET", url="http://192.168.4.1/param", timeout_s=20)
+        param_status = int(param_resp.get("status", 0))
         if param_status != 200:
             raise PortalTestError(f"Portal GET /param returned {param_status}")
-        param_body = param_body_bytes.decode("utf-8", errors="replace")
+        param_body = str(param_resp.get("body", ""))
         param_action = _extract_form_action(param_body)
         _assert_contains(param_body, "server", "mqtt param form")
         _assert_contains(param_body, "port", "mqtt param form")
         _assert_contains(param_body, "user", "mqtt param form")
         _assert_contains(param_body, "mpass", "mqtt param form")
 
-        save_param_status, _save_param_body = _http_request(
-            "POST",
-            urllib.parse.urljoin(portal_runtime_base + "/param", param_action),
-            body=urllib.parse.urlencode(
-                {
+        save_param_resp = _pi_http_request(
+            ssh,
+            method="POST",
+            url=urllib.parse.urljoin("http://192.168.4.1/param", param_action),
+            form={
                 "server": mqtt_host,
                 "port": str(mqtt_port),
                 "user": mqtt_user,
                 "mpass": mqtt_pass,
                 "inverter_label": "",
-                }
-            ).encode("utf-8"),
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            },
             timeout_s=30,
         )
+        save_param_status = int(save_param_resp.get("status", 0))
         if save_param_status not in (200, 302):
             raise PortalTestError(f"Portal POST /paramsave returned {save_param_status}")
 
         # The portal usually schedules a reboot after MQTT params are saved; force it if still up.
         time.sleep(3)
         try:
-            _http_request("POST", portal_runtime_base + "/reboot/normal", timeout_s=10)
+            _pi_http_request(ssh, method="POST", url="http://192.168.4.1/reboot/normal", timeout_s=10)
         except Exception:
             pass
 
-        status, net = _wait_for_runtime_ready(mqtt, device_root=device_root, expected_build_ts=build_ts, timeout_s=180)
+        status, net = _wait_for_runtime_ready(
+            mqtt,
+            device_root=device_root,
+            expected_build_ts=build_ts,
+            previous_boot_payload=previous_boot_payload,
+            previous_status_payload=previous_status_payload,
+            previous_net_payload=previous_net_payload,
+            timeout_s=180,
+        )
         runtime_ip = str(net.get("ip", "")).strip()
         runtime_ssid = str(net.get("ssid", "")).strip()
         if not runtime_ip:
