@@ -61,6 +61,24 @@ When you set an entity to `freqDisabled`, the device stops polling and removes t
 
 The WiFi/config portal also supports direct polling-config import via the `bucket_map_full` form field on `POST /config/polling/save`. The value is a semicolon-delimited assignment list like `Grid_Power=ten_sec;Battery_Temp=one_min;`. This merges onto the current config and persists the result; omitted entities keep their current bucket. If you want to explicitly remove an entity from polling and HA discovery, assign it `disabled`, for example `Battery_Temp=disabled;`.
 
+### Captive Portal Verification
+The captive portal has a separate real-device verification script because it depends on lab infrastructure that the main RS485 stub E2E suite does not use. The script starts from a true virgin state by fully erasing flash over serial, flashing the latest real firmware, completing onboarding through the AP portal from a remote Pi, and then verifying that the normal-mode WiFi portal can save polling bucket changes.
+
+Prerequisites:
+- serial access to the target ESP8266 device
+- the `arduino-cli-build` helper container running and able to access the serial device
+- a Pi reachable over SSH with wired LAN plus a working WiFi interface for joining the ESP AP
+- local-only `.secrets` entries for `PI_HOSTNAME`, `PI_USER`, `PI_SSH_PWD`, `WIFI_SSID`, and `WIFI_PWD`
+- MQTT settings available through `tools/e2e/e2e.local.json`, `tools/e2e/e2e.local.env`, or `.secrets`
+
+Run it with:
+
+```bash
+timeout 3600 /home/coder/git/Alpha2MQTT/scripts/e2e_captive_portal.sh
+```
+
+This test should be run periodically and whenever WiFi, captive portal, boot-mode, or onboarding changes are made.
+
 If you enable more telemetry than the selected polling cadence can comfortably sustain, the firmware stays bounded rather than trying to catch up forever. Some values may go stale for a while, and the controller publishes diagnostics so that this is visible instead of silent.
 
 - **Config topic (retained):** `DEVICE_NAME/config`
