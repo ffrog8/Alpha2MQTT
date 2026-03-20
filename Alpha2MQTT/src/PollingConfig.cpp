@@ -415,6 +415,48 @@ validatePollingConfigEntries(const char *payload, char *valueScratch, size_t val
 	                                 nullptr);
 }
 
+bool
+buildPollingConfigSetPayload(const char *pollIntervalS,
+                            const char *bucketMap,
+                            char *out,
+                            size_t outSize)
+{
+	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+
+	const bool includePoll = (pollIntervalS != nullptr && pollIntervalS[0] != '\0');
+	const bool includeMap = (bucketMap != nullptr && bucketMap[0] != '\0');
+
+	if (!includePoll && !includeMap) {
+		if (outSize < 3) {
+			return false;
+		}
+		out[0] = '{';
+		out[1] = '}';
+		out[2] = '\0';
+		return true;
+	}
+
+	int written = 0;
+	if (includePoll && includeMap) {
+		written = snprintf(out,
+		                  outSize,
+		                  "{\"poll_interval_s\":\"%s\",\"bucket_map\":\"%s\"}",
+		                  pollIntervalS,
+		                  bucketMap);
+	} else if (includePoll) {
+		written = snprintf(out, outSize, "{\"poll_interval_s\":\"%s\"}", pollIntervalS);
+	} else {
+		written = snprintf(out, outSize, "{\"bucket_map\":\"%s\"}", bucketMap);
+	}
+
+	if (written < 0) {
+		return false;
+	}
+	return static_cast<size_t>(written) < outSize;
+}
+
 static bool
 resolveEntityToken(const char *token,
                    const mqttState *entities,

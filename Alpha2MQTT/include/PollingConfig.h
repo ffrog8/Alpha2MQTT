@@ -59,6 +59,13 @@ bool validatePollingConfigEntries(const char *payload,
                                   char *valueScratch,
                                   size_t valueScratchSize);
 
+// Build a JSON payload compatible with MQTT/config/set from optional polling
+// parameters submitted by portal handlers.
+bool buildPollingConfigSetPayload(const char *pollIntervalS,
+                                 const char *bucketMap,
+                                 char *out,
+                                 size_t outSize);
+
 // Apply a Bucket_Map string into the provided bucket assignments. Supports both
 // "Entity_Name=bucket;" and compact "#<descriptor-index>=bucket;" tokens.
 bool applyBucketMapString(const char *map,

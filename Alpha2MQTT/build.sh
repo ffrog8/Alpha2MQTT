@@ -10,11 +10,33 @@ if [[ "${BUILD_TRACE:-0}" == "1" ]]; then
 	set -x
 fi
 
-cd /project
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${SCRIPT_DIR}/platformio.ini" && -f "${SCRIPT_DIR}/Alpha2MQTT.ino" ]]; then
+	REPO_ROOT="${SCRIPT_DIR}"
+elif [[ -f /project/Alpha2MQTT/Alpha2MQTT.ino ]]; then
+	REPO_ROOT="/project/Alpha2MQTT"
+elif [[ -f /project/Alpha2MQTT/Alpha2MQTT/Alpha2MQTT.ino ]]; then
+	REPO_ROOT="/project/Alpha2MQTT/Alpha2MQTT"
+elif [[ -f "${SCRIPT_DIR}/platformio.ini" ]]; then
+	REPO_ROOT="${SCRIPT_DIR}"
+else
+	REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+fi
+
+cd "${REPO_ROOT}"
+if [[ -f "${REPO_ROOT}/Alpha2MQTT.ino" ]]; then
+	SKETCH_DIR="${REPO_ROOT}"
+	OUTDIR="${REPO_ROOT}/build/firmware"
+elif [[ -f "${REPO_ROOT}/Alpha2MQTT/Alpha2MQTT.ino" ]]; then
+	SKETCH_DIR="${REPO_ROOT}/Alpha2MQTT"
+	OUTDIR="${REPO_ROOT}/Alpha2MQTT/build/firmware"
+else
+	echo "[build] ERROR: unable to locate Alpha2MQTT.ino" >&2
+	exit 1
+fi
 
 BUILD_TS_MS="$(date +%s%3N)"
 BASE_BUILD_FLAGS="-DMP_ESP8266 -UMP_ESP32 -UMP_XIAO_ESP32C6 -DBUILD_TS_MS=${BUILD_TS_MS}ULL"
-OUTDIR="Alpha2MQTT/build/firmware"
 OUTFILE_REAL="${OUTDIR}/Alpha2MQTT_${BUILD_TS_MS}_real.bin"
 OUTFILE_STUB="${OUTDIR}/Alpha2MQTT_${BUILD_TS_MS}_stub.bin"
 ESP8266_INDEX_URL="https://arduino.esp8266.com/stable/package_esp8266com_index.json"
@@ -44,7 +66,7 @@ compile_one() {
 	local label="$1"
 	local extra_flags="$2"
 	local outfile="$3"
-	local build_dir="Alpha2MQTT/build/esp8266.esp8266.d1_mini"
+	local build_dir="${SKETCH_DIR}/build/esp8266.esp8266.d1_mini"
 	local elf_path="${build_dir}/Alpha2MQTT.ino.elf"
 	local map_path="${build_dir}/Alpha2MQTT.ino.map"
 	local elf_flags="-Wl,-Map=${map_path}"
@@ -56,15 +78,15 @@ compile_one() {
 	echo "[build] build.extra_flags=${extra_flags}"
 
 	if [[ "${BUILD_VERBOSE:-0}" == "1" ]]; then
-		arduino-cli compile -v -e --build-property build.extra_flags="${extra_flags}" --build-property compiler.c.elf.extra_flags="${elf_flags}" --fqbn esp8266:esp8266:d1_mini Alpha2MQTT
+		arduino-cli compile -v -e --build-property build.extra_flags="${extra_flags}" --build-property compiler.c.elf.extra_flags="${elf_flags}" --fqbn esp8266:esp8266:d1_mini "${SKETCH_DIR}"
 	else
-		arduino-cli compile -e --build-property build.extra_flags="${extra_flags}" --build-property compiler.c.elf.extra_flags="${elf_flags}" --fqbn esp8266:esp8266:d1_mini Alpha2MQTT
+		arduino-cli compile -e --build-property build.extra_flags="${extra_flags}" --build-property compiler.c.elf.extra_flags="${elf_flags}" --fqbn esp8266:esp8266:d1_mini "${SKETCH_DIR}"
 	fi
 
 	local toolchain_bin=""
 	toolchain_bin="$(find_toolchain_bin)"
 
-	mv Alpha2MQTT/build/esp8266.esp8266.d1_mini/Alpha2MQTT.ino.bin "${outfile}"
+	mv "${build_dir}/Alpha2MQTT.ino.bin" "${outfile}"
 	echo "[build] Wrote ${outfile} ($(wc -c < "${outfile}") bytes)"
 
 	if [[ -f "${elf_path}" ]]; then

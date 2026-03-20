@@ -24,7 +24,9 @@ void buildInverterHaUniqueId(const char *serial, char *out, size_t outLen);
 // Returns true when the current HA unique_id already matches the inverter serial.
 bool inverterHaUniqueIdMatchesSerial(const char *uniqueId, const char *serial);
 
-// Returns true only for non-empty serials that are not placeholder values.
+// Returns true for non-empty serial strings that look like real inverter IDs.
+// The helper intentionally rejects placeholder values and obvious invalid
+// placeholders (for example, all-zero strings or bare "unknown").
 bool inverterSerialIsValid(const char *serial);
 
 // Writes the effective display label for inverter naming. Prefers the user

@@ -185,6 +185,29 @@ TEST_CASE("config entry validation rejects truncated payloads before apply")
 	CHECK_FALSE(validatePollingConfigEntries("{\"poll_interval_s\":\"45\",\"bucket_map\":\"Op_Mode=one_min;\"", scratch, sizeof(scratch)));
 }
 
+TEST_CASE("polling-set payload builder emits complete/partial JSON")
+{
+	char out[256];
+
+	CHECK(buildPollingConfigSetPayload("45", "Op_Mode=one_min;", out, sizeof(out)));
+	CHECK(std::string(out) == "{\"poll_interval_s\":\"45\",\"bucket_map\":\"Op_Mode=one_min;\"}");
+
+	CHECK(buildPollingConfigSetPayload("45", "", out, sizeof(out)));
+	CHECK(std::string(out) == "{\"poll_interval_s\":\"45\"}");
+
+	CHECK(buildPollingConfigSetPayload("", "Op_Mode=one_min;", out, sizeof(out)));
+	CHECK(std::string(out) == "{\"bucket_map\":\"Op_Mode=one_min;\"}");
+}
+
+TEST_CASE("polling-set payload builder handles no-op values")
+{
+	char out[32];
+
+	CHECK(buildPollingConfigSetPayload("", "", out, sizeof(out)));
+	CHECK(std::string(out) == "{}");
+	CHECK_FALSE(buildPollingConfigSetPayload("", "", out, 2));
+}
+
 TEST_CASE("config entry visit aborts staged apply when bucket_map parsing fails")
 {
 	mqttState entities[1]{};

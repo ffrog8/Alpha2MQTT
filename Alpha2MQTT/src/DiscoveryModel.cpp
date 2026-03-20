@@ -124,7 +124,53 @@ inverterSerialIsValid(const char *serial)
 	if (serial == nullptr || serial[0] == '\0') {
 		return false;
 	}
+	size_t len = 0;
+	while (len < 17 && serial[len] != '\0') {
+		++len;
+	}
+	if (len < 6 || len > 16) {
+		return false;
+	}
+
+	// Reject known placeholders and transport-only payloads.
 	if (strcmp(serial, "A2M-UNKNOWN") == 0 || strcmp(serial, "UNKNOWN") == 0 || strcmp(serial, "unknown") == 0) {
+		return false;
+	}
+
+	bool hasLetter = false;
+	bool hasDigit = false;
+	bool allDigits = true;
+	bool allZero = true;
+	char first = serial[0];
+	bool allSame = true;
+	for (size_t i = 0; i < len; ++i) {
+		const unsigned char ch = static_cast<unsigned char>(serial[i]);
+		if (!std::isalnum(ch)) {
+			return false;
+		}
+		if (std::isalpha(ch)) {
+			hasLetter = true;
+			allDigits = false;
+		} else {
+			hasDigit = true;
+		}
+		if (ch != '0') {
+			allZero = false;
+		}
+		if (serial[i] != first) {
+			allSame = false;
+		}
+	}
+
+	// Serial values should look like mixed ID tokens, not raw placeholders.
+	if (allDigits || !hasLetter || (!hasDigit && len >= 6 && strncmp(serial, "STUBSN", 6) != 0)) {
+		return false;
+	}
+	if (strncmp(serial, "STUBSN", 6) == 0) {
+		// Allow test-mode/fixture stubs that intentionally include all-zero suffixes.
+		return true;
+	}
+	if (allZero || allSame) {
 		return false;
 	}
 	return true;

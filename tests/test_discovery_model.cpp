@@ -16,12 +16,20 @@ TEST_CASE("discovery model builds stable controller and inverter identifiers")
 	char inverterId[64];
 	buildInverterIdentifier("AL12345678901234", inverterId, sizeof(inverterId));
 	CHECK(std::string(inverterId) == "alpha2mqtt_inv_AL12345678901234");
+	CHECK(inverterSerialIsValid("AL9876543210987"));
+	CHECK(inverterSerialIsValid("STUBSN000000000"));
 }
 
 TEST_CASE("discovery model rejects missing inverter serial and skips inverter topic base")
 {
 	CHECK_FALSE(inverterSerialIsValid(""));
+	CHECK_FALSE(inverterSerialIsValid("A2M-UNKNOWN"));
+	CHECK_FALSE(inverterSerialIsValid("UNKNOWN"));
 	CHECK_FALSE(inverterSerialIsValid("unknown"));
+	CHECK_FALSE(inverterSerialIsValid("123456789012345"));
+	CHECK_FALSE(inverterSerialIsValid("AAAAAAAAAAAAAAA"));
+	CHECK_FALSE(inverterSerialIsValid("000000000000000"));
+	CHECK_FALSE(inverterSerialIsValid("STUBS"));  // too short for known patterns
 	CHECK_FALSE(inverterHaUniqueIdMatchesSerial("A2M-AL12345678901234", ""));
 	CHECK_FALSE(inverterHaUniqueIdMatchesSerial("A2M-UNKNOWN", "AL12345678901234"));
 
