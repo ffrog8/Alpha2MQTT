@@ -3059,7 +3059,11 @@ handlePortalPollingClear(WiFiManager &wifiManager)
 		if (bucketsApplied && persistUserPollingConfig(storedIntervalSeconds, outMap)) {
 			pollIntervalSeconds = storedIntervalSeconds;
 			recomputeBucketCounts();
+			updatePollingLastChange();
 			pollingConfigLoadedFromStorage = true;
+			requestHaDataResend();
+			resendAllData = true;
+			publishPollingConfig();
 		} else {
 			if (bucketsApplied && mqttEntitiesRtAvailable()) {
 				mqttEntityApplyBuckets(originalBuckets, entityCount);
@@ -3071,10 +3075,6 @@ handlePortalPollingClear(WiFiManager &wifiManager)
 	}
 	portalRebootScheduled = false;
 	portalMqttSaved = false;
-	if (!hadError) {
-		persistUserInverterLabel("");
-		appConfig.inverterLabel = "";
-	}
 
 	char location[96];
 	snprintf(location,
@@ -3619,19 +3619,26 @@ configHandlerSta(void)
 				{
 					Preferences prefsRo;
 					prefsRo.begin(DEVICE_NAME, true);
-				char storedMqttServer[kPrefMqttServerMaxLen] = "";
+					char storedMqttServer[kPrefMqttServerMaxLen] = "";
+					char storedMqttUser[kPrefMqttUsernameMaxLen] = "";
+					char storedMqttPass[kPrefMqttPasswordMaxLen] = "";
+					const uint16_t storedMqttPort =
+						static_cast<uint16_t>(prefsRo.getInt("MQTT_Port", 0));
 					prefsRo.getString("MQTT_Server", storedMqttServer, sizeof(storedMqttServer));
+					prefsRo.getString("MQTT_Username", storedMqttUser, sizeof(storedMqttUser));
+					prefsRo.getString("MQTT_Password", storedMqttPass, sizeof(storedMqttPass));
 					prefsRo.end();
-				PortalPostWifiAction postWifiAction = portalPostWifiActionAfterWifiSave(storedMqttServer);
-				portalNeedsMqttConfig = (postWifiAction == PortalPostWifiAction::RedirectToMqttParams);
-				if (postWifiAction == PortalPostWifiAction::Reboot) {
-					unsigned long statusStart = millis();
-					while (millis() - statusStart < 3000) {
-						wifiManager.process();
-						diagDelay(50);
+					PortalPostWifiAction postWifiAction = portalPostWifiActionAfterWifiSave(
+						storedMqttServer, storedMqttPort, storedMqttUser, storedMqttPass);
+					portalNeedsMqttConfig = (postWifiAction == PortalPostWifiAction::RedirectToMqttParams);
+					if (postWifiAction == PortalPostWifiAction::Reboot) {
+						unsigned long statusStart = millis();
+						while (millis() - statusStart < 3000) {
+							wifiManager.process();
+							diagDelay(50);
+						}
+						setBootIntentAndReboot(BootIntent::Normal);
 					}
-					setBootIntentAndReboot(BootIntent::Normal);
-				}
 				}
 			}
 
@@ -3938,13 +3945,20 @@ configHandler(void)
 				updateOLED(false, "Web", "config", "succeeded");
 
 				char storedMqttServer[kPrefMqttServerMaxLen] = "";
+				char storedMqttUser[kPrefMqttUsernameMaxLen] = "";
+				char storedMqttPass[kPrefMqttPasswordMaxLen] = "";
+				uint16_t storedMqttPort = 0;
 				{
 					Preferences prefsRo;
 					prefsRo.begin(DEVICE_NAME, true);
+					storedMqttPort = static_cast<uint16_t>(prefsRo.getInt("MQTT_Port", 0));
 					prefsRo.getString("MQTT_Server", storedMqttServer, sizeof(storedMqttServer));
+					prefsRo.getString("MQTT_Username", storedMqttUser, sizeof(storedMqttUser));
+					prefsRo.getString("MQTT_Password", storedMqttPass, sizeof(storedMqttPass));
 					prefsRo.end();
 				}
-				PortalPostWifiAction postWifiAction = portalPostWifiActionAfterWifiSave(storedMqttServer);
+				PortalPostWifiAction postWifiAction = portalPostWifiActionAfterWifiSave(
+					storedMqttServer, storedMqttPort, storedMqttUser, storedMqttPass);
 				portalNeedsMqttConfig = (postWifiAction == PortalPostWifiAction::RedirectToMqttParams);
 #ifdef MP_XIAO_ESP32C6
 				{

@@ -181,10 +181,23 @@ mqttServerIsBlank(const char *server)
 	return server == nullptr || server[0] == '\0';
 }
 
-PortalPostWifiAction
-portalPostWifiActionAfterWifiSave(const char *storedMqttServer)
+static bool
+portalStringIsBlank(const char *value)
 {
-	return mqttServerIsBlank(storedMqttServer) ? PortalPostWifiAction::RedirectToMqttParams : PortalPostWifiAction::Reboot;
+	return value == nullptr || value[0] == '\0';
+}
+
+bool
+mqttConfigIsComplete(const char *server, uint16_t port, const char *user, const char *password)
+{
+	return !mqttServerIsBlank(server) && port != 0 && !portalStringIsBlank(user) && !portalStringIsBlank(password);
+}
+
+PortalPostWifiAction
+portalPostWifiActionAfterWifiSave(const char *server, uint16_t port, const char *user, const char *password)
+{
+	return mqttConfigIsComplete(server, port, user, password) ? PortalPostWifiAction::Reboot
+	                                                          : PortalPostWifiAction::RedirectToMqttParams;
 }
 
 const char *

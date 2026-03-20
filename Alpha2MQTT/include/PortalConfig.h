@@ -51,7 +51,11 @@ struct PortalRuntimeBucketSummary {
 };
 
 bool mqttServerIsBlank(const char *server);
-PortalPostWifiAction portalPostWifiActionAfterWifiSave(const char *storedMqttServer);
+bool mqttConfigIsComplete(const char *server, uint16_t port, const char *user, const char *password);
+PortalPostWifiAction portalPostWifiActionAfterWifiSave(const char *server,
+                                                       uint16_t port,
+                                                       const char *user,
+                                                       const char *password);
 const char *portalMenuPollingHtml(void);
 const char *portalRebootToNormalHtml(void);
 uint16_t portalParseU16Strict(const char *text, uint16_t defaultValue);
