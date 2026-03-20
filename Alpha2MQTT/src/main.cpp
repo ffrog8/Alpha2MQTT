@@ -566,6 +566,7 @@ static void beginWifiStationWithStoredCredentials(void);
 static bool syncPortalWifiCredentials(WiFiManager *wifiManager, const char *ssidHint = nullptr, const char *passHint = nullptr);
 static void persistUserExtAntenna(bool enabled);
 static void persistUserInverterLabel(const char *label);
+static void persistUserBucketMap(const char *bucketMap);
 static bool persistUserPollingConfig(uint32_t intervalSeconds, const char *bucketMap);
 static void persistUserPollingLastChange(const char *lastChange);
 static void handlePortalPollingPage(WiFiManager &wifiManager);
