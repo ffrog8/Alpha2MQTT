@@ -566,7 +566,7 @@ static void beginWifiStationWithStoredCredentials(void);
 static bool syncPortalWifiCredentials(WiFiManager *wifiManager, const char *ssidHint = nullptr, const char *passHint = nullptr);
 static void persistUserExtAntenna(bool enabled);
 static void persistUserInverterLabel(const char *label);
-static void persistUserBucketMap(const char *bucketMap);
+static bool persistUserBucketMap(const char *bucketMap);
 static bool persistUserPollingConfig(uint32_t intervalSeconds, const char *bucketMap);
 static void persistUserPollingLastChange(const char *lastChange);
 static void handlePortalPollingPage(WiFiManager &wifiManager);
@@ -1458,7 +1458,7 @@ persistUserInverterLabel(const char *label)
 }
 
 static bool
-persistUserPollingConfig(uint32_t intervalSeconds, const char *bucketMap)
+persistUserBucketMap(const char *bucketMap)
 {
 	Preferences preferences;
 	if (!preferences.begin(DEVICE_NAME, false)) {
@@ -1467,23 +1467,38 @@ persistUserPollingConfig(uint32_t intervalSeconds, const char *bucketMap)
 
 	const char *safeBucketMap = (bucketMap != nullptr) ? bucketMap : "";
 	const size_t bucketMapLen = strlen(safeBucketMap);
-	bool ok = preferences.putUInt(kPreferencePollInterval, intervalSeconds) == sizeof(uint32_t);
-	if (ok) {
-		// Polling config updates run from constrained HTTP/MQTT callback stacks on ESP8266.
-		// Verify writes by return value rather than allocating another full bucket-map buffer here.
-		if (bucketMapLen == 0) {
-			ok = !preferences.isKey(kPreferenceBucketMap) || preferences.remove(kPreferenceBucketMap) || !preferences.isKey(kPreferenceBucketMap);
-		} else {
-			ok = preferences.putString(kPreferenceBucketMap, safeBucketMap) == bucketMapLen;
-		}
+	bool ok = false;
+	if (bucketMapLen == 0) {
+		ok = !preferences.isKey(kPreferenceBucketMap) || preferences.remove(kPreferenceBucketMap) ||
+		     !preferences.isKey(kPreferenceBucketMap);
+	} else {
+		ok = preferences.putString(kPreferenceBucketMap, safeBucketMap) == bucketMapLen;
 	}
-	// Writing the stable Bucket_Map makes it the authoritative config source.
-	// Mark migration complete so stale legacy Freq_* keys no longer reapply on boot.
 	if (ok) {
 		ok = preferences.putBool(kPreferenceBucketMapMigrated, true) == sizeof(uint8_t);
 	}
 	preferences.end();
 	return ok;
+}
+
+static bool
+persistUserPollingConfig(uint32_t intervalSeconds, const char *bucketMap)
+{
+	Preferences preferences;
+	if (!preferences.begin(DEVICE_NAME, false)) {
+		return false;
+	}
+
+	const char *safeBucketMap = (bucketMap != nullptr) ? bucketMap : "";
+	bool ok = preferences.putUInt(kPreferencePollInterval, intervalSeconds) == sizeof(uint32_t);
+	if (ok) {
+		// Polling config updates run from constrained HTTP/MQTT callback stacks on ESP8266.
+		// Reuse the Bucket_Map persistence helper so migration semantics stay identical.
+		preferences.end();
+		return persistUserBucketMap(safeBucketMap);
+	}
+	preferences.end();
+	return false;
 }
 
 static void
