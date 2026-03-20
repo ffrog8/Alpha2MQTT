@@ -2,6 +2,7 @@
 #include "doctest/doctest.h"
 
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -154,6 +155,27 @@ TEST_CASE("mutable config entry visitor tokenizes large bucket_map values in pla
 	CHECK(capture.visited == 2);
 	CHECK(capture.bucketMapValue == largeMap);
 	CHECK(capture.pollIntervalValue == "45");
+}
+
+TEST_CASE("config entry visitors accept numeric poll_interval_s values")
+{
+	const char *payload = "{\"poll_interval_s\":45,\"bucket_map\":\"Op_Mode=one_min;\"}";
+	char scratch[256];
+	VisitCapture capture{};
+
+	CHECK(visitPollingConfigEntries(payload, scratch, sizeof(scratch), captureConfigEntry, &capture));
+	CHECK(capture.visited == 2);
+	CHECK(capture.pollIntervalValue == "45");
+	CHECK(capture.bucketMapValue == "Op_Mode=one_min;");
+
+	std::vector<char> mutablePayload(payload, payload + std::strlen(payload));
+	mutablePayload.push_back('\0');
+	MutableVisitCapture mutableCapture{};
+
+	CHECK(visitMutablePollingConfigEntries(mutablePayload.data(), captureMutableConfigEntry, &mutableCapture));
+	CHECK(mutableCapture.visited == 2);
+	CHECK(mutableCapture.pollIntervalValue == "45");
+	CHECK(mutableCapture.bucketMapValue == "Op_Mode=one_min;");
 }
 
 TEST_CASE("config entry validation rejects truncated payloads before apply")

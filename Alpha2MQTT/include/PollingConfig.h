@@ -39,9 +39,9 @@ using LegacyPollingValueReader = bool (*)(size_t index,
                                           int &storedValue,
                                           void *context);
 
-// Visit the flat {"key":"value"} config/set payload used by polling config.
-// The parser intentionally stays limited to quoted string keys/values with no
-// escape support because that matches the existing firmware contract exactly.
+// Visit the flat config/set payload used by polling config. Keys remain quoted
+// JSON strings; values may be quoted strings or simple bare scalars so clients
+// can round-trip standard numeric poll_interval_s payloads.
 bool visitPollingConfigEntries(const char *payload,
                                char *valueScratch,
                                size_t valueScratchSize,

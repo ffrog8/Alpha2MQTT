@@ -188,6 +188,41 @@ copyQuotedString(const char *&cursor, char *out, size_t outSize)
 }
 
 static bool
+copyBareValue(const char *&cursor, char *out, size_t outSize)
+{
+	if (cursor == nullptr || out == nullptr || outSize == 0 || *cursor == '\0' || *cursor == '"' ||
+	    *cursor == ',' || *cursor == '}') {
+		return false;
+	}
+
+	size_t index = 0;
+	while (*cursor != '\0' && *cursor != ',' && *cursor != '}' &&
+	       !isspace(static_cast<unsigned char>(*cursor))) {
+		if (index + 1 >= outSize) {
+			return false;
+		}
+		out[index++] = *cursor++;
+	}
+	if (index == 0) {
+		return false;
+	}
+	out[index] = '\0';
+	return true;
+}
+
+static bool
+copyJsonValue(const char *&cursor, char *out, size_t outSize)
+{
+	if (cursor == nullptr) {
+		return false;
+	}
+	if (*cursor == '"') {
+		return copyQuotedString(cursor, out, outSize);
+	}
+	return copyBareValue(cursor, out, outSize);
+}
+
+static bool
 terminateQuotedString(char *&cursor, char *&out)
 {
 	if (cursor == nullptr || *cursor != '"') {
@@ -205,6 +240,43 @@ terminateQuotedString(char *&cursor, char *&out)
 	*cursor = '\0';
 	cursor++;
 	return true;
+}
+
+static bool
+terminateBareValue(char *&cursor, char *&out, char &delimiter)
+{
+	if (cursor == nullptr || *cursor == '\0' || *cursor == '"' || *cursor == ',' || *cursor == '}') {
+		return false;
+	}
+
+	out = cursor;
+	while (*cursor != '\0' && *cursor != ',' && *cursor != '}' &&
+	       !isspace(static_cast<unsigned char>(*cursor))) {
+		cursor++;
+	}
+	if (cursor == out) {
+		return false;
+	}
+	if (*cursor == '\0') {
+		return false;
+	}
+
+	delimiter = *cursor;
+	*cursor = '\0';
+	return true;
+}
+
+static bool
+terminateJsonValue(char *&cursor, char *&out, char &delimiter)
+{
+	if (cursor == nullptr) {
+		return false;
+	}
+	if (*cursor == '"') {
+		delimiter = '\0';
+		return terminateQuotedString(cursor, out);
+	}
+	return terminateBareValue(cursor, out, delimiter);
 }
 
 bool
@@ -243,7 +315,7 @@ visitPollingConfigEntries(const char *payload,
 		}
 		cursor++;
 		cursor = skipWhitespace(cursor);
-		if (cursor == nullptr || !copyQuotedString(cursor, valueScratch, valueScratchSize)) {
+		if (cursor == nullptr || !copyJsonValue(cursor, valueScratch, valueScratchSize)) {
 			return false;
 		}
 		if (!visitor(key, valueScratch, context)) {
@@ -283,6 +355,7 @@ visitMutablePollingConfigEntries(char *payload,
 	while (true) {
 		char key[64];
 		char *value = nullptr;
+		char valueDelimiter = '\0';
 
 		cursor = const_cast<char *>(skipWhitespace(cursor));
 		if (cursor == nullptr || *cursor == '\0') {
@@ -301,11 +374,14 @@ visitMutablePollingConfigEntries(char *payload,
 		}
 		cursor++;
 		cursor = const_cast<char *>(skipWhitespace(cursor));
-		if (cursor == nullptr || !terminateQuotedString(cursor, value)) {
+		if (cursor == nullptr || !terminateJsonValue(cursor, value, valueDelimiter)) {
 			return false;
 		}
 		if (!visitor(key, value, context)) {
 			return false;
+		}
+		if (valueDelimiter != '\0') {
+			*cursor = valueDelimiter;
 		}
 
 		cursor = const_cast<char *>(skipWhitespace(cursor));
