@@ -1399,14 +1399,16 @@ beginWifiStationWithStoredCredentials(void)
 static bool
 syncPortalWifiCredentials(WiFiManager *wifiManager, const char *ssidHint, const char *passHint)
 {
+	const bool ssidProvided = ssidHint != nullptr;
+	const bool passProvided = passHint != nullptr;
 	String ssid = ssidHint != nullptr ? String(ssidHint) : String();
 	String pass = passHint != nullptr ? String(passHint) : String();
 
 	if (wifiManager != nullptr) {
-		if (ssid.length() == 0) {
+		if (!ssidProvided && ssid.length() == 0) {
 			ssid = wifiManager->getWiFiSSID();
 		}
-		if (pass.length() == 0) {
+		if (!passProvided && pass.length() == 0) {
 			pass = wifiManager->getWiFiPass();
 		}
 	}
@@ -1414,7 +1416,7 @@ syncPortalWifiCredentials(WiFiManager *wifiManager, const char *ssidHint, const 
 	if (ssid.length() == 0 && WiFi.status() == WL_CONNECTED) {
 		ssid = WiFi.SSID();
 	}
-	if (pass.length() == 0 && appConfig.wifiPass.length() > 0) {
+	if (!passProvided && pass.length() == 0 && appConfig.wifiPass.length() > 0) {
 		pass = appConfig.wifiPass;
 	}
 	if (ssid.length() == 0) {
@@ -3446,7 +3448,7 @@ configHandlerSta(void)
 	logHeap("sta-portal-entry");
 #endif
 
-	if (appConfig.wifiSSID == "" || appConfig.wifiPass == "") {
+	if (appConfig.wifiSSID == "") {
 #ifdef DEBUG_OVER_SERIAL
 		portalLog("STA portal: no persisted WiFi credentials; falling back to AP config.");
 #endif

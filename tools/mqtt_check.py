@@ -36,6 +36,14 @@ def _load_e2e_module():
     return module
 
 
+def _read_optional_pass() -> str:
+    passfile = os.environ.get("MQTT_PASSFILE")
+    if passfile:
+        return Path(passfile).read_text(encoding="utf-8").strip()
+    password = os.environ.get("MQTT_PASS")
+    return password.strip() if password else ""
+
+
 def main() -> int:
     try:
         e2e = _load_e2e_module()
@@ -43,8 +51,10 @@ def main() -> int:
 
         host = e2e._require_env("MQTT_HOST")
         port = int(os.environ.get("MQTT_PORT", "1883"))
-        user = e2e._require_env("MQTT_USER")
-        password = e2e._read_pass()
+        user = os.environ.get("MQTT_USER", "").strip()
+        password = _read_optional_pass()
+        if password and not user:
+            raise RuntimeError("MQTT_PASS or MQTT_PASSFILE requires MQTT_USER")
 
         mqtt = e2e.MqttClient(host=host, port=port, user=user, password=password, client_id="mqtt-check")
         mqtt.connect()
