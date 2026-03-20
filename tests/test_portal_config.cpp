@@ -45,7 +45,6 @@ TEST_CASE("portal config: menu includes update and no exit")
 	bool hasUpdate = false;
 	bool hasExit = false;
 	bool hasCustom = false;
-	int paramIndex = -1;
 	int customIndex = -1;
 	int updateIndex = -1;
 
@@ -63,23 +62,21 @@ TEST_CASE("portal config: menu includes update and no exit")
 		if (strcmp(id, "exit") == 0) {
 			hasExit = true;
 		}
-		if (strcmp(id, "param") == 0) {
-			paramIndex = i;
-		}
 	}
 
 	CHECK(hasUpdate);
 	CHECK(hasCustom);
 	CHECK(!hasExit);
-	CHECK(paramIndex >= 0);
-	CHECK(customIndex > paramIndex);
-	CHECK(updateIndex > paramIndex);
+	CHECK(customIndex >= 0);
+	CHECK(updateIndex > customIndex);
 }
 
-TEST_CASE("portal config: custom polling menu html points to polling page")
+TEST_CASE("portal config: custom menu html points to mqtt and polling pages")
 {
 	const char *html = portalMenuPollingHtml();
 	REQUIRE(html != nullptr);
+	CHECK(strstr(html, "/config/mqtt") != nullptr);
+	CHECK(strstr(html, "MQTT Setup") != nullptr);
 	CHECK(strstr(html, "/config/polling") != nullptr);
 	CHECK(strstr(html, "Polling") != nullptr);
 }
