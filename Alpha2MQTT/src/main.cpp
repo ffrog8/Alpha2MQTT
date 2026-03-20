@@ -4362,6 +4362,7 @@ loadPollingConfig(void)
 	BucketId *buckets = g_portalBucketsScratch;
 	ScopedCharBuffer bucketMapBuffer(kPrefBucketMapMaxLen);
 	bool appliedBucketMap = false;
+	bool migrateLegacyIndexBucketMap = false;
 	if (!bucketMapBuffer.ok()) {
 		persistLoadOk = 0;
 		persistLoadErr = 1;
@@ -4421,9 +4422,23 @@ loadPollingConfig(void)
 	const bool legacyMigrated = preferences.getBool(kPreferenceBucketMapMigrated, false);
 	if (bucketMap[0] != '\0') {
 		if (bucketMapUsesDescriptorIndices(bucketMap)) {
-			// Older compact "#<index>=bucket" maps are not stable once the catalog grows.
-			// Ignore them on boot and fall back to defaults until a fresh name-based map is saved.
-			persistLoadOk = 1;
+			appliedBucketMap = applyBucketMapString(bucketMap,
+			                                        entities,
+			                                        entityCount,
+			                                        buckets,
+			                                        persistUnknownEntityCount,
+			                                        persistInvalidBucketCount,
+			                                        persistDuplicateEntityCount);
+			if (appliedBucketMap) {
+				size_t appliedCount = 0;
+				if (buildBucketMapFromAssignments(
+					    entities, entityCount, buckets, bucketMap, kPrefBucketMapMaxLen, appliedCount)) {
+					migrateLegacyIndexBucketMap = true;
+				}
+				persistLoadOk = 1;
+			} else {
+				persistLoadErr = 1;
+			}
 		} else {
 			appliedBucketMap = applyBucketMapString(bucketMap,
 			                                        entities,
@@ -4472,6 +4487,9 @@ loadPollingConfig(void)
 		persistLoadOk = 0;
 		persistLoadErr = 1;
 		return;
+	}
+	if (migrateLegacyIndexBucketMap) {
+		persistUserBucketMap(bucketMap);
 	}
 	recomputeBucketCounts();
 	pollingConfigLoadedFromStorage = true;
