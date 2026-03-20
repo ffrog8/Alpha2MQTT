@@ -30,13 +30,14 @@ TEST_CASE("portal config: mqtt blank detection")
 	CHECK(!mqttServerIsBlank("mqtt.local"));
 }
 
-TEST_CASE("portal config: mqtt completeness requires server port user and password")
+TEST_CASE("portal config: mqtt completeness requires server and port only")
 {
 	CHECK_FALSE(mqttConfigIsComplete(nullptr, 1883, "user", "pass"));
 	CHECK_FALSE(mqttConfigIsComplete("", 1883, "user", "pass"));
 	CHECK_FALSE(mqttConfigIsComplete("broker", 0, "user", "pass"));
-	CHECK_FALSE(mqttConfigIsComplete("broker", 1883, "", "pass"));
-	CHECK_FALSE(mqttConfigIsComplete("broker", 1883, "user", ""));
+	CHECK(mqttConfigIsComplete("broker", 1883, "", ""));
+	CHECK(mqttConfigIsComplete("broker", 1883, "user", ""));
+	CHECK(mqttConfigIsComplete("broker", 1883, "", "pass"));
 	CHECK(mqttConfigIsComplete("broker", 1883, "user", "pass"));
 }
 
@@ -47,9 +48,9 @@ TEST_CASE("portal config: post-wifi action redirects until mqtt config is comple
 	CHECK(portalPostWifiActionAfterWifiSave("broker", 0, "user", "pass") ==
 	      PortalPostWifiAction::RedirectToMqttParams);
 	CHECK(portalPostWifiActionAfterWifiSave("broker", 1883, "", "pass") ==
-	      PortalPostWifiAction::RedirectToMqttParams);
+	      PortalPostWifiAction::Reboot);
 	CHECK(portalPostWifiActionAfterWifiSave("broker", 1883, "user", "") ==
-	      PortalPostWifiAction::RedirectToMqttParams);
+	      PortalPostWifiAction::Reboot);
 	CHECK(portalPostWifiActionAfterWifiSave("broker", 1883, "user", "pass") ==
 	      PortalPostWifiAction::Reboot);
 }

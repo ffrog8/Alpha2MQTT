@@ -38,7 +38,7 @@ First, go and customise options at the top of Definitions.h!
 #include "../include/TimeProvider.h"
 #include "../include/diag.h"
 #include <Arduino.h>
-#if defined MP_ESP8266
+#if defined(MP_ESP8266) || defined(ESP8266) || defined(ARDUINO_ARCH_ESP8266)
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <coredecls.h>
@@ -68,7 +68,7 @@ First, go and customise options at the top of Definitions.h!
 #include <Adafruit_NeoPixel.h>
 #endif // MP_ESPUNO_ESP32C6
 
-#if defined MP_ESP8266
+#if defined(MP_ESP8266) || defined(ESP8266) || defined(ARDUINO_ARCH_ESP8266)
 using HttpServer = ESP8266WebServer;
 #else
 using HttpServer = WebServer;
@@ -1879,7 +1879,7 @@ handlePortalParamSave(WiFiManager& wifiManager)
 	mqttConfigComplete = isMqttConfigComplete();
 	mqttRuntimeEnabled = bootPlan.mqtt && mqttConfigComplete;
 	portalMqttSaved = true;
-	portalNeedsMqttConfig = mqttServerIsBlank(appConfig.mqttSrvr.c_str());
+	portalNeedsMqttConfig = !mqttConfigComplete;
 	if (portalMqttSaved && !portalNeedsMqttConfig && portalHasPersistedWifiCredentials()) {
 		portalRebootScheduled = true;
 		portalRebootAt = millis() + 1500;
@@ -2203,16 +2203,13 @@ refreshPortalCustomParameters(void)
 static bool
 isWifiConfigComplete(void)
 {
-	return appConfig.wifiSSID != "" && appConfig.wifiPass != "";
+	return appConfig.wifiSSID != "";
 }
 
 static bool
 isMqttConfigComplete(void)
 {
-	return appConfig.mqttSrvr != "" &&
-	       appConfig.mqttPort != 0 &&
-	       appConfig.mqttUser != "" &&
-	       appConfig.mqttPass != "";
+	return appConfig.mqttSrvr != "" && appConfig.mqttPort != 0;
 }
 
 static bool
@@ -3557,7 +3554,8 @@ configHandlerSta(void)
 		appConfig.inverterLabel = gPortalInverterLabel.getValue();
 
 		portalMqttSaved = true;
-		portalNeedsMqttConfig = mqttServerIsBlank(gPortalMqttServer.getValue());
+		portalNeedsMqttConfig = !mqttConfigIsComplete(
+			gPortalMqttServer.getValue(), static_cast<uint16_t>(port), gPortalMqttUser.getValue(), gPortalMqttPass.getValue());
 #ifdef DEBUG_OVER_SERIAL
 		portalLog("MQTT params saved (server=%s)", gPortalMqttServer.getValue());
 #endif
@@ -3882,7 +3880,8 @@ configHandler(void)
 		appConfig.inverterLabel = gPortalInverterLabel.getValue();
 
 		portalMqttSaved = true;
-		portalNeedsMqttConfig = mqttServerIsBlank(gPortalMqttServer.getValue());
+		portalNeedsMqttConfig = !mqttConfigIsComplete(
+			gPortalMqttServer.getValue(), static_cast<uint16_t>(port), gPortalMqttUser.getValue(), gPortalMqttPass.getValue());
 #ifdef DEBUG_OVER_SERIAL
 		portalLog("MQTT params saved (server=%s)", gPortalMqttServer.getValue());
 #endif
