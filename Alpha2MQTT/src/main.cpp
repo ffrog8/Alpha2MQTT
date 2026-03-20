@@ -137,6 +137,8 @@ bool portalNeedsMqttConfig = false;
 bool portalMqttSaved = false;
 bool portalRebootScheduled = false;
 unsigned long portalRebootAt = 0;
+uint8_t portalRouteRebindRetriesRemaining = 0;
+unsigned long portalRouteRebindRetryAt = 0;
 bool deferredControlPlaneRebootScheduled = false;
 BootIntent deferredControlPlaneRebootIntent = BootIntent::Normal;
 unsigned long deferredControlPlaneRebootAt = 0;
@@ -2142,6 +2144,28 @@ bindPortalRoutes(WiFiManager &wifiManager)
 }
 
 static void
+schedulePortalRouteRebindRetries(void)
+{
+	portalRouteRebindRetriesRemaining = 6;
+	portalRouteRebindRetryAt = millis() + 250;
+}
+
+static void
+servicePortalRouteRebindRetries(WiFiManager &wifiManager)
+{
+	if (portalRouteRebindRetriesRemaining == 0) {
+		return;
+	}
+	if (static_cast<long>(millis() - portalRouteRebindRetryAt) < 0) {
+		return;
+	}
+	invalidatePortalRouteBinding("post-connect-retry");
+	bindPortalRoutes(wifiManager);
+	portalRouteRebindRetriesRemaining--;
+	portalRouteRebindRetryAt = millis() + 500;
+}
+
+static void
 ensurePortalPollingRuntimeReady(void)
 {
 	initMqttEntitiesRtIfNeeded(true);
@@ -3476,6 +3500,8 @@ configHandlerSta(void)
 	portalMqttSaved = false;
 	portalRebootScheduled = false;
 	portalRebootAt = 0;
+	portalRouteRebindRetriesRemaining = 0;
+	portalRouteRebindRetryAt = 0;
 	invalidatePortalRouteBinding("sta-portal-init");
 
 	wifiManager.setWebServerCallback([&]() {
@@ -3543,6 +3569,7 @@ configHandlerSta(void)
 		unsigned long processStart = millis();
 		wifiManager.process();
 		bindPortalRoutes(wifiManager);
+		servicePortalRouteRebindRetries(wifiManager);
 		processPendingPollingConfigPayload();
 		unsigned long processElapsed = millis() - processStart;
 #ifdef DEBUG_OVER_SERIAL
@@ -3574,6 +3601,7 @@ configHandlerSta(void)
 					strlcpy(portalStatusIp, WiFi.localIP().toString().c_str(), sizeof(portalStatusIp));
 					invalidatePortalRouteBinding("sta-portal-connected");
 					bindPortalRoutes(wifiManager);
+					schedulePortalRouteRebindRetries();
 #ifdef DEBUG_OVER_SERIAL
 					portalLog("WiFi connected: SSID=%s IP=%s RSSI=%d channel=%d free=%u max=%u frag=%u",
 						portalStatusSsid,
@@ -3625,10 +3653,8 @@ configHandlerSta(void)
 			}
 		}
 
-		// Option B behavior: if MQTT params saved and WiFi credentials exist, reboot into normal.
-		if (portalMqttSaved && !portalNeedsMqttConfig) {
-			(void)syncPortalWifiCredentials(&wifiManager, portalStatusSsid, nullptr);
-		}
+		// Once MQTT params are saved, WiFi credentials should already be persisted from the
+		// earlier WiFi save path. Do not rewrite them on every loop tick while waiting to reboot.
 		if (portalMqttSaved && !portalNeedsMqttConfig && portalHasPersistedWifiCredentials()) {
 			if (!portalRebootScheduled) {
 				portalRebootScheduled = true;
@@ -3760,6 +3786,8 @@ configHandler(void)
 	portalMqttSaved = false;
 	portalRebootScheduled = false;
 	portalRebootAt = 0;
+	portalRouteRebindRetriesRemaining = 0;
+	portalRouteRebindRetryAt = 0;
 
 #if defined MP_ESP8266
 	static WiFiEventHandler disconnectHandler;
@@ -3860,6 +3888,7 @@ configHandler(void)
 		unsigned long processStart = millis();
 		wifiManager.process();
 		bindPortalRoutes(wifiManager);
+		servicePortalRouteRebindRetries(wifiManager);
 		processPendingPollingConfigPayload();
 		unsigned long processElapsed = millis() - processStart;
 #ifdef DEBUG_OVER_SERIAL
@@ -3891,6 +3920,7 @@ configHandler(void)
 					strlcpy(portalStatusIp, WiFi.localIP().toString().c_str(), sizeof(portalStatusIp));
 					invalidatePortalRouteBinding("ap-portal-connected");
 					bindPortalRoutes(wifiManager);
+					schedulePortalRouteRebindRetries();
 #ifdef DEBUG_OVER_SERIAL
 					portalLog("WiFi connected: SSID=%s IP=%s RSSI=%d channel=%d free=%u max=%u frag=%u",
 						portalStatusSsid,
@@ -3928,16 +3958,19 @@ configHandler(void)
 				}
 #endif // MP_ESPUNO_ESP32C6
 
-				// If WiFi saved/connected but MQTT is blank, keep the portal alive and redirect to /param.
-				// Otherwise keep the legacy behavior: short status display then reboot into normal.
-					if (postWifiAction == PortalPostWifiAction::Reboot) {
-						unsigned long statusStart = millis();
-						while (millis() - statusStart < 3000) {
-							wifiManager.process();
-							diagDelay(50);
-						}
-						setBootIntentAndReboot(BootIntent::Normal);
-					}
+				// After AP onboarding succeeds, hand off to the next stable mode explicitly:
+				// - MQTT configured: reboot straight to normal runtime.
+				// - MQTT missing: reboot into the STA-only WiFi config portal on the known LAN IP.
+				unsigned long statusStart = millis();
+				while (millis() - statusStart < 3000) {
+					wifiManager.process();
+					diagDelay(50);
+				}
+				if (postWifiAction == PortalPostWifiAction::Reboot) {
+					setBootIntentAndReboot(BootIntent::Normal);
+				} else {
+					setBootIntentAndReboot(BootIntent::WifiConfig);
+				}
 				}
 
 			if (portalConnectStart > 0 && millis() - portalConnectStart >= 20000) {
@@ -3960,15 +3993,10 @@ configHandler(void)
 			}
 		}
 
-			// After MQTT params are saved:
-			// Option B: if WiFi credentials exist, reboot into normal immediately even if the STA is
-			// not currently connected. This keeps the portal workflow intuitive when WiFi was
-			// configured previously and the user only updated MQTT settings.
+			// After MQTT params are saved, reboot into normal if persisted WiFi credentials exist.
+			// The WiFi save path already writes credentials, so avoid rewriting them on each loop tick.
 			// Do not block inside nested loops here; it can run in a non-yieldable context depending on
 			// the WiFiManager call path and cause a core panic in __yield().
-			if (portalMqttSaved && !portalNeedsMqttConfig) {
-				(void)syncPortalWifiCredentials(&wifiManager, portalStatusSsid, nullptr);
-			}
 			if (portalMqttSaved && !portalNeedsMqttConfig && portalHasPersistedWifiCredentials()) {
 				if (!portalRebootScheduled) {
 					portalRebootScheduled = true;

@@ -581,22 +581,45 @@ def run(cmd, *, input_text=None, check=True):
 def sudo(cmd):
     return run(["sudo", "-S", "-p", ""] + cmd, input_text=sudo_pw + "\\n")
 
+def soft_reset_iface():
+    run(["nmcli", "device", "disconnect", iface], check=False)
+    sudo(["nmcli", "device", "set", iface, "managed", "no"])
+    time.sleep(1)
+    sudo(["nmcli", "device", "set", iface, "managed", "yes"])
+    time.sleep(2)
+
+def scan_wifi():
+    run(["nmcli", "radio", "wifi", "on"], check=False)
+    run(["nmcli", "device", "disconnect", iface], check=False)
+    run(["nmcli", "device", "wifi", "rescan", "ifname", iface], check=False)
+    scan = run([
+        "nmcli", "-t", "-f", "IN-USE,SSID,BSSID,SIGNAL,SECURITY",
+        "device", "wifi", "list", "ifname", iface
+    ], check=False)
+    return scan
+
 last_scan = ""
+scan_history = []
 last_error = ""
 best = None
-for _ in range(12):
-    run(["nmcli", "radio", "wifi", "on"], check=False)
-    run(["nmcli", "device", "wifi", "rescan", "ifname", iface], check=False)
-    scan = run(["nmcli", "-t", "-f", "SSID,BSSID,SIGNAL,SECURITY", "device", "wifi", "list", "ifname", iface], check=False)
+run(["nmcli", "radio", "wifi", "on"], check=False)
+run(["nmcli", "device", "disconnect", iface], check=False)
+for attempt in range(18):
+    if attempt in (6, 12):
+        soft_reset_iface()
+    scan = scan_wifi()
     last_scan = scan
+    scan_history.append(scan)
+    if len(scan_history) > 4:
+        scan_history = scan_history[-4:]
     best = None
     for raw in scan.splitlines():
         if not raw:
             continue
-        parts = re.split(r'(?<!\\\\):', raw, maxsplit=3)
-        if len(parts) < 4:
+        parts = re.split(r'(?<!\\\\):', raw, maxsplit=4)
+        if len(parts) < 5:
             continue
-        ssid, bssid, signal, security = parts
+        _in_use, ssid, bssid, signal, security = parts
         bssid = bssid.replace("\\:", ":")
         if not ssid.startswith(ssid_prefix):
             continue
@@ -612,7 +635,13 @@ for _ in range(12):
     time.sleep(5)
 
 if best is None:
-    raise SystemExit(json.dumps({{"error": "no matching AP", "scan": last_scan}}))
+    show = run(["nmcli", "-t", "-f", "GENERAL.STATE,GENERAL.CONNECTION", "device", "show", iface], check=False)
+    raise SystemExit(json.dumps({{
+        "error": "no matching AP",
+        "scan": last_scan,
+        "recent_scans": scan_history,
+        "device": show,
+    }}))
 
 run(["sudo", "-S", "-p", "", "nmcli", "device", "disconnect", iface], input_text=sudo_pw + "\\n", check=False)
 for _ in range(6):
@@ -1046,19 +1075,20 @@ def _resolve_http_base_url(
     raise PortalTestError(f"Could not resolve reachable base URL for {path}: {last_error}")
 
 
-def _resolve_portal_base_url(ssh: "PiSsh", *, candidates: list[str], timeout_s: int = 20) -> str:
+def _resolve_portal_base_url(ssh: "PiSsh", *, candidates: list[str], timeout_s: int = 60) -> str:
     deadline = time.time() + timeout_s
-    last_error = ""
+    last_errors: dict[str, str] = {}
     while time.time() < deadline:
         for base_url in candidates:
             try:
                 _load_param_page(ssh, base_url=base_url, timeout_s=5)
                 return base_url
             except PortalTestError as exc:
-                last_error = f"{base_url}: {exc}"
+                last_errors[base_url] = str(exc)
                 continue
         time.sleep(1.0)
-    raise PortalTestError(f"Could not resolve reachable portal base URL: {last_error}")
+    detail = "; ".join(f"{base_url}: {msg}" for base_url, msg in last_errors.items())
+    raise PortalTestError(f"Could not resolve reachable portal base URL: {detail}")
 
 
 def _save_mqtt_params(
@@ -1121,12 +1151,8 @@ def _run_wifi_only_case(
         wifi_pwd=wifi_pwd,
         wifi_action=wifi_action,
     )
-    portal_base_url = _resolve_http_base_url(
-        ssh,
-        candidates=[f"http://{portal_runtime_ip}", "http://192.168.4.1"],
-        path="/status",
-        required_token="WiFi Status",
-    )
+    portal_base_url = f"http://{portal_runtime_ip}"
+    _wait_for_sta_portal(ssh, portal_base_url, timeout_s=120)
 
     _reboot_normal_and_tolerate_disconnect(
         ssh,
@@ -1171,10 +1197,8 @@ def _run_wifi_plus_mqtt_case(
         wifi_pwd=wifi_pwd,
         wifi_action=wifi_action,
     )
-    portal_base_url = _resolve_portal_base_url(
-        ssh,
-        candidates=[f"http://{portal_runtime_ip}", "http://192.168.4.1"],
-    )
+    portal_base_url = f"http://{portal_runtime_ip}"
+    _wait_for_sta_portal(ssh, portal_base_url, timeout_s=120)
 
     _save_mqtt_params(
         ssh,
@@ -1184,12 +1208,6 @@ def _run_wifi_plus_mqtt_case(
         mqtt_user=mqtt_user,
         mqtt_pass=mqtt_pass,
     )
-
-    time.sleep(3)
-    try:
-        _pi_http_request(ssh, method="POST", url=portal_base_url + "/config/reboot-normal", timeout_s=10)
-    except Exception:
-        pass
 
     base_url = f"http://{portal_runtime_ip}"
     root_page = _wait_for_runtime_root_contains(ssh, base_url, "MQTT connected: 1", timeout_s=180)
