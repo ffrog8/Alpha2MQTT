@@ -1122,6 +1122,12 @@ handleHttpRoot(void)
 #ifdef DEBUG_OVER_SERIAL
 	Serial.println("HTTP GET /");
 #endif
+	if (deferredControlPlaneRebootScheduled) {
+		httpServer.sendHeader("Cache-Control", "no-store");
+		httpServer.sendHeader("Retry-After", "2");
+		httpServer.send(503, "text/plain", "Reboot pending");
+		return;
+	}
 	httpServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
 	httpServer.sendHeader("Connection", "close");
 	httpServer.send(200, "text/html", "");
@@ -1248,10 +1254,12 @@ handleRebootWifi(void)
 		"<script>"
 		"(function(){"
 		"var start=Date.now();"
+		"var armAt=start+2200;"
 		"function tick(){"
 		"document.getElementById('s').textContent='waiting '+Math.floor((Date.now()-start)/1000)+'s';"
 		"}"
 		"async function probe(){"
+		"if(Date.now()<armAt){tick();setTimeout(probe,250);return;}"
 		"try{"
 		"var r=await fetch('/',{cache:'no-store'});"
 		"if(r && r.ok){window.location.href='/';return;}"
@@ -7200,7 +7208,7 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 	char netTopic[160];
 	snprintf(netTopic, sizeof(netTopic), "%s/net", statusTopic);
 	if (buildStatusNetJson(net, netAddition, sizeof(netAddition))) {
-		_mqtt.publish(netTopic, netAddition, false);
+		_mqtt.publish(netTopic, netAddition, MQTT_RETAIN);
 		maybeYield();
 	}
 
@@ -7213,9 +7221,9 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 		usedCompactPoll = pollBuilt;
 	}
 	if (pollBuilt) {
-		bool published = _mqtt.publish(pollTopic, pollAddition, false);
+		bool published = _mqtt.publish(pollTopic, pollAddition, MQTT_RETAIN);
 		if (!published && !usedCompactPoll && buildStatusPollJsonCompact(poll, pollAddition, sizeof(pollAddition))) {
-			published = _mqtt.publish(pollTopic, pollAddition, false);
+			published = _mqtt.publish(pollTopic, pollAddition, MQTT_RETAIN);
 			usedCompactPoll = true;
 		}
 #ifdef DEBUG_OVER_SERIAL
@@ -7257,7 +7265,7 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 		char stubTopic[160];
 		snprintf(stubTopic, sizeof(stubTopic), "%s/stub", statusTopic);
 		if (buildStatusStubJson(stub, stubAddition, sizeof(stubAddition))) {
-			_mqtt.publish(stubTopic, stubAddition, false);
+			_mqtt.publish(stubTopic, stubAddition, MQTT_RETAIN);
 			maybeYield();
 		}
 	}
