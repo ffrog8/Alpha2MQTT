@@ -166,8 +166,8 @@ constexpr size_t kPrefMqttUsernameMaxLen = 64;
 constexpr size_t kPrefMqttPasswordMaxLen = 64;
 // Stable "name=bucket;" persistence is larger than the old index encoding. Size these
 // buffers for the full current catalog, but keep them off steady-state globals.
-constexpr size_t kPrefBucketMapMaxLen = 4096;
-constexpr size_t kPollingConfigSetPayloadMaxLen = 4608;
+constexpr size_t kPrefBucketMapMaxLen = 4608;
+constexpr size_t kPollingConfigSetPayloadMaxLen = 5120;
 constexpr size_t kPollingConfigChunkMapMaxLen = 1024;
 constexpr size_t kPrefPollingLastChangeMaxLen = 32;
 static WiFiManagerParameter gPortalMqttSection("<p>MQTT settings:</p>");
@@ -3049,6 +3049,20 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 			rawMapUsed += bucketLen;
 			rawMap[rawMapUsed++] = ';';
 			rawMap[rawMapUsed] = '\0';
+		}
+		if (rawMapUsed > 0) {
+			uint32_t unknownCount = 0;
+			uint32_t invalidCount = 0;
+			uint32_t duplicateCount = 0;
+			if (!applyBucketMapString(rawMap,
+			                         entities,
+			                         entityCount,
+			                         buckets,
+			                         unknownCount,
+			                         invalidCount,
+			                         duplicateCount)) {
+				hadError = true;
+			}
 		}
 	}
 

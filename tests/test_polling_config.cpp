@@ -564,12 +564,12 @@ TEST_CASE("assignment builder fits the full live catalog inside the expanded fir
 {
 	const size_t entityCount = mqttEntitiesCount();
 	std::vector<mqttState> entities(entityCount);
-	std::vector<BucketId> buckets(entityCount, BucketId::Disabled);
+	std::vector<BucketId> buckets(entityCount, BucketId::User);
 	for (size_t i = 0; i < entityCount; ++i) {
 		REQUIRE(mqttEntityCopyByIndex(i, &entities[i]));
 	}
 
-	char out[4096];
+	char out[4608];
 	size_t applied = 0;
 	CHECK(buildBucketMapFromAssignments(entities.data(),
 	                                    entities.size(),
