@@ -129,6 +129,7 @@ enum PortalStatus : uint8_t {
 PortalStatus portalStatus = portalStatusIdle;
 char portalStatusReason[64] = "";
 char portalStatusSsid[33] = "";
+char portalSubmittedPass[64] = "";
 char portalStatusIp[20] = "";
 int portalLastDisconnectReason = -1;
 char portalLastDisconnectLabel[32] = "";
@@ -631,7 +632,7 @@ discoveryDeviceIdForScope(DiscoveryDeviceScope scope)
 	if (scope == DiscoveryDeviceScope::Controller) {
 		return controllerIdentifier;
 	}
-	if (!inverterSerialKnown()) {
+	if (!inverterReady || !inverterSerialIsValid(deviceSerialNumber)) {
 		return "";
 	}
 	static char inverterIdentifier[64];
@@ -3603,6 +3604,7 @@ configHandlerSta(void)
 	portalStatus = portalStatusIdle;
 	portalStatusReason[0] = '\0';
 	portalStatusSsid[0] = '\0';
+	portalSubmittedPass[0] = '\0';
 	portalStatusIp[0] = '\0';
 	portalLastDisconnectReason = -1;
 	portalLastDisconnectLabel[0] = '\0';
@@ -3625,8 +3627,8 @@ configHandlerSta(void)
 		portalConnectStart = millis();
 		const String submittedSsid = wifiManager.getWiFiSSID();
 		const String submittedPass = wifiManager.getWiFiPass();
-		(void)syncPortalWifiCredentials(&wifiManager, submittedSsid.c_str(), submittedPass.c_str());
 		strlcpy(portalStatusSsid, submittedSsid.c_str(), sizeof(portalStatusSsid));
+		strlcpy(portalSubmittedPass, submittedPass.c_str(), sizeof(portalSubmittedPass));
 		portalStatusReason[0] = '\0';
 #ifdef DEBUG_OVER_SERIAL
 		portalLog("WiFi submit: SSID=%s", portalStatusSsid);
@@ -3711,7 +3713,7 @@ configHandlerSta(void)
 		if (portalStatus == portalStatusConnecting) {
 				if (WiFi.status() == WL_CONNECTED) {
 					portalStatus = portalStatusSuccess;
-					(void)syncPortalWifiCredentials(&wifiManager, portalStatusSsid, nullptr);
+					(void)syncPortalWifiCredentials(&wifiManager, portalStatusSsid, portalSubmittedPass);
 					strlcpy(portalStatusIp, WiFi.localIP().toString().c_str(), sizeof(portalStatusIp));
 					invalidatePortalRouteBinding("sta-portal-connected");
 					bindPortalRoutes(wifiManager);
@@ -3899,6 +3901,7 @@ configHandler(void)
 	portalStatus = portalStatusIdle;
 	portalStatusReason[0] = '\0';
 	portalStatusSsid[0] = '\0';
+	portalSubmittedPass[0] = '\0';
 	portalStatusIp[0] = '\0';
 	portalLastDisconnectReason = -1;
 	portalLastDisconnectLabel[0] = '\0';
@@ -3952,8 +3955,8 @@ configHandler(void)
 		portalConnectStart = millis();
 		const String submittedSsid = wifiManager.getWiFiSSID();
 		const String submittedPass = wifiManager.getWiFiPass();
-		(void)syncPortalWifiCredentials(&wifiManager, submittedSsid.c_str(), submittedPass.c_str());
 		strlcpy(portalStatusSsid, submittedSsid.c_str(), sizeof(portalStatusSsid));
+		strlcpy(portalSubmittedPass, submittedPass.c_str(), sizeof(portalSubmittedPass));
 		portalStatusReason[0] = '\0';
 #ifdef DEBUG_OVER_SERIAL
 		IPAddress ip = WiFi.softAPIP();
@@ -4040,7 +4043,7 @@ configHandler(void)
 		if (portalStatus == portalStatusConnecting) {
 				if (WiFi.status() == WL_CONNECTED) {
 					portalStatus = portalStatusSuccess;
-					(void)syncPortalWifiCredentials(&wifiManager, portalStatusSsid, nullptr);
+					(void)syncPortalWifiCredentials(&wifiManager, portalStatusSsid, portalSubmittedPass);
 					strlcpy(portalStatusIp, WiFi.localIP().toString().c_str(), sizeof(portalStatusIp));
 					invalidatePortalRouteBinding("ap-portal-connected");
 					bindPortalRoutes(wifiManager);
@@ -5083,7 +5086,7 @@ publishControllerInverterSerialState(void)
 	char topic[160];
 	char payload[40];
 	snprintf(topic, sizeof(topic), "%s/%s/%s/state", deviceName, controllerIdentifier, kControllerInverterSerialEntity);
-	if (inverterSerialKnown()) {
+	if (inverterReady && inverterSerialIsValid(deviceSerialNumber)) {
 		strlcpy(payload, deviceSerialNumber, sizeof(payload));
 	} else {
 		strlcpy(payload, "unknown", sizeof(payload));
@@ -7112,7 +7115,7 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 	core.bootMode = bootModeToString(currentBootMode);
 	core.bootIntent = bootIntentToString(currentBootIntent);
 	core.httpControlPlaneEnabled = httpControlPlaneEnabled;
-	core.haUniqueId = haUniqueId;
+	core.haUniqueId = inverterReady ? haUniqueId : "A2M-UNKNOWN";
 
 	net.uptimeS = getUptimeSeconds();
 	net.freeHeap = ESP.getFreeHeap();
@@ -7217,7 +7220,7 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 	char netTopic[160];
 	snprintf(netTopic, sizeof(netTopic), "%s/net", statusTopic);
 	if (buildStatusNetJson(net, netAddition, sizeof(netAddition))) {
-		_mqtt.publish(netTopic, netAddition, true);
+		_mqtt.publish(netTopic, netAddition, false);
 		maybeYield();
 	}
 
@@ -7230,9 +7233,9 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 		usedCompactPoll = pollBuilt;
 	}
 	if (pollBuilt) {
-		bool published = _mqtt.publish(pollTopic, pollAddition, true);
+		bool published = _mqtt.publish(pollTopic, pollAddition, false);
 		if (!published && !usedCompactPoll && buildStatusPollJsonCompact(poll, pollAddition, sizeof(pollAddition))) {
-			published = _mqtt.publish(pollTopic, pollAddition, true);
+			published = _mqtt.publish(pollTopic, pollAddition, false);
 			usedCompactPoll = true;
 		}
 #ifdef DEBUG_OVER_SERIAL
@@ -7274,7 +7277,7 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 		char stubTopic[160];
 		snprintf(stubTopic, sizeof(stubTopic), "%s/stub", statusTopic);
 		if (buildStatusStubJson(stub, stubAddition, sizeof(stubAddition))) {
-			_mqtt.publish(stubTopic, stubAddition, true);
+			_mqtt.publish(stubTopic, stubAddition, false);
 			maybeYield();
 		}
 	}
