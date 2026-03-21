@@ -1482,6 +1482,33 @@ persistUserExtAntenna(bool enabled)
 	preferences.end();
 }
 
+struct ScopedCharBuffer {
+	char *data = nullptr;
+	size_t size = 0;
+
+	explicit ScopedCharBuffer(size_t bufferSize)
+	{
+		if (bufferSize == 0) {
+			return;
+		}
+		data = new (std::nothrow) char[bufferSize];
+		if (data != nullptr) {
+			size = bufferSize;
+			data[0] = '\0';
+		}
+	}
+
+	~ScopedCharBuffer()
+	{
+		delete[] data;
+	}
+
+	bool ok() const
+	{
+		return data != nullptr;
+	}
+};
+
 static void
 persistUserInverterLabel(const char *label)
 {
@@ -2115,33 +2142,6 @@ struct ScopedEntityCatalogCopy {
 			return false;
 		}
 		return true;
-	}
-};
-
-struct ScopedCharBuffer {
-	char *data = nullptr;
-	size_t size = 0;
-
-	explicit ScopedCharBuffer(size_t bufferSize)
-	{
-		if (bufferSize == 0) {
-			return;
-		}
-		data = new (std::nothrow) char[bufferSize];
-		if (data != nullptr) {
-			size = bufferSize;
-			data[0] = '\0';
-		}
-	}
-
-	~ScopedCharBuffer()
-	{
-		delete[] data;
-	}
-
-	bool ok() const
-	{
-		return data != nullptr;
 	}
 };
 
