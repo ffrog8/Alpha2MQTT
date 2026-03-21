@@ -398,6 +398,25 @@ TEST_CASE("legacy freq mapping uses bucket ids")
 	CHECK(bucketIdFromLegacyFreq(9999) == BucketId::Unknown);
 }
 
+TEST_CASE("legacy descriptor bucket maps resolve against the pre-catalog entity order")
+{
+	mqttState entities[2]{};
+	entities[0] = makeEntity(mqttEntityId::entitySocTarget, "SOC_Target", mqttUpdateFreq::freqOneMin, homeAssistantClass::haClassBox);
+	entities[1] = makeEntity(mqttEntityId::entityOpMode, "Op_Mode", mqttUpdateFreq::freqOneMin, homeAssistantClass::haClassSelect);
+
+	BucketId buckets[2] = { BucketId::OneMin, BucketId::OneMin };
+	uint32_t unknown = 0;
+	uint32_t invalid = 0;
+	uint32_t dup = 0;
+
+	CHECK(applyLegacyBucketMapString("#18=five_min;#19=disabled;", entities, 2, buckets, unknown, invalid, dup));
+	CHECK(buckets[0] == BucketId::Disabled);
+	CHECK(buckets[1] == BucketId::FiveMin);
+	CHECK(unknown == 0);
+	CHECK(invalid == 0);
+	CHECK(dup == 0);
+}
+
 TEST_CASE("legacy values build compact stable bucket map")
 {
 	mqttState entities[2]{};

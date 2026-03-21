@@ -250,11 +250,17 @@ bool resendHaData = false;
 bool resendHaPreludePending = false;
 size_t resendHaNextEntityIndex = 0;
 bool resendHaClearStaleInverterPending = false;
+bool resendHaClearStaleControllerPending = false;
 static constexpr size_t kStaleInverterDiscoveryQueueMax = 2;
 size_t resendHaClearStaleInverterIndex = 0;
 size_t resendHaClearStaleInverterQueueIndex = 0;
 size_t resendHaClearStaleInverterQueueCount = 0;
 char resendHaClearStaleInverterDeviceIds[kStaleInverterDiscoveryQueueMax][64] = {{0}};
+size_t resendHaClearStaleControllerIndex = 0;
+size_t resendHaClearStaleControllerQueueIndex = 0;
+size_t resendHaClearStaleControllerQueueCount = 0;
+char resendHaClearStaleControllerDeviceIds[kStaleInverterDiscoveryQueueMax][64] = {{0}};
+char lastQueuedStaleControllerDiscoveryId[64] = "";
 bool resendAllData = false;
 static constexpr size_t kHaDiscoveryBatchSize = 1;
 // Human-readable timestamp of the most recent polling-config mutation.
@@ -545,6 +551,7 @@ void buildDeviceName(void);
 void publishBootEventOncePerBoot(void);
 void setMqttIdentifiersFromSerial(const char *serial);
 void queueStaleInverterDiscoveryClear(const char *deviceId);
+void queueStaleControllerDiscoveryClear(const char *deviceId);
 bool inverterSerialKnown(void);
 const char *discoveryDeviceIdForScope(DiscoveryDeviceScope scope);
 void publishStatusNow(void);
@@ -665,6 +672,28 @@ queueStaleInverterDiscoveryClear(const char *deviceId)
 	        sizeof(resendHaClearStaleInverterDeviceIds[0]));
 	resendHaClearStaleInverterQueueCount++;
 	resendHaClearStaleInverterPending = true;
+}
+
+void
+queueStaleControllerDiscoveryClear(const char *deviceId)
+{
+	if (deviceId == nullptr || deviceId[0] == '\0') {
+		return;
+	}
+	for (size_t i = 0; i < resendHaClearStaleControllerQueueCount; ++i) {
+		if (strcmp(resendHaClearStaleControllerDeviceIds[i], deviceId) == 0) {
+			resendHaClearStaleControllerPending = true;
+			return;
+		}
+	}
+	if (resendHaClearStaleControllerQueueCount >= kStaleInverterDiscoveryQueueMax) {
+		return;
+	}
+	strlcpy(resendHaClearStaleControllerDeviceIds[resendHaClearStaleControllerQueueCount],
+	        deviceId,
+	        sizeof(resendHaClearStaleControllerDeviceIds[0]));
+	resendHaClearStaleControllerQueueCount++;
+	resendHaClearStaleControllerPending = true;
 }
 
 void
@@ -846,6 +875,21 @@ rs485TryReadIdentityOnce(void)
 	    response.dataValueFormatted[0] != '\0') {
 		strlcpy(deviceBatteryType, response.dataValueFormatted, sizeof(deviceBatteryType));
 	}
+
+	auto queueLegacyControllerClearIfNeeded = [&](const char *deviceId) {
+		if (deviceId == nullptr || deviceId[0] == '\0' || strcmp(deviceId, "A2M-UNKNOWN") == 0 ||
+		    strcmp(deviceId, controllerIdentifier) == 0) {
+			return;
+		}
+		if (strcmp(lastQueuedStaleControllerDiscoveryId, deviceId) == 0) {
+			return;
+		}
+		queueStaleControllerDiscoveryClear(deviceId);
+		strlcpy(lastQueuedStaleControllerDiscoveryId, deviceId, sizeof(lastQueuedStaleControllerDiscoveryId));
+	};
+
+	queueLegacyControllerClearIfNeeded(currentLegacyHaUniqueId);
+	queueLegacyControllerClearIfNeeded(haUniqueId);
 
 	if (!inverterHaUniqueIdMatchesSerial(haUniqueId, deviceSerialNumber)) {
 		// Persisted serial is only a hint. Refresh topic/discovery identity whenever the live
@@ -2248,25 +2292,32 @@ loadPollingBucketsForPortal(const mqttState *entities,
 		preferences.getString(kPreferenceBucketMap, persistedMap.data, kPrefBucketMapMaxLen);
 		const bool legacyMigrated = preferences.getBool(kPreferenceBucketMapMigrated, false);
 		if (persistedMap.data[0] != '\0') {
-			if (!bucketMapUsesDescriptorIndices(persistedMap.data)) {
-				uint32_t unknownCount = 0;
-				uint32_t invalidCount = 0;
-				uint32_t duplicateCount = 0;
-				if (!applyBucketMapString(persistedMap.data,
-				                         entities,
-				                         entityCount,
-				                         outBuckets,
-				                         unknownCount,
-				                         invalidCount,
-				                         duplicateCount)) {
-					preferences.end();
-					return false;
-				}
+			uint32_t unknownCount = 0;
+			uint32_t invalidCount = 0;
+			uint32_t duplicateCount = 0;
+			const bool applied = bucketMapUsesDescriptorIndices(persistedMap.data)
+			                         ? applyLegacyBucketMapString(persistedMap.data,
+			                                                      entities,
+			                                                      entityCount,
+			                                                      outBuckets,
+			                                                      unknownCount,
+			                                                      invalidCount,
+			                                                      duplicateCount)
+			                         : applyBucketMapString(persistedMap.data,
+			                                                entities,
+			                                                entityCount,
+			                                                outBuckets,
+			                                                unknownCount,
+			                                                invalidCount,
+			                                                duplicateCount);
+			if (!applied) {
+				preferences.end();
+				return false;
 			}
-	} else if (!legacyMigrated) {
-		size_t appliedCount = 0;
-		if (!buildBucketMapFromLegacyReader(entities,
-		                                   entityCount,
+		} else if (!legacyMigrated) {
+			size_t appliedCount = 0;
+			if (!buildBucketMapFromLegacyReader(entities,
+			                                   entityCount,
 			                                   readLegacyPollingPref,
 			                                   &preferences,
 			                                   persistedMap.data,
@@ -2280,12 +2331,12 @@ loadPollingBucketsForPortal(const mqttState *entities,
 				uint32_t invalidCount = 0;
 				uint32_t duplicateCount = 0;
 				if (!applyBucketMapString(persistedMap.data,
-				                         entities,
-				                         entityCount,
-				                         outBuckets,
-				                         unknownCount,
-				                         invalidCount,
-				                         duplicateCount)) {
+				                          entities,
+				                          entityCount,
+				                          outBuckets,
+				                          unknownCount,
+				                          invalidCount,
+				                          duplicateCount)) {
 					preferences.end();
 					return false;
 				}
@@ -4453,13 +4504,13 @@ loadPollingConfig(void)
 	const bool legacyMigrated = preferences.getBool(kPreferenceBucketMapMigrated, false);
 	if (bucketMap[0] != '\0') {
 		if (bucketMapUsesDescriptorIndices(bucketMap)) {
-			appliedBucketMap = applyBucketMapString(bucketMap,
-			                                        entities,
-			                                        entityCount,
-			                                        buckets,
-			                                        persistUnknownEntityCount,
-			                                        persistInvalidBucketCount,
-			                                        persistDuplicateEntityCount);
+			appliedBucketMap = applyLegacyBucketMapString(bucketMap,
+			                                              entities,
+			                                              entityCount,
+			                                              buckets,
+			                                              persistUnknownEntityCount,
+			                                              persistInvalidBucketCount,
+			                                              persistDuplicateEntityCount);
 			if (appliedBucketMap) {
 				size_t appliedCount = 0;
 				if (buildBucketMapFromAssignments(
@@ -5040,6 +5091,25 @@ clearHaEntityDiscovery(const mqttState *entity, const char *deviceId)
 }
 
 static bool
+clearHaControllerExtraDiscovery(const char *deviceId)
+{
+	if (deviceId == nullptr || deviceId[0] == '\0') {
+		return false;
+	}
+
+	char topic[160];
+	snprintf(topic, sizeof(topic), "homeassistant/sensor/%s/%s/config", deviceId, "MQTT_Config");
+	emptyPayload();
+	if (!sendMqtt(topic, MQTT_RETAIN)) {
+		return false;
+	}
+
+	snprintf(topic, sizeof(topic), "homeassistant/sensor/%s/%s/config", deviceId, kControllerInverterSerialEntity);
+	emptyPayload();
+	return sendMqtt(topic, MQTT_RETAIN);
+}
+
+static bool
 publishPendingStaleInverterDiscoveryClears(void)
 {
 	if (!resendHaClearStaleInverterPending ||
@@ -5085,6 +5155,61 @@ publishPendingStaleInverterDiscoveryClears(void)
 	resendHaClearStaleInverterPending = false;
 	resendHaClearStaleInverterQueueIndex = 0;
 	resendHaClearStaleInverterQueueCount = 0;
+	return false;
+}
+
+static bool
+publishPendingStaleControllerDiscoveryClears(void)
+{
+	if (!resendHaClearStaleControllerPending ||
+	    resendHaClearStaleControllerQueueIndex >= resendHaClearStaleControllerQueueCount ||
+	    resendHaClearStaleControllerDeviceIds[resendHaClearStaleControllerQueueIndex][0] == '\0') {
+		return false;
+	}
+	if (!mqttEntitiesRtAvailable()) {
+		return false;
+	}
+
+	const size_t entityCount = mqttEntitiesCount();
+	size_t batchCount = 0;
+	while (resendHaClearStaleControllerIndex < entityCount && batchCount < kHaDiscoveryBatchSize) {
+		const size_t idx = resendHaClearStaleControllerIndex;
+		mqttState entity{};
+		if (!mqttEntityCopyByIndex(idx, &entity)) {
+			return true;
+		}
+		if (mqttEntityScope(entity.entityId) != DiscoveryDeviceScope::Controller) {
+			resendHaClearStaleControllerIndex++;
+			continue;
+		}
+		if (!clearHaEntityDiscovery(
+		        &entity,
+		        resendHaClearStaleControllerDeviceIds[resendHaClearStaleControllerQueueIndex])) {
+			return true;
+		}
+		resendHaClearStaleControllerIndex++;
+		batchCount++;
+		maybeYield();
+	}
+	if (resendHaClearStaleControllerIndex < entityCount) {
+		return true;
+	}
+
+	if (!clearHaControllerExtraDiscovery(
+	        resendHaClearStaleControllerDeviceIds[resendHaClearStaleControllerQueueIndex])) {
+		return true;
+	}
+
+	resendHaClearStaleControllerIndex = 0;
+	resendHaClearStaleControllerDeviceIds[resendHaClearStaleControllerQueueIndex][0] = '\0';
+	resendHaClearStaleControllerQueueIndex++;
+	if (resendHaClearStaleControllerQueueIndex < resendHaClearStaleControllerQueueCount) {
+		return true;
+	}
+
+	resendHaClearStaleControllerPending = false;
+	resendHaClearStaleControllerQueueIndex = 0;
+	resendHaClearStaleControllerQueueCount = 0;
 	return false;
 }
 
@@ -7697,6 +7822,9 @@ sendHaData()
 
 	// Spread retained HA discovery publishes across multiple loop() turns so a config change
 	// cannot monopolize the ESP8266 network stack long enough to trigger the watchdog.
+	if (publishPendingStaleControllerDiscoveryClears()) {
+		return;
+	}
 	if (publishPendingStaleInverterDiscoveryClears()) {
 		return;
 	}

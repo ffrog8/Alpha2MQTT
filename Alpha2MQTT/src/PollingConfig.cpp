@@ -11,6 +11,62 @@
 
 namespace {
 constexpr char kDisableAllBucketMap[] = "__all__=disabled;";
+
+// Legacy persisted #<index> bucket maps were written against the original
+// pre-catalog descriptor order. Keep that order here so upgrades can resolve
+// old indices before rewriting them to stable entity-name assignments.
+constexpr mqttEntityId kLegacyBucketMapOrder[] = {
+#ifdef DEBUG_FREEMEM
+	mqttEntityId::entityFreemem,
+#endif
+#ifdef DEBUG_CALLBACKS
+	mqttEntityId::entityCallbacks,
+#endif
+#ifdef DEBUG_RS485
+	mqttEntityId::entityRs485Errors,
+#endif
+#ifdef A2M_DEBUG_WIFI
+	mqttEntityId::entityRSSI,
+	mqttEntityId::entityBSSID,
+	mqttEntityId::entityTxPower,
+	mqttEntityId::entityWifiRecon,
+#endif
+	mqttEntityId::entityRs485Avail,
+	mqttEntityId::entityA2MUptime,
+	mqttEntityId::entityA2MVersion,
+	mqttEntityId::entityInverterVersion,
+	mqttEntityId::entityInverterSn,
+	mqttEntityId::entityEmsVersion,
+	mqttEntityId::entityEmsSn,
+	mqttEntityId::entityBatSoc,
+	mqttEntityId::entityBatPwr,
+	mqttEntityId::entityBatEnergyCharge,
+	mqttEntityId::entityBatEnergyDischarge,
+	mqttEntityId::entityGridAvail,
+	mqttEntityId::entityGridPwr,
+	mqttEntityId::entityGridEnergyTo,
+	mqttEntityId::entityGridEnergyFrom,
+	mqttEntityId::entityPvPwr,
+	mqttEntityId::entityPvEnergy,
+	mqttEntityId::entityFrequency,
+	mqttEntityId::entityOpMode,
+	mqttEntityId::entitySocTarget,
+	mqttEntityId::entityChargePwr,
+	mqttEntityId::entityDischargePwr,
+	mqttEntityId::entityPushPwr,
+	mqttEntityId::entityBatCap,
+	mqttEntityId::entityBatTemp,
+	mqttEntityId::entityInverterTemp,
+	mqttEntityId::entityBatFaults,
+	mqttEntityId::entityBatWarnings,
+	mqttEntityId::entityInverterFaults,
+	mqttEntityId::entityInverterWarnings,
+	mqttEntityId::entitySystemFaults,
+	mqttEntityId::entityInverterMode,
+	mqttEntityId::entityGridReg,
+	mqttEntityId::entityRegNum,
+	mqttEntityId::entityRegValue,
+};
 }
 
 bool
@@ -485,16 +541,49 @@ resolveEntityToken(const char *token,
 	return true;
 }
 
-bool
-applyBucketMapString(const char *map,
-                     const mqttState *entities,
-                     size_t entityCount,
-                     BucketId *buckets,
-                     uint32_t &unknownEntityCount,
-                     uint32_t &invalidBucketCount,
-                     uint32_t &duplicateEntityCount)
+static bool
+resolveLegacyEntityToken(const char *token,
+                         const mqttState *entities,
+                         size_t entityCount,
+                         size_t &resolvedIndex)
 {
-	if (map == nullptr || *map == '\0' || entities == nullptr || buckets == nullptr || entityCount == 0) {
+	if (token == nullptr || token[0] == '\0') {
+		return false;
+	}
+	if (token[0] != '#') {
+		return resolveEntityToken(token, entities, entityCount, resolvedIndex);
+	}
+
+	char *endPtr = nullptr;
+	errno = 0;
+	unsigned long parsed = strtoul(token + 1, &endPtr, 10);
+	if (errno != 0 || endPtr == token + 1 || *endPtr != '\0' ||
+	    parsed >= (sizeof(kLegacyBucketMapOrder) / sizeof(kLegacyBucketMapOrder[0]))) {
+		return false;
+	}
+
+	const mqttEntityId legacyId = kLegacyBucketMapOrder[parsed];
+	for (size_t i = 0; i < entityCount; ++i) {
+		if (entities[i].entityId == legacyId) {
+			resolvedIndex = i;
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool
+applyBucketMapStringWithResolver(const char *map,
+                                 const mqttState *entities,
+                                 size_t entityCount,
+                                 BucketId *buckets,
+                                 uint32_t &unknownEntityCount,
+                                 uint32_t &invalidBucketCount,
+                                 uint32_t &duplicateEntityCount,
+                                 bool (*resolver)(const char *, const mqttState *, size_t, size_t &))
+{
+	if (map == nullptr || *map == '\0' || entities == nullptr || buckets == nullptr || entityCount == 0 ||
+	    resolver == nullptr) {
 		return false;
 	}
 	if (entityCount > kMqttEntityDescriptorCount) {
@@ -546,7 +635,7 @@ applyBucketMapString(const char *map,
 		}
 
 		size_t idx = 0;
-		if (!resolveEntityToken(token, entities, entityCount, idx)) {
+		if (!resolver(token, entities, entityCount, idx)) {
 			unknownEntityCount++;
 		} else {
 			const BucketId bucketId = bucketIdFromString(bucket);
@@ -564,6 +653,44 @@ applyBucketMapString(const char *map,
 
 	memcpy(buckets, staged, entityCount * sizeof(BucketId));
 	return true;
+}
+
+bool
+applyBucketMapString(const char *map,
+                     const mqttState *entities,
+                     size_t entityCount,
+                     BucketId *buckets,
+                     uint32_t &unknownEntityCount,
+                     uint32_t &invalidBucketCount,
+                     uint32_t &duplicateEntityCount)
+{
+	return applyBucketMapStringWithResolver(map,
+	                                        entities,
+	                                        entityCount,
+	                                        buckets,
+	                                        unknownEntityCount,
+	                                        invalidBucketCount,
+	                                        duplicateEntityCount,
+	                                        resolveEntityToken);
+}
+
+bool
+applyLegacyBucketMapString(const char *map,
+                           const mqttState *entities,
+                           size_t entityCount,
+                           BucketId *buckets,
+                           uint32_t &unknownEntityCount,
+                           uint32_t &invalidBucketCount,
+                           uint32_t &duplicateEntityCount)
+{
+	return applyBucketMapStringWithResolver(map,
+	                                        entities,
+	                                        entityCount,
+	                                        buckets,
+	                                        unknownEntityCount,
+	                                        invalidBucketCount,
+	                                        duplicateEntityCount,
+	                                        resolveLegacyEntityToken);
 }
 
 bool

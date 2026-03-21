@@ -76,6 +76,17 @@ bool applyBucketMapString(const char *map,
                           uint32_t &invalidBucketCount,
                           uint32_t &duplicateEntityCount);
 
+// Apply a persisted legacy Bucket_Map that still uses compact #<index> tokens
+// from the pre-catalog metadata order. This preserves upgraded assignments
+// until the map can be rewritten using stable entity names.
+bool applyLegacyBucketMapString(const char *map,
+                                const mqttState *entities,
+                                size_t entityCount,
+                                BucketId *buckets,
+                                uint32_t &unknownEntityCount,
+                                uint32_t &invalidBucketCount,
+                                uint32_t &duplicateEntityCount);
+
 // Build a stable Bucket_Map string from legacy per-entity values.
 bool buildBucketMapFromLegacy(const mqttState *entities,
                               size_t entityCount,
