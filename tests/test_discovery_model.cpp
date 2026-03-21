@@ -22,6 +22,7 @@ TEST_CASE("discovery model builds stable controller and inverter identifiers")
 
 TEST_CASE("discovery model rejects missing inverter serial and skips inverter topic base")
 {
+	CHECK(inverterSerialIsValid("AL1234"));
 	CHECK_FALSE(inverterSerialIsValid(""));
 	CHECK_FALSE(inverterSerialIsValid("A2M-UNKNOWN"));
 	CHECK_FALSE(inverterSerialIsValid("UNKNOWN"));

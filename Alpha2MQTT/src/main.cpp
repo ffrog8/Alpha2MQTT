@@ -848,7 +848,7 @@ rs485TryReadIdentityOnce(void)
 	result = _registerHandler->readHandledRegister(REG_SYSTEM_INFO_R_EMS_SN_BYTE_1_2, &response);
 	if (result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess ||
 	    response.dataValueFormatted[0] == '\0' ||
-	    strlen(response.dataValueFormatted) < 15) {
+	    !inverterSerialIsValid(response.dataValueFormatted)) {
 		return false;
 	}
 
@@ -2994,8 +2994,9 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 	rawMap[0] = '\0';
 	size_t rawMapUsed = 0;
 
-	if (wifiManager.server->hasArg("bucket_map_full")) {
-		const String fullMap = wifiManager.server->arg("bucket_map_full");
+	const String fullMapArg = wifiManager.server->arg("bucket_map_full");
+	if (wifiManager.server->hasArg("bucket_map_full") && fullMapArg.length() > 0) {
+		const String &fullMap = fullMapArg;
 		if (fullMap.length() >= kPrefBucketMapMaxLen) {
 			wifiManager.server->sendHeader(
 				"Location",
@@ -5770,7 +5771,7 @@ getSerialNumber()
 	// Keep retries bounded so startup cannot stall indefinitely when RS485 is unavailable.
 	uint8_t serialAttempts = 0;
 	while (((result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) ||
-	       (strlen(response.dataValueFormatted) < 15)) &&
+	       !inverterSerialIsValid(response.dataValueFormatted)) &&
 	       (serialAttempts++ < kMaxIdentityReadAttempts)) {
 		tries++;
 		rs485Errors++;
@@ -5782,7 +5783,7 @@ getSerialNumber()
 #endif // DEBUG_NO_RS485
 	const bool liveSerialReadOk =
 		(result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) &&
-		(strlen(response.dataValueFormatted) >= 15);
+		inverterSerialIsValid(response.dataValueFormatted);
 	if (liveSerialReadOk) {
 		strlcpy(deviceSerialNumber, response.dataValueFormatted, sizeof(deviceSerialNumber));
 		persistUserDeviceSerial(deviceSerialNumber);
