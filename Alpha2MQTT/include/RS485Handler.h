@@ -13,9 +13,13 @@ Handles Modbus requests and responses in a tidy class separate from main program
 #ifndef _RS485Handler_h
 #define _RS485Handler_h
 
-#include <Arduino.h>
-
 #include "Definitions.h"
+
+#if RS485_STUB
+#include "RS485HandlerStub.h"
+#else
+
+#include <Arduino.h>
 
 #if defined MP_ESP8266
 #include <SoftwareSerial.h>
@@ -71,9 +75,11 @@ class RS485Handler
 		void checkRS485IsQuiet();
 		modbusRequestAndResponseStatusValues listenResponse(modbusRequestAndResponse* resp);
 		bool checkForData();
+		void (*_serviceHook)() = nullptr;
 #ifdef DEBUG_OUTPUT_TX_RX
 		void outputFrameToSerial(bool transmit, uint8_t frame[], byte actualFrameSize);
 #endif // DEBUG_OUTPUT_TX_RX
+		bool _inTransaction = false;
 		uint16_t baudRate;
 		bool _rs485IsOnline;
 		char uartInfoString[OLED_CHARACTER_WIDTH];
@@ -85,6 +91,7 @@ class RS485Handler
 		RS485Handler();
 		~RS485Handler();
 		modbusRequestAndResponseStatusValues sendModbus(uint8_t frame[], byte actualFrameSize, modbusRequestAndResponse* resp);
+		void setServiceHook(void (*hook)());
 		bool checkCRC(uint8_t frame[], byte actualFrameSize);
 		void calcCRC(uint8_t frame[], byte actualFrameSize);
 #if defined(DEBUG_OVER_SERIAL) || defined(DEBUG_LEVEL2) || defined(DEBUG_OUTPUT_TX_RX)
@@ -92,8 +99,11 @@ class RS485Handler
 #endif // DEBUG_OVER_SERIAL || DEBUG_LEVEL2 || DEBUG_OUTPUT_TX_RX
 		void setBaudRate(unsigned long baudRate);
 		bool isRs485Online();
+		bool inTransaction() const { return _inTransaction; }
 		char *uartInfo();
 };
 
 
 #endif
+
+#endif // !RS485_STUB

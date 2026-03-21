@@ -55,7 +55,9 @@ Customise these options as per README.txt.  Please read README.txt before contin
 
 // Display parameters - Set LARGE_DISPLAY for 128x64 oled
 // Don't set this if using the ESP8266 OLED Shield 64x48 display.
-#define LARGE_DISPLAY
+// Define DISABLE_DISPLAY to compile out the OLED when no display is connected.
+#define DISABLE_DISPLAY
+//#define LARGE_DISPLAY
 
 // If your OLED does have an RST pin, set this.
 // An OLED Shield compatible with an ESP8266 does have a RESET pin and it is linked to GPIO0 if using an ESP8266.
@@ -83,7 +85,7 @@ Customise these options as per README.txt.  Please read README.txt before contin
 // If you aren't using an ESP8266 you may be able to increase this.
 // Alpha2MQTT on boot will request a buffer size of (MAX_MQTT_PAYLOAD_SIZE + MQTT_HEADER_SIZE) for MQTT, and
 // MAX_MQTT_PAYLOAD_SIZE for building payloads.  If these fail and your device doesn't boot, you can assume you've set this too high.
-#define MAX_MQTT_PAYLOAD_SIZE 4096
+#define MAX_MQTT_PAYLOAD_SIZE 1536
 #define MIN_MQTT_PAYLOAD_SIZE 512
 #define MQTT_HEADER_SIZE 512
 
@@ -160,7 +162,9 @@ Customise these options as per README.txt.  Please read README.txt before contin
 
 // The device name is used as the MQTT base topic and presence on the network.
 // You can have more than one Alpha2MQTT on your network without changing this.
+#ifndef DEVICE_NAME
 #define DEVICE_NAME "Alpha2MQTT"
+#endif
 
 // Default address of inverter is 0x55 as per Alpha Modbus documentation.  If you have altered it, reflect that change here.
 #define ALPHA_SLAVE_ID 0x55
@@ -1293,77 +1297,40 @@ struct modbusRequestAndResponse
 // MQTT HA Subscription - Lets us know if HA restarts.
 #define MQTT_SUB_HOMEASSISTANT "homeassistant/status"
 
-enum mqttEntityId {
-#ifdef DEBUG_FREEMEM
-	entityFreemem,
-#endif // DEBUG_FREEMEM
-#ifdef DEBUG_CALLBACKS
-	entityCallbacks,
-#endif // DEBUG_CALLBACKS
-#ifdef A2M_DEBUG_WIFI
-	entityRSSI,
-	entityBSSID,
-	entityTxPower,
-	entityWifiRecon,
-#endif // A2M_DEBUG_WIFI
-#ifdef DEBUG_RS485
-	entityRs485Errors,
-#endif // DEBUG_RS485
-	entityRs485Avail,
-	entityA2MUptime,
-	entityA2MVersion,
-	entityInverterSn,
-	entityInverterVersion,
-	entityEmsSn,
-	entityEmsVersion,
-	entityBatSoc,
-	entityBatPwr,
-	entityBatEnergyCharge,
-	entityBatEnergyDischarge,
-	entityGridAvail,
-	entityGridPwr,
-	entityGridEnergyTo,
-	entityGridEnergyFrom,
-	entityPvPwr,
-	entityPvEnergy,
-	entityFrequency,
-	entityOpMode,
-	entitySocTarget,
-	entityChargePwr,
-	entityDischargePwr,
-	entityPushPwr,
-	entityBatCap,
-	entityBatTemp,
-	entityInverterTemp,
-	entityBatFaults,
-	entityBatWarnings,
-	entityInverterFaults,
-	entityInverterWarnings,
-	entitySystemFaults,
-	entityInverterMode,
-	entityGridReg,
-	entityRegNum,
-	entityRegValue
-};
-
-enum mqttUpdateFreq {
+enum mqttUpdateFreq : uint8_t {
 	freqTenSec,
 	freqOneMin,
 	freqFiveMin,
 	freqOneHour,
 	freqOneDay,
+	freqUser,
 	freqNever,		// Reserved for legacy defaults; not user-settable.
 	freqDisabled		// User-settable disable that removes HA discovery and stops polling.
 };
 
-enum homeAssistantClass {
+// Persisted schedule bucket ids. These are stable identifiers stored in Preferences.
+enum class BucketId : uint8_t {
+	TenSec,
+	OneMin,
+	FiveMin,
+	OneHour,
+	OneDay,
+	User,
+	Disabled,
+	Unknown
+};
+
+enum homeAssistantClass : uint8_t {
 	haClassEnergy,
 	haClassPower,
+	haClassReactivePower,
+	haClassApparentPower,
 	haClassBinaryProblem,
 	haClassBattery,
 	haClassVoltage,
 	haClassCurrent,
 	haClassFrequency,
+	haClassPowerFactor,
 	haClassTemp,
 	haClassDuration,
 	haClassInfo,
@@ -1372,7 +1339,38 @@ enum homeAssistantClass {
 	haClassNumber
 };
 
+enum class MqttEntityFamily : uint8_t {
+	Controller = 0,
+	Grid,
+	Pv,
+	Battery,
+	Inverter,
+	Backup,
+	System
+};
+
+enum class MqttEntityScope : uint8_t {
+	Controller = 0,
+	Inverter = 1
+};
+
+enum class MqttEntityReadKind : uint8_t {
+	Register = 0,
+	Aggregate,
+	Derived,
+	Identity,
+	Control,
+	Manual
+};
+
+enum mqttEntityId : uint16_t {
+#define MQTT_ENTITY_ROW(entityId, mqttName, updateFreq, subscribe, retain, haClass, family, scope, readKind, readKey, needsEssSnapshot) entityId,
+#include "MqttEntityCatalogRows.h"
+#undef MQTT_ENTITY_ROW
+};
+
 enum opMode {
+	opModeNormal,
 	opModePvCharge,
 	opModeTarget,
 	opModePush,
@@ -1381,6 +1379,7 @@ enum opMode {
 	opModeNoCharge
 };
 
+#define OP_MODE_DESC_NORMAL		"Normal"
 #define OP_MODE_DESC_PV_CHARGE		"PV Charge"
 #define OP_MODE_DESC_TARGET		"Target SOC"
 #define OP_MODE_DESC_PUSH		"Push To Grid"
@@ -1396,14 +1395,17 @@ enum gridStatus {
 
 struct mqttState
 {
+	const char *mqttName;
+	uint16_t readKey;
 	mqttEntityId entityId;
-	char mqttName[MAX_MQTT_NAME_LENGTH];
 	mqttUpdateFreq updateFreq;
-	mqttUpdateFreq defaultFreq;
-	mqttUpdateFreq effectiveFreq;
+	homeAssistantClass haClass;
+	MqttEntityFamily family;
+	MqttEntityScope scope;
+	MqttEntityReadKind readKind;
 	bool subscribe;
 	bool retain;
-	homeAssistantClass haClass;
+	bool needsEssSnapshot;
 };
 
 #endif // ! _Definitions_h

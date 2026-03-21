@@ -54,18 +54,71 @@ GitHub Actions also runs these tests via the `Host Tests` workflow alongside an 
 Before this device can do anything, it must be given basic configuration.  It needs to know your WiFi SSID and password, and your MQTT server details (IP, port, username, and password).  These details used to be hardcoded in `Definitions.h` but are now configured via a captive portal web interface and saved in flash.  There are two ways to start the configuration portal:  Button press or "as needed".  The button press is preferred as it is more secure, but this is only available when a button is defined.  (A button is currently only defined for the XIAO ESP32C6 which uses the "BOOT" button.)  Simply press the button to enter config mode, and you can re-configure any time by pressing it again.  When no button is defined, the "as needed" method is used and it simply starts the portal at bootup if the configuration is incomplete.  Once configuration mode starts the hardware will create its own WiFi network (SSID="Alpha2MQTT" and no password).  Join that network and you will be taken to the captive web portal where you can enter the configuration details.  Once you are done, the hardware will reboot and should join your WiFi network and talk to your MQTT server.
 If you define WiFi/MQTT values via `Secrets.h` (or a `secrets.txt` workflow that generates it), those values are used as defaults for the captive portal fields and as initial settings when no stored configuration exists.
 
+### Inverter identity and discovery
+The controller no longer reuses a cached inverter serial across reboot. Inverter identity is considered unknown until the firmware reads a live serial from RS485.
+
+Practical effect:
+- controller-side runtime, WiFi, MQTT, HTTP, and portal features can still come up normally while RS485 is unavailable
+- inverter-scoped Home Assistant discovery and inverter telemetry do not publish until live serial is known
+- if the device boots while the inverter is offline, it will not guess an inverter identity from old flash state
+
+If a device upgrades while the inverter is unavailable, old retained inverter discovery topics may remain in Home Assistant until the controller later reads a live serial again or the retained topics are purged manually.
+
 ### Configuring polling intervals via MQTT
-Alpha2MQTT can store per-entity polling intervals that persist across restarts and show up in Home Assistant via MQTT discovery. The authoritative config is a retained payload published to `DEVICE_NAME/config`, with delta updates sent to `DEVICE_NAME/config/set`. When you set an entity to `freqDisabled`, the device stops polling and removes that entity's discovery configuration in HA until it is re-enabled. `freqNever` is reserved for legacy defaults and is not user-settable.
+Alpha2MQTT can store per-entity polling intervals that persist across restarts and show up in Home Assistant via MQTT discovery. The authoritative config is a retained payload published to `DEVICE_NAME/config`, with delta updates sent to `DEVICE_NAME/config/set`. The firmware now supports a broad catalog of optional telemetry, and many of those entities are disabled by default. This lets you choose the small set of values you actually care about instead of polling everything all the time.
+
+When you set an entity to `freqDisabled`, the device stops polling and removes that entity's discovery configuration in HA until it is re-enabled. `freqNever` is reserved for legacy defaults and is not user-settable.
+
+The WiFi/config portal also supports direct polling-config import via the `bucket_map_full` form field on `POST /config/polling/save`. The value is a semicolon-delimited assignment list like `Grid_Power=ten_sec;Battery_Temp=one_min;`. This merges onto the current config and persists the result; omitted entities keep their current bucket. If you want to explicitly remove an entity from polling and HA discovery, assign it `disabled`, for example `Battery_Temp=disabled;`.
+
+### Captive Portal Verification
+The captive portal has a separate real-device verification script because it depends on lab infrastructure that the main RS485 stub E2E suite does not use. The script starts from a true virgin state by fully erasing flash over serial, flashing the latest real firmware, completing onboarding through the AP portal from a remote Pi, and then verifying that the normal-mode WiFi portal can save polling bucket changes.
+
+Prerequisites:
+- serial access to the target ESP8266 device
+- the `arduino-cli-build` helper container running and able to access the serial device
+- a Pi reachable over SSH with wired LAN plus a working WiFi interface for joining the ESP AP
+- local-only `.secrets` entries for `PI_HOSTNAME`, `PI_USER`, `PI_SSH_PWD`, `WIFI_SSID`, and `WIFI_PWD`
+- MQTT settings available through `tools/e2e/e2e.local.json`, `tools/e2e/e2e.local.env`, or `.secrets`
+
+Run it with:
+
+```bash
+timeout 3600 /home/coder/git/Alpha2MQTT/scripts/e2e_captive_portal.sh
+```
+
+This test should be run periodically and whenever WiFi, captive portal, boot-mode, or onboarding changes are made.
+
+If you enable more telemetry than the selected polling cadence can comfortably sustain, the firmware stays bounded rather than trying to catch up forever. Some values may go stale for a while, and the controller publishes diagnostics so that this is visible instead of silent.
 
 - **Config topic (retained):** `DEVICE_NAME/config`
 - **Config update topic (non-retained):** `DEVICE_NAME/config/set`
+
+### HTTP control plane (MODE_NORMAL only)
+When boot mode is `normal`, the firmware exposes a lightweight HTTP page for requesting reboots into specific boot modes. The server is not started when boot mode is `ap_config` or `wifi_config`.
+
+- **GET /**: status page (boot mode, boot intent, reset reason)
+- **POST /reboot/normal**: set boot_mode=normal, boot_intent=normal, reboot
+- **POST /reboot/ap**: set boot_mode=ap_config, boot_intent=ap_config, reboot
+- **POST /reboot/wifi**: set boot_mode=wifi_config, boot_intent=wifi_config, reboot
 - **Example update payload:** `{ "Grid_Power": "freqOneMin", "Battery_Temp": "freqDisabled" }`
 - **HA discovery:** a diagnostic sensor named **MQTT Config** exposes `last_change` as its state and the full JSON as attributes.
 
+### MQTT status, boot, and events
+The device publishes lightweight retained/status topics for observability:
+
+- `DEVICE_NAME/HA_UNIQUE_ID/boot` (retained): `{"boot_intent":"...","reset_reason":"...","ts_ms":...}`
+- `DEVICE_NAME/HA_UNIQUE_ID/status` (retained, ~10s): core fields `presence`, `a2mStatus`, `rs485Status`, `gridStatus`, `boot_intent`.
+- `DEVICE_NAME/HA_UNIQUE_ID/status/net` (retained, ~10s): uptime, heap, WiFi RSSI/SSID/IP, WiFi/MQTT state + reconnect counters.
+- `DEVICE_NAME/HA_UNIQUE_ID/status/poll` (retained, ~10s): poll ok/err counts, last poll duration, last ok/err timestamps, last error code, and polling-pressure diagnostics such as backlog and budget exhaustion.
+- `DEVICE_NAME/HA_UNIQUE_ID/event` (non-retained): rate-limited fault events like `RS485_TIMEOUT`, `MODBUS_FRAME`, or `POLL_OVERRUN`.
+
+Before live inverter identity is known, the masked HA identity remains `A2M-UNKNOWN` and inverter-scoped discovery/state topics are suppressed.
+
 ### What you will see
 - Once your Alpha2MQTT device is working, in Home Assistant go to Settings->Devices & Services->Integrations->MQTT->devices
-- In this list is your new Alpha2MQTT device which starts with "A2M" and ends with your AlphaESS serial number.  In this image it is the top entry. (The 2nd entry is my dummy testing device which you won't see.)
-- Now click on your device and you'll see every entity that is provided for your device.
+- In this list you will see your inverter-focused Alpha2MQTT device, and you may also see a small controller-side diagnostic device. The inverter-facing entities are the main telemetry and control surface. The controller-side entities are there to help you understand connectivity and polling health.
+- Many optional telemetry entities are disabled by default, so the exact list you see will reflect what you have chosen to enable.
 
 ### Controlling Your ESS
 There are 5 control entities for controlling your ESS.  There is "**Op Mode**", "**SOC Target**", "**Charge Power**", "**Discharge Power**", and "**Push Power**".  Control is simple.  You set an "**Op Mode**" and the other control entities that are appropriate for that mode.  Operating Modes are a bit different from AlphaESS internal modes.  They are similar, but add more fuctionality.  For example, most Alpha modes don't honor a target SOC, but most Operating Modes do.  Here are all the modes and which other controls each uses:
@@ -130,6 +183,8 @@ Device wiring:
 
 ### Other Changes and Enhancements
 - Quite a few new registers have been added.  (See [Specs](#alphaess-specs) above.)
+- The firmware now supports a much broader optional telemetry catalog while keeping most additional entities disabled by default until you opt in.
+- Polling is now intended to be user-shaped rather than treated as one fixed built-in schedule. If you ask for too much at a given cadence, the controller stays responsive and surfaces the pressure through diagnostics rather than silently hiding it.
 - This uses an MQTT Last Will and Testament (LWT) to set availability for all entities.  In addition some entities also use the RS485 status to set their availability.  And for others, even the grid status is used.
 - This uses the MQTT retain flag along with other MQTT options to ensure as-graceful-as-possible handling of situations where this device, HA, or the MQTT broker might reboot or go offline.  By default, HA is assumed to be the authority for knowing what state the ESS should be in.  If Alpha2MQTT reboots, HA will set the state upon reconnect.  However, this can be changed in `Definitions.h` so that the ESS is the authority and Alpha2MQTT will then tell HA what the state is.
 - The WiFi code has been tweaked to better handle Multi-AP environments and low signal situations.

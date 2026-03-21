@@ -7,35 +7,8 @@
 namespace {
 const char *kKeyPollInterval = "poll_interval_s";
 const char *kKeyBootMode = "boot_mode";
+const char *kKeyBootIntent = "boot_intent";
 const char *kKeyRegisterMask = "enabled_register_mask";
-
-BootMode parseBootMode(const std::string &value)
-{
-	if (value == "normal") {
-		return BootMode::Normal;
-	}
-	if (value == "ap_config") {
-		return BootMode::ApConfig;
-	}
-	if (value == "wifi_config") {
-		return BootMode::WifiConfig;
-	}
-	return BootMode::Normal;
-}
-
-const char *bootModeToString(BootMode mode)
-{
-	switch (mode) {
-	case BootMode::Normal:
-		return "normal";
-	case BootMode::ApConfig:
-		return "ap_config";
-	case BootMode::WifiConfig:
-		return "wifi_config";
-	default:
-		return "normal";
-	}
-}
 
 bool parseUint32(const std::string &value, uint32_t *result)
 {
@@ -71,9 +44,9 @@ bool parseUint64(const std::string &value, uint64_t *result)
 }
 } // namespace
 
-Config defaultConfig()
+struct A2mConfig defaultConfig()
 {
-	return { kPollIntervalDefaultSeconds, BootMode::Normal, 0 };
+	return { kPollIntervalDefaultSeconds, BootMode::Normal, BootIntent::Normal, 0 };
 }
 
 uint32_t clampPollInterval(uint32_t valueSeconds)
@@ -87,19 +60,20 @@ uint32_t clampPollInterval(uint32_t valueSeconds)
 	return valueSeconds;
 }
 
-std::string serializeConfig(const Config &config)
+std::string serializeConfig(const A2mConfig &config)
 {
 	std::string output;
-	output.reserve(128);
+	output.reserve(160);
 	output.append(kKeyPollInterval).append("=").append(std::to_string(config.pollIntervalSeconds)).append(";");
 	output.append(kKeyBootMode).append("=").append(bootModeToString(config.bootMode)).append(";");
+	output.append(kKeyBootIntent).append("=").append(bootIntentToString(config.bootIntent)).append(";");
 	output.append(kKeyRegisterMask).append("=").append(std::to_string(config.enabledRegisterMask));
 	return output;
 }
 
-Config deserializeConfig(const std::string &payload)
+struct A2mConfig deserializeConfig(const std::string &payload)
 {
-	Config config = defaultConfig();
+	A2mConfig config = defaultConfig();
 
 	size_t start = 0;
 	while (start < payload.size()) {
@@ -118,7 +92,9 @@ Config deserializeConfig(const std::string &payload)
 					config.pollIntervalSeconds = clampPollInterval(parsed);
 				}
 			} else if (key == kKeyBootMode) {
-				config.bootMode = parseBootMode(value);
+				config.bootMode = bootModeFromString(value.c_str());
+			} else if (key == kKeyBootIntent) {
+				config.bootIntent = bootIntentFromString(value.c_str());
 			} else if (key == kKeyRegisterMask) {
 				uint64_t parsed = 0;
 				if (parseUint64(value, &parsed)) {
@@ -131,4 +107,11 @@ Config deserializeConfig(const std::string &payload)
 
 	config.pollIntervalSeconds = clampPollInterval(config.pollIntervalSeconds);
 	return config;
+}
+
+BootIntent consumeBootIntent(A2mConfig &config)
+{
+	BootIntent prior = config.bootIntent;
+	config.bootIntent = BootIntent::Normal;
+	return prior;
 }

@@ -24,6 +24,52 @@ If conflicts arise, **this file is the source of truth** for this repo.
   - Not executable due to environment constraints
 - If a blocking constraint is encountered, stop and report it clearly.
 
+## Boot-loop / unreachable-device policy (OTA safety)
+If the device is in a boot loop or is not stably reachable, **stop and ask for assistance**. Do not keep iterating on OTA/E2E as if it can self-recover.
+
+Definition (any of the following):
+- Repeated resets observed on serial during NORMAL boot (e.g., soft WDT resets / exceptions).
+- HTTP endpoints required for OTA (`/reboot/*`, `/u`, portal `/update`) consistently time out.
+- MQTT connectivity is intermittent or absent (no stable `<device>/boot` / status publishes).
+
+Required behavior for the agent:
+- Clearly state: “Device is not stably reachable; OTA/E2E cannot proceed.”
+- Ask the user to manually reflash or otherwise recover the device to a stable baseline (outside the agent).
+- Only resume OTA/E2E once the device remains up long enough to serve HTTP (for OTA) and/or publish MQTT status consistently.
+
+Notes (why this policy exists):
+- OTA flashing requires a stable runtime window to accept HTTP requests; a boot loop removes that window.
+- In this state, further “try another OTA” actions are counterproductive; the correct next step is manual recovery (USB serial flash / physical intervention).
+
+
+## OOM prevention policy (all firmware changes)
+
+ESP8266 heap is tight; any change can trigger OOM even if it “looks small”.
+Therefore, **any firmware change must avoid increasing steady‑state RAM usage**
+or transient peak allocations without explicit justification.
+
+Rules:
+- Do not introduce new large static/global buffers or persistent objects.
+- Avoid heap allocations in hot paths and config/persistence paths; prefer bounded stack or pre‑allocated scratch.
+- If you must allocate dynamically, reserve once and reuse; do not grow Strings repeatedly.
+- Any added buffers/arrays must have a hard upper bound and be sized conservatively.
+- Without impacting performance ensure debug level of free and fragmentation are displayed perioidcally over serial
+
+Verification (required after any firmware change):
+- Confirm free heap does not regress at key points (boot, after Wi‑Fi, after MQTT).
+- If free heap regresses or fragmentation increases, treat it as a regression to fix
+  before proceeding—do not “accept” it as normal.
+
+If you can’t verify heap impact, explicitly state “Not verified” and avoid claiming stability.
+
+## Memory health reporting (required for core changes)
+For any change that touches networking, webserver, MQTT, RS485, scheduling, or entity metadata:
+- Include the toolchain “RAM used … / 80192” and “IRAM used … / 65536” lines in your summary.
+- Capture `/status` memory health fields (heap free/max block/frag and boot/runtime levels) after boot.
+- Do not introduce new large globals or static buffers without justification; prefer flash/PROGMEM.
+These checks are required to prevent regressions like recent boot-time OOM failures.
+
+
 ## Arduino / arduino-cli usage policy
 
 ### Installation timing
@@ -86,3 +132,78 @@ Guidance:
 - Local runs provide provisional feedback only.
 - GitHub CI is the final authority for correctness.
 - Work must not be labeled “verified” unless CI passes.
+
+## Canonical Verification Checklist (non-sensitive)
+When a change affects firmware behavior, prefer this minimal verification set:
+- Host unit tests: `./scripts/test_host.sh`
+- Firmware build: `Alpha2MQTT/build.sh`
+- Normal-mode HTTP smoke: `GET /` should return 200; config-only pages like `/update` should be unavailable outside portals.
+- MQTT smoke (if MQTT is enabled in MODE_NORMAL):
+  - Confirm a retained boot/presence message is published under the device root topic (e.g., `<device>/boot`, `<device>/status`).
+  - Confirm periodic status messages publish at the expected cadence (topics may include `<device>/status/*`).
+
+If any item is not run, explicitly state “Not executed” and why.
+
+## E2E run-control policy
+- Use `tools/e2e/e2e.local.json` as the default and preferred control surface for E2E run behavior (case selection, verbosity, tracing, flash policy).
+- Keep the E2E command stable (`scripts/e2e.sh`) and do not pass ad-hoc CLI arguments unless a task explicitly requires them.
+- For focused diagnosis, change `e2e.local.json` `run` settings (`from_case`, `cases`, `trace_http`, `trace_mqtt`, etc.) instead of changing command-line flags.
+- Persist E2E logs under `tools/e2e/logs/` so failures can be reviewed later without rerunning.
+
+## ESP8266 panic stack decode playbook (required)
+When a user provides an ESP8266 panic/exception stack, decode it before proposing fixes.
+Do not rely on guesses from panic type alone.
+
+Required procedure:
+1. Extract firmware build timestamp from serial log:
+   - `Firmware build ts: <ts>`
+2. Select the matching ELF:
+   - `/home/coder/git/Alpha2MQTT/Alpha2MQTT/build/firmware/Alpha2MQTT_<ts>_real.elf`
+3. Decode inside the build container (`arduino-cli-build`) using the ESP8266 toolchain path:
+   - `tail -f /dev/null | docker exec -i arduino-cli-build bash -lc "/root/.arduino15/packages/esp8266/tools/xtensa-lx106-elf-gcc/3.1.0-gcc10.3-e5f9fec/bin/xtensa-lx106-elf-addr2line -e /project/Alpha2MQTT/build/firmware/Alpha2MQTT_<ts>_real.elf -f -C <pc1> <pc2> ..."`
+4. If that binary path changes, discover it in-container, then rerun decode:
+   - `tail -f /dev/null | docker exec -i arduino-cli-build bash -lc "find /root/.arduino15 -maxdepth 8 -type f | grep 'xtensa-lx106-elf-addr2line'"`
+5. Map decoded frames to exact source lines and report the concrete call chain.
+
+Reporting requirements for panic analysis:
+- Include the build timestamp used for decoding.
+- Include the ELF path used.
+- Include decoded function + file:line for each relevant PC.
+- Explicitly label any unresolved frame as unresolved (do not invent a location).
+
+### RS485 probing liveness (headless, no inverter required)
+If RS485/inverter is offline, the firmware should continue background probing without blocking NORMAL-mode services.
+Verify probing is still active via MQTT using `status/poll` uptime fields:
+- `rs485_probe_last_attempt_ms` (uptime millis at last probe attempt)
+- `rs485_probe_backoff_ms` (current backoff delay; capped in firmware, 0 when connected)
+
+How to check:
+- Read `uptime_s` from `<device>/status/net` and compute `uptime_ms = uptime_s * 1000`.
+- Compute `age_ms = uptime_ms - rs485_probe_last_attempt_ms`.
+- Probing is considered active when `age_ms <= rs485_probe_backoff_ms + slack_ms` (use a generous slack, e.g. 20000ms, for publish cadence and jitter).
+
+Notes:
+- With no inverter connected, `poll_ok_count` may remain 0; treat `rs485_probe_*` fields as the liveness signal.
+
+## Preferences (NVS) non-volatile storage
+
+- **Preferences / NVS policy**
+  - `getString()` **must use buffer overloads only**; String-returning Preferences APIs are forbidden.
+  - All `put*()` / `remove()` calls **must occur only** inside:
+    - `persist_user_*()` (explicit user “Save / Apply”), or
+    - `persist_defaults_if_missing()` (one-time default seeding).
+  - **No NVS writes** from reconnect loops, polling loops, telemetry paths, background tasks, or periodic timers.
+  - `Preferences::begin()` / `end()` **must be paired in the same scope**; reads must use RO mode where supported.
+  - New string keys **must define explicit max lengths** and use bounded buffers; truncation is acceptable, overflow is not.
+  - Preferences are a **configuration store**, not a runtime state database.
+
+
+## Local Developer Operations (not committed)
+This repository is public. Do not add environment-specific or secret-bearing content to tracked files:
+- No IP addresses, hostnames, ports, or Wi-Fi SSIDs.
+- No MQTT credentials, tokens, passfiles, or `.env` contents.
+- No device-specific OTA URLs or curl commands tied to a private network.
+
+Instead, maintain a local-only notes file and keep it out of git:
+- Suggested filename: `LOCAL_DEV_NOTES.md` (ignored by `.gitignore`)
+- Contents may include: device IP(s), broker address, local helper commands/scripts, and deployment steps.

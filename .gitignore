@@ -33,6 +33,13 @@ bld/
 [Ll]og/
 [Ll]ogs/
 
+# E2E local configuration (do not commit secrets/hostnames)
+tools/e2e/e2e.local.env
+tools/e2e/e2e.local.json
+tools/serial/logs/
+tools/serial/__pycache__/
+core
+
 # Visual Studio 2015/2017 cache/options directory
 .vs/
 # Uncomment if you have tasks that create the project's static files in wwwroot
@@ -158,6 +165,9 @@ nCrunchTemp_*
 
 # MightyMoose
 *.mm.*
+
+# Local developer notes (do not commit)
+LOCAL_DEV_NOTES.md
 AutoTest.Net/
 
 # Web workbench (sass)
@@ -383,3 +393,5 @@ com-bluino-esploader-17-64161482-7f6b82679a1c5e25c492a0cc66c85277(1).apk
 
 # Local secrets for Alpha2MQTT
 Alpha2MQTT/Secrets.h
+docs/step7_gap_report.md
+.secrets

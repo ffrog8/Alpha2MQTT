@@ -1,0 +1,17 @@
+{
+  "run": {
+    "verbose": false,
+    "trace_http": false,
+    "trace_mqtt": false,
+    "from_case": "",
+    "cases": []
+  },
+  "env": {
+    "MQTT_HOST": "your-broker-host-or-ip",
+    "MQTT_PORT": 1883,
+    "MQTT_USER": "your-mqtt-username",
+    "MQTT_PASSFILE": "/path/to/local/mqtt-pass.txt",
+    "DEVICE_HTTP_BASE": "http://device-ip",
+    "DEVICE_TOPIC": "Alpha2MQTT-DEVICE"
+  }
+}
