@@ -560,28 +560,25 @@ TEST_CASE("legacy bucket map builder fails when output buffer too small")
 	CHECK(applied == 0);
 }
 
-TEST_CASE("assignment builder fails when the persisted override map exceeds the firmware limit")
+TEST_CASE("assignment builder fits the full live catalog inside the expanded firmware limit")
 {
-	std::vector<mqttState> entities(90);
-	std::vector<BucketId> buckets(90, BucketId::User);
-	std::vector<std::string> names;
-	names.reserve(entities.size());
-	for (size_t i = 0; i < entities.size(); ++i) {
-		char name[24];
-		snprintf(name, sizeof(name), "Entity_%02u_Long_Name", static_cast<unsigned>(i));
-		names.emplace_back(name);
-		entities[i] = makeEntity(mqttEntityId::entityOpMode, names.back().c_str(), mqttUpdateFreq::freqTenSec, homeAssistantClass::haClassSelect);
+	const size_t entityCount = mqttEntitiesCount();
+	std::vector<mqttState> entities(entityCount);
+	std::vector<BucketId> buckets(entityCount, BucketId::Disabled);
+	for (size_t i = 0; i < entityCount; ++i) {
+		REQUIRE(mqttEntityCopyByIndex(i, &entities[i]));
 	}
 
-	char out[2048];
+	char out[4096];
 	size_t applied = 0;
-	CHECK_FALSE(buildBucketMapFromAssignments(entities.data(),
-	                                          entities.size(),
-	                                          buckets.data(),
-	                                          out,
-	                                          sizeof(out),
-	                                          applied));
+	CHECK(buildBucketMapFromAssignments(entities.data(),
+	                                    entities.size(),
+	                                    buckets.data(),
+	                                    out,
+	                                    sizeof(out),
+	                                    applied));
 	CHECK(applied > 0);
+	CHECK(std::strlen(out) < sizeof(out));
 }
 
 TEST_CASE("assignment builder emits stable name overrides and round-trips")

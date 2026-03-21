@@ -164,10 +164,10 @@ constexpr size_t kPrefWifiPasswordMaxLen = 64;
 constexpr size_t kPrefMqttServerMaxLen = 64;
 constexpr size_t kPrefMqttUsernameMaxLen = 64;
 constexpr size_t kPrefMqttPasswordMaxLen = 64;
-// Polling map payloads are compact enough for the full catalog (~2KB max) and must fit
-// comfortably within available ESP8266 heap during portal handling.
-constexpr size_t kPrefBucketMapMaxLen = 2048;
-constexpr size_t kPollingConfigSetPayloadMaxLen = 2304;
+// Stable "name=bucket;" persistence is larger than the old index encoding. Size these
+// buffers for the full current catalog, but keep them off steady-state globals.
+constexpr size_t kPrefBucketMapMaxLen = 4096;
+constexpr size_t kPollingConfigSetPayloadMaxLen = 4608;
 constexpr size_t kPollingConfigChunkMapMaxLen = 1024;
 constexpr size_t kPrefPollingLastChangeMaxLen = 32;
 static WiFiManagerParameter gPortalMqttSection("<p>MQTT settings:</p>");
@@ -177,7 +177,6 @@ static WiFiManagerParameter gPortalMqttUser("user", "MQTT user", "", 32);
 static WiFiManagerParameter gPortalMqttPass("mpass", "MQTT password", "", 32);
 static WiFiManagerParameter gPortalInverterLabel("inverter_label", "Inverter label (optional)", "", kPrefInverterLabelMaxLen);
 static WiFiManagerParameter gPortalPollingLink("<p><a href=\"/config/polling\">Polling schedule</a></p>");
-static char gPortalPollingSaveMapBuffer[kPrefBucketMapMaxLen] = "";
 // Portal handlers run on a constrained callback stack on ESP8266.
 // Keep only the small bucket assignment array persistent. Large text buffers are
 // allocated on demand so NORMAL-mode runtime does not carry portal/config scratch.
@@ -2945,9 +2944,10 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 	const size_t entityCount = catalog.count;
 	BucketId *buckets = g_portalBucketsScratch;
 	ScopedCharBuffer canonicalMapBuffer(kPrefBucketMapMaxLen);
+	ScopedCharBuffer rawMapBuffer(kPrefBucketMapMaxLen);
 	BucketId originalBuckets[kMqttEntityDescriptorCount]{};
 	const bool runtimeBucketsAvailable = mqttEntitiesRtAvailable();
-	if (!canonicalMapBuffer.ok()) {
+	if (!canonicalMapBuffer.ok() || !rawMapBuffer.ok()) {
 		wifiManager.server->send(500, "text/plain", "polling config unavailable");
 		return;
 	}
@@ -2990,7 +2990,7 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 		storedIntervalSeconds = clampPollInterval(parsedInterval);
 	}
 
-	char *rawMap = gPortalPollingSaveMapBuffer;
+	char *rawMap = rawMapBuffer.data;
 	rawMap[0] = '\0';
 	size_t rawMapUsed = 0;
 
