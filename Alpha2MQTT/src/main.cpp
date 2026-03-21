@@ -1535,16 +1535,46 @@ persistUserPollingConfig(uint32_t intervalSeconds, const char *bucketMap)
 		return false;
 	}
 
-	const char *safeBucketMap = (bucketMap != nullptr) ? bucketMap : "";
-	bool ok = preferences.putUInt(kPreferencePollInterval, intervalSeconds) == sizeof(uint32_t);
-	if (ok) {
-		// Polling config updates run from constrained HTTP/MQTT callback stacks on ESP8266.
-		// Reuse the Bucket_Map persistence helper so migration semantics stay identical.
+	const uint32_t originalIntervalSeconds =
+		preferences.getUInt(kPreferencePollInterval, kPollIntervalDefaultSeconds);
+	const bool originalBucketMapPresent = preferences.isKey(kPreferenceBucketMap);
+	const bool originalBucketMapMigrated = preferences.getBool(kPreferenceBucketMapMigrated, false);
+	ScopedCharBuffer originalBucketMap(kPrefBucketMapMaxLen);
+	if (!originalBucketMap.ok()) {
 		preferences.end();
-		return persistUserBucketMap(safeBucketMap);
+		return false;
+	}
+	originalBucketMap.data[0] = '\0';
+	if (originalBucketMapPresent) {
+		preferences.getString(kPreferenceBucketMap, originalBucketMap.data, originalBucketMap.size);
+	}
+
+	const char *safeBucketMap = (bucketMap != nullptr) ? bucketMap : "";
+	const size_t bucketMapLen = strlen(safeBucketMap);
+	bool ok = false;
+	if (bucketMapLen == 0) {
+		ok = !preferences.isKey(kPreferenceBucketMap) || preferences.remove(kPreferenceBucketMap) ||
+		     !preferences.isKey(kPreferenceBucketMap);
+	} else {
+		ok = preferences.putString(kPreferenceBucketMap, safeBucketMap) == bucketMapLen;
+	}
+	if (ok) {
+		ok = preferences.putBool(kPreferenceBucketMapMigrated, true) == sizeof(uint8_t);
+	}
+	if (ok) {
+		ok = preferences.putUInt(kPreferencePollInterval, intervalSeconds) == sizeof(uint32_t);
+	}
+	if (!ok) {
+		if (originalBucketMapPresent) {
+			preferences.putString(kPreferenceBucketMap, originalBucketMap.data);
+		} else if (preferences.isKey(kPreferenceBucketMap)) {
+			preferences.remove(kPreferenceBucketMap);
+		}
+		preferences.putBool(kPreferenceBucketMapMigrated, originalBucketMapMigrated);
+		preferences.putUInt(kPreferencePollInterval, originalIntervalSeconds);
 	}
 	preferences.end();
-	return false;
+	return ok;
 }
 
 static void
@@ -1907,7 +1937,7 @@ handlePortalParamSave(WiFiManager& wifiManager)
 	const long parsedPort = strtol(portArg.c_str(), nullptr, 10);
 	const bool portValid = portArg.length() > 0 && parsedPort >= 0 && parsedPort <= SHRT_MAX;
 
-	if (portArg.length() > 0 && !portValid) {
+	if ((portArg.length() > 0 && !portValid) || !inverterLabelOverrideIsValid(label.c_str())) {
 		wifiManager.server->sendHeader("Location", "/config/mqtt?err=1");
 		wifiManager.server->send(302, "text/plain", "");
 		return;
@@ -2917,9 +2947,6 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 	ScopedCharBuffer canonicalMapBuffer(kPrefBucketMapMaxLen);
 	BucketId originalBuckets[kMqttEntityDescriptorCount]{};
 	const bool runtimeBucketsAvailable = mqttEntitiesRtAvailable();
-	if (runtimeBucketsAvailable) {
-		memcpy(originalBuckets, buckets, sizeof(originalBuckets));
-	}
 	if (!canonicalMapBuffer.ok()) {
 		wifiManager.server->send(500, "text/plain", "polling config unavailable");
 		return;
@@ -2928,6 +2955,9 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 	if (!loadPollingBucketsForPortal(entities, entityCount, buckets, storedIntervalSeconds)) {
 		wifiManager.server->send(500, "text/plain", "polling config unavailable");
 		return;
+	}
+	if (runtimeBucketsAvailable) {
+		memcpy(originalBuckets, buckets, entityCount * sizeof(BucketId));
 	}
 
 	const String familyArg = wifiManager.server->arg("family");
@@ -3603,8 +3633,10 @@ configHandlerSta(void)
 			port = 0;
 		}
 		persistUserMqttConfig(gPortalMqttServer.getValue(), port, gPortalMqttUser.getValue(), gPortalMqttPass.getValue());
-		persistUserInverterLabel(gPortalInverterLabel.getValue());
-		appConfig.inverterLabel = gPortalInverterLabel.getValue();
+		if (inverterLabelOverrideIsValid(gPortalInverterLabel.getValue())) {
+			persistUserInverterLabel(gPortalInverterLabel.getValue());
+			appConfig.inverterLabel = gPortalInverterLabel.getValue();
+		}
 
 		portalMqttSaved = true;
 		portalNeedsMqttConfig = !mqttConfigIsComplete(
@@ -3929,8 +3961,10 @@ configHandler(void)
 			port = 0;
 		}
 		persistUserMqttConfig(gPortalMqttServer.getValue(), port, gPortalMqttUser.getValue(), gPortalMqttPass.getValue());
-		persistUserInverterLabel(gPortalInverterLabel.getValue());
-		appConfig.inverterLabel = gPortalInverterLabel.getValue();
+		if (inverterLabelOverrideIsValid(gPortalInverterLabel.getValue())) {
+			persistUserInverterLabel(gPortalInverterLabel.getValue());
+			appConfig.inverterLabel = gPortalInverterLabel.getValue();
+		}
 
 		portalMqttSaved = true;
 		portalNeedsMqttConfig = !mqttConfigIsComplete(

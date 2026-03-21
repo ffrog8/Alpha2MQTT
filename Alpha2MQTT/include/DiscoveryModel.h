@@ -39,6 +39,10 @@ bool buildInverterLabelDisplay(const char *serial,
 // Normalizes a display label into a lowercase snake_case id segment.
 void buildInverterLabelId(const char *labelDisplay, char *out, size_t outLen);
 
+// Returns true when a user-supplied label can be used in discovery payloads
+// and still normalizes to a non-empty entity-id segment.
+bool inverterLabelOverrideIsValid(const char *labelOverride);
+
 // Writes the HA-facing inverter device display name: "Alpha <label>".
 bool buildInverterDeviceDisplayName(const char *serial,
                                     const char *labelOverride,

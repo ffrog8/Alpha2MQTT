@@ -206,6 +206,24 @@ buildInverterLabelId(const char *labelDisplay, char *out, size_t outLen)
 }
 
 bool
+inverterLabelOverrideIsValid(const char *labelOverride)
+{
+	if (labelOverride == nullptr || labelOverride[0] == '\0') {
+		return true;
+	}
+
+	for (const unsigned char *cursor = reinterpret_cast<const unsigned char *>(labelOverride); *cursor != '\0'; ++cursor) {
+		if (*cursor < 0x20 || *cursor == '"' || *cursor == '\\') {
+			return false;
+		}
+	}
+
+	char labelId[16];
+	buildInverterLabelId(labelOverride, labelId, sizeof(labelId));
+	return labelId[0] != '\0';
+}
+
+bool
 buildInverterDeviceDisplayName(const char *serial,
                                const char *labelOverride,
                                char *out,

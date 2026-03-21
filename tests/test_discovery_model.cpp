@@ -138,6 +138,15 @@ TEST_CASE("discovery model derives inverter labels for display and ids")
 	CHECK(std::string(deviceName) == "Alpha Shed-A");
 }
 
+TEST_CASE("discovery model rejects unsafe or empty-normalized label overrides")
+{
+	CHECK(inverterLabelOverrideIsValid(""));
+	CHECK(inverterLabelOverrideIsValid("Shed-A"));
+	CHECK_FALSE(inverterLabelOverrideIsValid("   !!!"));
+	CHECK_FALSE(inverterLabelOverrideIsValid("Shed\"A"));
+	CHECK_FALSE(inverterLabelOverrideIsValid("Shed\\A"));
+}
+
 TEST_CASE("discovery model builds canonical inverter metric ids and display names")
 {
 	mqttState batterySoc{};
