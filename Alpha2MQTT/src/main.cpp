@@ -146,7 +146,6 @@ unsigned long deferredControlPlaneRebootAt = 0;
 void *portalRoutesBoundServer = nullptr;
 const char kPreferenceBootIntent[] = "Boot_Intent";
 const char kPreferenceBootMode[] = "Boot_Mode";
-const char kPreferenceDeviceSerial[] = "Device_Serial";
 const char kPreferenceInverterLabel[] = "Inverter_Label";
 const char kPreferenceBucketMap[] = "Bucket_Map";
 const char kPreferencePollInterval[] = "poll_interval_s";
@@ -158,7 +157,6 @@ const char kControllerModel[] = "Alpha2MQTT Bridge";
 const char kInverterModelFallback[] = "Alpha ESS";
 constexpr size_t kPrefBootIntentMaxLen = 24;
 constexpr size_t kPrefBootModeMaxLen = 24;
-constexpr size_t kPrefDeviceSerialMaxLen = 32;
 constexpr size_t kPrefInverterLabelMaxLen = 11;
 constexpr size_t kPrefWifiSsidMaxLen = 64;
 constexpr size_t kPrefWifiPasswordMaxLen = 64;
@@ -585,7 +583,8 @@ static void refreshPortalCustomParameters(void);
 static bool isWifiConfigComplete(void);
 static bool isMqttConfigComplete(void);
 static bool mqttSubsystemEnabled(void);
-static void persistUserDeviceSerial(const char *serial);
+static void clearRuntimeInverterIdentity(void);
+static bool applyLiveInverterIdentity(const char *serial);
 static void persistDefaultsIfMissing(void);
 void setupHttpControlPlane(void);
 void handleHttpRoot(void);
@@ -650,6 +649,71 @@ setMqttIdentifiersFromSerial(const char *serial)
 	buildInverterHaUniqueId(serial, haUniqueId, sizeof(haUniqueId));
 	// Subscriptions are bound to the HA unique id; if identity changes from unknown/persisted, resubscribe.
 	inverterSubscriptionsSet = false;
+}
+
+static void
+clearRuntimeInverterIdentity(void)
+{
+	deviceSerialNumber[0] = '\0';
+	strlcpy(haUniqueId, "A2M-UNKNOWN", sizeof(haUniqueId));
+	inverterReady = false;
+	inverterSubscriptionsSet = false;
+	if (_registerHandler != NULL) {
+		_registerHandler->setSerialNumberPrefix('\0', '\0');
+	}
+}
+
+static bool
+applyLiveInverterIdentity(const char *serial)
+{
+	if (!inverterSerialIsValid(serial)) {
+		return false;
+	}
+
+	char previousSerial[sizeof(deviceSerialNumber)];
+	strlcpy(previousSerial, deviceSerialNumber, sizeof(previousSerial));
+	char staleInverterIdentifier[64];
+	const bool staleInverterNamespace = buildStaleInverterIdentifier(previousSerial,
+	                                                                 serial,
+	                                                                 staleInverterIdentifier,
+	                                                                 sizeof(staleInverterIdentifier));
+	char currentLegacyHaUniqueId[sizeof(haUniqueId)];
+	buildInverterHaUniqueId(serial, currentLegacyHaUniqueId, sizeof(currentLegacyHaUniqueId));
+
+	strlcpy(deviceSerialNumber, serial, sizeof(deviceSerialNumber));
+	if (_registerHandler != NULL) {
+		_registerHandler->setSerialNumberPrefix(deviceSerialNumber[0], deviceSerialNumber[1]);
+	}
+	inverterReady = true;
+
+	auto queueLegacyControllerClearIfNeeded = [&](const char *deviceId) {
+		if (deviceId == nullptr || deviceId[0] == '\0' || strcmp(deviceId, "A2M-UNKNOWN") == 0 ||
+		    strcmp(deviceId, controllerIdentifier) == 0) {
+			return;
+		}
+		if (strcmp(lastQueuedStaleControllerDiscoveryId, deviceId) == 0) {
+			return;
+		}
+		queueStaleControllerDiscoveryClear(deviceId);
+		strlcpy(lastQueuedStaleControllerDiscoveryId, deviceId, sizeof(lastQueuedStaleControllerDiscoveryId));
+	};
+
+	queueLegacyControllerClearIfNeeded(currentLegacyHaUniqueId);
+	queueLegacyControllerClearIfNeeded(haUniqueId);
+
+	if (!inverterHaUniqueIdMatchesSerial(haUniqueId, deviceSerialNumber)) {
+		if (staleInverterNamespace) {
+			queueStaleInverterDiscoveryClear(staleInverterIdentifier);
+		}
+		if (haUniqueId[0] != '\0' &&
+		    strcmp(haUniqueId, "A2M-UNKNOWN") != 0 &&
+		    strcmp(haUniqueId, currentLegacyHaUniqueId) != 0) {
+			queueStaleInverterDiscoveryClear(haUniqueId);
+		}
+		setMqttIdentifiersFromSerial(deviceSerialNumber);
+	}
+
+	return true;
 }
 
 void
@@ -852,59 +916,15 @@ rs485TryReadIdentityOnce(void)
 	    !inverterSerialIsValid(response.dataValueFormatted)) {
 		return false;
 	}
-
-	char previousSerial[sizeof(deviceSerialNumber)];
-	strlcpy(previousSerial, deviceSerialNumber, sizeof(previousSerial));
-	char staleInverterIdentifier[64];
-	const bool staleInverterNamespace = buildStaleInverterIdentifier(previousSerial,
-	                                                                 response.dataValueFormatted,
-	                                                                 staleInverterIdentifier,
-	                                                                 sizeof(staleInverterIdentifier));
-	char currentLegacyHaUniqueId[sizeof(haUniqueId)];
-	buildInverterHaUniqueId(response.dataValueFormatted,
-	                        currentLegacyHaUniqueId,
-	                        sizeof(currentLegacyHaUniqueId));
-
-	strlcpy(deviceSerialNumber, response.dataValueFormatted, sizeof(deviceSerialNumber));
-	_registerHandler->setSerialNumberPrefix(deviceSerialNumber[0], deviceSerialNumber[1]);
-	inverterReady = true;
+	if (!applyLiveInverterIdentity(response.dataValueFormatted)) {
+		return false;
+	}
 
 	// Battery type is helpful for diagnostics, but it is not required to establish inverter identity.
 	result = _registerHandler->readHandledRegister(REG_BATTERY_HOME_R_BATTERY_TYPE, &response);
 	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess &&
 	    response.dataValueFormatted[0] != '\0') {
 		strlcpy(deviceBatteryType, response.dataValueFormatted, sizeof(deviceBatteryType));
-	}
-
-	auto queueLegacyControllerClearIfNeeded = [&](const char *deviceId) {
-		if (deviceId == nullptr || deviceId[0] == '\0' || strcmp(deviceId, "A2M-UNKNOWN") == 0 ||
-		    strcmp(deviceId, controllerIdentifier) == 0) {
-			return;
-		}
-		if (strcmp(lastQueuedStaleControllerDiscoveryId, deviceId) == 0) {
-			return;
-		}
-		queueStaleControllerDiscoveryClear(deviceId);
-		strlcpy(lastQueuedStaleControllerDiscoveryId, deviceId, sizeof(lastQueuedStaleControllerDiscoveryId));
-	};
-
-	queueLegacyControllerClearIfNeeded(currentLegacyHaUniqueId);
-	queueLegacyControllerClearIfNeeded(haUniqueId);
-
-	if (!inverterHaUniqueIdMatchesSerial(haUniqueId, deviceSerialNumber)) {
-		// Persisted serial is only a hint. Refresh topic/discovery identity whenever the live
-		// inverter reports a different serial so reconnects cannot stay pinned to stale namespaces.
-		if (staleInverterNamespace) {
-			queueStaleInverterDiscoveryClear(staleInverterIdentifier);
-		}
-		if (haUniqueId[0] != '\0' &&
-		    strcmp(haUniqueId, "A2M-UNKNOWN") != 0 &&
-		    strcmp(haUniqueId, currentLegacyHaUniqueId) != 0) {
-			// Upgrades from the legacy HA namespace used the prior haUniqueId as the discovery topic path.
-			// Compare legacy ids directly so reconnects do not requeue the same clear once the live serial matches.
-			queueStaleInverterDiscoveryClear(haUniqueId);
-		}
-		setMqttIdentifiersFromSerial(deviceSerialNumber);
 	}
 
 #ifdef DEBUG_OVER_SERIAL
@@ -941,8 +961,7 @@ rs485ApplyStubConnectivityMode(Rs485StubMode mode)
 	// Do not make them depend on the separate baud-probe state machine or issue Modbus reads
 	// from the MQTT callback path.
 	if (!inverterSerialKnown()) {
-		strlcpy(deviceSerialNumber, "STUBSN000000000", sizeof(deviceSerialNumber));
-		setMqttIdentifiersFromSerial(deviceSerialNumber);
+		applyLiveInverterIdentity("STUBSN000000000");
 	}
 	rs485ConnectState = Rs485ConnectState::Connected;
 	rs485LockedBaud = DEFAULT_BAUD_RATE;
@@ -1022,8 +1041,8 @@ rs485ProbeTick(void)
 
 	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
 		rs485LockedBaud = baud;
-		// Always re-read the live serial after a successful probe. Persisted identity is only a hint,
-		// and reconnects must be able to detect an inverter replacement without manual NVS cleanup.
+		// Always re-read the live serial after a successful probe. Runtime identity is live-only,
+		// so reconnects must detect an inverter replacement directly from hardware.
 		rs485ConnectState = Rs485ConnectState::ReadingIdentity;
 		rs485AttemptsInCycle = 0;
 		rs485CycleBackoffMs = kRs485ProbeAttemptDelayMs;
@@ -1617,23 +1636,6 @@ persistUserPollingLastChange(const char *lastChange)
 	preferences.getString(kPreferencePollingLastChange, stored, sizeof(stored));
 	if (strcmp(stored, lastChange) != 0) {
 		preferences.putString(kPreferencePollingLastChange, lastChange);
-	}
-	preferences.end();
-}
-
-static void
-persistUserDeviceSerial(const char *serial)
-{
-	if (serial == nullptr || *serial == '\0') {
-		return;
-	}
-
-	Preferences preferences;
-	char stored[kPrefDeviceSerialMaxLen] = "";
-	preferences.begin(DEVICE_NAME, false);
-	preferences.getString(kPreferenceDeviceSerial, stored, sizeof(stored));
-	if (strcmp(stored, serial) != 0) {
-		preferences.putString(kPreferenceDeviceSerial, serial);
 	}
 	preferences.end();
 }
@@ -3281,7 +3283,6 @@ void setup()
 
 	char storedIntent[kPrefBootIntentMaxLen] = "";
 	char storedMode[kPrefBootModeMaxLen] = "";
-	char storedSerial[kPrefDeviceSerialMaxLen] = "";
 	char storedInverterLabel[kPrefInverterLabelMaxLen] = "";
 	char wifiSsid[kPrefWifiSsidMaxLen] = "";
 	char wifiPass[kPrefWifiPasswordMaxLen] = "";
@@ -3292,7 +3293,6 @@ void setup()
 	preferences.begin(DEVICE_NAME, true); // RO
 	preferences.getString(kPreferenceBootIntent, storedIntent, sizeof(storedIntent));
 	preferences.getString(kPreferenceBootMode, storedMode, sizeof(storedMode));
-	preferences.getString(kPreferenceDeviceSerial, storedSerial, sizeof(storedSerial));
 	preferences.getString(kPreferenceInverterLabel, storedInverterLabel, sizeof(storedInverterLabel));
 	preferences.getString("WiFi_SSID", wifiSsid, sizeof(wifiSsid));
 	preferences.getString("WiFi_Password", wifiPass, sizeof(wifiPass));
@@ -3330,14 +3330,7 @@ void setup()
 	appConfig.mqttUser = mqttUser;
 	appConfig.mqttPass = mqttPass;
 	appConfig.inverterLabel = storedInverterLabel;
-
-	if (storedSerial[0] != '\0' && inverterSerialIsValid(storedSerial)) {
-		strlcpy(deviceSerialNumber, storedSerial, sizeof(deviceSerialNumber));
-		setMqttIdentifiersFromSerial(storedSerial);
-	}
-	if (storedSerial[0] != '\0' && !inverterSerialIsValid(storedSerial)) {
-		deviceSerialNumber[0] = '\0';
-	}
+	clearRuntimeInverterIdentity();
 	bootPlan = planForBootMode(currentBootMode);
 	BootMode startupMode = currentBootMode;
 
@@ -3504,11 +3497,6 @@ void setup()
 			if (deviceSerialNumber[0] != '\0' && deviceSerialNumber[1] != '\0') {
 				_registerHandler->setSerialNumberPrefix(deviceSerialNumber[0], deviceSerialNumber[1]);
 			}
-#if RS485_STUB
-				// Stub backend is used to validate scheduler + ESS snapshot behavior without inverter hardware.
-				// Mark inverterReady so the scheduler attempts refreshEssSnapshot() and dispatch gating can be exercised.
-				inverterReady = true;
-#endif
 #if defined(DEBUG_OVER_SERIAL)
 			logHeap("after RS485 init");
 #endif
@@ -5802,21 +5790,10 @@ getSerialNumber()
 		(result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) &&
 		inverterSerialIsValid(response.dataValueFormatted);
 	if (liveSerialReadOk) {
-		strlcpy(deviceSerialNumber, response.dataValueFormatted, sizeof(deviceSerialNumber));
-		persistUserDeviceSerial(deviceSerialNumber);
+		applyLiveInverterIdentity(response.dataValueFormatted);
 	} else {
-		Preferences preferences;
-		char storedSerial[kPrefDeviceSerialMaxLen] = "";
-		preferences.begin(DEVICE_NAME, true);
-		preferences.getString(kPreferenceDeviceSerial, storedSerial, sizeof(storedSerial));
-		preferences.end();
-		if (storedSerial[0] != '\0') {
-			strlcpy(deviceSerialNumber, storedSerial, sizeof(deviceSerialNumber));
-		} else {
-			strlcpy(deviceSerialNumber, "UNKNOWN", sizeof(deviceSerialNumber));
-		}
+		clearRuntimeInverterIdentity();
 	}
-	inverterReady = liveSerialReadOk;
 
 #ifdef DEBUG_NO_RS485
 result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
@@ -5844,11 +5821,19 @@ result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
 
 #ifndef DISABLE_DISPLAY
 #ifdef LARGE_DISPLAY
-	strlcpy(oledLine3, deviceSerialNumber, sizeof(oledLine3));
+	if (inverterSerialKnown()) {
+		strlcpy(oledLine3, deviceSerialNumber, sizeof(oledLine3));
+	} else {
+		strlcpy(oledLine3, "Serial wait", sizeof(oledLine3));
+	}
 	strlcpy(oledLine4, deviceBatteryType, sizeof(oledLine4));
 #else // LARGE_DISPLAY
-	strlcpy(oledLine3, &response.dataValueFormatted[0], 11);
-	strlcpy(oledLine4, &response.dataValueFormatted[10], 6);
+	if (inverterSerialKnown()) {
+		strlcpy(oledLine3, deviceSerialNumber, sizeof(oledLine3));
+	} else {
+		strlcpy(oledLine3, "Serial", sizeof(oledLine3));
+	}
+	strlcpy(oledLine4, deviceBatteryType, sizeof(oledLine4));
 #endif // LARGE_DISPLAY
 	updateOLED(false, "Hello", oledLine3, oledLine4);
 #endif // DISABLE_DISPLAY
@@ -5857,11 +5842,6 @@ result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
 	sprintf(_debugOutput, "Alpha Serial Number: %s", deviceSerialNumber);
 	Serial.println(_debugOutput);
 #endif
-
-	_registerHandler->setSerialNumberPrefix(deviceSerialNumber[0], deviceSerialNumber[1]);
-	if (haUniqueId[0] == '\0') {
-		setMqttIdentifiersFromSerial(deviceSerialNumber);
-	}
 
 	pumpMqttDuringSetup(4000);
 

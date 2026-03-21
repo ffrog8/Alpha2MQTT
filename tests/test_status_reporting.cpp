@@ -56,6 +56,27 @@ TEST_CASE("status core JSON builder includes required keys")
 	CHECK(payload.find("\"ha_unique_id\":\"A2M-TEST\"") != std::string::npos);
 }
 
+TEST_CASE("status core JSON builder allows masked inverter identity before live serial")
+{
+	StatusCoreSnapshot snapshot{};
+	snapshot.presence = "online";
+	snapshot.a2mStatus = "online";
+	snapshot.rs485Status = "unknown";
+	snapshot.gridStatus = "unknown";
+	snapshot.bootMode = "normal";
+	snapshot.bootIntent = "normal";
+	snapshot.httpControlPlaneEnabled = true;
+	snapshot.haUniqueId = "A2M-UNKNOWN";
+
+	char buffer[1024];
+	CHECK(buildStatusCoreJson(snapshot, buffer, sizeof(buffer)));
+
+	std::string payload(buffer);
+	CHECK(payload.find("\"ha_unique_id\":\"A2M-UNKNOWN\"") != std::string::npos);
+	CHECK(payload.find("\"rs485Status\":\"unknown\"") != std::string::npos);
+	CHECK(payload.find("\"gridStatus\":\"unknown\"") != std::string::npos);
+}
+
 TEST_CASE("status net JSON builder includes required keys")
 {
 	StatusNetSnapshot snapshot{};

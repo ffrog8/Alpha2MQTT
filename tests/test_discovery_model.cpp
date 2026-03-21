@@ -100,6 +100,11 @@ TEST_CASE("discovery model refreshes HA identity when serial changes")
 	CHECK(std::string(uniqueId) == "A2M-AL12345678901234");
 	CHECK(inverterHaUniqueIdMatchesSerial(uniqueId, "AL12345678901234"));
 	CHECK_FALSE(inverterHaUniqueIdMatchesSerial(uniqueId, "AL00000000000000"));
+
+	buildInverterHaUniqueId("", uniqueId, sizeof(uniqueId));
+	CHECK(std::string(uniqueId) == "A2M-UNKNOWN");
+	buildInverterHaUniqueId("UNKNOWN", uniqueId, sizeof(uniqueId));
+	CHECK(std::string(uniqueId) == "A2M-UNKNOWN");
 }
 
 TEST_CASE("discovery model returns the stale inverter namespace when serial changes")

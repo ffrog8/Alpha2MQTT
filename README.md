@@ -54,6 +54,16 @@ GitHub Actions also runs these tests via the `Host Tests` workflow alongside an 
 Before this device can do anything, it must be given basic configuration.  It needs to know your WiFi SSID and password, and your MQTT server details (IP, port, username, and password).  These details used to be hardcoded in `Definitions.h` but are now configured via a captive portal web interface and saved in flash.  There are two ways to start the configuration portal:  Button press or "as needed".  The button press is preferred as it is more secure, but this is only available when a button is defined.  (A button is currently only defined for the XIAO ESP32C6 which uses the "BOOT" button.)  Simply press the button to enter config mode, and you can re-configure any time by pressing it again.  When no button is defined, the "as needed" method is used and it simply starts the portal at bootup if the configuration is incomplete.  Once configuration mode starts the hardware will create its own WiFi network (SSID="Alpha2MQTT" and no password).  Join that network and you will be taken to the captive web portal where you can enter the configuration details.  Once you are done, the hardware will reboot and should join your WiFi network and talk to your MQTT server.
 If you define WiFi/MQTT values via `Secrets.h` (or a `secrets.txt` workflow that generates it), those values are used as defaults for the captive portal fields and as initial settings when no stored configuration exists.
 
+### Inverter identity and discovery
+The controller no longer reuses a cached inverter serial across reboot. Inverter identity is considered unknown until the firmware reads a live serial from RS485.
+
+Practical effect:
+- controller-side runtime, WiFi, MQTT, HTTP, and portal features can still come up normally while RS485 is unavailable
+- inverter-scoped Home Assistant discovery and inverter telemetry do not publish until live serial is known
+- if the device boots while the inverter is offline, it will not guess an inverter identity from old flash state
+
+If a device upgrades while the inverter is unavailable, old retained inverter discovery topics may remain in Home Assistant until the controller later reads a live serial again or the retained topics are purged manually.
+
 ### Configuring polling intervals via MQTT
 Alpha2MQTT can store per-entity polling intervals that persist across restarts and show up in Home Assistant via MQTT discovery. The authoritative config is a retained payload published to `DEVICE_NAME/config`, with delta updates sent to `DEVICE_NAME/config/set`. The firmware now supports a broad catalog of optional telemetry, and many of those entities are disabled by default. This lets you choose the small set of values you actually care about instead of polling everything all the time.
 
@@ -102,6 +112,8 @@ The device publishes lightweight retained/status topics for observability:
 - `DEVICE_NAME/HA_UNIQUE_ID/status/net` (retained, ~10s): uptime, heap, WiFi RSSI/SSID/IP, WiFi/MQTT state + reconnect counters.
 - `DEVICE_NAME/HA_UNIQUE_ID/status/poll` (retained, ~10s): poll ok/err counts, last poll duration, last ok/err timestamps, last error code, and polling-pressure diagnostics such as backlog and budget exhaustion.
 - `DEVICE_NAME/HA_UNIQUE_ID/event` (non-retained): rate-limited fault events like `RS485_TIMEOUT`, `MODBUS_FRAME`, or `POLL_OVERRUN`.
+
+Before live inverter identity is known, the masked HA identity remains `A2M-UNKNOWN` and inverter-scoped discovery/state topics are suppressed.
 
 ### What you will see
 - Once your Alpha2MQTT device is working, in Home Assistant go to Settings->Devices & Services->Integrations->MQTT->devices
