@@ -599,7 +599,6 @@ static bool isWifiConfigComplete(void);
 static bool isMqttConfigComplete(void);
 static bool mqttSubsystemEnabled(void);
 static BootIntent portalNormalRebootIntent(void);
-static bool shouldFallbackToApPortalAfterInitialWifiFailure(void);
 bool inverterLabelOverrideIsValid(const char *labelOverride);
 bool applyLegacyBucketMapString(const char *map,
                                 const mqttState *entities,
@@ -2771,12 +2770,10 @@ bindPortalRoutes(WiFiManager &wifiManager)
 		handlePortalMenuPage(wifiManager);
 	});
 	wifiManager.server->on("/restart", HTTP_GET, [&]() {
-		wifiManager.server->sendHeader("Location", "/", true);
-		wifiManager.server->send(302, "text/plain", "");
+		handlePortalRebootNormalRequest(wifiManager);
 	});
 	wifiManager.server->on("/restart/", HTTP_GET, [&]() {
-		wifiManager.server->sendHeader("Location", "/", true);
-		wifiManager.server->send(302, "text/plain", "");
+		handlePortalRebootNormalRequest(wifiManager);
 	});
 	wifiManager.server->on("/status", [&]() {
 #ifdef DEBUG_OVER_SERIAL
@@ -5914,6 +5911,7 @@ setupWifi(bool initialConnect)
 {
 	char line3[OLED_CHARACTER_WIDTH];
 	char line4[OLED_CHARACTER_WIDTH];
+	bool bootConnectPhase = initialConnect;
 
 	// We start by connecting to a WiFi network
 #ifdef DEBUG_OVER_SERIAL
@@ -5956,14 +5954,23 @@ setupWifi(bool initialConnect)
 	for (int tries = 0; WiFi.status() != WL_CONNECTED; tries++) {
 		snprintf(line3, sizeof(line3), "WiFi %d ...", tries);
 
-		const int maxTries = initialConnect ? kInitialWifiConnectMaxTries : kWifiReconnectMaxTries;
+		const int maxTries = bootConnectPhase ? kInitialWifiConnectMaxTries : kWifiReconnectMaxTries;
 		if (tries == maxTries) {
-			const BootIntent failureIntent =
-				!initialConnect
-					? BootIntent::Normal
-					: (shouldFallbackToApPortalAfterInitialWifiFailure() ? BootIntent::ApConfig
-					                                                     : BootIntent::Normal);
-			setBootIntentAndReboot(failureIntent);
+			if (bootConnectPhase) {
+				switch (initialWifiFailureAction(currentBootMode, currentBootIntent)) {
+				case InitialWifiFailureAction::RebootApConfig:
+					setBootIntentAndReboot(BootIntent::ApConfig);
+					break;
+				case InitialWifiFailureAction::ContinueReconnect:
+				default:
+					// Ordinary normal boots should stay up and keep retrying after
+					// the short initial window instead of entering a fast reboot loop.
+					bootConnectPhase = false;
+					tries = -1;
+					continue;
+				}
+			}
+			setBootIntentAndReboot(BootIntent::Normal);
 		}
 #ifdef BUTTON_PIN
 		// Read button state
@@ -6012,7 +6019,7 @@ setupWifi(bool initialConnect)
 #endif
 		}
 
-		if (initialConnect) {
+		if (bootConnectPhase) {
 			updateOLED(false, "Connecting", line3, line4);
 		} else {
 			updateOLED(false, "Reconnect", line3, line4);
@@ -6595,12 +6602,6 @@ portalNormalRebootIntent(void)
 	        portalWifiCredentialsChanged)
 		       ? BootIntent::PortalNormal
 		       : BootIntent::Normal;
-}
-
-static bool
-shouldFallbackToApPortalAfterInitialWifiFailure(void)
-{
-	return currentBootMode == BootMode::WifiConfig || currentBootIntent == BootIntent::PortalNormal;
 }
 
 

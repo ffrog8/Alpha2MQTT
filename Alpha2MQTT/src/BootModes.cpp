@@ -53,6 +53,18 @@ bootIntentAfterStaPortalConnectFailure(void)
 	return BootIntent::ApConfig;
 }
 
+InitialWifiFailureAction
+initialWifiFailureAction(BootMode currentMode, BootIntent currentIntent)
+{
+	// Only portal-applied WiFi changes should fall back to AP automatically.
+	// Ordinary normal boots should stay up and retry in place after the initial
+	// short connect window expires.
+	if (currentMode == BootMode::WifiConfig || currentIntent == BootIntent::PortalNormal) {
+		return InitialWifiFailureAction::RebootApConfig;
+	}
+	return InitialWifiFailureAction::ContinueReconnect;
+}
+
 BootMode
 bootModeForIntent(BootIntent intent, BootMode currentMode)
 {
