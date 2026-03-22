@@ -109,6 +109,7 @@ CASE_ORDER: tuple[str, ...] = (
     "soc_drift_e2e",
     "polling_config",
     "portal_polling_ui",
+    "portal_wifi_save_reboot_only",
 )
 
 
@@ -750,6 +751,20 @@ def _wait_for_http_ok(url: str, timeout_s: int = 30) -> None:
             return False, f"err={e}"
     _assert_eventually(f"HTTP reachable: {url}", pred, timeout_s=timeout_s, poll_s=2.0)
 
+def _assert_portal_root_menu(base: str, timeout_s: int = 20) -> str:
+    deadline = time.time() + timeout_s
+    last_html = ""
+    while time.time() < deadline:
+        status, body = _http_request_full("GET", base + "/", headers={}, body=b"", timeout_s=20)
+        if status == 200:
+            html = body.decode("utf-8", errors="replace")
+            last_html = html
+            required = ("/0wifi", "/config/mqtt", "/config/polling", "/config/update", "/status", "/config/reboot-normal")
+            if all(token in html for token in required):
+                return html
+        time.sleep(1.0)
+    raise E2EError(f"portal root missing actionable menu entries: {last_html[:400]!r}")
+
 def _discover_polling_menu_path(menu_html: str) -> str:
     # Accept both the root menu form button and setup-page anchor forms of the link.
     m = re.search(r"""(?:action|href)=['"](/config/polling(?:\?[^'"]*)?)['"]""", menu_html, flags=re.IGNORECASE)
@@ -758,16 +773,17 @@ def _discover_polling_menu_path(menu_html: str) -> str:
     return m.group(1)
 
 def _load_polling_page_via_menu(base: str) -> tuple[str, str]:
-    direct_path = "/config/polling"
-    status_poll, poll_body = _http_request_full("GET", base + direct_path, headers={}, body=b"", timeout_s=20)
-    if status_poll == 200:
-        return direct_path, poll_body.decode("utf-8", errors="replace")
-
     deadline = time.time() + 25
     polling_path = ""
     last_detail = "not checked"
     while time.time() < deadline:
-        for menu_path in ("/", "/param"):
+        direct_path = "/config/polling"
+        status_poll, poll_body = _http_request_full("GET", base + direct_path, headers={}, body=b"", timeout_s=20)
+        if status_poll == 200:
+            return direct_path, poll_body.decode("utf-8", errors="replace")
+        last_detail = f"{direct_path} status={status_poll}"
+
+        for menu_path in ("/", "/config/mqtt", "/param"):
             status_menu, menu_body = _http_request_full("GET", base + menu_path, headers={}, body=b"", timeout_s=20)
             if status_menu != 200:
                 last_detail = f"{menu_path} status={status_menu}"
@@ -790,6 +806,29 @@ def _load_polling_page_via_menu(base: str) -> tuple[str, str]:
         raise E2EError(f"portal polling page not reachable via menu link {polling_path}: status={status_poll}")
     poll_html = poll_body.decode("utf-8", errors="replace")
     return polling_path, poll_html
+
+def _extract_form_action_with_input(html: str, required_input: str) -> str:
+    for match in re.finditer(r"<form[^>]*action=['\"]([^'\"]+)['\"][^>]*>(.*?)</form>", html, flags=re.IGNORECASE | re.DOTALL):
+        action = match.group(1)
+        form_html = match.group(2)
+        if re.search(rf"name=['\"]{re.escape(required_input)}['\"]", form_html, flags=re.IGNORECASE):
+            return action
+    raise E2EError(f"could not locate form action for input {required_input}")
+
+def _extract_input_value(html: str, name: str) -> str:
+    m = re.search(rf'name="{re.escape(name)}"[^>]*value="([^"]*)"', html, flags=re.IGNORECASE)
+    if not m:
+        raise E2EError(f"could not locate input value for {name}")
+    return m.group(1)
+
+def _load_wifi_page(base: str) -> tuple[str, str]:
+    status, body = _http_request_full("GET", base + "/0wifi", headers={}, body=b"", timeout_s=20)
+    if status != 200:
+        raise E2EError(f"portal wifi page not reachable: status={status}")
+    html = body.decode("utf-8", errors="replace")
+    if 'name="s"' not in html or 'name="p"' not in html:
+        raise E2EError("portal wifi page missing ssid/password inputs")
+    return _extract_form_action_with_input(html, "s"), html
 
 def _extract_polling_page_bounds(poll_html: str) -> tuple[int, int]:
     m = re.search(r'<p class="hint">[^<]*Page\s+(\d+)\s+of\s+(\d+)[^<]*</p>', poll_html)
@@ -920,7 +959,12 @@ def _is_socket_closed_error(e: Exception) -> bool:
 
 def _is_expected_portal_transport_error(e: Exception) -> bool:
     detail = str(e).lower()
-    return "timed out" in detail or "reset by peer" in detail or "connection reset" in detail
+    return (
+        "timed out" in detail
+        or "reset by peer" in detail
+        or "connection reset" in detail
+        or "could not parse http status line: ''" in detail
+    )
 
 def _mqtt_retry(mqtt: MqttClient, name: str, fn: Callable[[], Any]) -> Any:
     """
@@ -1304,17 +1348,34 @@ def _device_is_latest_stub(
     expected_build_ts_ms: int,
     status_poll_suffix: str,
 ) -> Tuple[bool, str]:
+    http_runtime_match_detail = ""
     try:
         boot = _fetch_boot(mqtt, f"{device_root}/boot")
         fw_ts = boot.get("fw_build_ts_ms")
         if not isinstance(fw_ts, int):
             return False, f"boot.fw_build_ts_ms missing/invalid (keys={sorted(boot.keys())})"
         if fw_ts != expected_build_ts_ms:
-            return False, f"fw_build_ts_ms={fw_ts} expected={expected_build_ts_ms}"
+            http_runtime_match_detail = f"fw_build_ts_ms={fw_ts} expected={expected_build_ts_ms}"
     except E2EError as e:
         # If the broker doesn't have retained boot state (e.g. broker restart), we can't verify build id
         # until the device republishes /boot (usually on reboot). Treat as "not verified".
-        return False, f"boot_unavailable ({e})"
+        http_runtime_match_detail = f"boot_unavailable ({e})"
+
+    if http_runtime_match_detail:
+        try:
+            http_base = _resolve_device_http_base(mqtt, device_root)
+            status, body = _http_request_full("GET", http_base + "/", headers={}, body=b"", timeout_s=10)
+            html = body.decode("utf-8", errors="replace")
+            if (
+                status == 200
+                and "Alpha2MQTT Control" in html
+                and f"Firmware version: {expected_build_ts_ms}" in html
+                and "RS485 backend: stub" in html
+            ):
+                return True, f"http_runtime_ok ({http_runtime_match_detail})"
+        except Exception:
+            pass
+        return False, http_runtime_match_detail
 
     poll = _fetch_poll(mqtt, f"{device_root}{status_poll_suffix}")
     backend = poll.get("rs485_backend")
@@ -1553,7 +1614,7 @@ def main() -> int:
                 firmware_path=firmware_path,
             )
 
-    # Verify stub backend is actually active (after optional ensure/update).
+    # Verify stub backend is actually active (after optional ensure/config/update).
     first = _fetch_poll(mqtt, poll_topic)
     rs485_backend = first.get("rs485_backend")
     if rs485_backend != "stub":
@@ -1576,8 +1637,52 @@ def main() -> int:
         if b < a:
             raise E2EError(f"Scheduler field is not monotonic: {k} {a}->{b}")
 
+    def _normalized_stub_control_payload(payload: str) -> Optional[dict[str, Any]]:
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+
+        if not isinstance(parsed, dict):
+            return None
+
+        # The firmware only updates the stub-control fields that are present in the payload.
+        # Publish a complete fault baseline by default so later cases do not inherit stale
+        # fail/latency/probe settings from earlier cases.
+        mode = str(parsed.get("mode", "")).strip().lower()
+        wants_failure_mode = mode in ("offline", "fail", "fail_then_recover", "flap", "probe_delayed")
+        for key in ("fail_n", "reg", "fail_every_n", "fail_for_ms", "probe_success_after_n"):
+            try:
+                wants_failure_mode = wants_failure_mode or int(parsed.get(key, 0)) > 0
+            except (TypeError, ValueError):
+                pass
+
+        for key, value in (
+            ("fail_n", 0),
+            ("reg", 0),
+            ("fail_type", 0),
+            ("latency_ms", 0),
+            ("strict_unknown", 0),
+            ("strict", 0),
+            ("fail_every_n", 0),
+            ("fail_for_ms", 0),
+            ("flap_online_ms", 0),
+            ("flap_offline_ms", 0),
+            ("probe_success_after_n", 0),
+            ("soc_step_x10_per_snapshot", 0),
+        ):
+            parsed.setdefault(key, value)
+        parsed.setdefault("fail_reads", 1 if wants_failure_mode else 0)
+        parsed.setdefault("fail_writes", 1 if wants_failure_mode else 0)
+
+        return parsed
+
     def set_mode(payload: str) -> None:
-        mqtt.publish(control_topic, payload, retain=False)
+        normalized = _normalized_stub_control_payload(payload)
+        if normalized is None:
+            mqtt.publish(control_topic, payload, retain=False)
+            return
+        mqtt.publish(control_topic, json.dumps(normalized, separators=(",", ":")), retain=False)
 
     def set_mode_and_wait(
         payload: str,
@@ -1795,24 +1900,67 @@ def main() -> int:
         })
         mqtt.publish(f"{device_root}/config/set", payload, retain=False)
 
+    def ensure_clean_suite_baseline() -> None:
+        # The lab device persists fault toggles and polling overrides across runs. Reset them
+        # here so suite startup does not depend on whatever the previous manual/E2E session left behind.
+        # Gate only on live poll readiness. Retained status/stub and config snapshots can lag behind
+        # a manual serial flash or a just-restored runtime and are not authoritative enough to block
+        # the entire suite.
+        ensure_stub_online_backend(
+            '{"mode":"online","soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0}',
+            label="suite baseline",
+        )
+        set_polling_config(13, "")
+
     def _wait_for_inverter_identity() -> str:
-        def inverter_id_from_ha_unique(ha_unique: str) -> str:
-            if not ha_unique.startswith("A2M-"):
-                return ""
-            serial = ha_unique[4:]
+        controller_serial_filter = f"{device_root}/+/inverter_serial/state"
+        mqtt.subscribe(poll_topic, force=True)
+        mqtt.subscribe(controller_serial_filter, force=True)
+
+        def inverter_id_from_serial(serial: str) -> str:
+            serial = serial.strip()
             if not serial or serial.lower() == "unknown":
                 return ""
             return f"alpha2mqtt_inv_{serial}"
+        inverter_ready = False
+        controller_serial = ""
+        deadline = time.time() + 60.0
+        last_detail = "waiting for live poll + controller serial"
+        while time.time() < deadline:
+            try:
+                got_topic, payload = mqtt.wait_for_publish(timeout_s=min(5.0, max(0.1, deadline - time.time())))
+            except E2EError as e:
+                if "Timeout waiting for MQTT publish" in str(e):
+                    continue
+                raise
 
-        def pred() -> Tuple[bool, str]:
-            core = _fetch_status_core(mqtt, status_core_topic)
-            ha_unique = str(core.get("ha_unique_id", ""))
-            inverter_id = inverter_id_from_ha_unique(ha_unique)
-            detail = f"ha_unique_id={ha_unique!r} inverter_id={inverter_id!r}"
-            return (inverter_id != ""), detail
-        _assert_eventually("inverter identity available", pred, timeout_s=60, poll_s=3.0)
-        core = _fetch_status_core(mqtt, status_core_topic)
-        return inverter_id_from_ha_unique(str(core.get("ha_unique_id", "")))
+            if got_topic == poll_topic:
+                try:
+                    poll = _parse_json(payload)
+                except Exception:
+                    continue
+                inverter_ready = bool(poll.get("inverter_ready", False))
+            elif got_topic.startswith(f"{device_root}/") and got_topic.endswith("/inverter_serial/state"):
+                controller_serial = str(payload).strip()
+            else:
+                continue
+
+            inverter_id = inverter_id_from_serial(controller_serial)
+            last_detail = (
+                f"inverter_ready={inverter_ready} "
+                f"controller_serial={controller_serial!r} inverter_id={inverter_id!r}"
+            )
+            if inverter_ready and inverter_id:
+                return inverter_id
+
+        raise E2EError(f"inverter identity became ready but controller inverter_serial/state was not observed: {last_detail}")
+
+    def _ensure_online_inverter_identity(label: str) -> str:
+        ensure_stub_online_backend(
+            '{"mode":"online","soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0}',
+            label=label,
+        )
+        return _wait_for_inverter_identity()
 
     def _assert_unknown_inverter_identity(label: str, *, timeout_s: int = 60) -> None:
         def pred() -> Tuple[bool, str]:
@@ -1858,8 +2006,8 @@ def main() -> int:
         mqtt.publish("homeassistant/status", "online", retain=False)
         _sleep_with_mqtt(mqtt, 2)
 
-        serial_known = str(controller_serial).strip().lower() not in ("", "unknown")
-        inverter_device_id = _wait_for_inverter_identity() if serial_known else ""
+        serial_known = bool(_fetch_poll(mqtt, poll_topic).get("inverter_ready", False)) and str(controller_serial).strip().lower() not in ("", "unknown")
+        inverter_device_id = f"alpha2mqtt_inv_{controller_serial.strip()}" if serial_known else ""
         current_config = _fetch_config(mqtt, config_topic)
         intervals = current_config.get("entity_intervals", {})
         expect_inverter_entity = serial_known and isinstance(intervals, dict) and bool(intervals)
@@ -2034,13 +2182,13 @@ def main() -> int:
 
     def case_dispatch_write_via_commands() -> None:
         print("[e2e] case: dispatch write via command topics (virtual inverter)")
-        ha_unique = _wait_for_inverter_identity()
+        ha_unique = _ensure_online_inverter_identity("dispatch write baseline")
         ensure_dispatch_write(ha_unique, label_prefix="dispatch")
         return
 
     def case_dispatch_write_feedback_via_register_value() -> None:
         print("[e2e] case: dispatch write feedback (Register_Value reflects new dispatch state)")
-        ha_unique = _wait_for_inverter_identity()
+        ha_unique = _ensure_online_inverter_identity("dispatch feedback baseline")
         _, reg_dispatch_start, dispatch_start_start = ensure_dispatch_write(ha_unique, label_prefix="dispatch feedback")
         dispatch_start_stop = _discover_define_value("DISPATCH_START_STOP")
         op_mode_normal = _discover_define_string("OP_MODE_DESC_NORMAL")
@@ -2229,7 +2377,7 @@ def main() -> int:
 
     def case_strict_unknown_register_reads() -> None:
         print("[e2e] case: strict/loose unknown register reads via Register_Value")
-        ha_unique = _wait_for_inverter_identity()
+        ha_unique = _ensure_online_inverter_identity("strict unknown register baseline")
         manual_topic = _manual_read_topic()
         baseline_payload = (
             '{"mode":"online","reg":0,"fail_n":0,"fail_reads":1,"fail_writes":0,"fail_type":0,'
@@ -2468,7 +2616,7 @@ def main() -> int:
             '"soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0,"dispatch_start":0,"dispatch_mode":0,"dispatch_soc":0}}',
             ("online",),
         )
-        ha_unique = _wait_for_inverter_identity()
+        ha_unique = _ensure_online_inverter_identity("fail writes identity baseline")
         base = f"{device_root}/{ha_unique}"
 
         def publish_ready_commands() -> None:
@@ -2527,15 +2675,72 @@ def main() -> int:
         raise E2EError(f"fail_for_ms did not show fail then recover within timeout; last={last_detail}")
 
     def _soc_drift_payload() -> str:
-        return '{"mode":"online","soc_pct":50,"soc_step_x10_per_snapshot":10}'
+        return (
+            '{"mode":"online","soc_pct":50,"soc_step_x10_per_snapshot":10,'
+            '"fail_n":0,"fail_reads":0,"fail_writes":0,"fail_type":0,'
+            '"fail_every_n":0,"fail_for_ms":0,'
+            '"flap_online_ms":0,"flap_offline_ms":0,'
+            '"probe_success_after_n":0,"strict_unknown":0,"strict":0}'
+        )
 
     def _soc_drift_poll_interval() -> int:
         return int(_fetch_poll(mqtt, poll_topic).get("poll_interval_s", 13))
 
-    def _ensure_soc_drift_backend(current_poll_interval: int) -> None:
+    soc_drift_verified = False
+
+    def _verify_soc_drift_internal() -> None:
+        nonlocal soc_drift_verified
+        ha_unique = _wait_for_inverter_identity()
+        manual_topic = _manual_read_topic()
+        reg_soc = _discover_register_value("REG_BATTERY_HOME_R_SOC")
+        state_topic = _state_topic(ha_unique, "Register_Number")
+
+        first = _select_register_and_wait_manual_read(
+            mqtt,
+            _command_topic(ha_unique, "Register_Number"),
+            manual_topic,
+            state_topic,
+            reg_soc,
+            label="soc_drift_manual_before",
+        )
+        first_value = str(first.get("value", ""))
+        try:
+            first_soc = float(first_value)
+        except ValueError:
+            raise E2EError(f"Unexpected SOC payload before drift check: {first_value!r}")
+
+        deadline = time.time() + 45
+        last_value = first_value
+        while time.time() < deadline:
+            _sleep_with_mqtt(mqtt, 8.0)
+            cur = _select_register_and_wait_manual_read(
+                mqtt,
+                _command_topic(ha_unique, "Register_Number"),
+                manual_topic,
+                state_topic,
+                reg_soc,
+                label="soc_drift_manual_after",
+            )
+            last_value = str(cur.get("value", ""))
+            try:
+                current_soc = float(last_value)
+            except ValueError:
+                continue
+            if current_soc > first_soc:
+                soc_drift_verified = True
+                return
+
+        raise E2EError(f"Expected SOC to increase under drift backend: {first_value!r} -> {last_value!r}")
+
+    def _ensure_soc_drift_backend(current_poll_interval: int, *, force_reset: bool = False) -> None:
+        nonlocal soc_drift_verified
         drift_mode_payload = _soc_drift_payload()
-        set_mode_and_wait(drift_mode_payload, ("online",))
+        if force_reset:
+            soc_drift_verified = False
+            ensure_stub_online_backend('{"mode":"online","soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0}', label="soc drift reset")
+        set_mode(drift_mode_payload)
         set_polling_config(current_poll_interval, "State_of_Charge=ten_sec;")
+        wait_intervals_applied({"State_of_Charge": "ten_sec"}, timeout_s=45, republish_every_s=5.0)
         last_pub = time.time()
         _wait_for_live_json_change(mqtt, poll_topic, "poll liveness after soc drift setup", timeout_s=25)
 
@@ -2547,19 +2752,15 @@ def main() -> int:
                 set_polling_config(current_poll_interval, "State_of_Charge=ten_sec;")
                 last_pub = now
             cur_poll = _fetch_poll(mqtt, poll_topic)
-            cfg = _fetch_config(mqtt, config_topic)
-            intervals = cfg.get("entity_intervals", {})
-            bucket = str(intervals.get("State_of_Charge", "")) if isinstance(intervals, dict) else ""
             mode = str(cur_poll.get("rs485_stub_mode", ""))
             snapshot_ok = bool(cur_poll.get("ess_snapshot_last_ok", False))
             probe_backoff_ms = int(cur_poll.get("rs485_probe_backoff_ms", 0))
             detail = (
-                f"mode={mode!r} bucket={bucket!r} snapshot_ok={snapshot_ok} "
+                f"mode={mode!r} snapshot_ok={snapshot_ok} "
                 f"probe_backoff_ms={probe_backoff_ms}"
             )
             return (
                 mode == "online"
-                and bucket == "ten_sec"
                 and snapshot_ok
                 and probe_backoff_ms == 0
             ), detail
@@ -2570,6 +2771,8 @@ def main() -> int:
             timeout_s=60,
             poll_s=2.0,
         )
+        if not soc_drift_verified:
+            _verify_soc_drift_internal()
 
     def _wait_for_soc_change(ha_unique: str, prev: str, label: str, timeout_s: int) -> str:
         soc_topic = _state_topic(ha_unique, "State_of_Charge")
@@ -2581,36 +2784,23 @@ def main() -> int:
                 return _wait_for_topic_change(mqtt, soc_topic, prev, timeout_s=20, label=label)
             except E2EError as e:
                 last_err = str(e)
-                _ensure_soc_drift_backend(_soc_drift_poll_interval())
+                _ensure_soc_drift_backend(_soc_drift_poll_interval(), force_reset=True)
         raise E2EError(f"Timeout waiting for {label} change after drift-mode recovery attempts. Last observed: {last_err}")
 
     def case_soc_drift_backend_ready() -> None:
         print("[e2e] case: soc drift backend ready")
-        _wait_for_inverter_identity()
-        _ensure_soc_drift_backend(_soc_drift_poll_interval())
+        _ensure_soc_drift_backend(_soc_drift_poll_interval(), force_reset=True)
 
     def case_stub_soc_drift_applies() -> None:
         print("[e2e] case: stub SOC drift applies internally")
-        ha_unique = _wait_for_inverter_identity()
         current_poll_interval = _soc_drift_poll_interval()
-        _ensure_soc_drift_backend(current_poll_interval)
-        soc_topic = _state_topic(ha_unique, "State_of_Charge")
-        mqtt.subscribe(soc_topic, force=True)
-        v1 = _fetch_latest_text(mqtt, soc_topic, label="soc_drift_before")
-        v2 = _wait_for_soc_change(ha_unique, v1, "soc_drift_internal", timeout_s=45)
-        try:
-            f1 = float(v1)
-            f2 = float(v2)
-        except ValueError:
-            raise E2EError(f"Unexpected SOC payloads during drift check: {v1!r} {v2!r}")
-        if f2 <= f1:
-            raise E2EError(f"Expected SOC to increase under drift backend: {v1!r} -> {v2!r}")
+        _ensure_soc_drift_backend(current_poll_interval, force_reset=True)
 
     def case_soc_publish_respects_bucket() -> None:
         print("[e2e] case: State_of_Charge publish respects bucket")
-        ha_unique = _wait_for_inverter_identity()
         current_poll_interval = _soc_drift_poll_interval()
         _ensure_soc_drift_backend(current_poll_interval)
+        ha_unique = _wait_for_inverter_identity()
         soc_topic = _state_topic(ha_unique, "State_of_Charge")
         mqtt.subscribe(soc_topic, force=True)
         v1 = _fetch_latest_text(mqtt, soc_topic, label="soc")
@@ -2620,9 +2810,9 @@ def main() -> int:
 
     def case_soc_drift_e2e() -> None:
         print("[e2e] case: soc drift end-to-end")
-        ha_unique = _wait_for_inverter_identity()
         current_poll_interval = _soc_drift_poll_interval()
         _ensure_soc_drift_backend(current_poll_interval)
+        ha_unique = _wait_for_inverter_identity()
         soc_topic = _state_topic(ha_unique, "State_of_Charge")
         mqtt.subscribe(soc_topic, force=True)
         v1 = _fetch_latest_text(mqtt, soc_topic, label="soc")
@@ -2674,9 +2864,16 @@ def main() -> int:
         _assert_eventually("polling config applied", applied_pred, timeout_s=60, poll_s=3.0)
 
     def case_portal_polling_ui() -> None:
-        print("[e2e] case: portal UI updates polling schedule (WiFiManager, paged)")
-        ensure_stub_online_backend('{"mode":"online"}', label="portal polling ui baseline")
+        print("[e2e] case: portal UI updates polling schedule (lightweight paged portal)")
+        portal_stub_baseline = (
+            '{"mode":"online","fail_n":0,"fail_reads":0,"fail_writes":0,'
+            '"fail_type":0,"fail_every_n":0,"fail_for_ms":0,'
+            '"flap_online_ms":0,"flap_offline_ms":0,'
+            '"probe_success_after_n":0,"strict_unknown":0,"strict":0}'
+        )
+        ensure_stub_online_backend(portal_stub_baseline, label="portal polling ui baseline")
         base = _resolve_device_http_base(mqtt, device_root)
+        portal_reboot_normal_path = "/config/reboot-normal"
         config_before = _fetch_config(mqtt, config_topic)
         original_interval = int(config_before.get("poll_interval_s", 0))
         original_intervals = config_before.get("entity_intervals", {})
@@ -2705,12 +2902,8 @@ def main() -> int:
             raise E2EError("portal polling page missing shared portal wrapper/header style")
         if "Unsaved polling changes will be lost. Continue?" not in html:
             raise E2EError("portal polling page missing unsaved-changes warning text")
-        if "sessionStorage" not in html or "bucket_map_full" not in html:
-            raise E2EError("portal polling page missing draft-preservation script/hooks")
-        if "Advisory estimates only" not in html or "Current family estimate" not in html or "All active buckets" not in html:
-            raise E2EError("portal polling page missing advisory estimate sections")
-        if "Current runtime state" not in html or "Runtime state reflects what the scheduler is actually doing now." not in html:
-            raise E2EError("portal polling page missing runtime diagnostics section")
+        if "bucket_map_full" not in html or "pPrepareSave" not in html:
+            raise E2EError("portal polling page missing save serialization hooks")
 
         # Find which row index corresponds to a known stable mqttName.
         target = "State_of_Charge"
@@ -2756,35 +2949,27 @@ def main() -> int:
             if not _is_expected_portal_transport_error(e):
                 raise
             print(f"[e2e] polling save transport timeout tolerated; verifying by state ({e})")
+        saved_html = _load_polling_page(base, target_family, target_page)
+        interval_match = re.search(r'name="poll_interval_s"[^>]*value="(\d+)"', saved_html)
+        if not interval_match:
+            raise E2EError("polling page missing poll_interval_s input after save")
+        if int(interval_match.group(1)) != 13:
+            raise E2EError(f"poll_interval_s UI value not updated after save: {interval_match.group(1)}")
+        _, saved_bucket = _extract_entity_row_and_selected_bucket(saved_html, target)
+        if saved_bucket != desired_bucket:
+            raise E2EError(
+                f"{target} bucket UI value not updated after save (expected {desired_bucket!r}, got {saved_bucket!r})"
+            )
 
-        def saved_pred() -> Tuple[bool, str]:
-            cur = _fetch_poll(mqtt, poll_topic)
-            cfg_cur = _fetch_config(mqtt, config_topic)
-            cur_interval = int(cur.get("poll_interval_s", 0))
-            intervals_cur = cfg_cur.get("entity_intervals", {})
-            mapped = _effective_bucket(intervals_cur, target)
-            detail = f"poll_interval_s={cur_interval} mapped={mapped!r}"
-            if cur_interval != 13:
-                return False, detail
-            if mapped != desired_bucket:
-                return False, detail
-            return True, detail
-
-        _assert_eventually("portal save visible via mqtt config/state", saved_pred, timeout_s=60, poll_s=3.0)
-
-        reboot_normal_path = _discover_reboot_normal_path_from_code()
-        if not reboot_normal_path:
-            raise E2EError("Could not discover /reboot/normal endpoint from firmware source")
-
-        reboot_normal_url = base + reboot_normal_path
+        reboot_normal_url = base + portal_reboot_normal_path
         print(f"[e2e] rebooting to normal via {reboot_normal_url}")
         reboot_status, reboot_body = _http_request("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
         if reboot_status != 200:
-            raise E2EError(f"/reboot/normal returned unexpected status={reboot_status}")
+            raise E2EError(f"{portal_reboot_normal_path} returned unexpected status={reboot_status}")
         if reboot_body:
             reboot_html = reboot_body.decode("utf-8", errors="replace")
             if "Rebooting into normal runtime" not in reboot_html:
-                raise E2EError("/reboot/normal response missing reboot-to-normal heading")
+                raise E2EError(f"{portal_reboot_normal_path} response missing reboot-to-normal heading")
             if "Alpha2MQTT Control" not in reboot_html:
                 raise E2EError("/reboot/normal response missing runtime probe marker")
 
@@ -2795,6 +2980,7 @@ def main() -> int:
             timeout_s=60,
             poll_s=3.0,
         )
+        ensure_stub_online_backend(portal_stub_baseline, label="portal polling ui after save reboot")
 
         root_html_box = {"html": ""}
         def root_ready_pred() -> Tuple[bool, str]:
@@ -2873,25 +3059,35 @@ def main() -> int:
             raise E2EError(f"{target} bucket UI value not restored after reboot (expected {desired_bucket!r}, got {restored_bucket!r})")
 
         print(f"[e2e] POST {base}/config/polling/clear (clear-all check)")
-        clear_status = _http_post_form(
-            base + "/config/polling/clear",
-            {
-                "family": target_family,
-                "page": str(target_page),
-            },
-            timeout_s=20,
-        )
-        if clear_status not in (200, 302):
-            raise E2EError(f"polling clear failed status={clear_status}")
+        try:
+            clear_status = _http_post_form(
+                base + "/config/polling/clear",
+                {
+                    "family": target_family,
+                    "page": str(target_page),
+                },
+                timeout_s=20,
+            )
+            if clear_status not in (200, 302):
+                raise E2EError(f"polling clear failed status={clear_status}")
+        except Exception as e:
+            if not _is_expected_portal_transport_error(e):
+                raise
+            print(f"[e2e] polling clear transport timeout tolerated; verifying by state ({e})")
+
+        cleared_html = _load_polling_page(base, target_family, target_page)
+        _, cleared_bucket = _extract_entity_row_and_selected_bucket(cleared_html, target)
+        if cleared_bucket != "disabled":
+            raise E2EError(f"{target} bucket UI value not cleared after disable-all (got {cleared_bucket!r})")
 
         print(f"[e2e] rebooting to normal via {reboot_normal_url} (clear-all check)")
         reboot_status, reboot_body = _http_request("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
         if reboot_status != 200:
-            raise E2EError(f"/reboot/normal after clear returned unexpected status={reboot_status}")
+            raise E2EError(f"{portal_reboot_normal_path} after clear returned unexpected status={reboot_status}")
         if reboot_body:
             reboot_html = reboot_body.decode("utf-8", errors="replace")
             if "Rebooting into normal runtime" not in reboot_html:
-                raise E2EError("/reboot/normal after clear response missing reboot-to-normal heading")
+                raise E2EError(f"{portal_reboot_normal_path} after clear response missing reboot-to-normal heading")
 
         _assert_eventually(
             "device publishes status/poll after clear-all reboot to normal",
@@ -2899,6 +3095,7 @@ def main() -> int:
             timeout_s=60,
             poll_s=3.0,
         )
+        ensure_stub_online_backend(portal_stub_baseline, label="portal polling ui after clear reboot")
 
         def cleared_pred() -> Tuple[bool, str]:
             cfg_cur = _fetch_config(mqtt, config_topic)
@@ -2930,6 +3127,71 @@ def main() -> int:
 
         _assert_eventually("polling config restored after clear-all portal check", restored_pred, timeout_s=60, poll_s=3.0)
 
+    def case_portal_wifi_save_reboot_only() -> None:
+        reboot_url = _discover_reboot_wifi_path_from_code()
+        if not reboot_url:
+            raise E2EError("Could not discover /reboot/wifi endpoint from firmware source")
+        portal_reboot_normal_path = "/config/reboot-normal"
+        base = _resolve_device_http_base(mqtt, device_root)
+
+        print(f"[e2e] rebooting into wifi portal via {reboot_url} (wifi save-only check)")
+        _http_post_simple(base + reboot_url, timeout_s=10)
+        _wait_for_http_ok(base + "/", timeout_s=40)
+        _assert_portal_root_menu(base, timeout_s=20)
+
+        wifi_action, wifi_html = _load_wifi_page(base)
+        ssid = _extract_input_value(wifi_html, "s")
+        password = _extract_input_value(wifi_html, "p")
+        if not ssid:
+            raise E2EError("portal wifi page exposed a blank SSID")
+
+        save_url = urllib.parse.urljoin(base + "/0wifi", wifi_action)
+        print(f"[e2e] POST {save_url} fields: s=<current> p=<current>")
+        save_status = _http_post_form(save_url, {"s": ssid, "p": password}, timeout_s=20)
+        if save_status not in (200, 302):
+            raise E2EError(f"wifi save failed status={save_status}")
+
+        saved_status, saved_body = _http_request_full("GET", base + "/0wifi?saved=1", headers={}, body=b"", timeout_s=20)
+        if saved_status != 200:
+            raise E2EError(f"saved wifi page returned status={saved_status}")
+        saved_html = saved_body.decode("utf-8", errors="replace")
+        if "applied on the next reboot" not in saved_html:
+            raise E2EError("saved wifi page missing reboot-required message")
+
+        polling_status, polling_body = _http_request_full("GET", base + "/config/polling", headers={}, body=b"", timeout_s=20)
+        if polling_status != 200:
+            raise E2EError(f"polling page not reachable after wifi save: status={polling_status}")
+        if "Polling" not in polling_body.decode("utf-8", errors="replace"):
+            raise E2EError("polling page missing after wifi save")
+
+        reboot_normal_url = base + portal_reboot_normal_path
+        print(f"[e2e] rebooting to normal via {reboot_normal_url} (wifi save-only check)")
+        reboot_status, reboot_body = _http_request("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
+        if reboot_status != 200:
+            raise E2EError(f"{portal_reboot_normal_path} returned unexpected status={reboot_status}")
+        if reboot_body:
+            reboot_html = reboot_body.decode("utf-8", errors="replace")
+            if "Rebooting into normal runtime" not in reboot_html:
+                raise E2EError(f"{portal_reboot_normal_path} response missing reboot-to-normal heading")
+
+        root_html_box = {"html": ""}
+        def root_ready_pred() -> Tuple[bool, str]:
+            try:
+                root_status, root_body = _http_request_full("GET", base + "/", headers={}, body=b"", timeout_s=20)
+            except Exception as e:
+                return False, f"err={e}"
+            if root_status != 200:
+                return False, f"status={root_status}"
+            html = root_body.decode("utf-8", errors="replace")
+            if "Alpha2MQTT Control" not in html:
+                return False, "waiting for runtime root"
+            root_html_box["html"] = html
+            return True, "ok"
+
+        _assert_eventually("runtime root page after wifi save-only reboot", root_ready_pred, timeout_s=60, poll_s=2.0)
+        if "Boot mode:" not in root_html_box["html"]:
+            raise E2EError("runtime root missing boot status after wifi save-only reboot")
+
     cases: list[Tuple[str, Callable[[], None]]] = [
         ("two_device_discovery", case_two_device_discovery),
         ("offline", case_offline),
@@ -2955,6 +3217,7 @@ def main() -> int:
         ("soc_drift_e2e", case_soc_drift_e2e),
         ("polling_config", case_polling_config_persistence),
         ("portal_polling_ui", case_portal_polling_ui),
+        ("portal_wifi_save_reboot_only", case_portal_wifi_save_reboot_only),
     ]
 
     case_map = {name: fn for name, fn in cases}
@@ -2966,6 +3229,8 @@ def main() -> int:
         ordered_names = [name for name in ordered_names if name in selected_set]
     if not ordered_names:
         raise E2EError("No cases selected to run")
+
+    ensure_clean_suite_baseline()
 
     def dump_failure_context(failed_case: str) -> None:
         print(f"[e2e] failure context for case={failed_case}")

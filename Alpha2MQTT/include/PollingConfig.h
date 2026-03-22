@@ -104,6 +104,10 @@ bool buildBucketMapFromLegacyReader(const mqttState *entities,
                                     char *out,
                                     size_t outSize,
                                     size_t &appliedCount);
+bool legacyPollingOverridesExist(const mqttState *entities,
+                                 size_t entityCount,
+                                 LegacyPollingValueReader reader,
+                                 void *context);
 
 // Build a stable Bucket_Map string from explicit bucket assignments. Names are
 // used instead of descriptor indices so persisted config survives catalog growth.
@@ -113,6 +117,13 @@ bool buildBucketMapFromAssignments(const mqttState *entities,
                                    char *out,
                                    size_t outSize,
                                    size_t &appliedCount);
+
+// Estimate the persisted Bucket_Map payload size for the active non-default
+// overrides. The returned length excludes the trailing NUL.
+size_t estimateBucketMapFromAssignmentsLength(const mqttState *entities,
+                                              size_t entityCount,
+                                              const BucketId *buckets,
+                                              size_t &appliedCount);
 
 // Build one chunk of the active (non-disabled) bucket assignments. Unlike the
 // persisted Bucket_Map, this includes defaults so MQTT config consumers can

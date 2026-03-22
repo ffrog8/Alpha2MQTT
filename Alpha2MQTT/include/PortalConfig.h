@@ -57,6 +57,7 @@ PortalPostWifiAction portalPostWifiActionAfterWifiSave(const char *server,
                                                        const char *user,
                                                        const char *password);
 const char *portalMenuPollingHtml(void);
+const char *portalMenuStaHtml(void);
 const char *portalRebootToNormalHtml(void);
 uint16_t portalParseU16Strict(const char *text, uint16_t defaultValue);
 

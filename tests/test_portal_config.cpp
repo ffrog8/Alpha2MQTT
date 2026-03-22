@@ -100,6 +100,16 @@ TEST_CASE("portal config: custom menu html points to mqtt and polling pages")
 	CHECK(strstr(html, "Polling") != nullptr);
 }
 
+TEST_CASE("portal config: sta custom menu html includes wifi, mqtt, and polling pages")
+{
+	const char *html = portalMenuStaHtml();
+	REQUIRE(html != nullptr);
+	CHECK(strstr(html, "/0wifi") != nullptr);
+	CHECK(strstr(html, "WiFi Setup") != nullptr);
+	CHECK(strstr(html, "/config/mqtt") != nullptr);
+	CHECK(strstr(html, "/config/polling") != nullptr);
+}
+
 TEST_CASE("portal config: reboot-to-normal html includes runtime redirect probe")
 {
 	const char *html = portalRebootToNormalHtml();

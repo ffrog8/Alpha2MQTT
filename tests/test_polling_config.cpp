@@ -500,6 +500,27 @@ TEST_CASE("legacy reader preserves freqNever defaults when legacy key is absent"
 	CHECK(std::string(out).empty());
 }
 
+TEST_CASE("legacy reader existence probe ignores default-only values")
+{
+	mqttState entities[2]{};
+	entities[0] = makeEntity(mqttEntityId::entityA2mVersion,
+	                         "A2M_version",
+	                         mqttUpdateFreq::freqOneDay,
+	                         homeAssistantClass::haClassNone);
+	entities[1] = makeEntity(mqttEntityId::entityStateOfCharge,
+	                         "State_of_Charge",
+	                         mqttUpdateFreq::freqOneMin,
+	                         homeAssistantClass::haClassMeasurement);
+
+	LegacyReaderCapture capture{};
+	capture.values[0] = static_cast<int>(mqttUpdateFreq::freqOneDay);
+	capture.values[1] = static_cast<int>(mqttUpdateFreq::freqOneMin);
+	CHECK_FALSE(legacyPollingOverridesExist(entities, 2, captureLegacyValue, &capture));
+
+	capture.values[1] = static_cast<int>(mqttUpdateFreq::freqTenSec);
+	CHECK(legacyPollingOverridesExist(entities, 2, captureLegacyValue, &capture));
+}
+
 TEST_CASE("legacy reader surfaces read failures")
 {
 	mqttState entities[1]{};
@@ -601,6 +622,26 @@ TEST_CASE("assignment builder emits stable name overrides and round-trips")
 	uint32_t dup = 0;
 	CHECK(applyBucketMapString(out, entities, 2, roundTrip, unknown, invalid, dup));
 	CHECK(roundTrip[1] == BucketId::User);
+}
+
+TEST_CASE("assignment length estimate matches exact persisted override size")
+{
+	mqttState entities[3]{};
+	entities[0] = makeEntity(mqttEntityId::entityOpMode, "Op_Mode", mqttUpdateFreq::freqTenSec, homeAssistantClass::haClassSelect);
+	entities[1] = makeEntity(mqttEntityId::entitySocTarget, "SOC_Target", mqttUpdateFreq::freqOneMin, homeAssistantClass::haClassNumber);
+	entities[2] = makeEntity(mqttEntityId::entityA2MUptime, "A2M_uptime", mqttUpdateFreq::freqTenSec, homeAssistantClass::haClassNumber);
+
+	BucketId buckets[3] = { BucketId::TenSec, BucketId::User, BucketId::Disabled };
+	size_t applied = 0;
+	const size_t estimated = estimateBucketMapFromAssignmentsLength(entities, 3, buckets, applied);
+	std::vector<char> out(estimated + 1);
+	size_t builtApplied = 0;
+
+	CHECK(applied == 2);
+	REQUIRE(buildBucketMapFromAssignments(entities, 3, buckets, out.data(), out.size(), builtApplied));
+	CHECK(builtApplied == applied);
+	CHECK(std::strlen(out.data()) == estimated);
+	CHECK(std::string(out.data()) == "SOC_Target=user;A2M_uptime=disabled;");
 }
 
 TEST_CASE("assignment builder preserves explicit disabled overrides for freqNever entities")
