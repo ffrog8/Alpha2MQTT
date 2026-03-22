@@ -1495,12 +1495,11 @@ beginWifiStationWithStoredCredentials(void)
 static bool
 syncPortalWifiCredentials(WiFiManager *wifiManager, const char *ssidHint, const char *passHint)
 {
-	// Treat empty hints as "unknown" rather than authoritative. AP onboarding can
-	// reach this path after a successful live connect even when the earlier callback
-	// snapshot dropped the submitted password. Fall back to WiFiManager's current
-	// form state before deciding that the network is open.
-	const bool ssidProvided = ssidHint != nullptr && ssidHint[0] != '\0';
-	const bool passProvided = passHint != nullptr && passHint[0] != '\0';
+		// An empty password can be intentional for open networks, so only nullptr means
+		// "unknown". Fall back to WiFiManager's current form state only when no password
+		// hint was supplied at all.
+		const bool ssidProvided = ssidHint != nullptr && ssidHint[0] != '\0';
+		const bool passProvided = passHint != nullptr;
 	String ssid = ssidProvided ? String(ssidHint) : String();
 	String pass = passProvided ? String(passHint) : String();
 
