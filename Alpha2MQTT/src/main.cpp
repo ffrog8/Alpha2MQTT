@@ -2196,10 +2196,11 @@ handlePortalWifiSave(WiFiManager& wifiManager)
 		return;
 	}
 
+	const bool credentialsChanged = appConfig.wifiSSID != ssid || appConfig.wifiPass != pass;
 	appConfig.wifiSSID = ssid;
 	appConfig.wifiPass = pass;
 	persistUserWifiCredentials(appConfig.wifiSSID.c_str(), appConfig.wifiPass.c_str());
-	portalWifiCredentialsChanged = true;
+	portalWifiCredentialsChanged = portalWifiCredentialsChanged || credentialsChanged;
 	capturePortalActiveStaConnection();
 	wifiManager.server->sendHeader("Location", "/0wifi?saved=1");
 	wifiManager.server->send(302, "text/plain", "");
@@ -2351,6 +2352,61 @@ handlePortalStatusRequest(WiFiManager& wifiManager)
 		return;
 	}
 
+	struct PortalStatusSnapshot {
+		PortalStatus status;
+		bool needsMqttConfig;
+		BootIntent bootIntent;
+		BootMode bootMode;
+		BootMode diagnosticsMode;
+		WiFiMode_t wifiMode;
+		wl_status_t staStatus;
+		IPAddress apIp;
+		int lastDisconnectReason;
+		int rssi;
+		int channel;
+		unsigned int freeHeap;
+		unsigned int maxFreeBlock;
+		unsigned int heapFrag;
+		unsigned long uptimeMs;
+		char statusReason[sizeof(portalStatusReason)];
+		char statusSsid[sizeof(portalStatusSsid)];
+		char statusIp[sizeof(portalStatusIp)];
+		char targetSsid[kPrefWifiSsidMaxLen + 1];
+		char resetReason[sizeof(lastResetReason)];
+		char disconnectLabel[sizeof(portalLastDisconnectLabel)];
+	};
+
+	PortalStatusSnapshot snapshot{};
+	snapshot.status = portalStatus;
+	snapshot.needsMqttConfig = portalNeedsMqttConfig;
+	snapshot.bootIntent = currentBootIntent;
+	snapshot.bootMode = currentBootMode;
+	snapshot.diagnosticsMode = bootModeForDiagnostics;
+	snapshot.wifiMode = WiFi.getMode();
+	snapshot.staStatus = WiFi.status();
+	snapshot.apIp = WiFi.softAPIP();
+	snapshot.lastDisconnectReason = portalLastDisconnectReason;
+	snapshot.rssi = WiFi.RSSI();
+	snapshot.channel = WiFi.channel();
+#if defined(MP_ESP8266)
+	snapshot.freeHeap = ESP.getFreeHeap();
+	snapshot.maxFreeBlock = ESP.getMaxFreeBlockSize();
+	snapshot.heapFrag = ESP.getHeapFragmentation();
+#else
+	snapshot.freeHeap = ESP.getFreeHeap();
+	snapshot.maxFreeBlock = 0;
+	snapshot.heapFrag = 0;
+#endif
+	snapshot.uptimeMs = millis();
+	strlcpy(snapshot.statusReason, portalStatusReason, sizeof(snapshot.statusReason));
+	strlcpy(snapshot.statusSsid, portalStatusSsid, sizeof(snapshot.statusSsid));
+	strlcpy(snapshot.statusIp, portalStatusIp, sizeof(snapshot.statusIp));
+	strlcpy(snapshot.targetSsid,
+	        appConfig.wifiSSID.length() > 0 ? appConfig.wifiSSID.c_str() : portalStatusSsid,
+	        sizeof(snapshot.targetSsid));
+	strlcpy(snapshot.resetReason, lastResetReason, sizeof(snapshot.resetReason));
+	strlcpy(snapshot.disconnectLabel, portalLastDisconnectLabel, sizeof(snapshot.disconnectLabel));
+
 	char buf[256];
 	static const char kHead[] PROGMEM =
 		"<!DOCTYPE html><html><head>"
@@ -2368,18 +2424,18 @@ handlePortalStatusRequest(WiFiManager& wifiManager)
 			return false;
 		}
 
-		snprintf(buf, sizeof(buf), "<h2>WiFi Status: %s</h2>", portalStatusLabel(portalStatus));
+		snprintf(buf, sizeof(buf), "<h2>WiFi Status: %s</h2>", portalStatusLabel(snapshot.status));
 		if (!writer.write(buf)) {
 			return false;
 		}
 
-		if (portalStatus == portalStatusSuccess) {
-			snprintf(buf, sizeof(buf), "<p>Connected SSID: %s<br>IP: %s</p>", portalStatusSsid, portalStatusIp);
+		if (snapshot.status == portalStatusSuccess) {
+			snprintf(buf, sizeof(buf), "<p>Connected SSID: %s<br>IP: %s</p>", snapshot.statusSsid, snapshot.statusIp);
 			if (!writer.write(buf)) {
 				return false;
 			}
-			if (currentBootMode == BootMode::WifiConfig && appConfig.wifiSSID.length() > 0 &&
-			    strcmp(portalStatusSsid, appConfig.wifiSSID.c_str()) != 0) {
+			if (snapshot.bootMode == BootMode::WifiConfig && appConfig.wifiSSID.length() > 0 &&
+			    strcmp(snapshot.statusSsid, appConfig.wifiSSID.c_str()) != 0) {
 				snprintf(buf,
 				         sizeof(buf),
 				         "<p>Saved WiFi for next reboot: %s</p>",
@@ -2388,20 +2444,20 @@ handlePortalStatusRequest(WiFiManager& wifiManager)
 					return false;
 				}
 			}
-			if (portalNeedsMqttConfig) {
+			if (snapshot.needsMqttConfig) {
 				if (!writer.write("<p><strong>MQTT settings not set.</strong> Redirecting to MQTT settings...</p>") ||
 				    !writer.write("<p><a href=\"/config/mqtt\">Open MQTT settings</a></p>") ||
 				    !writer.write("<script>setTimeout(function(){window.location.href='/config/mqtt';},500);</script>")) {
 					return false;
 				}
 			}
-		} else if (portalStatus == portalStatusFailed) {
-			snprintf(buf, sizeof(buf), "<p>Reason: %s</p>", portalStatusReason);
+		} else if (snapshot.status == portalStatusFailed) {
+			snprintf(buf, sizeof(buf), "<p>Reason: %s</p>", snapshot.statusReason);
 			if (!writer.write(buf)) {
 				return false;
 			}
 		} else {
-			if (currentBootMode == BootMode::WifiConfig) {
+			if (snapshot.bootMode == BootMode::WifiConfig) {
 				if (!writer.write("<p>Portal active. WiFi changes apply on reboot.</p>")) {
 					return false;
 				}
@@ -2415,17 +2471,15 @@ handlePortalStatusRequest(WiFiManager& wifiManager)
 		if (!writer.writeP(kDiagOpen)) {
 			return false;
 		}
-		snprintf(buf, sizeof(buf), "Mode: %s", wifiModeLabel(WiFi.getMode()));
+		snprintf(buf, sizeof(buf), "Mode: %s", wifiModeLabel(snapshot.wifiMode));
 		if (!writer.write(buf)) {
 			return false;
 		}
 
 		// Only show SoftAP info when it is actually enabled; MODE_WIFI_CONFIG uses STA-only portal.
-		WiFiMode_t mode = WiFi.getMode();
-		if (mode == WIFI_AP || mode == WIFI_AP_STA) {
-			IPAddress apIp = WiFi.softAPIP();
+		if (snapshot.wifiMode == WIFI_AP || snapshot.wifiMode == WIFI_AP_STA) {
 			snprintf(buf, sizeof(buf), "<br>SoftAP SSID: %s<br>SoftAP IP: %u.%u.%u.%u",
-			         deviceName, apIp[0], apIp[1], apIp[2], apIp[3]);
+			         deviceName, snapshot.apIp[0], snapshot.apIp[1], snapshot.apIp[2], snapshot.apIp[3]);
 			if (!writer.write(buf)) {
 				return false;
 			}
@@ -2435,37 +2489,43 @@ handlePortalStatusRequest(WiFiManager& wifiManager)
 			}
 		}
 
-		wl_status_t staStatus = WiFi.status();
-		snprintf(buf, sizeof(buf), "<br>STA status: %s (%d)", wifiStatusLabel(staStatus), static_cast<int>(staStatus));
+		snprintf(buf,
+		         sizeof(buf),
+		         "<br>STA status: %s (%d)",
+		         wifiStatusLabel(snapshot.staStatus),
+		         static_cast<int>(snapshot.staStatus));
 		if (!writer.write(buf)) {
 			return false;
 		}
 
-		const char *targetSsid = appConfig.wifiSSID.length() > 0 ? appConfig.wifiSSID.c_str() : portalStatusSsid;
-		snprintf(buf, sizeof(buf), "<br>Target SSID: %s", targetSsid);
+		snprintf(buf, sizeof(buf), "<br>Target SSID: %s", snapshot.targetSsid);
 		if (!writer.write(buf)) {
 			return false;
 		}
 
 		snprintf(buf, sizeof(buf), "<br>Boot intent: %s<br>Boot mode: %s",
-		         bootIntentToString(currentBootIntent),
-		         bootModeToString(bootModeForDiagnostics));
+		         bootIntentToString(snapshot.bootIntent),
+		         bootModeToString(snapshot.diagnosticsMode));
 		if (!writer.write(buf)) {
 			return false;
 		}
 
-		snprintf(buf, sizeof(buf), "<br>Reset reason: %s", lastResetReason);
+		snprintf(buf, sizeof(buf), "<br>Reset reason: %s", snapshot.resetReason);
 		if (!writer.write(buf)) {
 			return false;
 		}
 
-		snprintf(buf, sizeof(buf), "<br>Last disconnect: %s (%d)", portalLastDisconnectLabel, portalLastDisconnectReason);
+		snprintf(buf,
+		         sizeof(buf),
+		         "<br>Last disconnect: %s (%d)",
+		         snapshot.disconnectLabel,
+		         snapshot.lastDisconnectReason);
 		if (!writer.write(buf)) {
 			return false;
 		}
 
-		if (staStatus == WL_CONNECTED) {
-			snprintf(buf, sizeof(buf), "<br>RSSI: %d dBm<br>Channel: %d", WiFi.RSSI(), WiFi.channel());
+		if (snapshot.staStatus == WL_CONNECTED) {
+			snprintf(buf, sizeof(buf), "<br>RSSI: %d dBm<br>Channel: %d", snapshot.rssi, snapshot.channel);
 			if (!writer.write(buf)) {
 				return false;
 			}
@@ -2473,15 +2533,15 @@ handlePortalStatusRequest(WiFiManager& wifiManager)
 
 #if defined(MP_ESP8266)
 		snprintf(buf, sizeof(buf), "<br>Heap: free=%u max=%u frag=%u",
-		         ESP.getFreeHeap(), ESP.getMaxFreeBlockSize(), ESP.getHeapFragmentation());
+		         snapshot.freeHeap, snapshot.maxFreeBlock, snapshot.heapFrag);
 #else
-		snprintf(buf, sizeof(buf), "<br>Heap free=%u", ESP.getFreeHeap());
+		snprintf(buf, sizeof(buf), "<br>Heap free=%u", snapshot.freeHeap);
 #endif
 		if (!writer.write(buf)) {
 			return false;
 		}
 
-		snprintf(buf, sizeof(buf), "<br>Uptime (ms): %lu</p>", static_cast<unsigned long>(millis()));
+		snprintf(buf, sizeof(buf), "<br>Uptime (ms): %lu</p>", snapshot.uptimeMs);
 		if (!writer.write(buf)) {
 			return false;
 		}
