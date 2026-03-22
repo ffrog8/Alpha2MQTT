@@ -2139,7 +2139,9 @@ handlePortalWifiPage(WiFiManager& wifiManager)
 	}
 
 	const bool saved = wifiManager.server->hasArg("saved");
-	const bool err = wifiManager.server->hasArg("err");
+	const String errCode = wifiManager.server->arg("err");
+	const bool errSsid = errCode == "ssid";
+	const bool errPass = errCode == "pass";
 
 	char escaped[6 * kPrefWifiPasswordMaxLen] = "";
 	static const char kHead[] PROGMEM =
@@ -2155,11 +2157,17 @@ handlePortalWifiPage(WiFiManager& wifiManager)
 		"<p>Saving WiFi here tests the connection immediately and continues onboarding if it succeeds.</p>";
 	static const char kSaved[] PROGMEM =
 		"<p><strong>Saved.</strong> The current WiFi session stays active until reboot.</p>";
-	static const char kErr[] PROGMEM =
+	static const char kErrSsid[] PROGMEM =
 		"<p><strong>WiFi SSID is required.</strong></p>";
-	static const char kTail[] PROGMEM =
+	static const char kErrPass[] PROGMEM =
+		"<p><strong>Enter a password for a different SSID, or check Open network.</strong></p>";
+	static const char kTailSta[] PROGMEM =
 		"<p>Leave the password blank to keep the saved password for this SSID.</p>"
 		"<p>Check Open network to clear the saved password.</p>"
+		"<p><button type=\"submit\">Save WiFi</button></p>"
+		"</form></body></html>";
+	static const char kTailAp[] PROGMEM =
+		"<p>Leave the password blank for open networks.</p>"
 		"<p><button type=\"submit\">Save WiFi</button></p>"
 		"</form></body></html>";
 	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
@@ -2178,7 +2186,10 @@ handlePortalWifiPage(WiFiManager& wifiManager)
 		if (saved && !writer.writeP(kSaved)) {
 			return false;
 		}
-		if (err && !writer.writeP(kErr)) {
+		if (errSsid && !writer.writeP(kErrSsid)) {
+			return false;
+		}
+		if (errPass && !writer.writeP(kErrPass)) {
 			return false;
 		}
 		if (!writePortalMenuButton(writer, "/", "Menu", "get") ||
@@ -2198,12 +2209,15 @@ handlePortalWifiPage(WiFiManager& wifiManager)
 		                  "autocomplete=\"new-password\"></p>")) {
 			return false;
 		}
-		if (!writer.write(
-		        "<p><label><input name=\"open\" type=\"checkbox\" value=\"1\"> Open network / clear saved "
-		        "password</label></p>")) {
-			return false;
+		if (currentBootMode == BootMode::WifiConfig) {
+			if (!writer.write(
+			        "<p><label><input name=\"open\" type=\"checkbox\" value=\"1\"> Open network / clear saved "
+			        "password</label></p>")) {
+				return false;
+			}
+			return writer.writeP(kTailSta);
 		}
-		return writer.writeP(kTail);
+		return writer.writeP(kTailAp);
 	};
 
 	PortalResponseWriter counter;
@@ -2240,16 +2254,22 @@ handlePortalWifiSave(WiFiManager& wifiManager)
 	const String passArg = wifiManager.server->arg("p");
 	const bool openNetworkRequested = wifiManager.server->hasArg("open");
 	if (ssid.length() == 0) {
-		wifiManager.server->sendHeader("Location", "/0wifi?err=1");
+		wifiManager.server->sendHeader("Location", "/0wifi?err=ssid");
+		wifiManager.server->send(302, "text/plain", "");
+		return;
+	}
+
+	const bool keepExistingPassword = portalWifiSaveKeepsExistingPassword(
+		appConfig.wifiSSID.c_str(), ssid.c_str(), passArg.c_str(), openNetworkRequested);
+	if (!portalWifiSaveAllowsBlankPassword(
+	        appConfig.wifiSSID.c_str(), ssid.c_str(), passArg.c_str(), openNetworkRequested)) {
+		wifiManager.server->sendHeader("Location", "/0wifi?err=pass");
 		wifiManager.server->send(302, "text/plain", "");
 		return;
 	}
 
 	String pass = passArg;
-	if (portalWifiSaveKeepsExistingPassword(appConfig.wifiSSID.c_str(),
-	                                        ssid.c_str(),
-	                                        passArg.c_str(),
-	                                        openNetworkRequested)) {
+	if (keepExistingPassword) {
 		pass = appConfig.wifiPass;
 	}
 	const bool credentialsChanged = appConfig.wifiSSID != ssid || appConfig.wifiPass != pass;

@@ -64,6 +64,14 @@ TEST_CASE("portal config: wifi save keeps saved password only for same-ssid blan
 	CHECK_FALSE(portalWifiSaveKeepsExistingPassword("", "home", "", false));
 }
 
+TEST_CASE("portal config: blank wifi passwords require explicit open-network intent for a different ssid")
+{
+	CHECK(portalWifiSaveAllowsBlankPassword("home", "home", "", false));
+	CHECK(portalWifiSaveAllowsBlankPassword("home", "guest", "newpass", false));
+	CHECK(portalWifiSaveAllowsBlankPassword("home", "guest", "", true));
+	CHECK_FALSE(portalWifiSaveAllowsBlankPassword("home", "guest", "", false));
+}
+
 TEST_CASE("portal config: menu includes update and no exit")
 {
 	PortalMenu menu = portalMenuDefault();

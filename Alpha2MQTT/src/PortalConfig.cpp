@@ -221,6 +221,21 @@ portalWifiSaveKeepsExistingPassword(const char *savedSsid,
 	return std::strcmp(savedSsid, requestedSsid) == 0;
 }
 
+bool
+portalWifiSaveAllowsBlankPassword(const char *savedSsid,
+                                  const char *requestedSsid,
+                                  const char *submittedPass,
+                                  bool openNetworkRequested)
+{
+	if (submittedPass != nullptr && submittedPass[0] != '\0') {
+		return true;
+	}
+	if (openNetworkRequested) {
+		return true;
+	}
+	return portalWifiSaveKeepsExistingPassword(savedSsid, requestedSsid, submittedPass, openNetworkRequested);
+}
+
 const char *
 portalMenuPollingHtml(void)
 {
