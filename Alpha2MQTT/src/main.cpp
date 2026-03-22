@@ -5956,10 +5956,11 @@ setupWifi(bool initialConnect)
 
 		const int maxTries = bootConnectPhase ? kInitialWifiConnectMaxTries : kWifiReconnectMaxTries;
 		if (tries == maxTries) {
+			BootIntent failureIntent = BootIntent::Normal;
 			if (bootConnectPhase) {
 				switch (initialWifiFailureAction(currentBootMode, currentBootIntent)) {
 				case InitialWifiFailureAction::RebootApConfig:
-					setBootIntentAndReboot(BootIntent::ApConfig);
+					failureIntent = BootIntent::ApConfig;
 					break;
 				case InitialWifiFailureAction::ContinueReconnect:
 				default:
@@ -5970,7 +5971,7 @@ setupWifi(bool initialConnect)
 					continue;
 				}
 			}
-			setBootIntentAndReboot(BootIntent::Normal);
+			setBootIntentAndReboot(failureIntent);
 		}
 #ifdef BUTTON_PIN
 		// Read button state
