@@ -624,6 +624,7 @@ const char* wifiModeLabel(WiFiMode_t mode);
 void handlePortalStatusRequest(WiFiManager& wifiManager);
 void handlePortalRebootNormalRequest(WiFiManager& wifiManager);
 bool portalHasPersistedWifiCredentials(void);
+static bool portalRequestHasMqttFields(WiFiManager &wifiManager);
 void configHandlerSta(void);
 const char *portalCustomHeadScript(void);
 static inline bool isMqttPumpBlocked(void);
@@ -4110,6 +4111,12 @@ configHandlerSta(void)
 	});
 
 	wifiManager.setSaveParamsCallback([&]() {
+		if (!portalRequestHasMqttFields(wifiManager)) {
+#ifdef DEBUG_OVER_SERIAL
+			portalLog("Ignoring saveParams callback without MQTT fields.");
+#endif
+			return;
+		}
 		int port = strtol(gPortalMqttPort.getValue(), NULL, 10);
 		if (port < 0 || port > SHRT_MAX) {
 			port = 0;
@@ -4373,6 +4380,12 @@ configHandler(void)
 	// Persist MQTT parameters when /paramsave is used, independent of WiFi success/failure.
 	// Keeping this separate avoids WiFi saves clobbering MQTT values.
 	wifiManager.setSaveParamsCallback([&]() {
+		if (!portalRequestHasMqttFields(wifiManager)) {
+#ifdef DEBUG_OVER_SERIAL
+			portalLog("Ignoring saveParams callback without MQTT fields.");
+#endif
+			return;
+		}
 		int port = strtol(gPortalMqttPort.getValue(), NULL, 10);
 		if (port < 0 || port > SHRT_MAX) {
 			port = 0;
@@ -4720,6 +4733,19 @@ portalHasPersistedWifiCredentials(void)
 	preferences.end();
 
 	return ssid[0] != '\0';
+}
+
+static bool
+portalRequestHasMqttFields(WiFiManager &wifiManager)
+{
+	if (!wifiManager.server) {
+		return false;
+	}
+	return wifiManager.server->hasArg("server") ||
+	       wifiManager.server->hasArg("port") ||
+	       wifiManager.server->hasArg("user") ||
+	       wifiManager.server->hasArg("mpass") ||
+	       wifiManager.server->hasArg("inverter_label");
 }
 
 bool

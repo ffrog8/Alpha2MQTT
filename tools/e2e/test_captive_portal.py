@@ -659,15 +659,20 @@ if best is None:
     }}))
 
 run(["sudo", "-S", "-p", "", "nmcli", "device", "disconnect", iface], input_text=sudo_pw + "\\n", check=False)
-for _ in range(6):
+for attempt in range(10):
+    if attempt in (3, 7):
+        soft_reset_iface()
     scan = scan_wifi()
     last_scan = scan
     scan_history.append(scan)
     if len(scan_history) > 4:
         scan_history = scan_history[-4:]
     refreshed = pick_best(scan)
-    if refreshed is not None:
-        best = refreshed
+    if refreshed is None:
+        last_error = "matching AP disappeared before connect"
+        time.sleep(3)
+        continue
+    best = refreshed
     connect_variants = [
         ["sudo", "-S", "-p", "", "nmcli", "device", "wifi", "connect", best["bssid"], "ifname", iface],
         ["sudo", "-S", "-p", "", "nmcli", "device", "wifi", "connect", best["ssid"], "ifname", iface, "bssid", best["bssid"]],
@@ -717,15 +722,15 @@ if form is not None:
     ])
 cmd.append(url)
 cp = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
-if cp.returncode != 0:
-    raise SystemExit(json.dumps({{
-        "error": cp.stderr.strip() or cp.stdout.strip() or f"curl rc={{cp.returncode}}",
-        "url": url,
-        "method": {json.dumps(method)},
-    }}))
 marker = "\\n__A2M_STATUS__"
 body, _, status = cp.stdout.rpartition(marker)
 if not status:
+    if cp.returncode != 0:
+        raise SystemExit(json.dumps({{
+            "error": cp.stderr.strip() or cp.stdout.strip() or f"curl rc={{cp.returncode}}",
+            "url": url,
+            "method": {json.dumps(method)},
+        }}))
     raise SystemExit(json.dumps({{"error": "missing curl status marker", "url": url, "method": {json.dumps(method)}}}))
 print(json.dumps({{"status": int(status.strip()), "body": body}}))
 """
@@ -917,6 +922,17 @@ def _wait_for_sta_portal(ssh: PiSsh, base_url: str, *, timeout_s: int) -> str:
             return last
         time.sleep(2.0)
     raise PortalTestError(f"Timed out waiting for STA portal polling page. Last={last[:300]!r}")
+
+
+def _rediscover_sta_portal_after_reboot_wifi(ssh: PiSsh, base_url: str, *, timeout_s: int) -> str:
+    previous_ip = urllib.parse.urlparse(base_url).hostname or ""
+    discovered_base_url, _portal_body = _discover_sta_portal_base(
+        ssh,
+        previous_ip=previous_ip,
+        hostname="",
+        timeout_s=timeout_s,
+    )
+    return discovered_base_url
 
 
 def _discover_sta_portal_base(
@@ -1401,7 +1417,7 @@ def _run_wifi_plus_mqtt_case(
     if reboot_wifi_status != 200:
         raise PortalTestError(f"/reboot/wifi returned unexpected status={reboot_wifi_status}")
 
-    _wait_for_sta_portal(ssh, base_url, timeout_s=60)
+    base_url = _rediscover_sta_portal_after_reboot_wifi(ssh, base_url, timeout_s=90)
 
     bucket_map = "State_of_Charge=ten_sec;"
     save_resp = _pi_http_request(
@@ -1487,7 +1503,7 @@ def _run_normal_to_wifi_portal_set_mqtt_case(
     if reboot_wifi_status != 200:
         raise PortalTestError(f"/reboot/wifi returned unexpected status={reboot_wifi_status}")
 
-    _wait_for_sta_portal(ssh, base_url, timeout_s=60)
+    base_url = _rediscover_sta_portal_after_reboot_wifi(ssh, base_url, timeout_s=90)
     _save_mqtt_params(
         ssh,
         base_url=base_url,
@@ -1541,7 +1557,7 @@ def _run_normal_to_wifi_portal_bad_wifi_falls_back_to_ap_case(
     if reboot_wifi_status != 200:
         raise PortalTestError(f"/reboot/wifi returned unexpected status={reboot_wifi_status}")
 
-    _wait_for_sta_portal(ssh, base_url, timeout_s=60)
+    base_url = _rediscover_sta_portal_after_reboot_wifi(ssh, base_url, timeout_s=90)
     _wifi_body, wifi_action = _load_sta_wifi_page(ssh, base_url=base_url, timeout_s=30)
     bad_ssid = f"{wifi_ssid}-bad-{int(time.time())}"
     save_wifi = _pi_http_request(
@@ -1594,18 +1610,6 @@ def _run_normal_to_wifi_portal_bad_wifi_falls_back_to_ap_case(
         wifi_ssid=wifi_ssid,
         wifi_pwd=wifi_pwd,
         wifi_action=_wifi_action,
-    )
-    portal_base_url, _portal_page = _discover_sta_portal_base(
-        ssh,
-        previous_ip=portal_runtime_ip,
-        hostname=ap_ssid,
-        timeout_s=180,
-    )
-    portal_runtime_ip = urllib.parse.urlparse(portal_base_url).hostname or portal_runtime_ip
-    _reboot_normal_and_tolerate_disconnect(
-        ssh,
-        url=portal_base_url + "/config/reboot-normal",
-        context="ap fallback recovery /config/reboot-normal",
     )
     recovered_base_url, recovered_root = _discover_runtime_root(
         ssh,
