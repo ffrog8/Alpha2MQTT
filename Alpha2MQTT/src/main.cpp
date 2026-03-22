@@ -2059,7 +2059,7 @@ handlePortalMenuPage(WiFiManager& wifiManager)
 	}
 
 	const wl_status_t staStatus = WiFi.status();
-	const IPAddress ip = WiFi.localIP();
+	const IPAddress ip = (currentBootMode == BootMode::ApConfig) ? WiFi.softAPIP() : WiFi.localIP();
 	char buf[192];
 	static const char kMenuHead[] PROGMEM =
 		"<!DOCTYPE html><html><head>"
@@ -4037,10 +4037,9 @@ void setup()
 			configHandler();
 			return;
 		}
-		setupWifi(true);
-		updateOLED(false, "WiFi", "config", "portal");
-		configHandlerSta();
-		return;
+			updateOLED(false, "WiFi", "config", "portal");
+			configHandlerSta();
+			return;
 	}
 
 	if (bootPlan.wifiSta) {
