@@ -597,6 +597,8 @@ static void refreshPortalCustomParameters(void);
 static bool isWifiConfigComplete(void);
 static bool isMqttConfigComplete(void);
 static bool mqttSubsystemEnabled(void);
+static BootIntent portalNormalRebootIntent(void);
+static bool shouldFallbackToApPortalAfterInitialWifiFailure(void);
 bool inverterLabelOverrideIsValid(const char *labelOverride);
 bool applyLegacyBucketMapString(const char *map,
                                 const mqttState *entities,
@@ -2653,6 +2655,7 @@ handlePortalRebootNormalRequest(WiFiManager& wifiManager)
 	portalNeedsMqttConfig = false;
 	portalRebootScheduled = true;
 	portalRebootAt = millis() + 1500;
+	deferredControlPlaneRebootIntent = portalNormalRebootIntent();
 }
 
 static constexpr uint8_t kPollingPortalPageSize = 8;
@@ -2965,12 +2968,6 @@ loadPollingBucketsForPortal(const mqttState *entities,
 				preferences.end();
 				return false;
 			}
-		} else if (usePersistedOnly) {
-#ifdef DEBUG_OVER_SERIAL
-			portalLog("portal polling load: no persisted map in portal mode; using defaults");
-#endif
-			preferences.end();
-			return true;
 		} else if (!legacyMigrated) {
 			if (!legacyPollingOverridesExist(entities, entityCount, readLegacyPollingPref, &preferences)) {
 #ifdef DEBUG_OVER_SERIAL
@@ -3591,11 +3588,11 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 	portalRebootScheduled = false;
 	portalMqttSaved = false;
 
-	// Optional hidden reboot for E2E; not shown in UI.
-	if (wifiManager.server->hasArg("reboot") && wifiManager.server->arg("reboot") == "1") {
-		setBootIntentAndReboot(BootIntent::Normal);
-		return;
-	}
+		// Optional hidden reboot for E2E; not shown in UI.
+		if (wifiManager.server->hasArg("reboot") && wifiManager.server->arg("reboot") == "1") {
+			setBootIntentAndReboot(portalNormalRebootIntent());
+			return;
+		}
 
 	char location[96];
 	snprintf(location,
@@ -4192,10 +4189,10 @@ configHandlerSta(void)
 				portalLog("MQTT configured and WiFi credentials present; reboot scheduled.");
 #endif
 			}
-		}
-		if (portalRebootScheduled && static_cast<long>(millis() - portalRebootAt) >= 0) {
-			setBootIntentAndReboot(BootIntent::Normal);
-		}
+				}
+				if (portalRebootScheduled && static_cast<long>(millis() - portalRebootAt) >= 0) {
+					setBootIntentAndReboot(portalNormalRebootIntent());
+				}
 
 		diagDelay(50);
 	}
@@ -4508,15 +4505,15 @@ configHandler(void)
 				// - MQTT configured: reboot straight to normal runtime.
 				// - MQTT missing: reboot into the STA-only WiFi config portal on the known LAN IP.
 				unsigned long statusStart = millis();
-				while (millis() - statusStart < 3000) {
-					wifiManager.process();
-					diagDelay(50);
-				}
-				if (postWifiAction == PortalPostWifiAction::Reboot) {
-					setBootIntentAndReboot(BootIntent::Normal);
-				} else {
-					setBootIntentAndReboot(BootIntent::WifiConfig);
-				}
+					while (millis() - statusStart < 3000) {
+						wifiManager.process();
+						diagDelay(50);
+					}
+					if (postWifiAction == PortalPostWifiAction::Reboot) {
+						setBootIntentAndReboot(portalNormalRebootIntent());
+					} else {
+						setBootIntentAndReboot(BootIntent::WifiConfig);
+					}
 				}
 
 			if (portalConnectStart > 0 && millis() - portalConnectStart >= 20000) {
@@ -4553,7 +4550,7 @@ configHandler(void)
 				}
 			}
 			if (portalRebootScheduled && static_cast<long>(millis() - portalRebootAt) >= 0) {
-				setBootIntentAndReboot(BootIntent::Normal);
+				setBootIntentAndReboot(portalNormalRebootIntent());
 			}
 			diagDelay(50);
 		}
@@ -5957,7 +5954,12 @@ setupWifi(bool initialConnect)
 
 		const int maxTries = initialConnect ? kInitialWifiConnectMaxTries : kWifiReconnectMaxTries;
 		if (tries == maxTries) {
-			setBootIntentAndReboot(initialConnect ? BootIntent::ApConfig : BootIntent::Normal);
+			const BootIntent failureIntent =
+				!initialConnect
+					? BootIntent::Normal
+					: (shouldFallbackToApPortalAfterInitialWifiFailure() ? BootIntent::ApConfig
+					                                                     : BootIntent::Normal);
+			setBootIntentAndReboot(failureIntent);
 		}
 #ifdef BUTTON_PIN
 		// Read button state
@@ -6477,6 +6479,7 @@ updateRunstate()
 		updateOLED(false, line2, line3, line4);
 	}
 }
+
 #else // LARGE_DISPLAY
 void updateRunstate()
 {
@@ -6578,8 +6581,22 @@ void updateRunstate()
 
 		updateOLED(false, line2, line3, line4);
 	}
+	}
+	#endif // DISABLE_DISPLAY
+
+static BootIntent
+portalNormalRebootIntent(void)
+{
+	return (currentBootMode == BootMode::ApConfig || currentBootMode == BootMode::WifiConfig)
+		       ? BootIntent::PortalNormal
+		       : BootIntent::Normal;
 }
-#endif // DISABLE_DISPLAY
+
+static bool
+shouldFallbackToApPortalAfterInitialWifiFailure(void)
+{
+	return currentBootMode == BootMode::WifiConfig || currentBootIntent == BootIntent::PortalNormal;
+}
 
 
 
@@ -7717,6 +7734,16 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 			_mqtt.publish(stubTopic, stubAddition, MQTT_RETAIN);
 			maybeYield();
 		}
+	}
+#else
+	static bool clearedRetainedStubStatus = false;
+	if (!clearedRetainedStubStatus) {
+		char stubTopic[160];
+		snprintf(stubTopic, sizeof(stubTopic), "%s/stub", statusTopic);
+		if (_mqtt.publish(stubTopic, "", MQTT_RETAIN)) {
+			clearedRetainedStubStatus = true;
+		}
+		maybeYield();
 	}
 #endif
 }

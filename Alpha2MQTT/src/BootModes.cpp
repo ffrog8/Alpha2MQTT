@@ -61,6 +61,7 @@ bootModeForIntent(BootIntent intent, BootMode currentMode)
 		return BootMode::ApConfig;
 	case BootIntent::WifiConfig:
 		return BootMode::WifiConfig;
+	case BootIntent::PortalNormal:
 	case BootIntent::Normal:
 		return BootMode::Normal;
 	case BootIntent::Ota:
@@ -114,6 +115,8 @@ bootIntentToString(BootIntent intent)
 		return "wifi_config";
 	case BootIntent::Ota:
 		return "ota";
+	case BootIntent::PortalNormal:
+		return "portal_normal";
 	default:
 		return "normal";
 	}
@@ -136,6 +139,9 @@ bootIntentFromString(const char *value)
 	}
 	if (strcmp(value, "ota") == 0) {
 		return BootIntent::Ota;
+	}
+	if (strcmp(value, "portal_normal") == 0) {
+		return BootIntent::PortalNormal;
 	}
 	return BootIntent::Normal;
 }

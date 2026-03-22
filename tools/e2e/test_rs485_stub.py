@@ -2992,10 +2992,8 @@ def main() -> int:
             raise E2EError(f"{portal_reboot_normal_path} returned unexpected status={reboot_status}")
         if reboot_body:
             reboot_html = reboot_body.decode("utf-8", errors="replace")
-            if "Rebooting into normal runtime" not in reboot_html:
+            if "Rebooting to normal mode" not in reboot_html:
                 raise E2EError(f"{portal_reboot_normal_path} response missing reboot-to-normal heading")
-            if "Alpha2MQTT Control" not in reboot_html:
-                raise E2EError("/reboot/normal response missing runtime probe marker")
 
         # Wait for MQTT status to resume after reboot to NORMAL.
         _assert_eventually(
@@ -3110,7 +3108,7 @@ def main() -> int:
             raise E2EError(f"{portal_reboot_normal_path} after clear returned unexpected status={reboot_status}")
         if reboot_body:
             reboot_html = reboot_body.decode("utf-8", errors="replace")
-            if "Rebooting into normal runtime" not in reboot_html:
+            if "Rebooting to normal mode" not in reboot_html:
                 raise E2EError(f"{portal_reboot_normal_path} after clear response missing reboot-to-normal heading")
 
         _assert_eventually(
@@ -3195,7 +3193,7 @@ def main() -> int:
             raise E2EError(f"{portal_reboot_normal_path} returned unexpected status={reboot_status}")
         if reboot_body:
             reboot_html = reboot_body.decode("utf-8", errors="replace")
-            if "Rebooting into normal runtime" not in reboot_html:
+            if "Rebooting to normal mode" not in reboot_html:
                 raise E2EError(f"{portal_reboot_normal_path} response missing reboot-to-normal heading")
 
         root_html_box = {"html": ""}

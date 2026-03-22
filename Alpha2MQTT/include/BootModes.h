@@ -13,6 +13,7 @@ enum class BootIntent : uint8_t {
 	ApConfig = 1,
 	WifiConfig = 2,
 	Ota = 3,
+	PortalNormal = 4,
 };
 
 struct SubsystemStates {
