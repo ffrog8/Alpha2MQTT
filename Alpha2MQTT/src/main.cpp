@@ -139,6 +139,7 @@ bool portalNeedsMqttConfig = false;
 bool portalMqttSaved = false;
 bool portalRebootScheduled = false;
 unsigned long portalRebootAt = 0;
+bool portalWifiCredentialsChanged = false;
 uint8_t portalRouteRebindRetriesRemaining = 0;
 unsigned long portalRouteRebindRetryAt = 0;
 bool deferredControlPlaneRebootScheduled = false;
@@ -1644,15 +1645,14 @@ persistUserPollingConfig(uint32_t intervalSeconds, const char *bucketMap)
 		preferences.getUInt(kPreferencePollInterval, kPollIntervalDefaultSeconds);
 	const bool originalBucketMapPresent = preferences.isKey(kPreferenceBucketMap);
 	const bool originalBucketMapMigrated = preferences.getBool(kPreferenceBucketMapMigrated, false);
-	const size_t originalBucketMapLen =
-		originalBucketMapPresent ? preferences.getBytesLength(kPreferenceBucketMap) : 0;
-	ScopedCharBuffer originalBucketMap(originalBucketMapLen + 1);
+	ScopedCharBuffer originalBucketMap(originalBucketMapPresent ? kPrefBucketMapMaxLen : 1);
 	if (originalBucketMapPresent) {
 		if (!originalBucketMap.ok()) {
 			preferences.end();
 			return false;
 		}
-		preferences.getString(kPreferenceBucketMap, originalBucketMap.data, originalBucketMapLen + 1);
+		originalBucketMap.data[0] = '\0';
+		preferences.getString(kPreferenceBucketMap, originalBucketMap.data, kPrefBucketMapMaxLen);
 	}
 
 	const char *safeBucketMap = (bucketMap != nullptr) ? bucketMap : "";
@@ -2200,6 +2200,7 @@ handlePortalWifiSave(WiFiManager& wifiManager)
 	appConfig.wifiSSID = ssid;
 	appConfig.wifiPass = pass;
 	persistUserWifiCredentials(appConfig.wifiSSID.c_str(), appConfig.wifiPass.c_str());
+	portalWifiCredentialsChanged = true;
 	capturePortalActiveStaConnection();
 	wifiManager.server->sendHeader("Location", "/0wifi?saved=1");
 	wifiManager.server->send(302, "text/plain", "");
@@ -2921,27 +2922,27 @@ loadPollingBucketsForPortal(const mqttState *entities,
 		preferences.begin(DEVICE_NAME, true);
 		outPollIntervalSeconds = clampPollInterval(preferences.getUInt(kPreferencePollInterval, pollIntervalSeconds));
 
-		const size_t persistedMapLen = preferences.getBytesLength(kPreferenceBucketMap);
 		const bool legacyMigrated = preferences.getBool(kPreferenceBucketMapMigrated, false);
 #ifdef DEBUG_OVER_SERIAL
-		portalLog("portal polling load: persistedMapLen=%u legacyMigrated=%u free=%u max=%u frag=%u",
-		          static_cast<unsigned>(persistedMapLen),
+		portalLog("portal polling load: hasPersistedMap=%u legacyMigrated=%u free=%u max=%u frag=%u",
+		          preferences.isKey(kPreferenceBucketMap) ? 1U : 0U,
 		          legacyMigrated ? 1U : 0U,
 		          ESP.getFreeHeap(),
 		          ESP.getMaxFreeBlockSize(),
 		          ESP.getHeapFragmentation());
 #endif
-		if (persistedMapLen > 0) {
-			ScopedCharBuffer persistedMap(persistedMapLen + 1);
+		if (preferences.isKey(kPreferenceBucketMap)) {
+			ScopedCharBuffer persistedMap(kPrefBucketMapMaxLen);
 			if (!persistedMap.ok()) {
 #ifdef DEBUG_OVER_SERIAL
 				portalLog("portal polling load: persistedMap alloc failed len=%u",
-				          static_cast<unsigned>(persistedMapLen + 1));
+				          static_cast<unsigned>(kPrefBucketMapMaxLen));
 #endif
 				preferences.end();
 				return false;
 			}
-			preferences.getString(kPreferenceBucketMap, persistedMap.data, persistedMapLen + 1);
+			persistedMap.data[0] = '\0';
+			preferences.getString(kPreferenceBucketMap, persistedMap.data, kPrefBucketMapMaxLen);
 			uint32_t unknownCount = 0;
 			uint32_t invalidCount = 0;
 			uint32_t duplicateCount = 0;
@@ -4095,6 +4096,7 @@ configHandlerSta(void)
 	portalConnectStart = 0;
 	portalNeedsMqttConfig = !isMqttConfigComplete();
 	portalMqttSaved = false;
+	portalWifiCredentialsChanged = false;
 	portalRebootScheduled = false;
 	portalRebootAt = 0;
 	portalRouteRebindRetriesRemaining = 0;
@@ -4310,6 +4312,7 @@ configHandler(void)
 	portalConnectStart = 0;
 	portalNeedsMqttConfig = false;
 	portalMqttSaved = false;
+	portalWifiCredentialsChanged = false;
 	portalRebootScheduled = false;
 	portalRebootAt = 0;
 	portalRouteRebindRetriesRemaining = 0;
@@ -4451,7 +4454,9 @@ configHandler(void)
 		if (portalStatus == portalStatusConnecting) {
 				if (WiFi.status() == WL_CONNECTED) {
 					portalStatus = portalStatusSuccess;
-					(void)syncPortalWifiCredentials(&wifiManager, portalStatusSsid, portalSubmittedPass);
+					portalWifiCredentialsChanged =
+						syncPortalWifiCredentials(&wifiManager, portalStatusSsid, portalSubmittedPass) ||
+						portalWifiCredentialsChanged;
 					strlcpy(portalStatusIp, WiFi.localIP().toString().c_str(), sizeof(portalStatusIp));
 					invalidatePortalRouteBinding("ap-portal-connected");
 					bindPortalRoutes(wifiManager);
@@ -6586,7 +6591,8 @@ void updateRunstate()
 static BootIntent
 portalNormalRebootIntent(void)
 {
-	return (currentBootMode == BootMode::ApConfig || currentBootMode == BootMode::WifiConfig)
+	return ((currentBootMode == BootMode::ApConfig || currentBootMode == BootMode::WifiConfig) &&
+	        portalWifiCredentialsChanged)
 		       ? BootIntent::PortalNormal
 		       : BootIntent::Normal;
 }
