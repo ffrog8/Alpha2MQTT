@@ -55,6 +55,15 @@ TEST_CASE("portal config: post-wifi action redirects until mqtt config is comple
 	      PortalPostWifiAction::Reboot);
 }
 
+TEST_CASE("portal config: wifi save keeps saved password only for same-ssid blank saves")
+{
+	CHECK(portalWifiSaveKeepsExistingPassword("home", "home", "", false));
+	CHECK_FALSE(portalWifiSaveKeepsExistingPassword("home", "guest", "", false));
+	CHECK_FALSE(portalWifiSaveKeepsExistingPassword("home", "home", "newpass", false));
+	CHECK_FALSE(portalWifiSaveKeepsExistingPassword("home", "home", "", true));
+	CHECK_FALSE(portalWifiSaveKeepsExistingPassword("", "home", "", false));
+}
+
 TEST_CASE("portal config: menu includes update and no exit")
 {
 	PortalMenu menu = portalMenuDefault();

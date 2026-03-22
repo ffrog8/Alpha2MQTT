@@ -200,6 +200,27 @@ portalPostWifiActionAfterWifiSave(const char *server, uint16_t port, const char 
 	                                                          : PortalPostWifiAction::RedirectToMqttParams;
 }
 
+bool
+portalWifiSaveKeepsExistingPassword(const char *savedSsid,
+                                    const char *requestedSsid,
+                                    const char *submittedPass,
+                                    bool openNetworkRequested)
+{
+	if (openNetworkRequested) {
+		return false;
+	}
+	if (requestedSsid == nullptr || requestedSsid[0] == '\0') {
+		return false;
+	}
+	if (submittedPass != nullptr && submittedPass[0] != '\0') {
+		return false;
+	}
+	if (savedSsid == nullptr || savedSsid[0] == '\0') {
+		return false;
+	}
+	return std::strcmp(savedSsid, requestedSsid) == 0;
+}
+
 const char *
 portalMenuPollingHtml(void)
 {

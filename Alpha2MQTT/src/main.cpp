@@ -2158,7 +2158,8 @@ handlePortalWifiPage(WiFiManager& wifiManager)
 	static const char kErr[] PROGMEM =
 		"<p><strong>WiFi SSID is required.</strong></p>";
 	static const char kTail[] PROGMEM =
-		"<p>Leave the password blank for open networks.</p>"
+		"<p>Leave the password blank to keep the saved password for this SSID.</p>"
+		"<p>Check Open network to clear the saved password.</p>"
 		"<p><button type=\"submit\">Save WiFi</button></p>"
 		"</form></body></html>";
 	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
@@ -2193,10 +2194,13 @@ handlePortalWifiPage(WiFiManager& wifiManager)
 		    !writer.write("\" maxlength=\"63\"></p>")) {
 			return false;
 		}
-		htmlEscapeInto(appConfig.wifiPass.c_str(), escaped, sizeof(escaped));
-		if (!writer.write("<p>WiFi password<br><input name=\"p\" type=\"password\" value=\"") ||
-		    !writer.write(escaped) ||
-		    !writer.write("\" maxlength=\"63\"></p>")) {
+		if (!writer.write("<p>WiFi password<br><input name=\"p\" type=\"password\" value=\"\" maxlength=\"63\" "
+		                  "autocomplete=\"new-password\"></p>")) {
+			return false;
+		}
+		if (!writer.write(
+		        "<p><label><input name=\"open\" type=\"checkbox\" value=\"1\"> Open network / clear saved "
+		        "password</label></p>")) {
 			return false;
 		}
 		return writer.writeP(kTail);
@@ -2233,13 +2237,21 @@ handlePortalWifiSave(WiFiManager& wifiManager)
 	}
 
 	const String ssid = wifiManager.server->arg("s");
-	const String pass = wifiManager.server->arg("p");
+	const String passArg = wifiManager.server->arg("p");
+	const bool openNetworkRequested = wifiManager.server->hasArg("open");
 	if (ssid.length() == 0) {
 		wifiManager.server->sendHeader("Location", "/0wifi?err=1");
 		wifiManager.server->send(302, "text/plain", "");
 		return;
 	}
 
+	String pass = passArg;
+	if (portalWifiSaveKeepsExistingPassword(appConfig.wifiSSID.c_str(),
+	                                        ssid.c_str(),
+	                                        passArg.c_str(),
+	                                        openNetworkRequested)) {
+		pass = appConfig.wifiPass;
+	}
 	const bool credentialsChanged = appConfig.wifiSSID != ssid || appConfig.wifiPass != pass;
 	appConfig.wifiSSID = ssid;
 	appConfig.wifiPass = pass;
@@ -3996,6 +4008,7 @@ void setup()
 #ifdef DEBUG_OVER_SERIAL
 			portalLog("wifi_config requested without saved WiFi credentials; falling back to AP portal.");
 #endif
+			currentBootMode = BootMode::ApConfig;
 			updateOLED(false, "WiFi", "config", "ap portal");
 			configHandler();
 			return;
