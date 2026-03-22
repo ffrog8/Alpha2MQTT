@@ -132,6 +132,7 @@ char portalStatusReason[64] = "";
 char portalStatusSsid[33] = "";
 char portalSubmittedPass[64] = "";
 char portalStatusIp[20] = "";
+char portalUpdateCsrfToken[33] = "";
 int portalLastDisconnectReason = -1;
 char portalLastDisconnectLabel[32] = "";
 unsigned long portalConnectStart = 0;
@@ -594,6 +595,8 @@ static void handlePortalParamSave(WiFiManager &wifiManager);
 static void handlePortalUpdatePage(WiFiManager &wifiManager);
 static void handlePortalUpdateUpload(WiFiManager &wifiManager);
 static void handlePortalUpdatePost(WiFiManager &wifiManager);
+static void refreshPortalUpdateCsrfToken(void);
+static bool portalUpdateRequestHasValidToken(WiFiManager *wifiManager);
 static void refreshPortalCustomParameters(void);
 static bool isWifiConfigComplete(void);
 static bool isMqttConfigComplete(void);
@@ -1528,10 +1531,51 @@ syncPortalWifiCredentials(WiFiManager *wifiManager, const char *ssidHint, const 
 		return false;
 	}
 
-	persistUserWifiCredentials(ssid.c_str(), pass.c_str());
+	const bool changed = appConfig.wifiSSID != ssid || appConfig.wifiPass != pass;
 	appConfig.wifiSSID = ssid;
 	appConfig.wifiPass = pass;
-	return true;
+	if (changed) {
+		persistUserWifiCredentials(ssid.c_str(), pass.c_str());
+	}
+	return changed;
+}
+
+static void
+refreshPortalUpdateCsrfToken(void)
+{
+	const IPAddress staIp = WiFi.localIP();
+	const IPAddress apIp = WiFi.softAPIP();
+	const uint32_t ipMix = (static_cast<uint32_t>(staIp[0]) << 24) | (static_cast<uint32_t>(staIp[1]) << 16) |
+	                       (static_cast<uint32_t>(staIp[2]) << 8) | static_cast<uint32_t>(staIp[3]);
+	const uint32_t apMix = (static_cast<uint32_t>(apIp[0]) << 24) | (static_cast<uint32_t>(apIp[1]) << 16) |
+	                       (static_cast<uint32_t>(apIp[2]) << 8) | static_cast<uint32_t>(apIp[3]);
+	const uint32_t a = static_cast<uint32_t>(micros());
+	const uint32_t b = static_cast<uint32_t>(millis()) ^ static_cast<uint32_t>(ESP.getFreeHeap());
+#if defined(MP_ESP8266)
+	const uint32_t c = ESP.getCycleCount();
+#else
+	const uint32_t c = static_cast<uint32_t>(ESP.getEfuseMac());
+#endif
+	const uint32_t d = portalConnectStart ^ ipMix ^ apMix ^ static_cast<uint32_t>(wifiPower);
+	snprintf(portalUpdateCsrfToken,
+	         sizeof(portalUpdateCsrfToken),
+	         "%08lx%08lx%08lx%08lx",
+	         static_cast<unsigned long>(a),
+	         static_cast<unsigned long>(b),
+	         static_cast<unsigned long>(c),
+	         static_cast<unsigned long>(d));
+}
+
+static bool
+portalUpdateRequestHasValidToken(WiFiManager *wifiManager)
+{
+	if (wifiManager == nullptr || !wifiManager->server || portalUpdateCsrfToken[0] == '\0') {
+		return false;
+	}
+	if (!wifiManager->server->hasArg("csrf")) {
+		return false;
+	}
+	return wifiManager->server->arg("csrf") == portalUpdateCsrfToken;
 }
 
 static void
@@ -2578,6 +2622,8 @@ handlePortalUpdatePage(WiFiManager &wifiManager)
 		return;
 	}
 
+	refreshPortalUpdateCsrfToken();
+
 	static const char kHead[] PROGMEM =
 		"<!DOCTYPE html><html><head>"
 		"<meta charset=\"utf-8\">"
@@ -2587,7 +2633,6 @@ handlePortalUpdatePage(WiFiManager &wifiManager)
 		"<h2>OTA Update</h2>"
 		"<p>Upload a firmware binary. The device reboots automatically after a successful update.</p>";
 	static const char kTail[] PROGMEM =
-		"<form method=\"POST\" action=\"/config/update\" enctype=\"multipart/form-data\">"
 		"<p><input type=\"file\" name=\"firmware\"></p>"
 		"<p><button type=\"submit\">Upload Firmware</button></p>"
 		"</form></body></html>";
@@ -2595,6 +2640,14 @@ handlePortalUpdatePage(WiFiManager &wifiManager)
 		if (!writer.writeP(kHead) ||
 		    !writePortalMenuButton(writer, "/", "Menu", "get") ||
 		    !writePortalMenuButton(writer, "/config/reboot-normal", "Reboot Normal", "post")) {
+			return false;
+		}
+		char formOpen[160];
+		const int written = snprintf(formOpen,
+		                             sizeof(formOpen),
+		                             "<form method=\"POST\" action=\"/config/update?csrf=%s\" enctype=\"multipart/form-data\">",
+		                             portalUpdateCsrfToken);
+		if (written <= 0 || static_cast<size_t>(written) >= sizeof(formOpen) || !writer.write(formOpen)) {
 			return false;
 		}
 		return writer.writeP(kTail);
@@ -2627,6 +2680,10 @@ static void
 handlePortalUpdateUpload(WiFiManager &wifiManager)
 {
 	if (!wifiManager.server) {
+		return;
+	}
+
+	if (!portalUpdateRequestHasValidToken(&wifiManager)) {
 		return;
 	}
 
@@ -2682,6 +2739,14 @@ static void
 handlePortalUpdatePost(WiFiManager &wifiManager)
 {
 	if (!wifiManager.server) {
+		return;
+	}
+
+	if (!portalUpdateRequestHasValidToken(&wifiManager)) {
+		wifiManager.server->sendHeader("Connection", "close");
+		wifiManager.server->send(403,
+		                         "text/html",
+		                         "<!DOCTYPE html><html><body><h2>Forbidden.</h2><p>Reload the update page and try again.</p></body></html>");
 		return;
 	}
 
