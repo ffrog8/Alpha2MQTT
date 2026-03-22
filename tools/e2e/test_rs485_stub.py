@@ -1489,6 +1489,30 @@ def _ensure_latest_stub_via_ota(
     # message can remain stale during this run and make verification flaky.
     _wait_for_boot_fw_build_ts_ms(mqtt, f"{device_root}/boot", expected_ts, timeout_s=120)
 
+    # OTA uploads are performed through the Wi-Fi portal. After reboot the updated firmware may
+    # legitimately return to that portal first, and status/poll can still show the previous retained
+    # runtime payload until we explicitly leave config mode. Detect that state and continue to normal.
+    def portal_ready_pred() -> Tuple[bool, str]:
+        try:
+            status_root, body_root = _http_request_full("GET", http_base.rstrip("/") + "/", headers={}, body=b"", timeout_s=10)
+        except Exception as exc:
+            return False, f"err={exc}"
+        root_html = body_root.decode("utf-8", errors="replace")
+        ready = status_root == 200 and "Alpha2MQTT Setup" in root_html and "/config/reboot-normal" in root_html
+        return ready, f"status={status_root}"
+
+    ok_portal, _detail_portal = portal_ready_pred()
+    if not ok_portal:
+        try:
+            _assert_eventually("OTA reboot returns to Wi-Fi portal", portal_ready_pred, timeout_s=30, poll_s=2.0)
+            ok_portal = True
+        except Exception:
+            ok_portal = False
+    if ok_portal:
+        print("[e2e] OTA reboot returned to Wi-Fi portal; POST /config/reboot-normal")
+        _http_post_simple(http_base.rstrip("/") + "/config/reboot-normal", timeout_s=15)
+        _sleep_with_mqtt(mqtt, 8)
+
     def pred() -> Tuple[bool, str]:
         ok2, det2 = _device_is_latest_stub(mqtt, device_root, expected_ts, status_poll_suffix)
         return ok2, det2
