@@ -503,14 +503,14 @@ TEST_CASE("legacy reader preserves freqNever defaults when legacy key is absent"
 TEST_CASE("legacy reader existence probe ignores default-only values")
 {
 	mqttState entities[2]{};
-	entities[0] = makeEntity(mqttEntityId::entityA2mVersion,
+	entities[0] = makeEntity(mqttEntityId::entityA2MVersion,
 	                         "A2M_version",
 	                         mqttUpdateFreq::freqOneDay,
-	                         homeAssistantClass::haClassNone);
-	entities[1] = makeEntity(mqttEntityId::entityStateOfCharge,
+	                         homeAssistantClass::haClassInfo);
+	entities[1] = makeEntity(mqttEntityId::entityBatSoc,
 	                         "State_of_Charge",
 	                         mqttUpdateFreq::freqOneMin,
-	                         homeAssistantClass::haClassMeasurement);
+	                         homeAssistantClass::haClassBattery);
 
 	LegacyReaderCapture capture{};
 	capture.values[0] = static_cast<int>(mqttUpdateFreq::freqOneDay);
