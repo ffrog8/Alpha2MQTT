@@ -618,7 +618,7 @@ def pick_best(scan):
         if len(parts) < 5:
             continue
         _in_use, ssid, bssid, signal, security = parts
-        bssid = bssid.replace("\\\\:", ":")
+        bssid = bssid.replace("\\:", ":")
         if not ssid.startswith(ssid_prefix):
             continue
         try:

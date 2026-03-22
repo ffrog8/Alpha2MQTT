@@ -133,6 +133,7 @@ char portalStatusSsid[33] = "";
 char portalSubmittedPass[64] = "";
 char portalStatusIp[20] = "";
 char portalUpdateCsrfToken[33] = "";
+bool portalUpdateUploadStarted = false;
 int portalLastDisconnectReason = -1;
 char portalLastDisconnectLabel[32] = "";
 unsigned long portalConnectStart = 0;
@@ -2690,6 +2691,7 @@ handlePortalUpdatePage(WiFiManager &wifiManager)
 		wifiManager.server->send(500, "text/plain", "update unavailable");
 		return;
 	}
+	portalUpdateUploadStarted = false;
 	wifiManager.server->setContentLength(counter.bytes);
 	wifiManager.server->sendHeader("Cache-Control", "no-store");
 	wifiManager.server->sendHeader("Connection", "close");
@@ -2725,6 +2727,7 @@ handlePortalUpdateUpload(WiFiManager &wifiManager)
 #ifdef DEBUG_OVER_SERIAL
 		portalLog("OTA upload start: %s", upload.filename.c_str());
 #endif
+		portalUpdateUploadStarted = true;
 		WiFiUDP::stopAll();
 		const uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000U) & 0xFFFFF000U;
 		if (!Update.begin(maxSketchSpace)) {
@@ -2758,6 +2761,7 @@ handlePortalUpdateUpload(WiFiManager &wifiManager)
 #ifdef DEBUG_OVER_SERIAL
 		portalLog("OTA upload aborted");
 #endif
+		portalUpdateUploadStarted = false;
 		if (Update.isRunning()) {
 			Update.end();
 		}
@@ -2782,7 +2786,7 @@ handlePortalUpdatePost(WiFiManager &wifiManager)
 		return;
 	}
 
-	const bool ok = !Update.hasError();
+	const bool ok = portalUpdateUploadStarted && Update.isFinished() && !Update.hasError();
 	wifiManager.server->sendHeader("Connection", "close");
 	wifiManager.server->send(ok ? 200 : 500,
 	                         "text/html",
