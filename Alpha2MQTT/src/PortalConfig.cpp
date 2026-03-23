@@ -19,6 +19,10 @@ constexpr const char *kPortalMenuIds[] = {
 constexpr char kPortalMenuPolling[] =
 	"<form action='/config/mqtt' method='get'><button>MQTT Setup</button></form><br/>\n"
 	"<form action='/config/polling' method='get'><button>Polling</button></form><br/>\n";
+constexpr char kPortalMenuSta[] =
+	"<form action='/0wifi' method='get'><button>WiFi Setup</button></form><br/>\n"
+	"<form action='/config/mqtt' method='get'><button>MQTT Setup</button></form><br/>\n"
+	"<form action='/config/polling' method='get'><button>Polling</button></form><br/>\n";
 #if !defined(MP_ESP8266) || !defined(ARDUINO)
 constexpr char kPortalRebootNormal[] =
 	"<!doctype html><html><head>"
@@ -196,10 +200,52 @@ portalPostWifiActionAfterWifiSave(const char *server, uint16_t port, const char 
 	                                                          : PortalPostWifiAction::RedirectToMqttParams;
 }
 
+bool
+portalWifiSaveKeepsExistingPassword(const char *savedSsid,
+                                    const char *requestedSsid,
+                                    const char *submittedPass,
+                                    bool openNetworkRequested)
+{
+	if (openNetworkRequested) {
+		return false;
+	}
+	if (requestedSsid == nullptr || requestedSsid[0] == '\0') {
+		return false;
+	}
+	if (submittedPass != nullptr && submittedPass[0] != '\0') {
+		return false;
+	}
+	if (savedSsid == nullptr || savedSsid[0] == '\0') {
+		return false;
+	}
+	return std::strcmp(savedSsid, requestedSsid) == 0;
+}
+
+bool
+portalWifiSaveAllowsBlankPassword(const char *savedSsid,
+                                  const char *requestedSsid,
+                                  const char *submittedPass,
+                                  bool openNetworkRequested)
+{
+	if (submittedPass != nullptr && submittedPass[0] != '\0') {
+		return true;
+	}
+	if (openNetworkRequested) {
+		return true;
+	}
+	return portalWifiSaveKeepsExistingPassword(savedSsid, requestedSsid, submittedPass, openNetworkRequested);
+}
+
 const char *
 portalMenuPollingHtml(void)
 {
 	return kPortalMenuPolling;
+}
+
+const char *
+portalMenuStaHtml(void)
+{
+	return kPortalMenuSta;
 }
 
 const char *

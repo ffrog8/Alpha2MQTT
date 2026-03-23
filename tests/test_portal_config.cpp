@@ -55,6 +55,23 @@ TEST_CASE("portal config: post-wifi action redirects until mqtt config is comple
 	      PortalPostWifiAction::Reboot);
 }
 
+TEST_CASE("portal config: wifi save keeps saved password only for same-ssid blank saves")
+{
+	CHECK(portalWifiSaveKeepsExistingPassword("home", "home", "", false));
+	CHECK_FALSE(portalWifiSaveKeepsExistingPassword("home", "guest", "", false));
+	CHECK_FALSE(portalWifiSaveKeepsExistingPassword("home", "home", "newpass", false));
+	CHECK_FALSE(portalWifiSaveKeepsExistingPassword("home", "home", "", true));
+	CHECK_FALSE(portalWifiSaveKeepsExistingPassword("", "home", "", false));
+}
+
+TEST_CASE("portal config: blank wifi passwords require explicit open-network intent for a different ssid")
+{
+	CHECK(portalWifiSaveAllowsBlankPassword("home", "home", "", false));
+	CHECK(portalWifiSaveAllowsBlankPassword("home", "guest", "newpass", false));
+	CHECK(portalWifiSaveAllowsBlankPassword("home", "guest", "", true));
+	CHECK_FALSE(portalWifiSaveAllowsBlankPassword("home", "guest", "", false));
+}
+
 TEST_CASE("portal config: menu includes update and no exit")
 {
 	PortalMenu menu = portalMenuDefault();
@@ -98,6 +115,16 @@ TEST_CASE("portal config: custom menu html points to mqtt and polling pages")
 	CHECK(strstr(html, "MQTT Setup") != nullptr);
 	CHECK(strstr(html, "/config/polling") != nullptr);
 	CHECK(strstr(html, "Polling") != nullptr);
+}
+
+TEST_CASE("portal config: sta custom menu html includes wifi, mqtt, and polling pages")
+{
+	const char *html = portalMenuStaHtml();
+	REQUIRE(html != nullptr);
+	CHECK(strstr(html, "/0wifi") != nullptr);
+	CHECK(strstr(html, "WiFi Setup") != nullptr);
+	CHECK(strstr(html, "/config/mqtt") != nullptr);
+	CHECK(strstr(html, "/config/polling") != nullptr);
 }
 
 TEST_CASE("portal config: reboot-to-normal html includes runtime redirect probe")

@@ -56,7 +56,16 @@ PortalPostWifiAction portalPostWifiActionAfterWifiSave(const char *server,
                                                        uint16_t port,
                                                        const char *user,
                                                        const char *password);
+bool portalWifiSaveKeepsExistingPassword(const char *savedSsid,
+                                         const char *requestedSsid,
+                                         const char *submittedPass,
+                                         bool openNetworkRequested);
+bool portalWifiSaveAllowsBlankPassword(const char *savedSsid,
+                                       const char *requestedSsid,
+                                       const char *submittedPass,
+                                       bool openNetworkRequested);
 const char *portalMenuPollingHtml(void);
+const char *portalMenuStaHtml(void);
 const char *portalRebootToNormalHtml(void);
 uint16_t portalParseU16Strict(const char *text, uint16_t defaultValue);
 

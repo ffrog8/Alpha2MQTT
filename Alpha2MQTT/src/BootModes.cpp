@@ -53,6 +53,18 @@ bootIntentAfterStaPortalConnectFailure(void)
 	return BootIntent::ApConfig;
 }
 
+InitialWifiFailureAction
+initialWifiFailureAction(BootMode currentMode, BootIntent currentIntent)
+{
+	// Only portal-applied WiFi changes should fall back to AP automatically.
+	// Ordinary normal boots should stay up and retry in place after the initial
+	// short connect window expires.
+	if (currentMode == BootMode::WifiConfig || currentIntent == BootIntent::PortalNormal) {
+		return InitialWifiFailureAction::RebootApConfig;
+	}
+	return InitialWifiFailureAction::ContinueReconnect;
+}
+
 BootMode
 bootModeForIntent(BootIntent intent, BootMode currentMode)
 {
@@ -61,6 +73,7 @@ bootModeForIntent(BootIntent intent, BootMode currentMode)
 		return BootMode::ApConfig;
 	case BootIntent::WifiConfig:
 		return BootMode::WifiConfig;
+	case BootIntent::PortalNormal:
 	case BootIntent::Normal:
 		return BootMode::Normal;
 	case BootIntent::Ota:
@@ -114,6 +127,8 @@ bootIntentToString(BootIntent intent)
 		return "wifi_config";
 	case BootIntent::Ota:
 		return "ota";
+	case BootIntent::PortalNormal:
+		return "portal_normal";
 	default:
 		return "normal";
 	}
@@ -136,6 +151,9 @@ bootIntentFromString(const char *value)
 	}
 	if (strcmp(value, "ota") == 0) {
 		return BootIntent::Ota;
+	}
+	if (strcmp(value, "portal_normal") == 0) {
+		return BootIntent::PortalNormal;
 	}
 	return BootIntent::Normal;
 }

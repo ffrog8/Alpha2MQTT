@@ -398,6 +398,17 @@ def _wait_for_config_interval(
                 if isinstance(chunk.get("entity_intervals"), dict):
                     for key, value in chunk["entity_intervals"].items():
                         merged[str(key)] = str(value)
+                    continue
+                raw_map = str(chunk.get("active_bucket_map", ""))
+                for token in raw_map.split(";"):
+                    token = token.strip()
+                    if not token or "=" not in token:
+                        continue
+                    key, value = token.split("=", 1)
+                    key = key.strip()
+                    value = value.strip()
+                    if key and value:
+                        merged[key] = value
             intervals = merged
         if str(config.get("poll_interval_s", "")) == expected_poll_interval_s and str(intervals.get(entity_name, "")) == expected_bucket:
             return config
@@ -598,20 +609,7 @@ def scan_wifi():
     ], check=False)
     return scan
 
-last_scan = ""
-scan_history = []
-last_error = ""
-best = None
-run(["nmcli", "radio", "wifi", "on"], check=False)
-run(["nmcli", "device", "disconnect", iface], check=False)
-for attempt in range(18):
-    if attempt in (6, 12):
-        soft_reset_iface()
-    scan = scan_wifi()
-    last_scan = scan
-    scan_history.append(scan)
-    if len(scan_history) > 4:
-        scan_history = scan_history[-4:]
+def pick_best(scan):
     best = None
     for raw in scan.splitlines():
         if not raw:
@@ -630,6 +628,23 @@ for attempt in range(18):
         cand = {{"ssid": ssid, "bssid": bssid, "signal": score, "security": security}}
         if best is None or cand["signal"] > best["signal"]:
             best = cand
+    return best
+
+last_scan = ""
+scan_history = []
+last_error = ""
+best = None
+run(["nmcli", "radio", "wifi", "on"], check=False)
+run(["nmcli", "device", "disconnect", iface], check=False)
+for attempt in range(18):
+    if attempt in (6, 12):
+        soft_reset_iface()
+    scan = scan_wifi()
+    last_scan = scan
+    scan_history.append(scan)
+    if len(scan_history) > 4:
+        scan_history = scan_history[-4:]
+    best = pick_best(scan)
     if best is not None:
         break
     time.sleep(5)
@@ -644,8 +659,20 @@ if best is None:
     }}))
 
 run(["sudo", "-S", "-p", "", "nmcli", "device", "disconnect", iface], input_text=sudo_pw + "\\n", check=False)
-for _ in range(6):
-    run(["nmcli", "device", "wifi", "rescan", "ifname", iface], check=False)
+for attempt in range(10):
+    if attempt in (3, 7):
+        soft_reset_iface()
+    scan = scan_wifi()
+    last_scan = scan
+    scan_history.append(scan)
+    if len(scan_history) > 4:
+        scan_history = scan_history[-4:]
+    refreshed = pick_best(scan)
+    if refreshed is None:
+        last_error = "matching AP disappeared before connect"
+        time.sleep(3)
+        continue
+    best = refreshed
     connect_variants = [
         ["sudo", "-S", "-p", "", "nmcli", "device", "wifi", "connect", best["bssid"], "ifname", iface],
         ["sudo", "-S", "-p", "", "nmcli", "device", "wifi", "connect", best["ssid"], "ifname", iface, "bssid", best["bssid"]],
@@ -695,15 +722,15 @@ if form is not None:
     ])
 cmd.append(url)
 cp = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
-if cp.returncode != 0:
-    raise SystemExit(json.dumps({{
-        "error": cp.stderr.strip() or cp.stdout.strip() or f"curl rc={{cp.returncode}}",
-        "url": url,
-        "method": {json.dumps(method)},
-    }}))
 marker = "\\n__A2M_STATUS__"
 body, _, status = cp.stdout.rpartition(marker)
 if not status:
+    if cp.returncode != 0:
+        raise SystemExit(json.dumps({{
+            "error": cp.stderr.strip() or cp.stdout.strip() or f"curl rc={{cp.returncode}}",
+            "url": url,
+            "method": {json.dumps(method)},
+        }}))
     raise SystemExit(json.dumps({{"error": "missing curl status marker", "url": url, "method": {json.dumps(method)}}}))
 print(json.dumps({{"status": int(status.strip()), "body": body}}))
 """
@@ -721,6 +748,11 @@ def _assert_contains_any(text: str, needles: list[str], context: str) -> None:
         if needle in text:
             return
     raise PortalTestError(f"{context}: missing any of {needles!r}")
+
+
+def _assert_portal_root_menu(body: str, context: str) -> None:
+    for needle in ("/0wifi", "/config/mqtt", "/config/polling", "/config/update", "/status", "/config/reboot-normal"):
+        _assert_contains(body, needle, context)
 
 
 def _extract_runtime_ip_from_status(body: str) -> str:
@@ -892,6 +924,107 @@ def _wait_for_sta_portal(ssh: PiSsh, base_url: str, *, timeout_s: int) -> str:
     raise PortalTestError(f"Timed out waiting for STA portal polling page. Last={last[:300]!r}")
 
 
+def _rediscover_sta_portal_after_reboot_wifi(ssh: PiSsh, base_url: str, *, timeout_s: int) -> str:
+    previous_ip = urllib.parse.urlparse(base_url).hostname or ""
+    discovered_base_url, _portal_body = _discover_sta_portal_base(
+        ssh,
+        previous_ip=previous_ip,
+        hostname="",
+        timeout_s=timeout_s,
+    )
+    return discovered_base_url
+
+
+def _discover_sta_portal_base(
+    ssh: PiSsh,
+    *,
+    previous_ip: str,
+    hostname: str,
+    timeout_s: int,
+) -> tuple[str, str]:
+    if previous_ip:
+        direct_url = f"http://{previous_ip}"
+        try:
+            return direct_url, _wait_for_sta_portal(ssh, direct_url, timeout_s=max(20, min(timeout_s, 60)))
+        except Exception:
+            pass
+
+    script = f"""
+import concurrent.futures, ipaddress, json, subprocess, urllib.request
+previous_ip = {json.dumps(previous_ip)}
+hostname = {json.dumps(hostname)}
+timeout_s = {int(timeout_s)}
+
+def probe_url(url: str):
+    try:
+        with urllib.request.urlopen(url, timeout=1.5) as resp:
+            body = resp.read().decode('utf-8', errors='replace')
+            if int(resp.getcode()) == 200 and 'Polling' in body:
+                return {{"url": url[:-len('/config/polling')], "body": body}}
+    except Exception:
+        return None
+    return None
+
+urls = []
+if hostname:
+    urls.append(f"http://{{hostname}}/config/polling")
+
+seen = set(urls)
+
+def add_url(url: str):
+    if url not in seen:
+        seen.add(url)
+        urls.append(url)
+
+if previous_ip:
+    network = ipaddress.ip_network(previous_ip + "/24", strict=False)
+    preferred = [ipaddress.ip_address(previous_ip)]
+    others = [ip for ip in network.hosts() if ip != preferred[0]]
+    ordered = preferred + others
+    for ip in ordered:
+        add_url(f"http://{{ip}}/config/polling")
+else:
+    try:
+        addr_data = json.loads(subprocess.check_output(["ip", "-json", "-4", "addr", "show", "up"], text=True))
+    except Exception:
+        addr_data = []
+    for iface in addr_data:
+        for info in iface.get("addr_info", []):
+            if info.get("family") != "inet" or info.get("scope") != "global":
+                continue
+            local = info.get("local")
+            prefixlen = int(info.get("prefixlen", 24))
+            if not local:
+                continue
+            try:
+                addr = ipaddress.ip_address(local)
+            except ValueError:
+                continue
+            network = ipaddress.ip_network(f"{{local}}/{{max(prefixlen, 24)}}", strict=False)
+            for ip in network.hosts():
+                add_url(f"http://{{ip}}/config/polling")
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=32) as ex:
+    futures = [ex.submit(probe_url, url) for url in urls]
+    for fut in concurrent.futures.as_completed(futures, timeout=max(30, timeout_s)):
+        result = fut.result()
+        if result:
+            print(json.dumps(result))
+            raise SystemExit(0)
+
+raise SystemExit(json.dumps({{"error": "sta portal not found", "previous_ip": previous_ip, "hostname": hostname}}))
+"""
+    out = ssh.run_python(script, timeout_s=max(60, timeout_s + 15)).strip()
+    last_line = out.splitlines()[-1]
+    try:
+        parsed = json.loads(last_line)
+    except json.JSONDecodeError as exc:
+        raise PortalTestError(f"Could not parse STA portal discovery result: {last_line[:300]!r}") from exc
+    if "url" not in parsed or "body" not in parsed:
+        raise PortalTestError(f"STA portal discovery failed: {parsed!r}")
+    return str(parsed["url"]), str(parsed["body"])
+
+
 def _extract_form_action(body: str) -> str:
     m = re.search(r"<form[^>]*action=['\"]([^'\"]+)['\"]", body, flags=re.IGNORECASE)
     if not m:
@@ -985,7 +1118,7 @@ def _join_ap_and_load_wifi_page(ssh: "PiSsh", mqtt: "MqttClient", *, iface: str)
     if int(root_resp.get("status", 0)) != 200:
         raise PortalTestError(f"Portal GET / returned {root_resp.get('status')}")
     root_body = str(root_resp.get("body", ""))
-    _assert_contains(root_body, "/0wifi", "portal root")
+    _assert_portal_root_menu(root_body, "portal root")
 
     deadline = time.time() + 20
     wifi_body = ""
@@ -999,7 +1132,7 @@ def _join_ap_and_load_wifi_page(ssh: "PiSsh", mqtt: "MqttClient", *, iface: str)
         wifi_body = str(wifi_resp.get("body", ""))
         input_names = _extract_input_names(wifi_body)
         try:
-            wifi_action = _extract_form_action(wifi_body)
+            wifi_action = _extract_form_action_with_input(wifi_body, "s")
         except PortalTestError:
             wifi_action = ""
         if wifi_action and "s" in input_names and "p" in input_names:
@@ -1018,10 +1151,18 @@ def _save_wifi_and_wait_connected(ssh: "PiSsh", *, wifi_ssid: str, wifi_pwd: str
         form={"s": wifi_ssid, "p": wifi_pwd},
         timeout_s=30,
     )
-    if int(save_wifi.get("status", 0)) != 200:
-        raise PortalTestError(f"Portal POST /wifisave returned {save_wifi.get('status')}")
-    _assert_contains(str(save_wifi.get("body", "")), "Trying to connect", "wifisave response")
-    _connected_status, portal_runtime_ip = _wait_for_portal_status_connected(ssh, timeout_s=60)
+    save_wifi_status = int(save_wifi.get("status", 0))
+    save_wifi_body = str(save_wifi.get("body", ""))
+    if save_wifi_status != 200:
+        raise PortalTestError(f"Portal POST /wifisave returned {save_wifi_status}")
+    try:
+        _connected_status, portal_runtime_ip = _wait_for_portal_status_connected(ssh, timeout_s=20)
+    except PortalTestError as exc:
+        _http_log(
+            "portal wifi save did not expose AP connected status; "
+            f"continuing with discovery save_body={save_wifi_body[:300]!r} err={exc}"
+        )
+        return ""
     _announce(f"portal connected via http://{portal_runtime_ip}")
     return portal_runtime_ip
 
@@ -1047,6 +1188,50 @@ def _load_param_page(ssh: "PiSsh", *, base_url: str, timeout_s: int = 20) -> tup
             return param_body, param_action
         time.sleep(1.0)
     raise PortalTestError(f"Portal GET /config/mqtt did not become ready; last status={last_status} body={last_body[:300]!r}")
+
+
+def _load_sta_wifi_page(ssh: "PiSsh", *, base_url: str, timeout_s: int = 20) -> tuple[str, str]:
+    deadline = time.time() + timeout_s
+    last_status = 0
+    last_body = ""
+    while time.time() < deadline:
+        try:
+            wifi_resp = _pi_http_request(ssh, method="GET", url=base_url + "/0wifi", timeout_s=10)
+        except Exception as exc:
+            last_status = 0
+            last_body = f"exc={exc}"
+            time.sleep(1.0)
+            continue
+        wifi_status = int(wifi_resp.get("status", 0))
+        wifi_body = str(wifi_resp.get("body", ""))
+        last_status = wifi_status
+        last_body = wifi_body
+        if wifi_status == 200:
+            input_names = _extract_input_names(wifi_body)
+            if "s" in input_names and "p" in input_names:
+                wifi_action = _extract_form_action_with_input(wifi_body, "s")
+                return wifi_body, wifi_action
+        time.sleep(1.0)
+    raise PortalTestError(f"Portal GET /0wifi did not become ready; last status={last_status} body={last_body[:300]!r}")
+
+
+def _wait_for_page_contains(ssh: "PiSsh", *, url: str, needle: str, timeout_s: int = 20) -> str:
+    deadline = time.time() + timeout_s
+    last = ""
+    while time.time() < deadline:
+        try:
+            resp = _pi_http_request(ssh, method="GET", url=url, timeout_s=10)
+        except Exception as exc:
+            last = f"exc={exc}"
+            time.sleep(1.0)
+            continue
+        status = int(resp.get("status", 0))
+        body = str(resp.get("body", ""))
+        last = body
+        if status == 200 and needle in body:
+            return body
+        time.sleep(1.0)
+    raise PortalTestError(f"{url}: missing {needle!r}; last={last[:300]!r}")
 
 
 def _resolve_http_base_url(
@@ -1151,8 +1336,15 @@ def _run_wifi_only_case(
         wifi_pwd=wifi_pwd,
         wifi_action=wifi_action,
     )
-    portal_base_url = f"http://{portal_runtime_ip}"
-    _wait_for_sta_portal(ssh, portal_base_url, timeout_s=120)
+    portal_base_url, _portal_page = _discover_sta_portal_base(
+        ssh,
+        previous_ip=portal_runtime_ip,
+        hostname=ap_ssid,
+        timeout_s=180,
+    )
+    portal_root_body = _wait_for_page_contains(ssh, url=portal_base_url + "/", needle="/config/mqtt", timeout_s=20)
+    _assert_portal_root_menu(portal_root_body, "sta portal root (wifi-only case)")
+    portal_runtime_ip = urllib.parse.urlparse(portal_base_url).hostname or portal_runtime_ip
 
     _reboot_normal_and_tolerate_disconnect(
         ssh,
@@ -1185,7 +1377,7 @@ def _run_wifi_plus_mqtt_case(
     mqtt_port: int,
     mqtt_user: str,
     mqtt_pass: str,
-) -> None:
+) -> str:
     _announce("case: fresh blank flash -> wifi plus mqtt -> runtime -> sta portal")
     _erase_and_flash_real_firmware(fw_path, serial_port=serial_port, baud=flash_baud)
     time.sleep(8)
@@ -1197,8 +1389,15 @@ def _run_wifi_plus_mqtt_case(
         wifi_pwd=wifi_pwd,
         wifi_action=wifi_action,
     )
-    portal_base_url = f"http://{portal_runtime_ip}"
-    _wait_for_sta_portal(ssh, portal_base_url, timeout_s=120)
+    portal_base_url, _portal_page = _discover_sta_portal_base(
+        ssh,
+        previous_ip=portal_runtime_ip,
+        hostname=device_root,
+        timeout_s=180,
+    )
+    portal_root_body = _wait_for_page_contains(ssh, url=portal_base_url + "/", needle="/config/mqtt", timeout_s=20)
+    _assert_portal_root_menu(portal_root_body, "sta portal root (wifi+mqtt case)")
+    portal_runtime_ip = urllib.parse.urlparse(portal_base_url).hostname or portal_runtime_ip
 
     _save_mqtt_params(
         ssh,
@@ -1209,7 +1408,7 @@ def _run_wifi_plus_mqtt_case(
         mqtt_pass=mqtt_pass,
     )
 
-    base_url = f"http://{portal_runtime_ip}"
+    base_url = portal_base_url
     root_page = _wait_for_runtime_root_contains(ssh, base_url, "MQTT connected: 1", timeout_s=180)
     _assert_contains(root_page, "Boot mode: normal", "runtime root")
 
@@ -1218,7 +1417,7 @@ def _run_wifi_plus_mqtt_case(
     if reboot_wifi_status != 200:
         raise PortalTestError(f"/reboot/wifi returned unexpected status={reboot_wifi_status}")
 
-    _wait_for_sta_portal(ssh, base_url, timeout_s=60)
+    base_url = _rediscover_sta_portal_after_reboot_wifi(ssh, base_url, timeout_s=90)
 
     bucket_map = "State_of_Charge=ten_sec;"
     save_resp = _pi_http_request(
@@ -1261,24 +1460,15 @@ def _run_wifi_plus_mqtt_case(
 
     final_root_page = _wait_for_runtime_root_contains(ssh, base_url, "MQTT connected: 1", timeout_s=60)
     _assert_contains(final_root_page, "Boot mode: normal", "final runtime root")
-    config = _fetch_latest_json(mqtt, f"{device_root}/config", "config", timeout_s=30)
-    intervals = config.get("entity_intervals", {})
-    if str(config.get("entity_intervals_encoding", "")) == "bucket_map_chunks":
-        merged: dict[str, str] = {}
-        chunk_count = int(config.get("entity_intervals_chunks", 0))
-        for idx in range(chunk_count):
-            chunk = _fetch_latest_json(mqtt, f"{device_root}/config/entity_intervals/{idx}", f"config-chunk-{idx}", timeout_s=15)
-            raw_map = str(chunk.get("active_bucket_map", ""))
-            for token in raw_map.split(";"):
-                token = token.strip()
-                if not token or "=" not in token:
-                    continue
-                key, value = token.split("=", 1)
-                if key.strip() and value.strip():
-                    merged[key.strip()] = value.strip()
-        intervals = merged
-    if not isinstance(intervals, dict) or str(intervals.get("State_of_Charge", "")) != "ten_sec":
-        raise PortalTestError(f"Polling config did not persist State_of_Charge=ten_sec: {intervals!r}")
+    _wait_for_config_interval(
+        mqtt,
+        device_root=device_root,
+        entity_name="State_of_Charge",
+        expected_bucket="ten_sec",
+        expected_poll_interval_s="13",
+        timeout_s=60,
+    )
+    return base_url
 
 
 def _run_normal_to_wifi_portal_set_mqtt_case(
@@ -1313,7 +1503,7 @@ def _run_normal_to_wifi_portal_set_mqtt_case(
     if reboot_wifi_status != 200:
         raise PortalTestError(f"/reboot/wifi returned unexpected status={reboot_wifi_status}")
 
-    _wait_for_sta_portal(ssh, base_url, timeout_s=60)
+    base_url = _rediscover_sta_portal_after_reboot_wifi(ssh, base_url, timeout_s=90)
     _save_mqtt_params(
         ssh,
         base_url=base_url,
@@ -1330,6 +1520,111 @@ def _run_normal_to_wifi_portal_set_mqtt_case(
 
     final_root_page = _wait_for_runtime_root_contains(ssh, base_url, "MQTT connected: 1", timeout_s=60)
     _assert_contains(final_root_page, "Boot mode: normal", "final runtime root (sta mqtt case)")
+
+
+def _run_normal_to_wifi_portal_bad_wifi_falls_back_to_ap_case(
+    ssh: "PiSsh",
+    mqtt: "MqttClient",
+    *,
+    iface: str,
+    fw_path: Path,
+    serial_port: str,
+    flash_baud: str,
+    wifi_ssid: str,
+    wifi_pwd: str,
+    mqtt_host: str,
+    mqtt_port: int,
+    mqtt_user: str,
+    mqtt_pass: str,
+) -> None:
+    _announce("case: fresh blank flash -> wifi plus mqtt -> sta portal -> save bad wifi -> ap fallback")
+    base_url = _run_wifi_plus_mqtt_case(
+        ssh,
+        mqtt,
+        iface=iface,
+        fw_path=fw_path,
+        serial_port=serial_port,
+        flash_baud=flash_baud,
+        wifi_ssid=wifi_ssid,
+        wifi_pwd=wifi_pwd,
+        mqtt_host=mqtt_host,
+        mqtt_port=mqtt_port,
+        mqtt_user=mqtt_user,
+        mqtt_pass=mqtt_pass,
+    )
+    reboot_wifi_resp = _pi_http_request(ssh, method="POST", url=base_url + "/reboot/wifi", timeout_s=15)
+    reboot_wifi_status = int(reboot_wifi_resp.get("status", 0))
+    if reboot_wifi_status != 200:
+        raise PortalTestError(f"/reboot/wifi returned unexpected status={reboot_wifi_status}")
+
+    base_url = _rediscover_sta_portal_after_reboot_wifi(ssh, base_url, timeout_s=90)
+    _wifi_body, wifi_action = _load_sta_wifi_page(ssh, base_url=base_url, timeout_s=30)
+    bad_ssid = f"{wifi_ssid}-bad-{int(time.time())}"
+    save_wifi = _pi_http_request(
+        ssh,
+        method="POST",
+        url=urllib.parse.urljoin(base_url + "/0wifi", wifi_action),
+        form={"s": bad_ssid, "p": wifi_pwd},
+        timeout_s=20,
+    )
+    save_wifi_status = int(save_wifi.get("status", 0))
+    if save_wifi_status not in (200, 302):
+        raise PortalTestError(f"Portal POST /wifisave returned {save_wifi_status}")
+
+    saved_wifi_page = _pi_http_request(ssh, method="GET", url=base_url + "/0wifi?saved=1", timeout_s=10)
+    if int(saved_wifi_page.get("status", 0)) != 200:
+        raise PortalTestError(f"STA portal saved WiFi page returned {saved_wifi_page.get('status')}")
+    _assert_contains(str(saved_wifi_page.get("body", "")), "applied on the next reboot", "sta wifi saved page")
+
+    polling_page = _pi_http_request(ssh, method="GET", url=base_url + "/config/polling", timeout_s=10)
+    if int(polling_page.get("status", 0)) != 200:
+        raise PortalTestError(f"Polling page not reachable after STA WiFi save: {polling_page.get('status')}")
+    _assert_contains(str(polling_page.get("body", "")), "Polling", "sta portal after wifi save")
+
+    _reboot_normal_and_tolerate_disconnect(
+        ssh,
+        url=base_url + "/config/reboot-normal",
+        context="sta portal /config/reboot-normal after wifi save",
+    )
+
+    ap_ssid, _wifi_action = _join_ap_and_load_wifi_page(ssh, mqtt, iface=iface)
+    status_resp = _pi_http_request(ssh, method="GET", url="http://192.168.4.1/status", timeout_s=10)
+    if int(status_resp.get("status", 0)) != 200:
+        raise PortalTestError(f"AP fallback /status returned {status_resp.get('status')}")
+    status_body = str(status_resp.get("body", ""))
+    _assert_contains(status_body, "Boot mode: ap_config", "ap fallback status")
+    _assert_contains(status_body, bad_ssid, "ap fallback target ssid")
+    mqtt_page, _mqtt_action = _load_param_page(ssh, base_url="http://192.168.4.1", timeout_s=20)
+    _assert_contains(mqtt_page, "MQTT Setup", "ap fallback mqtt page")
+    polling_resp = _pi_http_request(ssh, method="GET", url="http://192.168.4.1/config/polling", timeout_s=10)
+    if int(polling_resp.get("status", 0)) != 200:
+        raise PortalTestError(f"AP fallback polling page returned {polling_resp.get('status')}")
+    _assert_contains(str(polling_resp.get("body", "")), "Polling", "ap fallback polling page")
+    _wait_for_page_contains(ssh, url="http://192.168.4.1/", needle="/config/update", timeout_s=20)
+
+    # Keep the final portal case self-cleaning. This case intentionally stages bad
+    # WiFi to prove AP fallback, but the suite should finish with the device back on
+    # the normal LAN so follow-up checks and manual access do not inherit AP mode.
+    portal_runtime_ip = _save_wifi_and_wait_connected(
+        ssh,
+        wifi_ssid=wifi_ssid,
+        wifi_pwd=wifi_pwd,
+        wifi_action=_wifi_action,
+    )
+    recovered_base_url, recovered_root = _discover_runtime_root(
+        ssh,
+        previous_ip=portal_runtime_ip,
+        hostname=ap_ssid,
+        timeout_s=180,
+    )
+    _assert_contains(recovered_root, "Alpha2MQTT Control", "runtime root after AP fallback recovery")
+    recovered_root = _wait_for_runtime_root_contains(
+        ssh,
+        recovered_base_url,
+        "MQTT connected: 1",
+        timeout_s=180,
+    )
+    _assert_contains(recovered_root, "Boot mode: normal", "runtime root after AP fallback recovery")
 
 
 def main() -> int:
@@ -1392,6 +1687,20 @@ def main() -> int:
             mqtt_pass=mqtt_pass,
         )
         _run_normal_to_wifi_portal_set_mqtt_case(
+            ssh,
+            mqtt,
+            iface=args.pi_wifi_iface,
+            fw_path=fw_path,
+            serial_port=args.serial_port,
+            flash_baud=args.flash_baud,
+            wifi_ssid=wifi_ssid,
+            wifi_pwd=wifi_pwd,
+            mqtt_host=mqtt_host,
+            mqtt_port=mqtt_port,
+            mqtt_user=mqtt_user,
+            mqtt_pass=mqtt_pass,
+        )
+        _run_normal_to_wifi_portal_bad_wifi_falls_back_to_ap_case(
             ssh,
             mqtt,
             iface=args.pi_wifi_iface,

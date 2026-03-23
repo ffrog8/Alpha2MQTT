@@ -823,6 +823,41 @@ buildBucketMapFromLegacyReader(const mqttState *entities,
 }
 
 bool
+legacyPollingOverridesExist(const mqttState *entities,
+                            size_t entityCount,
+                            LegacyPollingValueReader reader,
+                            void *context)
+{
+	if (entities == nullptr || reader == nullptr || entityCount == 0) {
+		return false;
+	}
+
+	for (size_t i = 0; i < entityCount; ++i) {
+		const int defaultValue = static_cast<int>(entities[i].updateFreq);
+		int storedValue = defaultValue;
+		if (!reader(i, &entities[i], defaultValue, storedValue, context)) {
+			return false;
+		}
+		if (!isValidMqttUpdateFreq(storedValue)) {
+			continue;
+		}
+		const BucketId bucket = bucketIdFromLegacyFreq(storedValue);
+		if (bucket == BucketId::Unknown) {
+			continue;
+		}
+		const bool missingLegacyKey = (storedValue == defaultValue);
+		if (bucketMatchesPersistedDefault(entities[i], bucket) ||
+		    (missingLegacyKey &&
+		     entities[i].updateFreq == mqttUpdateFreq::freqNever &&
+		     bucket == BucketId::Disabled)) {
+			continue;
+		}
+		return true;
+	}
+	return false;
+}
+
+bool
 buildBucketMapFromAssignments(const mqttState *entities,
                               size_t entityCount,
                               const BucketId *buckets,
@@ -853,6 +888,33 @@ buildBucketMapFromAssignments(const mqttState *entities,
 	}
 
 	return true;
+}
+
+size_t
+estimateBucketMapFromAssignmentsLength(const mqttState *entities,
+                                       size_t entityCount,
+                                       const BucketId *buckets,
+                                       size_t &appliedCount)
+{
+	if (entities == nullptr || buckets == nullptr || entityCount == 0) {
+		appliedCount = 0;
+		return 0;
+	}
+
+	size_t used = 0;
+	appliedCount = 0;
+	for (size_t i = 0; i < entityCount; ++i) {
+		const BucketId bucket = buckets[i];
+		if (bucket == BucketId::Unknown || bucketMatchesPersistedDefault(entities[i], bucket)) {
+			continue;
+		}
+		const char *bucketStr = bucketIdToString(bucket);
+		char entityName[64];
+		mqttEntityNameCopy(&entities[i], entityName, sizeof(entityName));
+		used += strlen(entityName) + 1 + strlen(bucketStr) + 1;
+		appliedCount++;
+	}
+	return used;
 }
 
 bool

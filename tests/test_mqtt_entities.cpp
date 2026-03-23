@@ -429,3 +429,28 @@ TEST_CASE("mqtt entities: preview bucket apply does not mutate runtime state")
 	REQUIRE(mqttEntityCopyBuckets(after, kMqttEntityDescriptorCount));
 	CHECK(after[uptimeIdx] == original);
 }
+
+TEST_CASE("mqtt entities: State_of_Charge can move from one_min to ten_sec")
+{
+	initMqttEntitiesRtIfNeeded(true);
+
+	BucketId current[kMqttEntityDescriptorCount]{};
+	REQUIRE(mqttEntityCopyBuckets(current, kMqttEntityDescriptorCount));
+
+	const mqttState *desc = mqttEntitiesDesc();
+	size_t socIdx = kMqttEntityDescriptorCount;
+	for (size_t i = 0; i < kMqttEntityDescriptorCount; ++i) {
+		if (mqttEntityNameEquals(&desc[i], "State_of_Charge")) {
+			socIdx = i;
+			break;
+		}
+	}
+	REQUIRE(socIdx < kMqttEntityDescriptorCount);
+	REQUIRE(current[socIdx] == BucketId::OneMin);
+
+	BucketId preview[kMqttEntityDescriptorCount]{};
+	std::memcpy(preview, current, sizeof(preview));
+	preview[socIdx] = BucketId::TenSec;
+
+	REQUIRE(mqttEntityCanApplyBuckets(preview, kMqttEntityDescriptorCount));
+}

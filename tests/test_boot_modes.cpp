@@ -1,5 +1,7 @@
 #include "doctest/doctest.h"
 
+#include <string>
+
 #include "BootModes.h"
 
 TEST_CASE("boot mode subsystem gating")
@@ -52,10 +54,29 @@ TEST_CASE("STA-only portal failure falls back to AP config")
 	CHECK(bootIntentAfterStaPortalConnectFailure() == BootIntent::ApConfig);
 }
 
+TEST_CASE("initial wifi failure only falls back to AP for portal-applied config")
+{
+	CHECK(initialWifiFailureAction(BootMode::Normal, BootIntent::Normal) ==
+	      InitialWifiFailureAction::ContinueReconnect);
+	CHECK(initialWifiFailureAction(BootMode::ApConfig, BootIntent::Normal) ==
+	      InitialWifiFailureAction::ContinueReconnect);
+	CHECK(initialWifiFailureAction(BootMode::WifiConfig, BootIntent::Normal) ==
+	      InitialWifiFailureAction::RebootApConfig);
+	CHECK(initialWifiFailureAction(BootMode::Normal, BootIntent::PortalNormal) ==
+	      InitialWifiFailureAction::RebootApConfig);
+}
+
 TEST_CASE("boot intent maps to the next boot mode")
 {
 	CHECK(bootModeForIntent(BootIntent::Normal, BootMode::ApConfig) == BootMode::Normal);
+	CHECK(bootModeForIntent(BootIntent::PortalNormal, BootMode::ApConfig) == BootMode::Normal);
 	CHECK(bootModeForIntent(BootIntent::ApConfig, BootMode::Normal) == BootMode::ApConfig);
 	CHECK(bootModeForIntent(BootIntent::WifiConfig, BootMode::Normal) == BootMode::WifiConfig);
 	CHECK(bootModeForIntent(BootIntent::Ota, BootMode::WifiConfig) == BootMode::WifiConfig);
+}
+
+TEST_CASE("boot intent strings round-trip portal normal")
+{
+	CHECK(bootIntentFromString("portal_normal") == BootIntent::PortalNormal);
+	CHECK(std::string(bootIntentToString(BootIntent::PortalNormal)) == "portal_normal");
 }
