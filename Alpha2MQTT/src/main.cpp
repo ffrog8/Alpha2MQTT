@@ -2965,26 +2965,40 @@ bindPortalRoutes(WiFiManager &wifiManager)
 			handlePortalWifiSave(wifiManager);
 		});
 	}
-	wifiManager.server->on("/config/mqtt", HTTP_GET, [&]() {
+		wifiManager.server->on("/config/mqtt", HTTP_GET, [&]() {
 #ifdef DEBUG_OVER_SERIAL
-		portalLog("route hit: /config/mqtt");
+			portalLog("route hit: /config/mqtt");
 #endif
-		handlePortalParamPage(wifiManager);
-	});
-	wifiManager.server->on("/config/mqtt/save", HTTP_POST, [&]() {
-		handlePortalParamSave(wifiManager);
-	});
-	wifiManager.server->on("/config/update", HTTP_GET, [&]() {
-		handlePortalUpdatePage(wifiManager);
-	});
-	wifiManager.server->on("/config/update", HTTP_POST, [&]() {
-		handlePortalUpdatePost(wifiManager);
-	}, [&]() {
-		handlePortalUpdateUpload(wifiManager);
-	});
-	wifiManager.server->on("/config/polling/save", HTTP_POST, [&]() {
-		handlePortalPollingSave(wifiManager);
-	});
+			handlePortalParamPage(wifiManager);
+		});
+		wifiManager.server->on("/param", HTTP_GET, [&]() {
+			handlePortalParamPage(wifiManager);
+		});
+		wifiManager.server->on("/config/mqtt/save", HTTP_POST, [&]() {
+			handlePortalParamSave(wifiManager);
+		});
+		wifiManager.server->on("/paramsave", HTTP_POST, [&]() {
+			handlePortalParamSave(wifiManager);
+		});
+		wifiManager.server->on("/config/update", HTTP_GET, [&]() {
+			handlePortalUpdatePage(wifiManager);
+		});
+		wifiManager.server->on("/update", HTTP_GET, [&]() {
+			handlePortalUpdatePage(wifiManager);
+		});
+		wifiManager.server->on("/config/update", HTTP_POST, [&]() {
+			handlePortalUpdatePost(wifiManager);
+		}, [&]() {
+			handlePortalUpdateUpload(wifiManager);
+		});
+		wifiManager.server->on("/u", HTTP_POST, [&]() {
+			handlePortalUpdatePost(wifiManager);
+		}, [&]() {
+			handlePortalUpdateUpload(wifiManager);
+		});
+		wifiManager.server->on("/config/polling/save", HTTP_POST, [&]() {
+			handlePortalPollingSave(wifiManager);
+		});
 	wifiManager.server->on("/config/polling/clear", HTTP_POST, [&]() {
 		handlePortalPollingClear(wifiManager);
 	});
