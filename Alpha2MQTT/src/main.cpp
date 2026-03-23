@@ -602,6 +602,7 @@ static void refreshPortalCustomParameters(void);
 static bool isWifiConfigComplete(void);
 static bool isMqttConfigComplete(void);
 static bool mqttSubsystemEnabled(void);
+static BootIntent portalRestartIntent(void);
 static BootIntent portalNormalRebootIntent(void);
 bool inverterLabelOverrideIsValid(const char *labelOverride);
 bool applyLegacyBucketMapString(const char *map,
@@ -628,6 +629,7 @@ const char* wifiStatusReason(wl_status_t status);
 const char* wifiStatusLabel(wl_status_t status);
 const char* wifiModeLabel(WiFiMode_t mode);
 void handlePortalStatusRequest(WiFiManager& wifiManager);
+static void handlePortalRestartRequest(WiFiManager& wifiManager);
 void handlePortalRebootNormalRequest(WiFiManager& wifiManager);
 bool portalHasPersistedWifiCredentials(void);
 static bool portalRequestHasMqttFields(WiFiManager &wifiManager);
@@ -2801,6 +2803,23 @@ handlePortalUpdatePost(WiFiManager &wifiManager)
 }
 
 void
+handlePortalRestartRequest(WiFiManager& wifiManager)
+{
+	if (!wifiManager.server) {
+		return;
+	}
+
+	wifiManager.server->sendHeader("Connection", "close");
+	wifiManager.server->send(200, "text/plain", "Rebooting...");
+#if defined(MP_ESP8266)
+	ESP.wdtFeed();
+#endif
+	portalRebootScheduled = true;
+	portalRebootAt = millis() + 1500;
+	deferredControlPlaneRebootIntent = portalRestartIntent();
+}
+
+void
 handlePortalRebootNormalRequest(WiFiManager& wifiManager)
 {
 	if (!wifiManager.server) {
@@ -2930,12 +2949,12 @@ bindPortalRoutes(WiFiManager &wifiManager)
 	wifiManager.server->on("/", HTTP_GET, [&]() {
 		handlePortalMenuPage(wifiManager);
 	});
-	wifiManager.server->on("/restart", HTTP_GET, [&]() {
-		handlePortalRebootNormalRequest(wifiManager);
-	});
-	wifiManager.server->on("/restart/", HTTP_GET, [&]() {
-		handlePortalRebootNormalRequest(wifiManager);
-	});
+		wifiManager.server->on("/restart", HTTP_GET, [&]() {
+			handlePortalRestartRequest(wifiManager);
+		});
+		wifiManager.server->on("/restart/", HTTP_GET, [&]() {
+			handlePortalRestartRequest(wifiManager);
+		});
 	wifiManager.server->on("/status", [&]() {
 #ifdef DEBUG_OVER_SERIAL
 		portalLog("route hit: /status");
@@ -6770,6 +6789,19 @@ void updateRunstate()
 	}
 	}
 	#endif // DISABLE_DISPLAY
+
+static BootIntent
+portalRestartIntent(void)
+{
+	switch (currentBootMode) {
+	case BootMode::ApConfig:
+		return BootIntent::ApConfig;
+	case BootMode::WifiConfig:
+		return BootIntent::WifiConfig;
+	default:
+		return BootIntent::Normal;
+	}
+}
 
 static BootIntent
 portalNormalRebootIntent(void)
