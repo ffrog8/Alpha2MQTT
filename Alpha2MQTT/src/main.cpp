@@ -1517,10 +1517,12 @@ static bool
 syncPortalWifiCredentials(WiFiManager *wifiManager, const char *ssidHint, const char *passHint)
 {
 	// AP onboarding can hand us empty SSID/password hints even though WiFiManager still
-	// holds the submitted values it just used for a successful connect. Treat empty hints
-	// as "unknown" so we do not persist blank credentials across the AP->STA portal handoff.
+	// holds the submitted values it just used for a successful connect. Treat both empty
+	// hints as "unknown" so we can fall back to WiFiManager state, but preserve an empty
+	// password when the caller supplied an SSID because that is how open networks are
+	// represented through the portal form.
 	const bool ssidProvided = ssidHint != nullptr && ssidHint[0] != '\0';
-	const bool passProvided = passHint != nullptr && passHint[0] != '\0';
+	const bool passProvided = passHint != nullptr && (passHint[0] != '\0' || ssidProvided);
 	String ssid = ssidProvided ? String(ssidHint) : String();
 	String pass = passProvided ? String(passHint) : String();
 
@@ -9581,6 +9583,15 @@ processPendingEntityCommand(void)
 				opData.a2mReadyToUseOpMode = true;
 				dispatchRelevantChange = true;
 				if (tempOpMode == opMode::opModeNormal) {
+					if (_registerHandler != NULL) {
+						modbusRequestAndResponse response;
+						modbusRequestAndResponseStatusValues result = _registerHandler->writeDispatchStop(&response);
+						if (result == modbusRequestAndResponseStatusValues::writeDataRegisterSuccess) {
+							opData.essDispatchStart = DISPATCH_START_STOP;
+						} else {
+							rs485Errors++;
+						}
+					}
 					timedDispatchState.completedGeneration = timedDispatchState.requestedGeneration;
 					timedDispatchState.restartAfterStop = false;
 				} else {

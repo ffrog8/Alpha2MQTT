@@ -1568,15 +1568,34 @@ def _ensure_latest_stub_via_ota(
 
     print(f"[e2e] POST {upload_path} (upload firmware: {firmware_path.name})")
     status: Optional[int] = None
-    try:
-        status = _http_post_multipart(upload_url, field_name=field_name, file_path=firmware_path, timeout_s=240)
-        print(f"[e2e] upload HTTP status={status}")
-        if status < 200 or status >= 400:
-            raise E2EError(f"OTA upload failed (HTTP {status})")
-    except TimeoutError:
-        # Some OTA implementations reboot before responding, or hold the connection open without a response.
-        # Treat this as ambiguous and confirm success via MQTT build timestamp instead.
-        print("[e2e] upload timed out waiting for HTTP response; verifying success via MQTT...")
+    upload_attempt = 0
+    while True:
+        upload_attempt += 1
+        try:
+            status = _http_post_multipart(upload_url, field_name=field_name, file_path=firmware_path, timeout_s=240)
+            print(f"[e2e] upload HTTP status={status}")
+            if status < 200 or status >= 400:
+                raise E2EError(f"OTA upload failed (HTTP {status})")
+            break
+        except TimeoutError:
+            # Some OTA implementations reboot before responding, or hold the connection open without a response.
+            # Treat this as ambiguous and confirm success via MQTT build timestamp instead.
+            print("[e2e] upload timed out waiting for HTTP response; verifying success via MQTT...")
+            break
+        except OSError as exc:
+            # ESP8266 OTA can reset the TCP connection while the client is still writing the
+            # multipart body. Treat a transport reset like a timeout and verify via MQTT.
+            print(f"[e2e] upload connection reset during OTA; verifying success via MQTT ({exc})")
+            break
+        except E2EError as exc:
+            if upload_attempt >= 2 or status != 500:
+                raise
+            print(f"[e2e] upload returned HTTP 500; refreshing portal update form and retrying once ({exc})")
+            _sleep_with_mqtt(mqtt, 5)
+            discovered_action, update_html = _load_update_page(http_base.rstrip("/"))
+            upload_path = discovered_action
+            field_name = _extract_file_input_name(update_html)
+            upload_url = http_base.rstrip("/") + upload_path
 
     print("[e2e] waiting for device to reboot and report new fw_build_ts_ms over MQTT...")
     # Ensure we observe a *new boot publish* with the new build id; otherwise the retained /boot
