@@ -3805,6 +3805,9 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 	// Polling save is user-driven config edit only. Never auto-reboot from this path.
 	portalRebootScheduled = false;
 	portalMqttSaved = false;
+	if (hadError) {
+		g_portalPollingCacheValid = false;
+	}
 
 		// Optional hidden reboot for E2E; not shown in UI.
 		if (wifiManager.server->hasArg("reboot") && wifiManager.server->arg("reboot") == "1") {
@@ -3897,6 +3900,9 @@ handlePortalPollingClear(WiFiManager &wifiManager)
 	}
 	portalRebootScheduled = false;
 	portalMqttSaved = false;
+	if (hadError) {
+		g_portalPollingCacheValid = false;
+	}
 
 	char location[96];
 	snprintf(location,
