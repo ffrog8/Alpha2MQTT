@@ -23,6 +23,7 @@ struct TimedDispatchRuntimeState {
 	uint32_t acceptedDurationSeconds = 0;
 	uint32_t lastCountdownPublishMs = 0;
 	uint32_t lastEvalMs = 0;
+	bool evalPending = false;
 	bool awaitingStopAck = false;
 	bool restartAfterStop = false;
 	bool bootStopPending = true;
@@ -34,7 +35,7 @@ uint32_t dispatchRawTimeForDuration(uint32_t seconds);
 uint32_t dispatchRemainingSeconds(uint32_t acceptedAtMs,
                                   uint32_t acceptedDurationSeconds,
                                   uint32_t nowMs);
-bool dispatchEvalDue(uint32_t lastEvalMs, uint32_t nowMs, uint32_t intervalMs);
+bool dispatchEvalDue(uint32_t lastEvalMs, uint32_t nowMs, uint32_t intervalMs, bool forceImmediate);
 bool dispatchCountdownPublishDue(uint32_t lastCountdownPublishMs, uint32_t nowMs);
 void dispatchNoteRequestedGeneration(TimedDispatchRuntimeState &state);
 bool dispatchHasPendingGeneration(const TimedDispatchRuntimeState &state);

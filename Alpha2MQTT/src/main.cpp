@@ -9616,7 +9616,7 @@ processPendingEntityCommand(void)
 	}
 
 	if (dispatchRelevantChange) {
-		timedDispatchState.lastEvalMs = 0;
+		timedDispatchState.evalPending = true;
 		if (timedGenerationRequested) {
 			dispatchNoteRequestedGeneration(timedDispatchState);
 		}
@@ -10419,7 +10419,8 @@ dispatchService(void)
 	const bool handshakeActive = timedDispatchState.bootStopPending || timedDispatchState.awaitingStopAck ||
 	                             (pendingGeneration && timedDispatchState.activeGeneration == 0);
 	const uint32_t evalIntervalMs = handshakeActive ? kDispatchHandshakeIntervalMs : (pollIntervalSeconds * 1000UL);
-	const bool dueEval = dispatchEvalDue(timedDispatchState.lastEvalMs, nowMs, evalIntervalMs);
+	const bool dueEval = dispatchEvalDue(
+		timedDispatchState.lastEvalMs, nowMs, evalIntervalMs, timedDispatchState.evalPending);
 	const bool dueCountdown = (timedDispatchState.activeGeneration != 0) &&
 	                          dispatchCountdownPublishDue(timedDispatchState.lastCountdownPublishMs, nowMs);
 	if (!dueEval && !dueCountdown) {
@@ -10427,6 +10428,7 @@ dispatchService(void)
 	}
 	if (dueEval) {
 		timedDispatchState.lastEvalMs = nowMs;
+		timedDispatchState.evalPending = false;
 		if (!refreshEssSnapshot()) {
 			strlcpy(dispatchLastSkipReason, "ess_snapshot_failed", sizeof(dispatchLastSkipReason));
 			return;

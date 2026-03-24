@@ -40,8 +40,11 @@ dispatchRemainingSeconds(uint32_t acceptedAtMs, uint32_t acceptedDurationSeconds
 }
 
 bool
-dispatchEvalDue(uint32_t lastEvalMs, uint32_t nowMs, uint32_t intervalMs)
+dispatchEvalDue(uint32_t lastEvalMs, uint32_t nowMs, uint32_t intervalMs, bool forceImmediate)
 {
+	if (forceImmediate) {
+		return true;
+	}
 	if (intervalMs == 0) {
 		return true;
 	}
@@ -84,6 +87,7 @@ dispatchMarkAccepted(TimedDispatchRuntimeState &state,
 	state.acceptedAtMs = acceptedAtMs;
 	state.acceptedDurationSeconds = durationSeconds;
 	state.lastCountdownPublishMs = acceptedAtMs;
+	state.evalPending = false;
 	state.awaitingStopAck = false;
 	state.restartAfterStop = false;
 }
@@ -100,4 +104,5 @@ dispatchMarkStopped(TimedDispatchRuntimeState &state, bool completed)
 	state.awaitingStopAck = false;
 	state.restartAfterStop = false;
 	state.lastCountdownPublishMs = 0;
+	state.evalPending = false;
 }

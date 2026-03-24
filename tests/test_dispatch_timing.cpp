@@ -58,9 +58,10 @@ TEST_CASE("dispatch timing generation bookkeeping avoids accidental restart")
 
 TEST_CASE("dispatch timing evaluation and countdown cadences are independent")
 {
-	CHECK_FALSE(dispatchEvalDue(1000, 1500, 1000));
-	CHECK(dispatchEvalDue(1000, 2000, 1000));
-	CHECK(dispatchEvalDue(1000, 1500, 0));
+	CHECK_FALSE(dispatchEvalDue(1000, 1500, 1000, false));
+	CHECK(dispatchEvalDue(1000, 2000, 1000, false));
+	CHECK(dispatchEvalDue(1000, 1500, 0, false));
+	CHECK(dispatchEvalDue(0, 500, 120000, true));
 
 	CHECK_FALSE(dispatchCountdownPublishDue(1000, 5999));
 	CHECK(dispatchCountdownPublishDue(1000, 6000));
