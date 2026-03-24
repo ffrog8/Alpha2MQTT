@@ -1516,11 +1516,11 @@ beginWifiStationWithStoredCredentials(void)
 static bool
 syncPortalWifiCredentials(WiFiManager *wifiManager, const char *ssidHint, const char *passHint)
 {
-		// An empty password can be intentional for open networks, so only nullptr means
-		// "unknown". Fall back to WiFiManager's current form state only when no password
-		// hint was supplied at all.
-		const bool ssidProvided = ssidHint != nullptr && ssidHint[0] != '\0';
-		const bool passProvided = passHint != nullptr;
+	// AP onboarding can hand us empty SSID/password hints even though WiFiManager still
+	// holds the submitted values it just used for a successful connect. Treat empty hints
+	// as "unknown" so we do not persist blank credentials across the AP->STA portal handoff.
+	const bool ssidProvided = ssidHint != nullptr && ssidHint[0] != '\0';
+	const bool passProvided = passHint != nullptr && passHint[0] != '\0';
 	String ssid = ssidProvided ? String(ssidHint) : String();
 	String pass = passProvided ? String(passHint) : String();
 
@@ -3161,20 +3161,22 @@ loadPollingBucketsForPortal(const mqttState *entities,
 		return false;
 	}
 
-	for (size_t i = 0; i < entityCount; ++i) {
-		outBuckets[i] = bucketIdFromFreq(entities[i].updateFreq);
-	}
-
 	const bool usePersistedOnly =
 		currentBootMode == BootMode::ApConfig || currentBootMode == BootMode::WifiConfig;
 	outPollIntervalSeconds = clampPollInterval(pollIntervalSeconds);
 	if (usePersistedOnly || !mqttEntitiesRtAvailable()) {
 		if (g_portalPollingCacheValid && g_portalPollingCacheEntityCount == entityCount) {
 			outPollIntervalSeconds = g_portalPollingCacheIntervalSeconds;
+			// The portal cache lives in g_portalBucketsScratch. Do not prefill
+			// defaults into that buffer before checking the cache or the saved
+			// overrides get clobbered and the page falsely reverts to defaults.
 			if (outBuckets != g_portalBucketsScratch) {
 				memcpy(outBuckets, g_portalBucketsScratch, entityCount * sizeof(BucketId));
 			}
 			return true;
+		}
+		for (size_t i = 0; i < entityCount; ++i) {
+			outBuckets[i] = bucketIdFromFreq(entities[i].updateFreq);
 		}
 		Preferences preferences;
 		preferences.begin(DEVICE_NAME, true);
@@ -3294,6 +3296,9 @@ loadPollingBucketsForPortal(const mqttState *entities,
 		return true;
 	}
 
+	for (size_t i = 0; i < entityCount; ++i) {
+		outBuckets[i] = bucketIdFromFreq(entities[i].updateFreq);
+	}
 	return mqttEntityCopyBuckets(outBuckets, entityCount);
 }
 

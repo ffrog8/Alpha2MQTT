@@ -486,11 +486,23 @@ def _build_container_name() -> str:
 def _container_firmware_path(path: Path, *, container_name: str) -> str:
     try:
         rel = path.relative_to(_repo_root())
-        return f"/project/{rel.as_posix()}"
+        rel_posix = rel.as_posix()
+        # Support both the legacy container layout (/project/...) and the current
+        # bind-mounted repo layout (/project/Alpha2MQTT/...).
+        for candidate in (f"/project/{rel_posix}", f"/project/Alpha2MQTT/{rel_posix}"):
+            result = subprocess.run(
+                ["docker", "exec", container_name, "test", "-f", candidate],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            if result.returncode == 0:
+                return candidate
     except ValueError:
-        staged = f"/tmp/{path.name}"
-        _run_checked(["docker", "cp", str(path), f"{container_name}:{staged}"], timeout_s=60)
-        return staged
+        pass
+    staged = f"/tmp/{path.name}"
+    _run_checked(["docker", "cp", str(path), f"{container_name}:{staged}"], timeout_s=60)
+    return staged
 
 
 def _find_esptool_path(container_name: str) -> str:
@@ -907,21 +919,17 @@ def _wait_for_sta_portal(ssh: PiSsh, base_url: str, *, timeout_s: int) -> str:
     last = ""
     while time.time() < deadline:
         try:
-            _pi_http_request(ssh, method="GET", url=base_url + "/", timeout_s=10)
-        except Exception:
-            pass
-        try:
-            resp = _pi_http_request(ssh, method="GET", url=base_url + "/config/polling", timeout_s=10)
+            resp = _pi_http_request(ssh, method="GET", url=base_url + "/", timeout_s=10)
         except Exception as exc:
             last = f"exc={exc}"
             time.sleep(2.0)
             continue
         status = int(resp.get("status", 0))
         last = str(resp.get("body", ""))
-        if status == 200 and "Polling" in last:
+        if status == 200 and all(token in last for token in ("/config/mqtt", "/config/polling", "/config/reboot-normal")):
             return last
         time.sleep(2.0)
-    raise PortalTestError(f"Timed out waiting for STA portal polling page. Last={last[:300]!r}")
+    raise PortalTestError(f"Timed out waiting for STA portal root menu. Last={last[:300]!r}")
 
 
 def _rediscover_sta_portal_after_reboot_wifi(ssh: PiSsh, base_url: str, *, timeout_s: int) -> str:
@@ -959,15 +967,15 @@ def probe_url(url: str):
     try:
         with urllib.request.urlopen(url, timeout=1.5) as resp:
             body = resp.read().decode('utf-8', errors='replace')
-            if int(resp.getcode()) == 200 and 'Polling' in body:
-                return {{"url": url[:-len('/config/polling')], "body": body}}
+            if int(resp.getcode()) == 200 and '/config/mqtt' in body and '/config/polling' in body and '/config/reboot-normal' in body:
+                return {{"url": url[:-1], "body": body}}
     except Exception:
         return None
     return None
 
 urls = []
 if hostname:
-    urls.append(f"http://{{hostname}}/config/polling")
+    urls.append(f"http://{{hostname}}/")
 
 seen = set(urls)
 
@@ -982,7 +990,7 @@ if previous_ip:
     others = [ip for ip in network.hosts() if ip != preferred[0]]
     ordered = preferred + others
     for ip in ordered:
-        add_url(f"http://{{ip}}/config/polling")
+        add_url(f"http://{{ip}}/")
 else:
     try:
         addr_data = json.loads(subprocess.check_output(["ip", "-json", "-4", "addr", "show", "up"], text=True))
@@ -1002,7 +1010,7 @@ else:
                 continue
             network = ipaddress.ip_network(f"{{local}}/{{max(prefixlen, 24)}}", strict=False)
             for ip in network.hosts():
-                add_url(f"http://{{ip}}/config/polling")
+                add_url(f"http://{{ip}}/")
 
 with concurrent.futures.ThreadPoolExecutor(max_workers=32) as ex:
     futures = [ex.submit(probe_url, url) for url in urls]
@@ -1340,13 +1348,12 @@ def _run_wifi_only_case(
         wifi_pwd=wifi_pwd,
         wifi_action=wifi_action,
     )
-    portal_base_url, _portal_page = _discover_sta_portal_base(
+    portal_base_url, portal_root_body = _discover_sta_portal_base(
         ssh,
         previous_ip=portal_runtime_ip,
         hostname=ap_ssid,
         timeout_s=180,
     )
-    portal_root_body = _wait_for_page_contains(ssh, url=portal_base_url + "/", needle="/config/mqtt", timeout_s=20)
     _assert_portal_root_menu(portal_root_body, "sta portal root (wifi-only case)")
     portal_runtime_ip = urllib.parse.urlparse(portal_base_url).hostname or portal_runtime_ip
 
@@ -1393,13 +1400,12 @@ def _run_wifi_plus_mqtt_case(
         wifi_pwd=wifi_pwd,
         wifi_action=wifi_action,
     )
-    portal_base_url, _portal_page = _discover_sta_portal_base(
+    portal_base_url, portal_root_body = _discover_sta_portal_base(
         ssh,
         previous_ip=portal_runtime_ip,
         hostname=device_root,
         timeout_s=180,
     )
-    portal_root_body = _wait_for_page_contains(ssh, url=portal_base_url + "/", needle="/config/mqtt", timeout_s=20)
     _assert_portal_root_menu(portal_root_body, "sta portal root (wifi+mqtt case)")
     portal_runtime_ip = urllib.parse.urlparse(portal_base_url).hostname or portal_runtime_ip
 

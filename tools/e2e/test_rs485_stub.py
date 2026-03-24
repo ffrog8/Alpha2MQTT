@@ -876,6 +876,21 @@ def _load_wifi_page(base: str) -> tuple[str, str]:
         raise E2EError("portal wifi page missing ssid/password inputs")
     return _extract_form_action_with_input(html, "s"), html
 
+def _load_update_page(base: str) -> tuple[str, str]:
+    status, body = _http_request_full("GET", base + "/config/update", headers={}, body=b"", timeout_s=20)
+    if status != 200:
+        raise E2EError(f"portal update page not reachable: status={status}")
+    html = body.decode("utf-8", errors="replace")
+    if 'type="file"' not in html:
+        raise E2EError("portal update page missing file input")
+    return _extract_form_action_with_input(html, "firmware"), html
+
+def _extract_file_input_name(html: str) -> str:
+    m = re.search(r'<input[^>]*type="file"[^>]*name="([^"]+)"', html, flags=re.IGNORECASE)
+    if not m:
+        raise E2EError("could not locate OTA file input name")
+    return m.group(1)
+
 def _extract_polling_page_bounds(poll_html: str) -> tuple[int, int]:
     m = re.search(r'<p class="hint">[^<]*Page\s+(\d+)\s+of\s+(\d+)[^<]*</p>', poll_html)
     if not m:
@@ -1523,11 +1538,7 @@ def _ensure_latest_stub_via_ota(
     reboot_path = os.environ.get("DEVICE_REBOOT_WIFI_PATH") or _discover_reboot_wifi_path_from_code()
     if not reboot_path:
         raise E2EError("Could not discover reboot-to-wifi-config path; set DEVICE_REBOOT_WIFI_PATH")
-    upload_path = os.environ.get("DEVICE_OTA_UPLOAD_PATH", "/u")
-    field_name = os.environ.get("DEVICE_OTA_FIELD_NAME", "update")
-
     reboot_url = http_base.rstrip("/") + reboot_path
-    upload_url = http_base.rstrip("/") + upload_path
 
     print(f"[e2e] POST {reboot_path} (reboot into Wi-Fi config portal)")
     try:
@@ -1544,6 +1555,16 @@ def _ensure_latest_stub_via_ota(
     # MODE_WIFI_CONFIG waits for STA reconnect before the portal is actually served.
     # The firmware's connect timeout is 20s, so 8s is not long enough to make /u reliable.
     _sleep_with_mqtt(mqtt, 25)
+
+    upload_path = os.environ.get("DEVICE_OTA_UPLOAD_PATH", "").strip()
+    field_name = os.environ.get("DEVICE_OTA_FIELD_NAME", "").strip()
+    if not upload_path or not field_name:
+        discovered_action, update_html = _load_update_page(http_base.rstrip("/"))
+        if not upload_path:
+            upload_path = discovered_action
+        if not field_name:
+            field_name = _extract_file_input_name(update_html)
+    upload_url = http_base.rstrip("/") + upload_path
 
     print(f"[e2e] POST {upload_path} (upload firmware: {firmware_path.name})")
     status: Optional[int] = None
@@ -3340,8 +3361,10 @@ def main() -> int:
         print(f"[e2e] rebooting into wifi portal via {reboot_url}")
         _http_post_simple(reboot_url, timeout_s=10)
 
-        # Portal is STA-only and should come back on the same IP.
-        _wait_for_http_ok(base + "/", timeout_s=40)
+        # Portal is STA-only and should come back on the same IP, but runtime
+        # can still answer briefly during the deferred reboot window. Wait for
+        # the actual portal menu, not just any 200 on `/`.
+        _assert_portal_root_menu(base, timeout_s=40)
 
         polling_path, html = _load_polling_page_via_menu(base)
         if not polling_path.startswith("/config/polling"):
@@ -3468,7 +3491,7 @@ def main() -> int:
         # Re-enter portal and verify values are restored in the UI after reboot.
         print(f"[e2e] rebooting into wifi portal via {reboot_url} (persistence check)")
         _http_post_simple(reboot_url, timeout_s=10)
-        _wait_for_http_ok(base + "/", timeout_s=40)
+        _assert_portal_root_menu(base, timeout_s=40)
 
         polling_path2, html2 = _load_polling_page_via_menu(base)
         if not polling_path2.startswith("/config/polling"):
@@ -3539,8 +3562,15 @@ def main() -> int:
 
         _assert_eventually("clear-all removes active entity intervals", cleared_pred, timeout_s=60, poll_s=3.0)
 
-        set_polling_config(original_interval, "")
-        wait_intervals_applied(original_intervals, timeout_s=60, republish_every_s=5.0)
+        if original_intervals:
+            wait_polling_config_applied(
+                original_interval,
+                {str(key): str(value) for key, value in original_intervals.items()},
+                timeout_s=60,
+                republish_every_s=5.0,
+            )
+        else:
+            set_polling_config(original_interval, "")
 
         def restored_pred() -> Tuple[bool, str]:
             cur = _fetch_poll(mqtt, poll_topic)
