@@ -10427,7 +10427,8 @@ dispatchService(void)
 	const uint32_t evalIntervalMs = handshakeActive ? kDispatchHandshakeIntervalMs : (pollIntervalSeconds * 1000UL);
 	const bool dueEval = dispatchEvalDue(
 		timedDispatchState.lastEvalMs, nowMs, evalIntervalMs, timedDispatchState.evalPending);
-	const bool dueCountdown = (timedDispatchState.activeGeneration != 0) &&
+	const bool dueCountdown = timedEnabled &&
+	                          (timedDispatchState.activeGeneration != 0) &&
 	                          dispatchCountdownPublishDue(timedDispatchState.lastCountdownPublishMs, nowMs);
 	if (!dueEval && !dueCountdown) {
 		return;

@@ -97,6 +97,7 @@ CASE_ORDER: tuple[str, ...] = (
     "dispatch_write_feedback",
     "dispatch_eval_user_interval",
     "dispatch_timed_restart_expire",
+    "dispatch_disable_timed_stops_countdown_wakes",
     "dispatch_boot_fail_closed",
     "fail_specific_snapshot_reg",
     "fail_every_n",
@@ -2660,6 +2661,48 @@ def main() -> int:
         if start_after_expiry.lower() not in ("stop", "stopped") and start_after_expiry != str(dispatch_start_stop):
             raise E2EError(f"dispatch restarted after expiry instead of staying stopped: {start_after_expiry!r}")
 
+    def case_dispatch_disable_timed_stops_countdown_wakes() -> None:
+        print("[e2e] case: disabling timed dispatch does not keep 5s rewrite bursts alive")
+        ha_unique = _ensure_online_inverter_identity("dispatch disable baseline")
+        ensure_dispatch_write(
+            ha_unique,
+            label_prefix="dispatch disable",
+            duration_s=12,
+            poll_interval_s=13,
+            timeout_s=8,
+        )
+
+        before_disable = _fetch_poll(mqtt, poll_topic)
+        writes_before_disable = int(before_disable.get("rs485_stub_writes", 0))
+
+        publish_and_wait_state(ha_unique, "Dispatch_Duration", "0")
+
+        disable_write_count = writes_before_disable
+
+        def disable_write_pred() -> Tuple[bool, str]:
+            nonlocal disable_write_count
+            cur = _fetch_poll(mqtt, poll_topic)
+            disable_write_count = int(cur.get("rs485_stub_writes", 0))
+            return disable_write_count > writes_before_disable, f"writes={disable_write_count}"
+
+        _assert_eventually(
+            "dispatch duration 0 triggers one non-timed rewrite",
+            disable_write_pred,
+            timeout_s=10,
+            poll_s=1.0,
+        )
+
+        # The countdown cadence is 5s. With poll_interval_s=13, any extra write
+        # seen in the next 7s window can only come from the stale countdown path.
+        _sleep_with_mqtt(mqtt, 7)
+        after_disable = _fetch_poll(mqtt, poll_topic)
+        writes_after_disable = int(after_disable.get("rs485_stub_writes", 0))
+        if writes_after_disable != disable_write_count:
+            raise E2EError(
+                f"Dispatch_Duration=0 kept countdown-triggered writes alive: "
+                f"{disable_write_count}->{writes_after_disable}"
+            )
+
     def case_dispatch_boot_fail_closed() -> None:
         print("[e2e] case: boot fail-closes an active dispatch once RS485 returns")
         dispatch_start_start = _discover_define_value("DISPATCH_START_START")
@@ -3693,6 +3736,7 @@ def main() -> int:
         ("dispatch_write_feedback", case_dispatch_write_feedback_via_register_value),
         ("dispatch_eval_user_interval", case_dispatch_eval_uses_user_interval),
         ("dispatch_timed_restart_expire", case_dispatch_timed_restart_and_expire),
+        ("dispatch_disable_timed_stops_countdown_wakes", case_dispatch_disable_timed_stops_countdown_wakes),
         ("dispatch_boot_fail_closed", case_dispatch_boot_fail_closed),
         ("fail_specific_snapshot_reg", case_fail_specific_snapshot_register_and_type),
         ("fail_every_n", case_fail_every_n_snapshot_attempts),
