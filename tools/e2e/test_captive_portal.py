@@ -1073,7 +1073,11 @@ def _wait_for_polling_page_persisted(
             continue
         body = str(resp.get("body", ""))
         last = body
-        poll_ok = f'name="poll_interval_s"' in body and f'value="{expected_poll_interval_s}"' in body
+        poll_ok = (
+            'name="poll_interval_s"' in body and
+            f'value="{expected_poll_interval_s}"' in body and
+            'max="120"' in body
+        )
         row_match = re.search(
             rf'<tr[^>]*data-entity="{re.escape(entity_name)}"[^>]*>(.*?)</tr>',
             body,

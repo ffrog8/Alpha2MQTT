@@ -186,3 +186,5 @@ MQTT_ENTITY_ROW(entityPollingBudgetLimitMsUser, "Polling_Budget_Limit_ms_user", 
 MQTT_ENTITY_ROW(entityPollingBacklogCountUser, "Polling_Backlog_Count_user", freqDisabled, false, false, haClassInfo, MqttEntityFamily::Controller, MqttEntityScope::Controller, MqttEntityReadKind::Derived, 0, false)
 MQTT_ENTITY_ROW(entityPollingBacklogOldestAgeMsUser, "Polling_Backlog_Oldest_Age_ms_user", freqDisabled, false, false, haClassInfo, MqttEntityFamily::Controller, MqttEntityScope::Controller, MqttEntityReadKind::Derived, 0, false)
 MQTT_ENTITY_ROW(entityPollingLastFullCycleAgeMsUser, "Polling_Last_Full_Cycle_Age_ms_user", freqDisabled, false, false, haClassInfo, MqttEntityFamily::Controller, MqttEntityScope::Controller, MqttEntityReadKind::Derived, 0, false)
+MQTT_ENTITY_ROW(entityDispatchDuration, "Dispatch_Duration", freqOneMin, true, true, haClassNumber, MqttEntityFamily::System, MqttEntityScope::Inverter, MqttEntityReadKind::Control, 0, false)
+MQTT_ENTITY_ROW(entityDispatchRemaining, "Dispatch_Remaining", freqDisabled, false, true, haClassDuration, MqttEntityFamily::System, MqttEntityScope::Inverter, MqttEntityReadKind::Derived, 0, false)

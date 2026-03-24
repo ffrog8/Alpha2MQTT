@@ -14,7 +14,7 @@ struct A2mConfig {
 };
 
 constexpr uint32_t kPollIntervalMinSeconds = 1;
-constexpr uint32_t kPollIntervalMaxSeconds = 86400;
+constexpr uint32_t kPollIntervalMaxSeconds = 120;
 constexpr uint32_t kPollIntervalDefaultSeconds = 60;
 
 A2mConfig defaultConfig();

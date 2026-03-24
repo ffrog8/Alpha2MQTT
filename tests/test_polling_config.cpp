@@ -121,7 +121,7 @@ TEST_CASE("strict uint32 parser rejects blank and signed polling intervals")
 	CHECK_FALSE(parseStrictUint32("-1", kPollIntervalMaxSeconds, value));
 	CHECK_FALSE(parseStrictUint32("+1", kPollIntervalMaxSeconds, value));
 	CHECK_FALSE(parseStrictUint32("1abc", kPollIntervalMaxSeconds, value));
-	CHECK_FALSE(parseStrictUint32("86401", kPollIntervalMaxSeconds, value));
+	CHECK_FALSE(parseStrictUint32("121", kPollIntervalMaxSeconds, value));
 }
 
 TEST_CASE("config entry visitor accepts large bucket_map values")

@@ -103,24 +103,12 @@ TEST_CASE("bucket helpers: snapshot-dependent entities are skipped when snapshot
 	CHECK_FALSE(shouldPublishEntityForBucket(true, false));
 }
 
-TEST_CASE("bucket helpers: dispatch runs only when snapshot succeeded")
-{
-	CHECK(shouldRunDispatchForTenSecBucket(true));
-	CHECK_FALSE(shouldRunDispatchForTenSecBucket(false));
-}
-
-TEST_CASE("bucket helpers: ten second cadence always requires snapshot")
-{
-	CHECK(tenSecBucketRequiresSnapshot());
-}
-
 TEST_CASE("bucket helpers: inverter not ready still allows non-snapshot publishes")
 {
 	const bool snapshotOkThisBucket = snapshotPrereqSatisfiedForBucket(true, true, false, false);
 	CHECK_FALSE(snapshotOkThisBucket);
 	CHECK(shouldPublishEntityForBucket(false, snapshotOkThisBucket));
 	CHECK_FALSE(shouldPublishEntityForBucket(true, snapshotOkThisBucket));
-	CHECK_FALSE(shouldRunDispatchForTenSecPass(true, snapshotOkThisBucket, false));
 }
 
 TEST_CASE("bucket helpers: snapshot failure skips only snapshot-dependent entities")
@@ -134,17 +122,14 @@ TEST_CASE("bucket helpers: snapshot failure skips only snapshot-dependent entiti
 	CHECK_FALSE(snapshotOkThisBucket);
 	CHECK(shouldPublishEntityForBucket(false, snapshotOkThisBucket));
 	CHECK_FALSE(shouldPublishEntityForBucket(true, snapshotOkThisBucket));
-	CHECK_FALSE(shouldRunDispatchForTenSecPass(true, snapshotOkThisBucket, false));
 }
 
-TEST_CASE("bucket helpers: snapshot success publishes snapshot entities and dispatch runs once")
+TEST_CASE("bucket helpers: snapshot success publishes snapshot entities")
 {
 	const bool snapshotOkThisBucket = snapshotPrereqSatisfiedForBucket(true, true, true, true);
 	CHECK(snapshotOkThisBucket);
 	CHECK(shouldPublishEntityForBucket(false, snapshotOkThisBucket));
 	CHECK(shouldPublishEntityForBucket(true, snapshotOkThisBucket));
-	CHECK(shouldRunDispatchForTenSecPass(true, snapshotOkThisBucket, false));
-	CHECK_FALSE(shouldRunDispatchForTenSecPass(true, snapshotOkThisBucket, true));
 }
 
 TEST_CASE("bucket member loops: inverter not ready publishes non-snapshot members in each due bucket")
@@ -182,36 +167,6 @@ TEST_CASE("bucket member loops: inverter not ready publishes non-snapshot member
 	CHECK(published[0] == 0);
 	CHECK(published[1] == 2);
 	CHECK(published[2] == 4);
-}
-
-TEST_CASE("dispatch edge-trigger: two sendData iterations in one 10s interval dispatch once")
-{
-	uint32_t lastRunTenSeconds = 0;
-	size_t dispatchCount = 0;
-	const uint32_t kTenSecMs = 10000UL;
-
-	auto runSendDataIteration = [&](uint32_t now, bool snapshotOkThisBucket) {
-		const bool dueTenSeconds = shouldRun(now, lastRunTenSeconds, kTenSecMs);
-		if (dueTenSeconds) {
-			lastRunTenSeconds = now;
-		}
-		bool dispatchRanThisPass = false;
-		if (shouldRunDispatchForTenSecPass(dueTenSeconds, snapshotOkThisBucket, dispatchRanThisPass)) {
-			++dispatchCount;
-			dispatchRanThisPass = true;
-		}
-		CHECK_FALSE(shouldRunDispatchForTenSecPass(dueTenSeconds, snapshotOkThisBucket, dispatchRanThisPass));
-	};
-
-	runSendDataIteration(10000UL, true); // boundary due
-	runSendDataIteration(10001UL, true); // same 10s interval, not due
-	CHECK(dispatchCount == 1);
-
-	runSendDataIteration(19999UL, true); // still same boundary window, not due
-	CHECK(dispatchCount == 1);
-
-	runSendDataIteration(20000UL, true); // next boundary due
-	CHECK(dispatchCount == 2);
 }
 
 TEST_CASE("bucket helpers expose interval and capped runtime budget")

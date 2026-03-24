@@ -33,6 +33,7 @@ First, go and customise options at the top of Definitions.h!
 #include "../include/RebootRequest.h"
 #include "../include/StatusReporting.h"
 #include "../include/DiscoveryModel.h"
+#include "../include/DispatchTiming.h"
 #include "../include/Rs485ProbeLogic.h"
 #include "../include/Scheduler.h"
 #include "../include/TimeProvider.h"
@@ -109,6 +110,7 @@ char lastResetReason[64] = "";
 HttpServer httpServer(80);
 bool httpControlPlaneEnabled = false;
 static bool inMqttCallback = false;
+static uint32_t mqttCallbackSequence = 0;
 static bool pendingPollingConfigSet = false;
 static bool pollingConfigLoadedFromStorage = false;
 static bool pendingRs485StubControlSet = false;
@@ -120,6 +122,7 @@ static char *pendingPollingConfigPayload = nullptr;
 // overlap in this storage.
 static char pendingDeferredControlPayload[512] = "";
 static uint32_t manualRegisterReadSeq = 0;
+constexpr uint8_t kDeferredMqttDrainMaxIterations = 16;
 
 enum PortalStatus : uint8_t {
 	portalStatusIdle = 0,
@@ -184,6 +187,9 @@ static WiFiManagerParameter gPortalPollingLink("<p><a href=\"/config/polling\">P
 // Keep only the small bucket assignment array persistent. Large text buffers are
 // allocated on demand so NORMAL-mode runtime does not carry portal/config scratch.
 static BucketId g_portalBucketsScratch[kMqttEntityDescriptorCount];
+static bool g_portalPollingCacheValid = false;
+static size_t g_portalPollingCacheEntityCount = 0;
+static uint32_t g_portalPollingCacheIntervalSeconds = kPollIntervalDefaultSeconds;
 static size_t g_lastPublishedPollingConfigChunkCount = 0;
 BootIntent currentBootIntent = BootIntent::Normal;
 BootIntent bootIntentForPublish = BootIntent::Normal;
@@ -218,6 +224,7 @@ uint32_t essSnapshotAttemptCount = 0;
 bool essSnapshotLastOk = false;
 uint32_t dispatchLastRunMs = 0;
 char dispatchLastSkipReason[48] = "";
+static TimedDispatchRuntimeState timedDispatchState;
 uint32_t schedTenSecLastRunMs = 0;
 uint32_t schedOneMinLastRunMs = 0;
 uint32_t schedFiveMinLastRunMs = 0;
@@ -428,6 +435,7 @@ struct {
 	uint16_t essDispatchMode = 0;
 	int32_t  essDispatchActivePower = DISPATCH_ACTIVE_POWER_OFFSET;
 	uint16_t essDispatchSoc = 0;      // Stored as ESS register value. (percent / 0.4)
+	uint32_t essDispatchTime = 0;
 	uint16_t essBatterySoc = 0;       // Stored as ESS register value. (percent / 0.1)
 	int16_t  essBatteryPower = 0;	// positive->discharge : negative->charge
 	int32_t  essGridPower = 0;	// positive->fromGrid : negative->toGrid
@@ -545,7 +553,14 @@ static bool readLegacyPollingPref(size_t index,
                                   int defaultValue,
                                   int &storedValue,
                                   void *context);
-void checkAndSetDispatchMode(void);
+static void dispatchService(void);
+static void serviceDeferredMqttWork(void);
+static void publishDispatchStateEntity(mqttEntityId entityId);
+static void publishDispatchAuxiliaryStates(bool publishRawTime);
+static bool computeDispatchCommand(uint16_t &essDispatchMode,
+                                   int32_t &essDispatchActivePower,
+                                   uint16_t &essDispatchSoc,
+                                   bool &checkActivePower);
 void printWifiBars(int rssi);
 void getOpModeDesc(char *dest, size_t size, enum opMode mode);
 void getInverterModeDesc(char *dest, size_t size, uint16_t inverterMode);
@@ -1689,41 +1704,48 @@ persistUserPollingConfig(uint32_t intervalSeconds, const char *bucketMap)
 
 	const uint32_t originalIntervalSeconds =
 		preferences.getUInt(kPreferencePollInterval, kPollIntervalDefaultSeconds);
-	const bool originalBucketMapPresent = preferences.isKey(kPreferenceBucketMap);
-	const bool originalBucketMapMigrated = preferences.getBool(kPreferenceBucketMapMigrated, false);
-	ScopedCharBuffer originalBucketMap(originalBucketMapPresent ? kPrefBucketMapMaxLen : 1);
+	const bool updateBucketMap = (bucketMap != nullptr);
+	const bool originalBucketMapPresent = updateBucketMap && preferences.isKey(kPreferenceBucketMap);
+	const size_t originalBucketMapStorageLen =
+		originalBucketMapPresent ? preferences.getBytesLength(kPreferenceBucketMap) : 0;
+	const size_t originalBucketMapBufferLen =
+		(originalBucketMapStorageLen < kPrefBucketMapMaxLen) ? (originalBucketMapStorageLen + 1) : kPrefBucketMapMaxLen;
+	ScopedCharBuffer originalBucketMap(originalBucketMapPresent ? originalBucketMapBufferLen : 1);
 	if (originalBucketMapPresent) {
 		if (!originalBucketMap.ok()) {
 			preferences.end();
 			return false;
 		}
 		originalBucketMap.data[0] = '\0';
-		preferences.getString(kPreferenceBucketMap, originalBucketMap.data, kPrefBucketMapMaxLen);
+		preferences.getString(kPreferenceBucketMap, originalBucketMap.data, originalBucketMapBufferLen);
 	}
-
-	const char *safeBucketMap = (bucketMap != nullptr) ? bucketMap : "";
-	const size_t bucketMapLen = strlen(safeBucketMap);
-	bool ok = false;
-	if (bucketMapLen == 0) {
-		ok = !preferences.isKey(kPreferenceBucketMap) || preferences.remove(kPreferenceBucketMap) ||
-		     !preferences.isKey(kPreferenceBucketMap);
-	} else {
-		ok = preferences.putString(kPreferenceBucketMap, safeBucketMap) == bucketMapLen;
-	}
-	if (ok) {
-		ok = preferences.putBool(kPreferenceBucketMapMigrated, true) == sizeof(uint8_t);
-	}
-	if (ok) {
-		ok = preferences.putUInt(kPreferencePollInterval, intervalSeconds) == sizeof(uint32_t);
+	const bool originalBucketMapMigrated = updateBucketMap ? preferences.getBool(kPreferenceBucketMapMigrated, false) : false;
+	bool ok = preferences.putUInt(kPreferencePollInterval, intervalSeconds) == sizeof(uint32_t);
+	if (updateBucketMap) {
+		const char *safeBucketMap = bucketMap;
+		const size_t bucketMapLen = strlen(safeBucketMap);
+		if (ok) {
+			if (bucketMapLen == 0) {
+				ok = !preferences.isKey(kPreferenceBucketMap) || preferences.remove(kPreferenceBucketMap) ||
+				     !preferences.isKey(kPreferenceBucketMap);
+			} else {
+				ok = preferences.putString(kPreferenceBucketMap, safeBucketMap) == bucketMapLen;
+			}
+		}
+		if (ok) {
+			ok = preferences.putBool(kPreferenceBucketMapMigrated, true) == sizeof(uint8_t);
+		}
 	}
 	if (!ok) {
-		if (originalBucketMapPresent) {
-			preferences.putString(kPreferenceBucketMap, originalBucketMap.data);
-		} else if (preferences.isKey(kPreferenceBucketMap)) {
-			preferences.remove(kPreferenceBucketMap);
-		}
-		preferences.putBool(kPreferenceBucketMapMigrated, originalBucketMapMigrated);
 		preferences.putUInt(kPreferencePollInterval, originalIntervalSeconds);
+		if (updateBucketMap) {
+			if (originalBucketMapPresent) {
+				preferences.putString(kPreferenceBucketMap, originalBucketMap.data);
+			} else if (preferences.isKey(kPreferenceBucketMap)) {
+				preferences.remove(kPreferenceBucketMap);
+			}
+			preferences.putBool(kPreferenceBucketMapMigrated, originalBucketMapMigrated);
+		}
 	}
 	preferences.end();
 	return ok;
@@ -1986,22 +2008,62 @@ struct PortalResponseWriter {
 	size_t bytes = 0;
 
 	bool
-	write(const char *content)
+	writeBytes(const uint8_t *data, size_t len)
 	{
-		if (content == nullptr) {
+		if (data == nullptr) {
 			return false;
 		}
-		const size_t len = strlen(content);
-		if (client != nullptr) {
-			if (!(*client) || client->write(reinterpret_cast<const uint8_t *>(content), len) != len) {
+		if (client == nullptr) {
+			bytes += len;
+			return true;
+		}
+		size_t written = 0;
+		uint8_t idleSpins = 0;
+		while (written < len) {
+			if (!client->connected()) {
 				return false;
 			}
+			const size_t chunkWritten = client->write(data + written, len - written);
+			if (chunkWritten == 0) {
+				if (++idleSpins >= 8) {
+#ifdef DEBUG_OVER_SERIAL
+					portalLog("portal write stalled len=%u written=%u free=%u max=%u frag=%u",
+					          static_cast<unsigned>(len),
+					          static_cast<unsigned>(written),
+					          ESP.getFreeHeap(),
+					          ESP.getMaxFreeBlockSize(),
+					          ESP.getHeapFragmentation());
+#endif
+					return false;
+				}
+				delay(1);
+#if defined(MP_ESP8266)
+				ESP.wdtFeed();
+#endif
+				continue;
+			}
+			written += chunkWritten;
+			idleSpins = 0;
+			delay(0);
+#if defined(MP_ESP8266)
+			ESP.wdtFeed();
+#endif
 		}
 		bytes += len;
 #if defined(MP_ESP8266)
 		ESP.wdtFeed();
 #endif
 		return true;
+	}
+
+	bool
+	write(const char *content)
+	{
+		if (content == nullptr) {
+			return false;
+		}
+		const size_t len = strlen(content);
+		return writeBytes(reinterpret_cast<const uint8_t *>(content), len);
 	}
 
 	bool
@@ -2022,17 +2084,12 @@ struct PortalResponseWriter {
 			const size_t chunk = (remaining < (sizeof(scratch) - 1)) ? remaining : (sizeof(scratch) - 1);
 			memcpy_P(scratch, content + offset, chunk);
 			scratch[chunk] = '\0';
-			if (!(*client) ||
-			    client->write(reinterpret_cast<const uint8_t *>(scratch), chunk) != chunk) {
+			if (!writeBytes(reinterpret_cast<const uint8_t *>(scratch), chunk)) {
 				return false;
 			}
 			offset += chunk;
 			remaining -= chunk;
 		}
-		bytes += totalLen;
-#if defined(MP_ESP8266)
-		ESP.wdtFeed();
-#endif
 		return true;
 	}
 };
@@ -2122,7 +2179,7 @@ handlePortalMenuPage(WiFiManager& wifiManager)
 	wifiManager.server->send(200, "text/html", "");
 
 	WiFiClient client = wifiManager.server->client();
-	if (!client) {
+	if (!client.connected()) {
 		return;
 	}
 	PortalResponseWriter writer;
@@ -2234,7 +2291,7 @@ handlePortalWifiPage(WiFiManager& wifiManager)
 	wifiManager.server->send(200, "text/html", "");
 
 	WiFiClient client = wifiManager.server->client();
-	if (!client) {
+	if (!client.connected()) {
 		return;
 	}
 	PortalResponseWriter writer;
@@ -2369,7 +2426,7 @@ handlePortalParamPage(WiFiManager& wifiManager)
 	wifiManager.server->send(200, "text/html", "");
 
 	WiFiClient client = wifiManager.server->client();
-	if (!client) {
+	if (!client.connected()) {
 		return;
 	}
 	PortalResponseWriter writer;
@@ -2589,7 +2646,7 @@ handlePortalStatusRequest(WiFiManager& wifiManager)
 			return false;
 		}
 
-		snprintf(buf, sizeof(buf), "<br>Reset reason: %s", snapshot.resetReason);
+		snprintf(buf, sizeof(buf), "<br>Firmware version: %s<br>Reset reason: %s", _version, snapshot.resetReason);
 		if (!writer.write(buf)) {
 			return false;
 		}
@@ -2638,7 +2695,7 @@ handlePortalStatusRequest(WiFiManager& wifiManager)
 	wifiManager.server->send(200, "text/html", "");
 
 	WiFiClient client = wifiManager.server->client();
-	if (!client) {
+	if (!client.connected()) {
 		return;
 	}
 	PortalResponseWriter writer;
@@ -2700,7 +2757,7 @@ handlePortalUpdatePage(WiFiManager &wifiManager)
 	wifiManager.server->send(200, "text/html", "");
 
 	WiFiClient client = wifiManager.server->client();
-	if (!client) {
+	if (!client.connected()) {
 		return;
 	}
 	PortalResponseWriter writer;
@@ -2837,7 +2894,7 @@ handlePortalRebootNormalRequest(WiFiManager& wifiManager)
 	deferredControlPlaneRebootIntent = portalNormalRebootIntent();
 }
 
-static constexpr uint8_t kPollingPortalPageSize = 8;
+static constexpr uint8_t kPollingPortalPageSize = 4;
 static constexpr BucketId kPortalEstimateBuckets[] = {
 	BucketId::TenSec,
 	BucketId::OneMin,
@@ -2916,6 +2973,9 @@ processPendingPollingConfigPayload(void)
 	if (pendingPollingConfigPayload == nullptr) {
 		return;
 	}
+#ifdef DEBUG_OVER_SERIAL
+	Serial.printf("config/set dequeue: %s\r\n", pendingPollingConfigPayload);
+#endif
 	handlePollingConfigSet(pendingPollingConfigPayload);
 	clearPendingPollingConfigPayload();
 }
@@ -3109,6 +3169,13 @@ loadPollingBucketsForPortal(const mqttState *entities,
 		currentBootMode == BootMode::ApConfig || currentBootMode == BootMode::WifiConfig;
 	outPollIntervalSeconds = clampPollInterval(pollIntervalSeconds);
 	if (usePersistedOnly || !mqttEntitiesRtAvailable()) {
+		if (g_portalPollingCacheValid && g_portalPollingCacheEntityCount == entityCount) {
+			outPollIntervalSeconds = g_portalPollingCacheIntervalSeconds;
+			if (outBuckets != g_portalBucketsScratch) {
+				memcpy(outBuckets, g_portalBucketsScratch, entityCount * sizeof(BucketId));
+			}
+			return true;
+		}
 		Preferences preferences;
 		preferences.begin(DEVICE_NAME, true);
 		outPollIntervalSeconds = clampPollInterval(preferences.getUInt(kPreferencePollInterval, pollIntervalSeconds));
@@ -3123,17 +3190,20 @@ loadPollingBucketsForPortal(const mqttState *entities,
 		          ESP.getHeapFragmentation());
 #endif
 		if (preferences.isKey(kPreferenceBucketMap)) {
-			ScopedCharBuffer persistedMap(kPrefBucketMapMaxLen);
+			const size_t persistedMapStorageLen = preferences.getBytesLength(kPreferenceBucketMap);
+			const size_t persistedMapBufferLen =
+				(persistedMapStorageLen < kPrefBucketMapMaxLen) ? (persistedMapStorageLen + 1) : kPrefBucketMapMaxLen;
+			ScopedCharBuffer persistedMap(persistedMapBufferLen);
 			if (!persistedMap.ok()) {
 #ifdef DEBUG_OVER_SERIAL
 				portalLog("portal polling load: persistedMap alloc failed len=%u",
-				          static_cast<unsigned>(kPrefBucketMapMaxLen));
+				          static_cast<unsigned>(persistedMapBufferLen));
 #endif
 				preferences.end();
 				return false;
 			}
 			persistedMap.data[0] = '\0';
-			preferences.getString(kPreferenceBucketMap, persistedMap.data, kPrefBucketMapMaxLen);
+			preferences.getString(kPreferenceBucketMap, persistedMap.data, persistedMapBufferLen);
 			uint32_t unknownCount = 0;
 			uint32_t invalidCount = 0;
 			uint32_t duplicateCount = 0;
@@ -3213,6 +3283,14 @@ loadPollingBucketsForPortal(const mqttState *entities,
 			}
 		}
 		preferences.end();
+		if (usePersistedOnly) {
+			g_portalPollingCacheValid = true;
+			g_portalPollingCacheEntityCount = entityCount;
+			g_portalPollingCacheIntervalSeconds = outPollIntervalSeconds;
+			if (outBuckets != g_portalBucketsScratch) {
+				memcpy(g_portalBucketsScratch, outBuckets, entityCount * sizeof(BucketId));
+			}
+		}
 		return true;
 	}
 
@@ -3318,99 +3396,35 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		"<meta charset=\"utf-8\">"
 		"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
 		"<title>Polling Schedule</title>"
-		"<style>"
-		".c,body{text-align:center;font-family:verdana}"
-		"div,input,select{padding:5px;font-size:1em;margin:5px 0;box-sizing:border-box}"
-		"input,button,select,.msg{border-radius:.3rem;width:100%}"
-		"button{cursor:pointer;border:0;background-color:#1fa3ec;color:#fff;line-height:2.2rem;font-size:1rem}"
-		".wrap{text-align:left;display:inline-block;min-width:260px;max-width:500px}"
-		".msg{padding:10px;margin:10px 0;border:1px solid #eee;border-left-width:5px;border-left-color:#777}"
-		".msg.S{border-left-color:#5cb85c}"
-		".msg.D{border-left-color:#dc3630}"
-		"table{width:100%;border-collapse:collapse}"
-		"th,td{padding:4px;border:1px solid #ddd;vertical-align:top}"
-		".row{display:flex;gap:8px;flex-wrap:wrap}"
-		".row form{flex:1;min-width:130px}"
-		".hint{font-size:.95em;color:#444}"
-		"</style>";
-	static const char kPageHeadB[] PROGMEM =
-		"<script>"
-		"window._d=0;"
-		"function pPrepareSave(){"
-		"var form=document.getElementById('polling-form');if(!form){return true;}"
-		"var full=form.elements['bucket_map_full'];"
-		"if(full){full.value='';}"
-		"var rows=document.querySelectorAll('tr[data-entity]');"
-		"var parts=[];"
-		"for(var i=0;i<rows.length;i++){"
-		"var row=rows[i],entity=row.getAttribute('data-entity');"
-		"var sel=row.querySelector('select[name^=\"b\"]');"
-		"if(entity&&sel){parts.push(entity+'='+sel.value);}"
-		"}"
-		"if(full){full.value=parts.length?parts.join(';')+';':'';}"
-		"window._d=0;"
-		"return true;"
-		"}"
-		"function pDirty(){window._d=1;}"
-		"function pClear(){"
-		"if(!window.confirm('Disable all polling entities?')){return false;}"
-		"window._d=0;"
-		"return true;"
-		"}"
-		"function pNav(){"
-		"if(!window._d){return true;}"
-		"if(!window.confirm('Unsaved polling changes will be lost. Continue?')){return false;}"
-		"return true;"
-		"}"
-		"</script>";
-	static const char kPageHeadC[] PROGMEM =
-		"</head><body class=\"c\"><div class=\"wrap\">"
-		"<h1>Setup</h1><h3>Polling schedule</h3>"
-		"<div class=\"row\">"
-		"<form data-nav-away=\"1\" action=\"/\" method=\"get\" onsubmit=\"return pNav()\"><button type=\"submit\">Menu</button></form>"
-		"<form data-nav-away=\"1\" action=\"/config/mqtt\" method=\"get\" onsubmit=\"return pNav()\"><button type=\"submit\">MQTT Setup</button></form>"
-		"<form data-nav-away=\"1\" action=\"/config/reboot-normal\" method=\"post\" onsubmit=\"return pNav()\"><button type=\"submit\">Reboot Normal</button></form>"
-		"</div>";
-	static const char kSavedMsg[] PROGMEM = "<div class=\"msg S\"><strong>Saved.</strong></div>";
-	static const char kErrMsg[] PROGMEM = "<div class=\"msg D\"><strong>Some values were invalid and were ignored.</strong></div>";
-	static const char kFormOpen[] PROGMEM = "<form id=\"polling-form\" method=\"POST\" action=\"/config/polling/save\" oninput=\"pDirty()\" onchange=\"pDirty()\" onsubmit=\"return pPrepareSave();\">";
+		"</head><body>"
+		"<h2>Polling schedule</h2>"
+		"<p><a href=\"/\">Menu</a> | <a href=\"/config/mqtt\">MQTT Setup</a></p>"
+		"<form action=\"/config/reboot-normal\" method=\"post\"><button type=\"submit\">Reboot Normal</button></form>";
+	static const char kSavedMsg[] PROGMEM = "<p><strong>Saved.</strong></p>";
+	static const char kErrMsg[] PROGMEM = "<p><strong>Some values were invalid and were ignored.</strong></p>";
+	static const char kFormOpen[] PROGMEM = "<form id=\"polling-form\" method=\"POST\" action=\"/config/polling/save\">";
 	static const char kTableOpen[] PROGMEM = "<table><tr><th>Entity</th><th>Bucket</th></tr>";
-	static const char kPlainTableClose[] PROGMEM = "</table>";
-	static const char kTableClose[] PROGMEM = "</table><br><button type=\"submit\">Save</button></form>";
-	static const char kNavOpen[] PROGMEM = "<div class=\"row\">";
-	static const char kNavClose[] PROGMEM = "</div></div></body></html>";
-	static const char kFamilyNavOpen[] PROGMEM = "<div class=\"row\">";
-	static const char kFamilyNavClose[] PROGMEM = "</div>";
+	static const char kTableClose[] PROGMEM = "</table><p><button type=\"submit\">Save</button></p></form>";
+	static const char kNavOpen[] PROGMEM = "<p>";
+	static const char kNavClose[] PROGMEM = "</p></body></html>";
+	static const char kFamilyNavOpen[] PROGMEM = "<p>";
+	static const char kFamilyNavClose[] PROGMEM = "</p>";
 	static const char kFamilyNavFmt[] PROGMEM =
-		"<form data-nav-away=\"1\" action=\"/config/polling\" method=\"get\" onsubmit=\"return pNav()\">"
-		"<input type=\"hidden\" name=\"family\" value=\"%s\">"
-		"<input type=\"hidden\" name=\"page\" value=\"0\">"
-		"<button type=\"submit\"%s>%s</button>"
-		"</form>";
+		"<a href=\"/config/polling?family=%s&page=0\">%s%s</a> ";
 	static const char kPageHintFmt[] PROGMEM = "<p class=\"hint\">Family %s · Page %u of %u · %u entities</p>";
 	static const char kFormMetaFmt[] PROGMEM =
 		"<input type=\"hidden\" name=\"family\" value=\"%s\">"
 		"<input type=\"hidden\" name=\"page\" value=\"%u\">"
 		"<input type=\"hidden\" name=\"bucket_map_full\" value=\"\">"
-		"<label>poll_interval_s <input name=\"poll_interval_s\" type=\"number\" min=\"1\" max=\"86400\" value=\"%lu\"></label><br><br>";
+		"<label>poll_interval_s <input name=\"poll_interval_s\" type=\"number\" min=\"1\" max=\"120\" value=\"%lu\"></label><br><br>";
 	static const char kClearFormFmt[] PROGMEM =
-		"<form action=\"/config/polling/clear\" method=\"post\" onsubmit=\"return pClear()\">"
+		"<form action=\"/config/polling/clear\" method=\"post\">"
 		"<input type=\"hidden\" name=\"family\" value=\"%s\">"
 		"<input type=\"hidden\" name=\"page\" value=\"%u\">"
 		"<button type=\"submit\">Disable All Entities</button>"
 		"</form><br>";
-	static const char kPrevFmt[] PROGMEM =
-		"<form data-nav-away=\"1\" action=\"/config/polling\" method=\"get\" onsubmit=\"return pNav()\">"
-		"<input type=\"hidden\" name=\"family\" value=\"%s\">"
-		"<input type=\"hidden\" name=\"page\" value=\"%u\">"
-		"<button type=\"submit\">Prev</button>"
-		"</form>";
-	static const char kNextFmt[] PROGMEM =
-		"<form data-nav-away=\"1\" action=\"/config/polling\" method=\"get\" onsubmit=\"return pNav()\">"
-		"<input type=\"hidden\" name=\"family\" value=\"%s\">"
-		"<input type=\"hidden\" name=\"page\" value=\"%u\">"
-		"<button type=\"submit\">Next</button>"
-		"</form>";
+	static const char kPrevFmt[] PROGMEM = "<a href=\"/config/polling?family=%s&page=%u\">Prev</a> ";
+	static const char kNextFmt[] PROGMEM = "<a href=\"/config/polling?family=%s&page=%u\">Next</a>";
 	static const char kRowFmt[] PROGMEM =
 		"<tr data-entity=\"%s\"><td>%s</td><td><select name=\"b%u\">"
 		"<option value=\"%s\"%s>%s</option>"
@@ -3423,7 +3437,7 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		"</select></td></tr>";
 	char buf[256];
 	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
-		if (!writer.writeP(kPageHeadA) || !writer.writeP(kPageHeadB) || !writer.writeP(kPageHeadC)) {
+		if (!writer.writeP(kPageHeadA)) {
 			return false;
 		}
 		if (saved && !writer.writeP(kSavedMsg)) {
@@ -3447,9 +3461,13 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 			           sizeof(buf),
 			           kFamilyNavFmt,
 			           portalPollingFamilyKey(navFamily),
-			           (navFamily == family) ? " disabled" : "",
+			           portalPollingFamilyKey(navFamily),
+			           (navFamily == family) ? "[" : "",
 			           portalPollingFamilyLabel(navFamily));
 			if (!writer.write(buf)) {
+				return false;
+			}
+			if (navFamily == family && !writer.write("] ")) {
 				return false;
 			}
 		}
@@ -3465,7 +3483,7 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		           static_cast<unsigned>(familyPage.maxPage + 1),
 		           static_cast<unsigned>(familyPage.totalEntityCount));
 		if (!writer.write(buf) ||
-		    !writer.write("<p class=\"hint\">Edit the visible rows and save. Unsaved changes are discarded when you leave this page.</p>") ||
+		    !writer.write("<p>Edit the visible rows and save.</p>") ||
 		    !writer.writeP(kFormOpen)) {
 			return false;
 		}
@@ -3758,6 +3776,9 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 			bucketsApplied = !runtimeBucketsAvailable || mqttEntityApplyBuckets(buckets, entityCount);
 			if (bucketsApplied && persistUserPollingConfig(storedIntervalSeconds, canonicalMapBuffer.data)) {
 				pollIntervalSeconds = storedIntervalSeconds;
+				g_portalPollingCacheValid = true;
+				g_portalPollingCacheEntityCount = entityCount;
+				g_portalPollingCacheIntervalSeconds = storedIntervalSeconds;
 				recomputeBucketCounts();
 				updatePollingLastChange();
 				pollingConfigLoadedFromStorage = true;
@@ -3848,6 +3869,9 @@ handlePortalPollingClear(WiFiManager &wifiManager)
 		bucketsApplied = !runtimeBucketsAvailable || mqttEntityApplyBuckets(buckets, entityCount);
 		if (bucketsApplied && persistUserPollingConfig(storedIntervalSeconds, disableAllMap)) {
 			pollIntervalSeconds = storedIntervalSeconds;
+			g_portalPollingCacheValid = true;
+			g_portalPollingCacheEntityCount = entityCount;
+			g_portalPollingCacheIntervalSeconds = storedIntervalSeconds;
 			recomputeBucketCounts();
 			updatePollingLastChange();
 			pollingConfigLoadedFromStorage = true;
@@ -4810,15 +4834,7 @@ loop()
 	}
 
 	if (mqttSubsystemEnabled()) {
-		processPendingPollingConfigPayload();
-	}
-	if (mqttSubsystemEnabled() && pendingRs485StubControlSet) {
-		pendingRs485StubControlSet = false;
-		applyRs485StubControlPayload(pendingDeferredControlPayload);
-		pendingDeferredControlPayload[0] = '\0';
-	}
-	if (mqttSubsystemEnabled() && pendingEntityCommandSet) {
-		processPendingEntityCommand();
+		serviceDeferredMqttWork();
 	}
 
 	if (httpControlPlaneEnabled) {
@@ -4864,6 +4880,9 @@ loop()
 	// Scheduler runs continuously; per-bucket prerequisites are resolved inside sendData().
 	if (mqttSubsystemEnabled()) {
 		sendData();
+	}
+	if (bootPlan.inverter) {
+		dispatchService();
 	}
 
 	// Force Restart?
@@ -5974,6 +5993,13 @@ handlePollingConfigSet(char *payload)
 							ctx.stagedPollInterval = clamped;
 							ctx.pollIntervalChanged = true;
 						}
+#ifdef DEBUG_OVER_SERIAL
+						Serial.printf("config/set poll_interval parsed=%lu clamped=%lu changed=%u current=%lu\r\n",
+						              static_cast<unsigned long>(parsedInterval),
+						              static_cast<unsigned long>(clamped),
+						              ctx.pollIntervalChanged ? 1U : 0U,
+						              static_cast<unsigned long>(pollIntervalSeconds));
+#endif
 					}
 					handled = true;
 				}
@@ -6064,7 +6090,8 @@ handlePollingConfigSet(char *payload)
 		ctx.bucketsApplied = mqttEntitiesRtAvailable();
 	}
 	if ((ctx.pollIntervalChanged || ctx.bucketAssignmentsChanged) &&
-	    !persistUserPollingConfig(ctx.stagedPollInterval, persistedMap.data)) {
+	    !persistUserPollingConfig(ctx.stagedPollInterval,
+	                             ctx.bucketAssignmentsChanged ? persistedMap.data : nullptr)) {
 		if (ctx.bucketsApplied) {
 			mqttEntityApplyBuckets(ctx.originalBuckets, entityCount);
 		}
@@ -6085,6 +6112,11 @@ handlePollingConfigSet(char *payload)
 	}
 
 	if (ctx.anyChange) {
+#ifdef DEBUG_OVER_SERIAL
+		Serial.printf("config/set apply: poll_interval=%lu buckets_changed=%u\r\n",
+		              static_cast<unsigned long>(pollIntervalSeconds),
+		              ctx.bucketAssignmentsChanged ? 1U : 0U);
+#endif
 		recomputeBucketCounts();
 		updatePollingLastChange();
 		pollingConfigLoadedFromStorage = true;
@@ -7414,6 +7446,22 @@ readEntity(const mqttState *singleEntity, modbusRequestAndResponse* rs)
 		sprintf(rs->dataValueFormatted, "%ld", opData.a2mPwrCharge);
 		result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
 		break;
+	case mqttEntityId::entityDispatchDuration:
+		snprintf(rs->dataValueFormatted,
+		         sizeof(rs->dataValueFormatted),
+		         "%lu",
+		         static_cast<unsigned long>(timedDispatchState.configuredDurationSeconds));
+		result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
+		break;
+	case mqttEntityId::entityDispatchRemaining:
+		snprintf(rs->dataValueFormatted,
+		         sizeof(rs->dataValueFormatted),
+		         "%lu",
+		         static_cast<unsigned long>(dispatchRemainingSeconds(timedDispatchState.acceptedAtMs,
+		                                                            timedDispatchState.acceptedDurationSeconds,
+		                                                            millis())));
+		result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
+		break;
 	case mqttEntityId::entitySocTarget:
 		sprintf(rs->dataValueFormatted, "%u", opData.a2mSocTarget);
 		result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
@@ -7737,7 +7785,7 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 			static char stateAddition[256];
 			static char netAddition[256];
 			static char pollAddition[1024];
-			static char stubAddition[512];
+			static char stubAddition[768];
 		StatusCoreSnapshot core{};
 		StatusNetSnapshot net{};
 		StatusPollSnapshot poll{};
@@ -8289,6 +8337,22 @@ emitEntityDiscoveryPayload(CountedMqttPayload &payload, void *context)
 			 OP_MODE_DESC_NORMAL, OP_MODE_DESC_LOAD_FOLLOW, OP_MODE_DESC_TARGET, OP_MODE_DESC_PUSH,
 			 OP_MODE_DESC_PV_CHARGE, OP_MODE_DESC_MAX_CHARGE, OP_MODE_DESC_NO_CHARGE);
 		break;
+	case mqttEntityId::entityDispatchDuration:
+		snprintf(stateAddition, sizeof(stateAddition),
+			 ", \"device_class\": \"duration\""
+			 ", \"state_class\": \"measurement\""
+			 ", \"unit_of_measurement\": \"s\""
+			 ", \"icon\": \"mdi:timer-cog-outline\""
+			 ", \"min\": 0, \"max\": %lu",
+			 static_cast<unsigned long>(kDispatchDurationMaxSeconds));
+		break;
+	case mqttEntityId::entityDispatchRemaining:
+		snprintf(stateAddition, sizeof(stateAddition),
+			 ", \"device_class\": \"duration\""
+			 ", \"state_class\": \"measurement\""
+			 ", \"unit_of_measurement\": \"s\""
+			 ", \"icon\": \"mdi:timer-sand\"");
+		break;
 	case mqttEntityId::entitySocTarget:
 		snprintf(stateAddition, sizeof(stateAddition),
 			 ", \"device_class\": \"battery\""
@@ -8646,6 +8710,7 @@ refreshEssSnapshot(void)
 		opData.essDispatchMode = DISPATCH_MODE_NORMAL_MODE;
 		opData.essDispatchActivePower = DISPATCH_ACTIVE_POWER_OFFSET;
 		opData.essDispatchSoc = 50 / DISPATCH_SOC_MULTIPLIER;
+		opData.essDispatchTime = 30;
 		opData.essBatterySoc = 65 / BATTERY_SOC_MULTIPLIER;
 		opData.essBatteryPower = -1357;
 		opData.essGridPower = -1368;
@@ -8656,6 +8721,7 @@ refreshEssSnapshot(void)
 		opData.essDispatchMode = UINT16_MAX;
 		opData.essDispatchActivePower = INT32_MAX;
 		opData.essDispatchSoc = UINT16_MAX;
+		opData.essDispatchTime = UINT32_MAX;
 		opData.essBatterySoc = UINT16_MAX;
 		opData.essBatteryPower = INT16_MAX;
 		opData.essGridPower = INT32_MAX;
@@ -8670,6 +8736,7 @@ refreshEssSnapshot(void)
 		opData.essDispatchMode = UINT16_MAX;
 		opData.essDispatchActivePower = INT32_MAX;
 		opData.essDispatchSoc = UINT16_MAX;
+		opData.essDispatchTime = UINT32_MAX;
 		opData.essBatterySoc = UINT16_MAX;
 		opData.essBatteryPower = INT16_MAX;
 		opData.essGridPower = INT32_MAX;
@@ -8714,6 +8781,15 @@ refreshEssSnapshot(void)
 		opData.essDispatchSoc = response.unsignedShortValue;
 	} else {
 		opData.essDispatchSoc = UINT16_MAX;
+		rs485TimedOut = rs485TimedOut || (result == modbusRequestAndResponseStatusValues::noResponse);
+		noteRs485Error(result, response.statusMqttMessage);
+		gotError++;
+	}
+	result = _registerHandler->readHandledRegister(REG_DISPATCH_RW_DISPATCH_TIME_1, &response);
+	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
+		opData.essDispatchTime = response.unsignedIntValue;
+	} else {
+		opData.essDispatchTime = UINT32_MAX;
 		rs485TimedOut = rs485TimedOut || (result == modbusRequestAndResponseStatusValues::noResponse);
 		noteRs485Error(result, response.statusMqttMessage);
 		gotError++;
@@ -9043,8 +9119,6 @@ sendData()
 	// (even if multiple buckets are due at the same time).
 	bool snapshotAttemptedThisPass = false;
 	bool snapshotOkThisPass = essSnapshotValid;
-	bool dispatchRanThisPass = false;
-
 	auto ensureSnapshotForBucket = [&](bool bucketNeedsSnapshot) -> bool {
 		if (shouldAttemptEssSnapshotRefreshForBucket(bucketNeedsSnapshot,
 		                                             bootPlan.inverter,
@@ -9112,21 +9186,9 @@ sendData()
 	};
 
 	if (dueTenSeconds) {
-		// 10s cadence also gates dispatch, which depends on the ESS snapshot.
-		const bool snapshotOkThisBucket = ensureSnapshotForBucket(tenSecBucketRequiresSnapshot());
+		const bool snapshotOkThisBucket = ensureSnapshotForBucket(plan->tenSec.hasEssSnapshot);
 		sendStatus(snapshotOkThisBucket);
-		const bool tenSecTruncated = runBucketTransactions(BucketId::TenSec, plan->tenSec, snapshotOkThisBucket);
-
-		if (!tenSecTruncated &&
-		    shouldRunDispatchForTenSecPass(dueTenSeconds, snapshotOkThisBucket, dispatchRanThisPass)) {
-			checkAndSetDispatchMode();
-			dispatchRanThisPass = true;
-			dispatchLastSkipReason[0] = '\0';
-		} else if (tenSecTruncated) {
-			strlcpy(dispatchLastSkipReason, "poll_budget_exhausted", sizeof(dispatchLastSkipReason));
-		} else {
-			strlcpy(dispatchLastSkipReason, "ess_snapshot_failed", sizeof(dispatchLastSkipReason));
-		}
+		runBucketTransactions(BucketId::TenSec, plan->tenSec, snapshotOkThisBucket);
 	}
 
 	if (dueOneMinute) {
@@ -9368,6 +9430,8 @@ processPendingEntityCommand(void)
 	const char *singleString = NULL;
 	char *endPtr = NULL;
 	bool valueProcessingError = false;
+	bool dispatchRelevantChange = false;
+	bool timedGenerationRequested = false;
 
 	// First, process value.
 	switch (mqttEntity.entityId) {
@@ -9375,6 +9439,7 @@ processPendingEntityCommand(void)
 	case mqttEntityId::entityChargePwr:
 	case mqttEntityId::entityDischargePwr:
 	case mqttEntityId::entityPushPwr:
+	case mqttEntityId::entityDispatchDuration:
 	case mqttEntityId::entityRegNum:
 		singleInt32 = strtol(mqttIncomingPayload, &endPtr, 10);
 		if ((endPtr == mqttIncomingPayload) || ((singleInt32 == 0) && (errno != 0))) {
@@ -9423,6 +9488,8 @@ processPendingEntityCommand(void)
 		} else {
 			opData.a2mSocTarget = singleInt32;
 			opData.a2mReadyToUseSocTarget = true;
+			dispatchRelevantChange = true;
+			timedGenerationRequested = true;
 		}
 		break;
 	case mqttEntityId::entityChargePwr:
@@ -9437,6 +9504,8 @@ processPendingEntityCommand(void)
 		} else {
 			opData.a2mPwrCharge = singleInt32;
 			opData.a2mReadyToUsePwrCharge = true;
+			dispatchRelevantChange = true;
+			timedGenerationRequested = true;
 		}
 		break;
 	case mqttEntityId::entityDischargePwr:
@@ -9451,6 +9520,8 @@ processPendingEntityCommand(void)
 		} else {
 			opData.a2mPwrDischarge = singleInt32;
 			opData.a2mReadyToUsePwrDischarge = true;
+			dispatchRelevantChange = true;
+			timedGenerationRequested = true;
 		}
 		break;
 	case mqttEntityId::entityPushPwr:
@@ -9465,6 +9536,32 @@ processPendingEntityCommand(void)
 		} else {
 			opData.a2mPwrPush = singleInt32;
 			opData.a2mReadyToUsePwrPush = true;
+			dispatchRelevantChange = true;
+			timedGenerationRequested = true;
+		}
+		break;
+	case mqttEntityId::entityDispatchDuration:
+		if (singleInt32 < 0) {
+#ifdef DEBUG_OVER_SERIAL
+			sprintf(_debugOutput, "HA sent invalid Dispatch Duration! %ld", singleInt32);
+			Serial.println(_debugOutput);
+#endif
+#ifdef DEBUG_CALLBACKS
+			badCallbacks++;
+#endif // DEBUG_CALLBACKS
+		} else {
+			timedDispatchState.configuredDurationSeconds =
+				clampDispatchDurationSeconds(static_cast<uint32_t>(singleInt32));
+#ifdef DEBUG_OVER_SERIAL
+			snprintf(_debugOutput,
+			         sizeof(_debugOutput),
+			         "Dispatch_Duration applied: requested=%ld configured=%lu",
+			         singleInt32,
+			         static_cast<unsigned long>(timedDispatchState.configuredDurationSeconds));
+			Serial.println(_debugOutput);
+#endif
+			dispatchRelevantChange = true;
+			timedGenerationRequested = dispatchDurationIsTimed(timedDispatchState.configuredDurationSeconds);
 		}
 		break;
 	case mqttEntityId::entityRegNum:
@@ -9477,15 +9574,12 @@ processPendingEntityCommand(void)
 			if (tempOpMode != (enum opMode)-1) {
 				opData.a2mOpMode = tempOpMode;
 				opData.a2mReadyToUseOpMode = true;
-				if (tempOpMode == opMode::opModeNormal &&
-				    _registerHandler != NULL) {
-					modbusRequestAndResponse response;
-					modbusRequestAndResponseStatusValues result = _registerHandler->writeDispatchStop(&response);
-					if (result == modbusRequestAndResponseStatusValues::writeDataRegisterSuccess) {
-						opData.essDispatchStart = DISPATCH_START_STOP;
-					} else {
-						rs485Errors++;
-					}
+				dispatchRelevantChange = true;
+				if (tempOpMode == opMode::opModeNormal) {
+					timedDispatchState.completedGeneration = timedDispatchState.requestedGeneration;
+					timedDispatchState.restartAfterStop = false;
+				} else {
+					timedGenerationRequested = dispatchDurationIsTimed(timedDispatchState.configuredDurationSeconds);
 				}
 			} else {
 #ifdef DEBUG_OVER_SERIAL
@@ -9506,8 +9600,61 @@ processPendingEntityCommand(void)
 		break;
 	}
 
+	if (dispatchRelevantChange) {
+		timedDispatchState.lastEvalMs = 0;
+		if (timedGenerationRequested) {
+			dispatchNoteRequestedGeneration(timedDispatchState);
+		}
+	}
+
 	// Send (hopefully) updated state. If we failed to update, sender should notice value not changing.
+#ifdef DEBUG_OVER_SERIAL
+	if (mqttEntity.entityId == mqttEntityId::entityDispatchDuration) {
+		snprintf(_debugOutput,
+		         sizeof(_debugOutput),
+		         "Dispatch_Duration publishing state=%lu",
+		         static_cast<unsigned long>(timedDispatchState.configuredDurationSeconds));
+		Serial.println(_debugOutput);
+	}
+#endif
 	sendDataFromMqttState(&mqttEntity, false, nullptr, true);
+}
+
+static void
+serviceDeferredMqttWork(void)
+{
+	for (uint8_t iteration = 0; iteration < kDeferredMqttDrainMaxIterations; ++iteration) {
+		bool didWork = false;
+
+		if (pendingPollingConfigSet) {
+			processPendingPollingConfigPayload();
+			didWork = true;
+		}
+		if (pendingRs485StubControlSet) {
+			pendingRs485StubControlSet = false;
+			applyRs485StubControlPayload(pendingDeferredControlPayload);
+			pendingDeferredControlPayload[0] = '\0';
+			didWork = true;
+		}
+		if (pendingEntityCommandSet) {
+			processPendingEntityCommand();
+			didWork = true;
+		}
+		if (pendingPollingConfigSet || pendingRs485StubControlSet || pendingEntityCommandSet) {
+			continue;
+		}
+
+		const uint32_t callbackSequenceBeforePump = mqttCallbackSequence;
+		if (!pumpMqttOnce()) {
+			return;
+		}
+		if (mqttCallbackSequence != callbackSequenceBeforePump) {
+			didWork = true;
+		}
+		if (!didWork) {
+			return;
+		}
+	}
 }
 
 #if RS485_STUB
@@ -9539,6 +9686,7 @@ struct Rs485StubControlRequest {
 	uint16_t virtualDispatchMode = DISPATCH_MODE_NORMAL_MODE;
 	int32_t virtualDispatchActivePower = DISPATCH_ACTIVE_POWER_OFFSET;
 	uint16_t virtualDispatchSoc = 0;
+	uint32_t virtualDispatchTime = 0;
 };
 
 static bool
@@ -9668,6 +9816,10 @@ parseRs485StubControlPayload(const char *payload, Rs485StubControlRequest &reque
 		request.virtualDispatchSoc = static_cast<uint16_t>(value);
 		request.hasVirtualDispatch = true;
 	}
+	if (parseStubControlInt(payload, "dispatch_time", value) && value >= 0) {
+		request.virtualDispatchTime = static_cast<uint32_t>(value);
+		request.hasVirtualDispatch = true;
+	}
 
 	return true;
 }
@@ -9714,7 +9866,8 @@ applyRs485StubControlPayload(const char *payload)
 			request.virtualDispatchStart,
 			request.virtualDispatchMode,
 			request.virtualDispatchActivePower,
-			request.virtualDispatchSoc);
+			request.virtualDispatchSoc,
+			request.virtualDispatchTime);
 		maybeYield();
 	}
 	rs485ApplyStubConnectivityMode(request.mode);
@@ -9747,6 +9900,7 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 		explicit MqttCallbackGuard(bool &f) : flag(f) { flag = true; }
 		~MqttCallbackGuard() { flag = false; }
 	} guard(inMqttCallback);
+	mqttCallbackSequence++;
 
 	char mqttIncomingPayload[512] = ""; // Should be enough to cover command requests
 	mqttState mqttEntity{};
@@ -9755,6 +9909,16 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 #ifdef DEBUG_OVER_SERIAL
 	sprintf(_debugOutput, "Topic: %s", topic);
 	Serial.println(_debugOutput);
+	if (strstr(topic, "Dispatch_Duration") != nullptr) {
+		const char *dbgInverterId = discoveryDeviceIdForScope(DiscoveryDeviceScope::Inverter);
+		snprintf(_debugOutput,
+		         sizeof(_debugOutput),
+		         "Dispatch_Duration pre-gate: ready=%u device=%s inverter=%s",
+		         inverterReady ? 1U : 0U,
+		         deviceName,
+		         dbgInverterId);
+		Serial.println(_debugOutput);
+	}
 #endif
 
 #ifdef DEBUG_CALLBACKS
@@ -9833,11 +9997,31 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 		char matchPrefix[64];
 
 		snprintf(matchPrefix, sizeof(matchPrefix), "%s/", deviceName);
+#ifdef DEBUG_OVER_SERIAL
+		if (!strncmp(topic, matchPrefix, strlen(matchPrefix)) &&
+		    !strcmp(&topic[strlen(topic) - strlen("/command")], "/command")) {
+			snprintf(_debugOutput,
+			         sizeof(_debugOutput),
+			         "MQTT command gate: ready=%u inverter='%s' topic=%s",
+			         inverterReady ? 1U : 0U,
+			         inverterDeviceId,
+			         topic);
+			Serial.println(_debugOutput);
+		}
+#endif
 		if (inverterReady &&
 		    inverterDeviceId[0] != '\0' &&
 		    !strncmp(topic, matchPrefix, strlen(matchPrefix)) &&
 		    !strcmp(&topic[strlen(topic) - strlen("/command")], "/command")) {
 			if (mqttCommandWarmupActive()) {
+#ifdef DEBUG_OVER_SERIAL
+				snprintf(_debugOutput,
+				         sizeof(_debugOutput),
+				         "MQTT command warmup drop: topic=%s age_ms=%lu",
+				         topic,
+				         static_cast<unsigned long>(millis() - lastMqttConnectMs));
+				Serial.println(_debugOutput);
+#endif
 				return;
 			}
 			const char *topicAfterDevice = &topic[strlen(matchPrefix)];
@@ -9850,8 +10034,36 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 				if (topicDeviceIdLen < sizeof(topicDeviceId) && topicEntityLen > 0 && topicEntityLen < static_cast<int>(sizeof(topicEntityName))) {
 					strlcpy(topicDeviceId, topicAfterDevice, topicDeviceIdLen + 1);
 					strlcpy(topicEntityName, entitySep + 1, topicEntityLen + 1);
+#ifdef DEBUG_OVER_SERIAL
+					snprintf(_debugOutput,
+					         sizeof(_debugOutput),
+					         "MQTT command parsed: ready=%u topic_device=%s inverter=%s entity=%s",
+					         inverterReady ? 1U : 0U,
+					         topicDeviceId,
+					         inverterDeviceId,
+					         topicEntityName);
+					Serial.println(_debugOutput);
+#endif
 					if (!strcmp(topicDeviceId, inverterDeviceId)) {
 						haveMqttEntity = lookupSubscription(topicEntityName, &mqttEntity);
+#ifdef DEBUG_OVER_SERIAL
+						snprintf(_debugOutput,
+						         sizeof(_debugOutput),
+						         "MQTT command lookup: entity=%s have=%u",
+						         topicEntityName,
+						         haveMqttEntity ? 1U : 0U);
+						Serial.println(_debugOutput);
+#endif
+					} else {
+#ifdef DEBUG_OVER_SERIAL
+						snprintf(_debugOutput,
+						         sizeof(_debugOutput),
+						         "MQTT command device mismatch: topic=%s inverter=%s entity=%s",
+						         topicDeviceId,
+						         inverterDeviceId,
+						         topicEntityName);
+						Serial.println(_debugOutput);
+#endif
 					}
 				}
 			}
@@ -9862,6 +10074,16 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 	#endif // DEBUG_CALLBACKS
 			return; // No further processing possible.
 		}
+#ifdef DEBUG_OVER_SERIAL
+		if (mqttEntity.entityId == mqttEntityId::entityDispatchDuration) {
+			snprintf(_debugOutput,
+			         sizeof(_debugOutput),
+			         "Dispatch_Duration command queued: topic=%s payload=%s",
+			         topic,
+			         mqttIncomingPayload);
+			Serial.println(_debugOutput);
+		}
+#endif
 
 		// Defer command application out of callback context to avoid deep call chains while PubSubClient
 		// is executing loop() and to keep RS485 writes on the main loop path.
@@ -10069,41 +10291,40 @@ lookupOpMode(const char *opModeDesc)
 }
 
 void
-checkAndSetDispatchMode(void)
+publishDispatchStateEntity(mqttEntityId entityId)
 {
-#ifndef DEBUG_NO_RS485
-	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
-	modbusRequestAndResponse response;
-	uint16_t essDispatchMode, essBatterySocPct, essDispatchSoc;
-	int32_t essDispatchActivePower;
-	bool checkActivePower = true;
-
-	if (!essSnapshotValid) {
+	if (!mqttSubsystemEnabled()) {
 		return;
 	}
-
-	if (!opData.a2mReadyToUseOpMode) {
-		return;  // Don't set anything if op mode isn't ready.
-	}
-
-	if (opData.a2mOpMode == opMode::opModeNormal) {
-		if (opData.essDispatchStart == DISPATCH_START_START) {
-			result = _registerHandler->writeDispatchStop(&response);
-			if (result != modbusRequestAndResponseStatusValues::writeDataRegisterSuccess) {
-				rs485Errors++;
-			}
-		}
+	mqttState entity{};
+	if (!lookupEntity(entityId, &entity)) {
 		return;
 	}
+	sendDataFromMqttState(&entity, false, nullptr, true);
+}
 
+static void
+publishDispatchAuxiliaryStates(bool publishRawTime)
+{
+	publishDispatchStateEntity(mqttEntityId::entityDispatchStart);
+	publishDispatchStateEntity(mqttEntityId::entityDispatchRemaining);
+	if (publishRawTime) {
+		publishDispatchStateEntity(mqttEntityId::entityDispatchTime);
+	}
+}
+
+static bool
+computeDispatchCommand(uint16_t &essDispatchMode,
+                       int32_t &essDispatchActivePower,
+                       uint16_t &essDispatchSoc,
+                       bool &checkActivePower)
+{
 	if (!opData.a2mReadyToUseSocTarget || !opData.a2mReadyToUsePwrCharge ||
 	    !opData.a2mReadyToUsePwrDischarge || !opData.a2mReadyToUsePwrPush) {
-		return;  // Don't set anything if opData isn't ready.
+		return false;
 	}
 
-	dispatchLastRunMs = millis();
-
-	essBatterySocPct = opData.essBatterySoc * BATTERY_SOC_MULTIPLIER;
+	const uint16_t essBatterySocPct = opData.essBatterySoc * BATTERY_SOC_MULTIPLIER;
 	if (opData.a2mSocTarget == 100) {
 		essDispatchSoc = 252;  // (100/DISPATCH_SOC_MULTIPLIER) = 250 but we want it a smidge higher
 		// and leave power charging.  Let Alpha stop it when ready.
@@ -10121,7 +10342,7 @@ checkAndSetDispatchMode(void)
 
 	switch (opData.a2mOpMode) {
 	case opMode::opModeNormal:
-		return;
+		return false;
 	case opMode::opModePvCharge:		// Honors Power and SOC
 		essDispatchMode = DISPATCH_MODE_BATTERY_ONLY_CHARGED_VIA_PV;	// Honors Power but not SOC
 		// use essDispatchActivePower from above
@@ -10164,21 +10385,225 @@ checkAndSetDispatchMode(void)
 		essDispatchActivePower = DISPATCH_ACTIVE_POWER_OFFSET;
 		break;
 	default:
-		return; // Shouldn't happen!  opMode is corrupt.
+		return false; // Shouldn't happen!  opMode is corrupt.
+	}
+	return true;
+}
+
+static void
+dispatchService(void)
+{
+#ifndef DEBUG_NO_RS485
+	if (_registerHandler == nullptr) {
+		return;
 	}
 
-	if ((opData.essDispatchStart != DISPATCH_START_START) ||
-	    (opData.essDispatchMode != essDispatchMode) ||
-	    (checkActivePower && (opData.essDispatchActivePower != essDispatchActivePower)) ||
-	    (opData.essDispatchSoc != essDispatchSoc)) {
+	const uint32_t nowMs = millis();
+	const bool timedEnabled = dispatchDurationIsTimed(timedDispatchState.configuredDurationSeconds);
+	const bool pendingGeneration = timedEnabled && dispatchHasPendingGeneration(timedDispatchState);
+	const bool handshakeActive = timedDispatchState.bootStopPending || timedDispatchState.awaitingStopAck ||
+	                             (pendingGeneration && timedDispatchState.activeGeneration == 0);
+	const uint32_t evalIntervalMs = handshakeActive ? kDispatchHandshakeIntervalMs : (pollIntervalSeconds * 1000UL);
+	const bool dueEval = dispatchEvalDue(timedDispatchState.lastEvalMs, nowMs, evalIntervalMs);
+	const bool dueCountdown = (timedDispatchState.activeGeneration != 0) &&
+	                          dispatchCountdownPublishDue(timedDispatchState.lastCountdownPublishMs, nowMs);
+	if (!dueEval && !dueCountdown) {
+		return;
+	}
+	if (dueEval) {
+		timedDispatchState.lastEvalMs = nowMs;
+		if (!refreshEssSnapshot()) {
+			strlcpy(dispatchLastSkipReason, "ess_snapshot_failed", sizeof(dispatchLastSkipReason));
+			return;
+		}
+	}
+
+	auto writeStop = [&](const char *reason, bool restartAfterStop) -> bool {
+		modbusRequestAndResponse response;
+		const modbusRequestAndResponseStatusValues result = _registerHandler->writeDispatchStop(&response);
+		dispatchLastRunMs = millis();
+		if (result != modbusRequestAndResponseStatusValues::writeDataRegisterSuccess) {
+			rs485Errors++;
+			return false;
+		}
+		timedDispatchState.awaitingStopAck = true;
+		timedDispatchState.restartAfterStop = restartAfterStop;
+		strlcpy(dispatchLastSkipReason, reason, sizeof(dispatchLastSkipReason));
+#ifdef DEBUG_OVER_SERIAL
+		snprintf(_debugOutput, sizeof(_debugOutput), "dispatch stop sent: reason=%s restart=%u",
+		         reason, restartAfterStop ? 1U : 0U);
+		Serial.println(_debugOutput);
+#endif
+		return true;
+	};
+
+	auto writeStart = [&](uint16_t mode, int32_t activePower, uint16_t soc, uint32_t rawTime) -> bool {
+		modbusRequestAndResponse response;
+		const modbusRequestAndResponseStatusValues result =
+			_registerHandler->writeDispatchRegisters(activePower, mode, soc, rawTime, &response);
+		dispatchLastRunMs = millis();
+		if (result != modbusRequestAndResponseStatusValues::writeDataRegisterSuccess) {
+			rs485Errors++;
+			return false;
+		}
+		strlcpy(dispatchLastSkipReason, "awaiting_start_ack", sizeof(dispatchLastSkipReason));
+		publishDispatchStateEntity(mqttEntityId::entityDispatchStart);
+		publishDispatchStateEntity(mqttEntityId::entityDispatchTime);
+#ifdef DEBUG_OVER_SERIAL
+		snprintf(_debugOutput, sizeof(_debugOutput),
+		         "dispatch start sent: mode=%u power=%ld soc=%u time=%lu",
+		         static_cast<unsigned>(mode),
+		         static_cast<long>(activePower),
+		         static_cast<unsigned>(soc),
+		         static_cast<unsigned long>(rawTime));
+		Serial.println(_debugOutput);
+#endif
+		return true;
+	};
+
+	if (timedDispatchState.bootStopPending) {
+		if (opData.essDispatchStart == DISPATCH_START_START) {
+			if (!timedDispatchState.awaitingStopAck) {
+				writeStop("boot_stop", false);
+			}
+			return;
+		}
+		timedDispatchState.bootStopPending = false;
+		timedDispatchState.awaitingStopAck = false;
+	}
+
+	if (timedDispatchState.awaitingStopAck) {
+		if (opData.essDispatchStart != DISPATCH_START_START) {
+			const bool completed = (timedDispatchState.activeGeneration != 0);
+			const bool restartAfterStop = timedDispatchState.restartAfterStop;
+			dispatchMarkStopped(timedDispatchState, completed);
+			timedDispatchState.bootStopPending = false;
+			publishDispatchAuxiliaryStates(true);
+			if (!restartAfterStop) {
+				return;
+			}
+		} else if (dueEval) {
+			writeStop("waiting_stop_ack", timedDispatchState.restartAfterStop);
+			return;
+		}
+	}
+
+	if (!opData.a2mReadyToUseOpMode) {
+		strlcpy(dispatchLastSkipReason, "op_mode_not_ready", sizeof(dispatchLastSkipReason));
+		return;
+	}
+
+	if (opData.a2mOpMode == opMode::opModeNormal) {
+		if (opData.essDispatchStart == DISPATCH_START_START) {
+			writeStop("normal_mode", false);
+			return;
+		}
+		dispatchMarkStopped(timedDispatchState, false);
+		dispatchLastSkipReason[0] = '\0';
+		return;
+	}
+
+	uint16_t desiredMode = DISPATCH_MODE_NORMAL_MODE;
+	int32_t desiredActivePower = DISPATCH_ACTIVE_POWER_OFFSET;
+	uint16_t desiredSoc = 0;
+	bool checkActivePower = true;
+	if (!computeDispatchCommand(desiredMode, desiredActivePower, desiredSoc, checkActivePower)) {
+		strlcpy(dispatchLastSkipReason, "control_values_not_ready", sizeof(dispatchLastSkipReason));
+		return;
+	}
+
+	const bool snapshotActive = (opData.essDispatchStart == DISPATCH_START_START);
+	const bool snapshotMatchesMaintenance =
+		snapshotActive &&
+		opData.essDispatchMode == desiredMode &&
+		(!checkActivePower || opData.essDispatchActivePower == desiredActivePower) &&
+		opData.essDispatchSoc == desiredSoc;
+	const uint32_t desiredRawTime = dispatchRawTimeForDuration(timedDispatchState.configuredDurationSeconds);
+	const bool snapshotMatchesAcceptance = snapshotMatchesMaintenance &&
+	                                      opData.essDispatchTime == desiredRawTime;
+
+	if (!timedEnabled) {
+		if (!snapshotActive || !snapshotMatchesMaintenance ||
+		    opData.essDispatchTime != kDispatchRawForeverSeconds) {
+#ifdef DEBUG_OPS
+			opCounter++;
+#endif
+			writeStart(desiredMode, desiredActivePower, desiredSoc, desiredRawTime);
+			return;
+		}
+		if (dispatchLastSkipReason[0] != '\0') {
+			publishDispatchAuxiliaryStates(true);
+		}
+		dispatchMarkStopped(timedDispatchState, false);
+		dispatchLastSkipReason[0] = '\0';
+		return;
+	}
+
+	if (timedDispatchState.activeGeneration != 0) {
+		const uint32_t remainingSeconds = dispatchRemainingSeconds(timedDispatchState.acceptedAtMs,
+		                                                           timedDispatchState.acceptedDurationSeconds,
+		                                                           nowMs);
+		if (dueCountdown) {
+			timedDispatchState.lastCountdownPublishMs = nowMs;
+			publishDispatchAuxiliaryStates(false);
+		}
+		if (timedDispatchState.requestedGeneration > timedDispatchState.activeGeneration) {
+			if (snapshotActive) {
+				writeStop("restart_wait_stop", true);
+				return;
+			}
+			dispatchMarkStopped(timedDispatchState, true);
+			publishDispatchAuxiliaryStates(true);
+		} else if (remainingSeconds == 0) {
+			if (snapshotActive) {
+				publishDispatchAuxiliaryStates(false);
+				writeStop("timed_complete", false);
+				return;
+			}
+			dispatchMarkStopped(timedDispatchState, true);
+			publishDispatchAuxiliaryStates(true);
+			strlcpy(dispatchLastSkipReason, "timed_complete", sizeof(dispatchLastSkipReason));
+			return;
+		} else if (!snapshotMatchesMaintenance) {
+#ifdef DEBUG_OPS
+			opCounter++;
+#endif
+			writeStart(desiredMode, desiredActivePower, desiredSoc, desiredRawTime);
+			return;
+		}
+	}
+
+	if (dispatchHasPendingGeneration(timedDispatchState) && timedDispatchState.activeGeneration == 0 &&
+	    !timedDispatchState.awaitingStopAck) {
+		if (snapshotMatchesAcceptance) {
+			dispatchMarkAccepted(timedDispatchState,
+			                     timedDispatchState.requestedGeneration,
+			                     nowMs,
+			                     timedDispatchState.configuredDurationSeconds);
+			dispatchLastSkipReason[0] = '\0';
+			publishDispatchAuxiliaryStates(true);
+#ifdef DEBUG_OVER_SERIAL
+			snprintf(_debugOutput, sizeof(_debugOutput), "dispatch accepted: gen=%lu time=%lu",
+			         static_cast<unsigned long>(timedDispatchState.activeGeneration),
+			         static_cast<unsigned long>(desiredRawTime));
+			Serial.println(_debugOutput);
+#endif
+			return;
+		}
+		if (snapshotActive) {
+			writeStop("restart_wait_stop", true);
+			return;
+		}
 #ifdef DEBUG_OPS
 		opCounter++;
 #endif
-		result = _registerHandler->writeDispatchRegisters(essDispatchActivePower, essDispatchMode, essDispatchSoc, &response);
-		if (result != modbusRequestAndResponseStatusValues::writeDataRegisterSuccess) {
-			rs485Errors++;
-		}
+		writeStart(desiredMode, desiredActivePower, desiredSoc, desiredRawTime);
+		return;
 	}
+
+	dispatchLastSkipReason[0] = '\0';
+#else
+	(void)timedDispatchState;
 #endif // ! DEBUG_NO_RS485
 }
 
@@ -10268,6 +10693,9 @@ getA2mOpDataFromEss(void)
 
 	if (readWithRetries(REG_DISPATCH_RW_DISPATCH_SOC, "dispatch_soc")) {
 		opData.a2mSocTarget = response.unsignedShortValue * DISPATCH_SOC_MULTIPLIER;
+	}
+	if (readWithRetries(REG_DISPATCH_RW_DISPATCH_TIME_1, "dispatch_time")) {
+		opData.essDispatchTime = response.unsignedIntValue;
 	}
 
 	if (readWithRetries(REG_DISPATCH_RW_ACTIVE_POWER_1, "active_power")) {
