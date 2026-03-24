@@ -6,11 +6,18 @@ TEST_CASE("dispatch timing clamps and preserves forever semantics")
 {
 	CHECK(clampDispatchDurationSeconds(0) == 0);
 	CHECK(clampDispatchDurationSeconds(12) == 12);
+	CHECK(kDispatchDurationMaxSeconds == 4294967UL);
 	CHECK(clampDispatchDurationSeconds(0xFFFFFFFFUL) == kDispatchDurationMaxSeconds);
 	CHECK_FALSE(dispatchDurationIsTimed(0));
 	CHECK(dispatchDurationIsTimed(5));
 	CHECK(dispatchRawTimeForDuration(0) == kDispatchRawForeverSeconds);
 	CHECK(dispatchRawTimeForDuration(120) == 120);
+}
+
+TEST_CASE("dispatch timing max clamp remains millis-safe")
+{
+	CHECK(clampDispatchDurationSeconds(kDispatchDurationMaxSeconds) == kDispatchDurationMaxSeconds);
+	CHECK(clampDispatchDurationSeconds(kDispatchDurationMaxSeconds + 1UL) == kDispatchDurationMaxSeconds);
 }
 
 TEST_CASE("dispatch timing remaining countdown floors at zero")

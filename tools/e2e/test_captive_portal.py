@@ -1589,7 +1589,11 @@ def _run_normal_to_wifi_portal_bad_wifi_falls_back_to_ap_case(
     polling_page = _pi_http_request(ssh, method="GET", url=base_url + "/config/polling", timeout_s=10)
     if int(polling_page.get("status", 0)) != 200:
         raise PortalTestError(f"Polling page not reachable after STA WiFi save: {polling_page.get('status')}")
-    _assert_contains(str(polling_page.get("body", "")), "Polling", "sta portal after wifi save")
+    polling_body = str(polling_page.get("body", ""))
+    _assert_contains(polling_body, "Polling", "sta portal after wifi save")
+    if 'href="/config/polling?family=battery&page=0">Battery</a>' not in polling_body and \
+       'href="/config/polling?family=battery&page=0">[Battery</a>' not in polling_body:
+        raise PortalTestError("sta portal polling nav did not render human-readable family labels")
 
     _reboot_normal_and_tolerate_disconnect(
         ssh,
@@ -1609,7 +1613,11 @@ def _run_normal_to_wifi_portal_bad_wifi_falls_back_to_ap_case(
     polling_resp = _pi_http_request(ssh, method="GET", url="http://192.168.4.1/config/polling", timeout_s=10)
     if int(polling_resp.get("status", 0)) != 200:
         raise PortalTestError(f"AP fallback polling page returned {polling_resp.get('status')}")
-    _assert_contains(str(polling_resp.get("body", "")), "Polling", "ap fallback polling page")
+    polling_fallback_body = str(polling_resp.get("body", ""))
+    _assert_contains(polling_fallback_body, "Polling", "ap fallback polling page")
+    if 'href="/config/polling?family=battery&page=0">Battery</a>' not in polling_fallback_body and \
+       'href="/config/polling?family=battery&page=0">[Battery</a>' not in polling_fallback_body:
+        raise PortalTestError("ap fallback polling nav did not render human-readable family labels")
     _wait_for_page_contains(ssh, url="http://192.168.4.1/", needle="/config/update", timeout_s=20)
 
     # Keep the final portal case self-cleaning. This case intentionally stages bad

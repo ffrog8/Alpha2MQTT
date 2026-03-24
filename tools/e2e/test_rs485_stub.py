@@ -929,13 +929,18 @@ def _load_polling_page(base: str, family: str, page: int) -> str:
     url = f"{base}/config/polling?family={urllib.parse.quote(family)}&page={page}"
     last_detail = "not checked"
     while time.time() < deadline:
-        status_poll, poll_body = _http_request_full(
-            "GET",
-            url,
-            headers={},
-            body=b"",
-            timeout_s=20,
-        )
+        try:
+            status_poll, poll_body = _http_request_full(
+                "GET",
+                url,
+                headers={},
+                body=b"",
+                timeout_s=20,
+            )
+        except (OSError, TimeoutError) as exc:
+            last_detail = f"transport={exc}"
+            time.sleep(2.0)
+            continue
         if status_poll != 200:
             last_detail = f"status={status_poll}"
             time.sleep(2.0)
@@ -3396,6 +3401,9 @@ def main() -> int:
             raise E2EError("portal polling page missing simplified header/navigation")
         if "bucket_map_full" not in html:
             raise E2EError("portal polling page missing hidden bucket_map_full field")
+        if 'href="/config/polling?family=battery&page=0">Battery</a>' not in html and \
+           'href="/config/polling?family=battery&page=0">[Battery</a>' not in html:
+            raise E2EError("portal polling family nav did not render human-readable labels")
 
         # Find which row index corresponds to a known stable mqttName.
         target = "State_of_Charge"

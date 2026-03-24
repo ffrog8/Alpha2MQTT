@@ -3468,7 +3468,6 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 			           sizeof(buf),
 			           kFamilyNavFmt,
 			           portalPollingFamilyKey(navFamily),
-			           portalPollingFamilyKey(navFamily),
 			           (navFamily == family) ? "[" : "",
 			           portalPollingFamilyLabel(navFamily));
 			if (!writer.write(buf)) {

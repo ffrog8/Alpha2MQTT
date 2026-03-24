@@ -8,7 +8,9 @@
 
 constexpr uint32_t kDispatchDurationForeverSeconds = 0;
 constexpr uint32_t kDispatchRawForeverSeconds = 0x7FFFFFFFUL;
-constexpr uint32_t kDispatchDurationMaxSeconds = 0x7FFFFFFFUL;
+// The controller countdown is derived from uint32_t millis(), so timed runs
+// must stay below one full wrap period to keep elapsed-time math monotonic.
+constexpr uint32_t kDispatchDurationMaxSeconds = 0xFFFFFFFFUL / 1000UL;
 constexpr uint32_t kDispatchCountdownPublishIntervalMs = 5000UL;
 constexpr uint32_t kDispatchHandshakeIntervalMs = 1000UL;
 
