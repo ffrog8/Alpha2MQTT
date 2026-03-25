@@ -9624,6 +9624,7 @@ processPendingEntityCommand(void)
 
 	if (dispatchRelevantChange) {
 		timedDispatchState.evalPending = true;
+		timedDispatchState.lastEvalMs = millis() - kDispatchHandshakeIntervalMs;
 		if (timedGenerationRequested) {
 			dispatchNoteRequestedGeneration(timedDispatchState);
 		}
@@ -10433,11 +10434,15 @@ dispatchService(void)
 	const uint32_t nowMs = millis();
 	const bool timedEnabled = dispatchDurationIsTimed(timedDispatchState.configuredDurationSeconds);
 	const bool pendingGeneration = timedEnabled && dispatchHasPendingGeneration(timedDispatchState);
-	const bool handshakeActive = timedDispatchState.bootStopPending || timedDispatchState.awaitingStopAck ||
-	                             (pendingGeneration && timedDispatchState.activeGeneration == 0);
-	const uint32_t evalIntervalMs = handshakeActive ? kDispatchHandshakeIntervalMs : (pollIntervalSeconds * 1000UL);
+	const bool rs485Live = (rs485ConnectState == Rs485ConnectState::Connected) && inverterReady;
+	const bool handshakeActive = (pendingGeneration && timedDispatchState.activeGeneration == 0) ||
+	                             (timedDispatchState.bootStopPending && rs485Live) ||
+	                             (timedDispatchState.awaitingStopAck && rs485Live);
+	const uint32_t evalIntervalMs =
+		(handshakeActive || timedDispatchState.evalPending) ? kDispatchHandshakeIntervalMs :
+		                                                     (pollIntervalSeconds * 1000UL);
 	const bool dueEval = dispatchEvalDue(
-		timedDispatchState.lastEvalMs, nowMs, evalIntervalMs, timedDispatchState.evalPending);
+		timedDispatchState.lastEvalMs, nowMs, evalIntervalMs, false);
 	const bool dueCountdown = timedEnabled &&
 	                          (timedDispatchState.activeGeneration != 0) &&
 	                          dispatchCountdownPublishDue(timedDispatchState.lastCountdownPublishMs, nowMs);
@@ -10446,11 +10451,11 @@ dispatchService(void)
 	}
 	if (dueEval) {
 		timedDispatchState.lastEvalMs = nowMs;
-		timedDispatchState.evalPending = false;
 		if (!refreshEssSnapshot()) {
 			strlcpy(dispatchLastSkipReason, "ess_snapshot_failed", sizeof(dispatchLastSkipReason));
 			return;
 		}
+		timedDispatchState.evalPending = false;
 	}
 
 	auto writeStop = [&](const char *reason, bool restartAfterStop) -> bool {
@@ -10500,6 +10505,8 @@ dispatchService(void)
 		if (opData.essDispatchStart == DISPATCH_START_START) {
 			if (!timedDispatchState.awaitingStopAck) {
 				writeStop("boot_stop", false);
+			} else if (dueEval) {
+				writeStop("waiting_stop_ack", false);
 			}
 			return;
 		}
