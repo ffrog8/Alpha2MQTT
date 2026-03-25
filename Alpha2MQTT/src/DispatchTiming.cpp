@@ -96,7 +96,9 @@ void
 dispatchMarkStopped(TimedDispatchRuntimeState &state, bool completed)
 {
 	if (completed && state.activeGeneration != 0) {
-		state.completedGeneration = state.activeGeneration;
+		if (state.activeGeneration > state.completedGeneration) {
+			state.completedGeneration = state.activeGeneration;
+		}
 	}
 	state.activeGeneration = 0;
 	state.acceptedAtMs = 0;

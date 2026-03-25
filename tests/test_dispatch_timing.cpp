@@ -56,6 +56,18 @@ TEST_CASE("dispatch timing generation bookkeeping avoids accidental restart")
 	CHECK(dispatchHasPendingGeneration(state));
 }
 
+TEST_CASE("dispatch timing stop never regresses completed generation")
+{
+	TimedDispatchRuntimeState state{};
+	state.activeGeneration = 2;
+	state.completedGeneration = 5;
+
+	dispatchMarkStopped(state, true);
+
+	CHECK(state.activeGeneration == 0);
+	CHECK(state.completedGeneration == 5);
+}
+
 TEST_CASE("dispatch timing evaluation and countdown cadences are independent")
 {
 	CHECK_FALSE(dispatchEvalDue(1000, 1500, 1000, false));
