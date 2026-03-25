@@ -97,6 +97,7 @@ CASE_ORDER: tuple[str, ...] = (
     "dispatch_write_feedback",
     "dispatch_eval_user_interval",
     "dispatch_timed_restart_expire",
+    "dispatch_timed_no_rewrite_without_fresh_snapshot",
     "dispatch_disable_timed_stops_countdown_wakes",
     "dispatch_boot_fail_closed",
     "fail_specific_snapshot_reg",
@@ -2661,6 +2662,45 @@ def main() -> int:
         if start_after_expiry.lower() not in ("stop", "stopped") and start_after_expiry != str(dispatch_start_stop):
             raise E2EError(f"dispatch restarted after expiry instead of staying stopped: {start_after_expiry!r}")
 
+    def case_dispatch_timed_no_rewrite_without_fresh_snapshot() -> None:
+        print("[e2e] case: timed countdown ticks do not rewrite without a fresh snapshot")
+        ha_unique = _ensure_online_inverter_identity("dispatch timed no-rewrite baseline")
+        ensure_dispatch_write(
+            ha_unique,
+            label_prefix="dispatch timed no-rewrite",
+            duration_s=25,
+            poll_interval_s=20,
+            timeout_s=8,
+        )
+        remaining_topic = _state_topic(ha_unique, "Dispatch_Remaining")
+        mqtt.subscribe(remaining_topic, force=True)
+
+        def accepted_pred() -> Tuple[bool, str]:
+            remaining_text = _fetch_latest_text(mqtt, remaining_topic, label="dispatch_remaining_no_rewrite")
+            remaining = int(remaining_text.strip())
+            return (0 < remaining <= 25), f"remaining={remaining}"
+
+        _assert_eventually(
+            "timed dispatch accepted before stale-snapshot window",
+            accepted_pred,
+            timeout_s=20,
+            poll_s=1.0,
+        )
+
+        before = _fetch_poll(mqtt, poll_topic)
+        writes_before = int(before.get("rs485_stub_writes", 0))
+
+        # Countdown publishes every 5s, while the next evaluation is delayed by the 20s
+        # user interval. Any write in this window would therefore come from stale snapshot data.
+        _sleep_with_mqtt(mqtt, 7)
+        after = _fetch_poll(mqtt, poll_topic)
+        writes_after = int(after.get("rs485_stub_writes", 0))
+        if writes_after != writes_before:
+            raise E2EError(
+                "Timed countdown rewrote dispatch without a fresh ESS snapshot: "
+                f"{writes_before}->{writes_after}"
+            )
+
     def case_dispatch_disable_timed_stops_countdown_wakes() -> None:
         print("[e2e] case: disabling timed dispatch does not keep 5s rewrite bursts alive")
         ha_unique = _ensure_online_inverter_identity("dispatch disable baseline")
@@ -2721,6 +2761,9 @@ def main() -> int:
             }),
             label="boot fail-close baseline",
         )
+        ha_unique = _wait_for_inverter_identity()
+        start_topic = _state_topic(ha_unique, "Dispatch_Start")
+        mqtt.subscribe(start_topic, force=True)
 
         base = _resolve_device_http_base(mqtt, device_root)
         reboot_normal_path = _discover_reboot_normal_path_from_code()
@@ -2753,9 +2796,6 @@ def main() -> int:
             poll_s=2.0,
         )
 
-        ha_unique = _wait_for_inverter_identity()
-        start_topic = _state_topic(ha_unique, "Dispatch_Start")
-        mqtt.subscribe(start_topic, force=True)
         _assert_eventually(
             "boot stop clears active dispatch",
             lambda: (
@@ -3736,6 +3776,7 @@ def main() -> int:
         ("dispatch_write_feedback", case_dispatch_write_feedback_via_register_value),
         ("dispatch_eval_user_interval", case_dispatch_eval_uses_user_interval),
         ("dispatch_timed_restart_expire", case_dispatch_timed_restart_and_expire),
+        ("dispatch_timed_no_rewrite_without_fresh_snapshot", case_dispatch_timed_no_rewrite_without_fresh_snapshot),
         ("dispatch_disable_timed_stops_countdown_wakes", case_dispatch_disable_timed_stops_countdown_wakes),
         ("dispatch_boot_fail_closed", case_dispatch_boot_fail_closed),
         ("fail_specific_snapshot_reg", case_fail_specific_snapshot_register_and_type),

@@ -557,6 +557,7 @@ static void dispatchService(void);
 static void serviceDeferredMqttWork(void);
 static void publishDispatchStateEntity(mqttEntityId entityId);
 static void publishDispatchAuxiliaryStates(bool publishRawTime);
+static bool publishDispatchAuxiliaryStatesIfReady(bool publishRawTime);
 static bool computeDispatchCommand(uint16_t &essDispatchMode,
                                    int32_t &essDispatchActivePower,
                                    uint16_t &essDispatchSoc,
@@ -9268,9 +9269,9 @@ sendDataFromMqttState(const mqttState *singleEntity,
 	                          scope,
 	                          controllerIdentifier,
 	                          deviceSerialNumber,
-		                          entityKey,
-		                          topicBase,
-		                          sizeof(topicBase))) {
+	                          entityKey,
+	                          topicBase,
+	                          sizeof(topicBase))) {
 		return true;
 	}
 	if (!doHomeAssistant && mqttEntityNeedsEssSnapshotByIndex(idx) && !essSnapshotValid) {
@@ -10335,6 +10336,16 @@ publishDispatchAuxiliaryStates(bool publishRawTime)
 }
 
 static bool
+publishDispatchAuxiliaryStatesIfReady(bool publishRawTime)
+{
+	if (!mqttSubsystemEnabled() || !inverterReady || !inverterSerialKnown()) {
+		return false;
+	}
+	publishDispatchAuxiliaryStates(publishRawTime);
+	return true;
+}
+
+static bool
 computeDispatchCommand(uint16_t &essDispatchMode,
                        int32_t &essDispatchActivePower,
                        uint16_t &essDispatchSoc,
@@ -10492,8 +10503,12 @@ dispatchService(void)
 			}
 			return;
 		}
-		timedDispatchState.bootStopPending = false;
-		timedDispatchState.awaitingStopAck = false;
+		// If we already issued boot_stop, preserve awaitingStopAck so the acknowledgement
+		// branch below can publish the stopped state once the inverter reflects Stop.
+		if (!timedDispatchState.awaitingStopAck) {
+			timedDispatchState.bootStopPending = false;
+			timedDispatchState.awaitingStopAck = false;
+		}
 	}
 
 	if (timedDispatchState.awaitingStopAck) {
@@ -10522,8 +10537,16 @@ dispatchService(void)
 			writeStop("normal_mode", false);
 			return;
 		}
+		bool publishedStoppedState = false;
+		if (dispatchLastSkipReason[0] != '\0') {
+			// A stop can complete before inverter-scoped MQTT topics are publishable after boot.
+			// Replay the final stopped state once identity is ready so subscribers do not miss it.
+			publishedStoppedState = publishDispatchAuxiliaryStatesIfReady(true);
+		}
 		dispatchMarkStopped(timedDispatchState, false);
-		dispatchLastSkipReason[0] = '\0';
+		if (dispatchLastSkipReason[0] == '\0' || publishedStoppedState) {
+			dispatchLastSkipReason[0] = '\0';
+		}
 		return;
 	}
 
@@ -10547,6 +10570,7 @@ dispatchService(void)
 	                                      opData.essDispatchTime == desiredRawTime;
 
 	if (!timedEnabled) {
+		bool publishedStoppedState = false;
 		if (!snapshotActive || !snapshotMatchesMaintenance ||
 		    opData.essDispatchTime != kDispatchRawForeverSeconds) {
 #ifdef DEBUG_OPS
@@ -10556,10 +10580,12 @@ dispatchService(void)
 			return;
 		}
 		if (dispatchLastSkipReason[0] != '\0') {
-			publishDispatchAuxiliaryStates(true);
+			publishedStoppedState = publishDispatchAuxiliaryStatesIfReady(true);
 		}
 		dispatchMarkStopped(timedDispatchState, false);
-		dispatchLastSkipReason[0] = '\0';
+		if (dispatchLastSkipReason[0] == '\0' || publishedStoppedState) {
+			dispatchLastSkipReason[0] = '\0';
+		}
 		return;
 	}
 
@@ -10589,6 +10615,10 @@ dispatchService(void)
 			strlcpy(dispatchLastSkipReason, "timed_complete", sizeof(dispatchLastSkipReason));
 			return;
 		} else if (!snapshotMatchesMaintenance) {
+			if (!dueEval) {
+				strlcpy(dispatchLastSkipReason, "waiting_maintenance_eval", sizeof(dispatchLastSkipReason));
+				return;
+			}
 #ifdef DEBUG_OPS
 			opCounter++;
 #endif
