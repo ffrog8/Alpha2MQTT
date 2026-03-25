@@ -1652,6 +1652,19 @@ struct ScopedCharBuffer {
 	}
 };
 
+static size_t
+preferenceStringBufferLen(Preferences &preferences, const char *key, size_t maxLen)
+{
+	// Bucket_Map is stored with putString(). ESP32 reports blob sizes via getBytesLength(),
+	// so use the string-specific length probe there and keep the legacy path for ESP8266.
+#if defined(MP_ESP32)
+	const size_t storedLen = preferences.getStringLength(key);
+#else
+	const size_t storedLen = preferences.getBytesLength(key);
+#endif
+	return (storedLen < maxLen) ? (storedLen + 1) : maxLen;
+}
+
 static void
 persistUserInverterLabel(const char *label)
 {
@@ -1709,10 +1722,8 @@ persistUserPollingConfig(uint32_t intervalSeconds, const char *bucketMap)
 		preferences.getUInt(kPreferencePollInterval, kPollIntervalDefaultSeconds);
 	const bool updateBucketMap = (bucketMap != nullptr);
 	const bool originalBucketMapPresent = updateBucketMap && preferences.isKey(kPreferenceBucketMap);
-	const size_t originalBucketMapStorageLen =
-		originalBucketMapPresent ? preferences.getBytesLength(kPreferenceBucketMap) : 0;
 	const size_t originalBucketMapBufferLen =
-		(originalBucketMapStorageLen < kPrefBucketMapMaxLen) ? (originalBucketMapStorageLen + 1) : kPrefBucketMapMaxLen;
+		originalBucketMapPresent ? preferenceStringBufferLen(preferences, kPreferenceBucketMap, kPrefBucketMapMaxLen) : 1;
 	ScopedCharBuffer originalBucketMap(originalBucketMapPresent ? originalBucketMapBufferLen : 1);
 	if (originalBucketMapPresent) {
 		if (!originalBucketMap.ok()) {
@@ -3195,9 +3206,8 @@ loadPollingBucketsForPortal(const mqttState *entities,
 		          ESP.getHeapFragmentation());
 #endif
 		if (preferences.isKey(kPreferenceBucketMap)) {
-			const size_t persistedMapStorageLen = preferences.getBytesLength(kPreferenceBucketMap);
 			const size_t persistedMapBufferLen =
-				(persistedMapStorageLen < kPrefBucketMapMaxLen) ? (persistedMapStorageLen + 1) : kPrefBucketMapMaxLen;
+				preferenceStringBufferLen(preferences, kPreferenceBucketMap, kPrefBucketMapMaxLen);
 			ScopedCharBuffer persistedMap(persistedMapBufferLen);
 			if (!persistedMap.ok()) {
 #ifdef DEBUG_OVER_SERIAL
