@@ -1659,14 +1659,7 @@ struct ScopedCharBuffer {
 
 	explicit ScopedCharBuffer(size_t bufferSize)
 	{
-		if (bufferSize == 0) {
-			return;
-		}
-		data = new (std::nothrow) char[bufferSize];
-		if (data != nullptr) {
-			size = bufferSize;
-			data[0] = '\0';
-		}
+		(void)reset(bufferSize);
 	}
 
 	~ScopedCharBuffer()
@@ -1677,6 +1670,23 @@ struct ScopedCharBuffer {
 	bool ok() const
 	{
 		return data != nullptr;
+	}
+
+	bool reset(size_t bufferSize)
+	{
+		delete[] data;
+		data = nullptr;
+		size = 0;
+		if (bufferSize == 0) {
+			return true;
+		}
+		data = new (std::nothrow) char[bufferSize];
+		if (data == nullptr) {
+			return false;
+		}
+		size = bufferSize;
+		data[0] = '\0';
+		return true;
 	}
 };
 
@@ -5568,6 +5578,8 @@ loadPollingConfig(void)
 	BucketId *buckets = g_portalBucketsScratch;
 	bool appliedBucketMap = false;
 	bool migrateLegacyIndexBucketMap = false;
+	ScopedCharBuffer migratedBucketMapBuffer(0);
+	const char *persistedBucketMap = nullptr;
 
 	persistLoadOk = 0;
 	persistLoadErr = 0;
@@ -5646,23 +5658,35 @@ loadPollingConfig(void)
 				recomputeBucketCounts();
 				return;
 			}
-			appliedBucketMap = applyLegacyBucketMapString(bucketMap,
-			                                              entities,
-			                                              entityCount,
-			                                              buckets,
-			                                              persistUnknownEntityCount,
-			                                              persistInvalidBucketCount,
-			                                              persistDuplicateEntityCount);
-			if (appliedBucketMap) {
-				size_t appliedCount = 0;
-				if (buildBucketMapFromAssignments(
-					    entities, entityCount, buckets, bucketMap, kPrefBucketMapMaxLen, appliedCount)) {
-					migrateLegacyIndexBucketMap = true;
+				appliedBucketMap = applyLegacyBucketMapString(bucketMap,
+				                                              entities,
+				                                              entityCount,
+				                                              buckets,
+				                                              persistUnknownEntityCount,
+				                                              persistInvalidBucketCount,
+				                                              persistDuplicateEntityCount);
+				if (appliedBucketMap) {
+					if (!migratedBucketMapBuffer.reset(kPrefBucketMapMaxLen)) {
+						preferences.end();
+						persistLoadOk = 0;
+						persistLoadErr = 1;
+						return;
+					}
+					size_t appliedCount = 0;
+					if (buildBucketMapFromAssignments(
+						    entities,
+						    entityCount,
+						    buckets,
+						    migratedBucketMapBuffer.data,
+						    migratedBucketMapBuffer.size,
+						    appliedCount)) {
+						migrateLegacyIndexBucketMap = true;
+						persistedBucketMap = migratedBucketMapBuffer.data;
+					}
+					persistLoadOk = 1;
+				} else {
+					persistLoadErr = 1;
 				}
-				persistLoadOk = 1;
-			} else {
-				persistLoadErr = 1;
-			}
 		} else {
 			appliedBucketMap = portalApplyBucketMapString(bucketMap,
 			                                              entityCount,
@@ -5723,8 +5747,8 @@ loadPollingConfig(void)
 		persistLoadErr = 1;
 		return;
 	}
-	if (migrateLegacyIndexBucketMap) {
-		persistUserBucketMap(bucketMap);
+	if (migrateLegacyIndexBucketMap && persistedBucketMap != nullptr) {
+		persistUserBucketMap(persistedBucketMap);
 	}
 	recomputeBucketCounts();
 	pollingConfigLoadedFromStorage = true;
