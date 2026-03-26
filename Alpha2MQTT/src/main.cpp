@@ -4484,7 +4484,9 @@ void setup()
 		sprintf(_debugOutput, "About to request buffer");
 		Serial.println(_debugOutput);
 #endif
-		for (int _bufferSize = (MAX_MQTT_PAYLOAD_SIZE + MQTT_HEADER_SIZE); _bufferSize >= MIN_MQTT_PAYLOAD_SIZE + MQTT_HEADER_SIZE; _bufferSize = _bufferSize - 1024) {
+		for (int _bufferSize = (MAX_MQTT_PAYLOAD_SIZE + MQTT_HEADER_SIZE);
+		     _bufferSize >= MIN_MQTT_PAYLOAD_SIZE + MQTT_HEADER_SIZE;
+		     _bufferSize -= 512) {
 #ifdef DEBUG_OVER_SERIAL
 		sprintf(_debugOutput, "Requesting a buffer of : %d bytes", _bufferSize);
 		Serial.println(_debugOutput);
