@@ -62,6 +62,7 @@ const mqttState *mqttEntityById(mqttEntityId id);
 bool mqttEntityCopyByIndex(size_t idx, mqttState *out);
 bool mqttEntityCopyById(mqttEntityId id, mqttState *out);
 bool mqttEntityIndexById(mqttEntityId id, size_t *outIdx);
+bool mqttEntityIndexByName(const char *name, size_t *outIdx);
 bool mqttEntityCopyCatalog(mqttState *out, size_t count);
 size_t mqttEntitiesCount();
 

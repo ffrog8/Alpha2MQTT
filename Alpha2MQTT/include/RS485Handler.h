@@ -80,7 +80,7 @@ class RS485Handler
 		void outputFrameToSerial(bool transmit, uint8_t frame[], byte actualFrameSize);
 #endif // DEBUG_OUTPUT_TX_RX
 		bool _inTransaction = false;
-		uint16_t baudRate;
+		unsigned long baudRate;
 		bool _rs485IsOnline;
 		char uartInfoString[OLED_CHARACTER_WIDTH];
 

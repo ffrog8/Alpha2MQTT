@@ -537,6 +537,26 @@ class RS485Handler
 			}
 
 			if (shouldFail) {
+#ifdef DEBUG_OVER_SERIAL
+				char dbg[192];
+				snprintf(dbg,
+				         sizeof(dbg),
+				         "stub shouldFail: reg=%u fn=%u mode=%u strict=%u failN=%lu failReg=%u failEveryN=%lu failReads=%u failWrites=%u failForMs=%lu failType=%u inSnapshot=%u snapIdx=%lu",
+				         static_cast<unsigned>(startRegister),
+				         static_cast<unsigned>(fn),
+				         static_cast<unsigned>(_cfg.mode),
+				         static_cast<unsigned>(_cfg.strictUnknownRegisters ? 1 : 0),
+				         static_cast<unsigned long>(_cfg.failFirstN),
+				         static_cast<unsigned>(_cfg.failRegister),
+				         static_cast<unsigned long>(_cfg.failEveryN),
+				         static_cast<unsigned>(_cfg.failReads ? 1 : 0),
+				         static_cast<unsigned>(_cfg.failWrites ? 1 : 0),
+				         static_cast<unsigned long>(_cfg.failForMs),
+				         static_cast<unsigned>(_cfg.failType),
+				         static_cast<unsigned>(_inSnapshot ? 1 : 0),
+				         static_cast<unsigned long>(_snapshotAttemptIndex));
+				Serial.println(dbg);
+#endif
 				// For slave-exception responses, the bus is still "online" (we got a response).
 				// For timeouts/no-response, treat the bus as offline.
 				_rs485IsOnline = (_cfg.failType == Rs485StubFailType::SlaveError);

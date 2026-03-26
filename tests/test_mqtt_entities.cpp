@@ -76,6 +76,26 @@ TEST_CASE("mqtt entities: copy and index helpers round-trip by id")
 	}
 }
 
+TEST_CASE("mqtt entities: name lookup round-trips by index")
+{
+	const mqttState *desc = mqttEntitiesDesc();
+	REQUIRE(desc != nullptr);
+	const size_t count = mqttEntitiesCount();
+	REQUIRE(count > 0);
+
+	for (size_t i = 0; i < count; ++i) {
+		char name[64];
+		size_t idx = count;
+		mqttEntityNameCopy(&desc[i], name, sizeof(name));
+		REQUIRE(name[0] != '\0');
+		REQUIRE(mqttEntityIndexByName(name, &idx));
+		CHECK(idx == i);
+	}
+
+	size_t missingIdx = 0;
+	CHECK_FALSE(mqttEntityIndexByName("Definitely_Not_A_Real_Entity", &missingIdx));
+}
+
 TEST_CASE("mqtt entities: full catalog copy mirrors descriptor metadata")
 {
 	const mqttState *desc = mqttEntitiesDesc();
