@@ -70,9 +70,9 @@ TEST_CASE("dispatch timing stop never regresses completed generation")
 
 TEST_CASE("dispatch timing evaluation and countdown cadences are independent")
 {
-	CHECK_FALSE(dispatchEvalDue(1000, 1500, 1000, false));
-	CHECK(dispatchEvalDue(1000, 2000, 1000, false));
-	CHECK(dispatchEvalDue(1000, 1500, 0, false));
+	CHECK_FALSE(dispatchEvalDue(1000, 3500, 3000, false));
+	CHECK(dispatchEvalDue(1000, 4000, 3000, false));
+	CHECK(dispatchEvalDue(1000, 3500, 0, false));
 	CHECK(dispatchEvalDue(0, 500, 120000, true));
 
 	CHECK_FALSE(dispatchCountdownPublishDue(1000, 5999));

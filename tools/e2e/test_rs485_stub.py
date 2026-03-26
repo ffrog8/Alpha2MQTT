@@ -2680,19 +2680,23 @@ def main() -> int:
             )
 
     def case_dispatch_eval_uses_user_interval() -> None:
-        print("[e2e] case: dispatch evaluation follows the 1s user interval, not the 10s bucket")
-        ha_unique = _ensure_online_inverter_identity("dispatch 1s baseline")
+        user_interval_s = 3
+        print("[e2e] case: dispatch evaluation follows the 3s user interval, not the 10s bucket")
+        ha_unique = _ensure_online_inverter_identity("dispatch 3s baseline")
         elapsed = measure_dispatch_write_latency(
             ha_unique,
-            label_prefix="dispatch 1s",
+            label_prefix="dispatch 3s",
             duration_s=12,
-            poll_interval_s=1,
+            poll_interval_s=user_interval_s,
             timeout_s=12,
         )
         # This measures the full confirmation path (dispatch eval + write + raw register readback publish),
-        # so keep the bound comfortably below the legacy 10s cadence without requiring a sub-second echo.
-        if elapsed > 5.0:
-            raise E2EError(f"dispatch write took too long after the final control burst with poll_interval_s=1: elapsed={elapsed:.2f}s")
+        # so keep the bound comfortably below the legacy 10s cadence while allowing a 3s user bucket.
+        if elapsed > 7.0:
+            raise E2EError(
+                f"dispatch write took too long after the final control burst with poll_interval_s={user_interval_s}: "
+                f"elapsed={elapsed:.2f}s"
+            )
 
         dispatch_time_topic = _state_topic(ha_unique, "Dispatch_Time")
         mqtt.subscribe(dispatch_time_topic, force=True)
@@ -2708,12 +2712,13 @@ def main() -> int:
 
     def case_dispatch_timed_restart_and_expire() -> None:
         print("[e2e] case: timed dispatch countdown restarts and expires cleanly")
+        user_interval_s = 3
         ha_unique = _ensure_online_inverter_identity("timed dispatch baseline")
         ensure_dispatch_write(
             ha_unique,
             label_prefix="dispatch timed",
             duration_s=12,
-            poll_interval_s=1,
+            poll_interval_s=user_interval_s,
             timeout_s=8,
         )
         dispatch_start_stop = _discover_define_value("DISPATCH_START_STOP")
