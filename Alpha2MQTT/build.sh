@@ -37,6 +37,9 @@ fi
 
 BUILD_TS_MS="$(date +%s%3N)"
 BASE_BUILD_FLAGS="-DMP_ESP8266 -UMP_ESP32 -UMP_XIAO_ESP32C6 -DBUILD_TS_MS=${BUILD_TS_MS}ULL"
+if [[ -n "${BUILD_EXTRA_FLAGS:-}" ]]; then
+	BASE_BUILD_FLAGS="${BASE_BUILD_FLAGS} ${BUILD_EXTRA_FLAGS}"
+fi
 OUTFILE_REAL="${OUTDIR}/Alpha2MQTT_${BUILD_TS_MS}_real.bin"
 OUTFILE_STUB="${OUTDIR}/Alpha2MQTT_${BUILD_TS_MS}_stub.bin"
 ESP8266_INDEX_URL="https://arduino.esp8266.com/stable/package_esp8266com_index.json"
