@@ -121,6 +121,9 @@ static char *pendingPollingConfigPayload = nullptr;
 // blocked while any deferred command is pending, so stub/entity commands never
 // overlap in this storage.
 static char pendingDeferredControlPayload[512] = "";
+// Status and manual-read JSON publishes are serialized through the single-threaded main loop.
+// Keep one shared scratch buffer instead of reserving multiple independent publish buffers.
+static char g_statusJsonScratch[1024] = "";
 static uint32_t manualRegisterReadSeq = 0;
 constexpr uint8_t kDeferredMqttDrainMaxIterations = 16;
 
@@ -8113,11 +8116,6 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 	void
 		sendStatus(bool includeEssSnapshot)
 		{
-			// Keep large buffers out of the stack to avoid soft WDT resets on ESP8266.
-			static char stateAddition[256];
-			static char netAddition[256];
-			static char pollAddition[1024];
-			static char stubAddition[768];
 		StatusCoreSnapshot core{};
 		StatusNetSnapshot net{};
 		StatusPollSnapshot poll{};
@@ -8252,10 +8250,10 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 				poll.pollingLastFullCycleAgeMs[bucketIdx] = bucketLastFullCycleAgeMs(budgetState, nowMs);
 			}
 
-			if (!buildStatusCoreJson(core, stateAddition, sizeof(stateAddition))) {
+			if (!buildStatusCoreJson(core, g_statusJsonScratch, sizeof(g_statusJsonScratch))) {
 				return;
 			}
-	resultAddedToPayload = addToPayload(stateAddition);
+	resultAddedToPayload = addToPayload(g_statusJsonScratch);
 	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
 		return;
 	}
@@ -8267,23 +8265,24 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 
 	char netTopic[160];
 	snprintf(netTopic, sizeof(netTopic), "%s/net", statusTopic);
-	if (buildStatusNetJson(net, netAddition, sizeof(netAddition))) {
-		_mqtt.publish(netTopic, netAddition, MQTT_RETAIN);
+	if (buildStatusNetJson(net, g_statusJsonScratch, sizeof(g_statusJsonScratch))) {
+		_mqtt.publish(netTopic, g_statusJsonScratch, MQTT_RETAIN);
 		maybeYield();
 	}
 
 	char pollTopic[160];
 	snprintf(pollTopic, sizeof(pollTopic), "%s/poll", statusTopic);
-	bool pollBuilt = buildStatusPollJson(poll, pollAddition, sizeof(pollAddition));
+	bool pollBuilt = buildStatusPollJson(poll, g_statusJsonScratch, sizeof(g_statusJsonScratch));
 	bool usedCompactPoll = false;
 	if (!pollBuilt) {
-		pollBuilt = buildStatusPollJsonCompact(poll, pollAddition, sizeof(pollAddition));
+		pollBuilt = buildStatusPollJsonCompact(poll, g_statusJsonScratch, sizeof(g_statusJsonScratch));
 		usedCompactPoll = pollBuilt;
 	}
 	if (pollBuilt) {
-		bool published = _mqtt.publish(pollTopic, pollAddition, MQTT_RETAIN);
-		if (!published && !usedCompactPoll && buildStatusPollJsonCompact(poll, pollAddition, sizeof(pollAddition))) {
-			published = _mqtt.publish(pollTopic, pollAddition, MQTT_RETAIN);
+		bool published = _mqtt.publish(pollTopic, g_statusJsonScratch, MQTT_RETAIN);
+		if (!published && !usedCompactPoll &&
+		    buildStatusPollJsonCompact(poll, g_statusJsonScratch, sizeof(g_statusJsonScratch))) {
+			published = _mqtt.publish(pollTopic, g_statusJsonScratch, MQTT_RETAIN);
 			usedCompactPoll = true;
 		}
 #ifdef DEBUG_OVER_SERIAL
@@ -8324,8 +8323,8 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 
 		char stubTopic[160];
 		snprintf(stubTopic, sizeof(stubTopic), "%s/stub", statusTopic);
-		if (buildStatusStubJson(stub, stubAddition, sizeof(stubAddition))) {
-			_mqtt.publish(stubTopic, stubAddition, MQTT_RETAIN);
+		if (buildStatusStubJson(stub, g_statusJsonScratch, sizeof(g_statusJsonScratch))) {
+			_mqtt.publish(stubTopic, g_statusJsonScratch, MQTT_RETAIN);
 			maybeYield();
 		}
 	}
@@ -9802,7 +9801,6 @@ publishManualRegisterValueState(const mqttState *valueEntity,
 static void
 publishManualRegisterReadStatus(int32_t requestedReg, const modbusRequestAndResponse &response)
 {
-	static char manualReadAddition[256];
 	char manualReadTopic[160];
 	StatusManualReadSnapshot snapshot{};
 	snapshot.seq = ++manualRegisterReadSeq;
@@ -9815,8 +9813,8 @@ publishManualRegisterReadStatus(int32_t requestedReg, const modbusRequestAndResp
 #endif
 	snapshot.value = response.dataValueFormatted;
 	snprintf(manualReadTopic, sizeof(manualReadTopic), "%s/manual_read", statusTopic);
-	if (buildStatusManualReadJson(snapshot, manualReadAddition, sizeof(manualReadAddition))) {
-		_mqtt.publish(manualReadTopic, manualReadAddition, true);
+	if (buildStatusManualReadJson(snapshot, g_statusJsonScratch, sizeof(g_statusJsonScratch))) {
+		_mqtt.publish(manualReadTopic, g_statusJsonScratch, true);
 		maybeYield();
 	}
 }

@@ -85,7 +85,7 @@ Customise these options as per README.txt.  Please read README.txt before contin
 // If you aren't using an ESP8266 you may be able to increase this.
 // Alpha2MQTT on boot will request a buffer size of (MAX_MQTT_PAYLOAD_SIZE + MQTT_HEADER_SIZE) for MQTT, and
 // MAX_MQTT_PAYLOAD_SIZE for building payloads.  If these fail and your device doesn't boot, you can assume you've set this too high.
-#define MAX_MQTT_PAYLOAD_SIZE 1536
+#define MAX_MQTT_PAYLOAD_SIZE 1024
 #define MIN_MQTT_PAYLOAD_SIZE 512
 #define MQTT_HEADER_SIZE 512
 
