@@ -5192,7 +5192,7 @@ loop()
 	if (mqttSubsystemEnabled()) {
 		sendData();
 	}
-	if (bootPlan.inverter) {
+	if (bootPlan.inverter && mqttSubsystemEnabled()) {
 		dispatchService();
 	}
 
@@ -10955,6 +10955,9 @@ dispatchService(void)
 {
 #ifndef DEBUG_NO_RS485
 	if (_registerHandler == nullptr) {
+		return;
+	}
+	if (!mqttSubsystemEnabled()) {
 		return;
 	}
 
