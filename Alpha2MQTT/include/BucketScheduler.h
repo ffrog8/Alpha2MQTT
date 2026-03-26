@@ -62,23 +62,6 @@ inline bool snapshotPrereqSatisfiedForBucket(bool bucketNeedsEssSnapshot,
 	return essSnapshotOk;
 }
 
-inline bool shouldRunDispatchForTenSecBucket(bool essSnapshotOk)
-{
-	return essSnapshotOk;
-}
-
-inline bool shouldRunDispatchForTenSecPass(bool dueTenSecBucket,
-                                           bool essSnapshotOk,
-                                           bool dispatchAlreadyRanThisPass)
-{
-	return dueTenSecBucket && shouldRunDispatchForTenSecBucket(essSnapshotOk) && !dispatchAlreadyRanThisPass;
-}
-
-inline bool tenSecBucketRequiresSnapshot(void)
-{
-	return true;
-}
-
 struct BucketMembership {
 	size_t tenSecCount;
 	size_t oneMinCount;

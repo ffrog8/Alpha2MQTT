@@ -48,6 +48,7 @@ class RS485Handler
 			uint16_t dispatchMode = DISPATCH_MODE_NORMAL_MODE;
 			int32_t dispatchActivePower = DISPATCH_ACTIVE_POWER_OFFSET;
 			uint16_t dispatchSoc = 0;
+			uint32_t dispatchTime = 0;
 
 			uint16_t batterySocX10 = 650; // 65.0% => 650 with BATTERY_SOC_MULTIPLIER=0.1
 			int16_t batteryPowerW = 0;
@@ -169,6 +170,14 @@ class RS485Handler
 			}
 			if (reg == REG_DISPATCH_RW_DISPATCH_SOC) {
 				*outWord = _state.dispatchSoc;
+				return true;
+			}
+			if (reg == REG_DISPATCH_RW_DISPATCH_TIME_1) {
+				*outWord = hi16(_state.dispatchTime);
+				return true;
+			}
+			if (reg == static_cast<uint16_t>(REG_DISPATCH_RW_DISPATCH_TIME_1 + 1)) {
+				*outWord = lo16(_state.dispatchTime);
 				return true;
 			}
 
@@ -308,12 +317,17 @@ class RS485Handler
 			_state.inverterWorkingMode = inverterWorkingMode;
 		}
 
-		void applyVirtualDispatchState(uint16_t start, uint16_t mode, int32_t activePower, uint16_t dispatchSoc)
+		void applyVirtualDispatchState(uint16_t start,
+		                             uint16_t mode,
+		                             int32_t activePower,
+		                             uint16_t dispatchSoc,
+		                             uint32_t dispatchTime)
 		{
 			_state.dispatchStart = start;
 			_state.dispatchMode = mode;
 			_state.dispatchActivePower = activePower;
 			_state.dispatchSoc = dispatchSoc;
+			_state.dispatchTime = dispatchTime;
 		}
 
 		void setSerialString(const char *serial)
@@ -523,6 +537,26 @@ class RS485Handler
 			}
 
 			if (shouldFail) {
+#ifdef DEBUG_OVER_SERIAL
+				char dbg[192];
+				snprintf(dbg,
+				         sizeof(dbg),
+				         "stub shouldFail: reg=%u fn=%u mode=%u strict=%u failN=%lu failReg=%u failEveryN=%lu failReads=%u failWrites=%u failForMs=%lu failType=%u inSnapshot=%u snapIdx=%lu",
+				         static_cast<unsigned>(startRegister),
+				         static_cast<unsigned>(fn),
+				         static_cast<unsigned>(_cfg.mode),
+				         static_cast<unsigned>(_cfg.strictUnknownRegisters ? 1 : 0),
+				         static_cast<unsigned long>(_cfg.failFirstN),
+				         static_cast<unsigned>(_cfg.failRegister),
+				         static_cast<unsigned long>(_cfg.failEveryN),
+				         static_cast<unsigned>(_cfg.failReads ? 1 : 0),
+				         static_cast<unsigned>(_cfg.failWrites ? 1 : 0),
+				         static_cast<unsigned long>(_cfg.failForMs),
+				         static_cast<unsigned>(_cfg.failType),
+				         static_cast<unsigned>(_inSnapshot ? 1 : 0),
+				         static_cast<unsigned long>(_snapshotAttemptIndex));
+				Serial.println(dbg);
+#endif
 				// For slave-exception responses, the bus is still "online" (we got a response).
 				// For timeouts/no-response, treat the bus as offline.
 				_rs485IsOnline = (_cfg.failType == Rs485StubFailType::SlaveError);
@@ -597,18 +631,22 @@ class RS485Handler
 						_state.dispatchStart = static_cast<uint16_t>((data[0] << 8) | data[1]);
 					}
 					// Special-case dispatch block write, as used by writeDispatchRegisters().
-					if (startRegister == REG_DISPATCH_RW_DISPATCH_START && usableWords >= 7) {
+					if (startRegister == REG_DISPATCH_RW_DISPATCH_START && usableWords >= 9) {
 						const uint16_t w0 = static_cast<uint16_t>((data[0] << 8) | data[1]);
 						const uint16_t w1 = static_cast<uint16_t>((data[2] << 8) | data[3]);
 						const uint16_t w2 = static_cast<uint16_t>((data[4] << 8) | data[5]);
 						const uint16_t w5 = static_cast<uint16_t>((data[10] << 8) | data[11]);
 						const uint16_t w6 = static_cast<uint16_t>((data[12] << 8) | data[13]);
+						const uint16_t w7 = static_cast<uint16_t>((data[14] << 8) | data[15]);
+						const uint16_t w8 = static_cast<uint16_t>((data[16] << 8) | data[17]);
 
 						const uint32_t ap = (static_cast<uint32_t>(w1) << 16) | w2;
+						const uint32_t dispatchTime = (static_cast<uint32_t>(w7) << 16) | w8;
 						_state.dispatchStart = w0;
 						_state.dispatchActivePower = static_cast<int32_t>(ap);
 						_state.dispatchMode = w5;
 						_state.dispatchSoc = w6;
+						_state.dispatchTime = dispatchTime;
 					}
 				}
 

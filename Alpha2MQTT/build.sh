@@ -36,7 +36,9 @@ else
 fi
 
 BUILD_TS_MS="$(date +%s%3N)"
-BASE_BUILD_FLAGS="-DMP_ESP8266 -UMP_ESP32 -UMP_XIAO_ESP32C6 -DBUILD_TS_MS=${BUILD_TS_MS}ULL"
+# ESP8266 OTA uploads stream through HTTPUpload. Keep the upload buffer small enough to fit in
+# WiFi portal heap without pushing the parser into OOM.
+BASE_BUILD_FLAGS="-DMP_ESP8266 -UMP_ESP32 -UMP_XIAO_ESP32C6 -DHTTP_UPLOAD_BUFLEN=512 -DBUILD_TS_MS=${BUILD_TS_MS}ULL"
 if [[ -n "${BUILD_EXTRA_FLAGS:-}" ]]; then
 	BASE_BUILD_FLAGS="${BASE_BUILD_FLAGS} ${BUILD_EXTRA_FLAGS}"
 fi

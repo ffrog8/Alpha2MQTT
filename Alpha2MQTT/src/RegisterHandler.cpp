@@ -4701,7 +4701,11 @@ modbusRequestAndResponseStatusValues RegisterHandler::writeDispatchStop(modbusRe
 	return writeRawDataRegister(REG_DISPATCH_RW_DISPATCH_START, DISPATCH_START_STOP, rs);
 }
 
-modbusRequestAndResponseStatusValues RegisterHandler::writeDispatchRegisters(uint32_t activePower, uint16_t mode, uint16_t socTarget, modbusRequestAndResponse* rs)
+modbusRequestAndResponseStatusValues RegisterHandler::writeDispatchRegisters(uint32_t activePower,
+                                                                            uint16_t mode,
+                                                                            uint16_t socTarget,
+                                                                            uint32_t dispatchTime,
+                                                                            modbusRequestAndResponse* rs)
 {
 	modbusRequestAndResponseStatusValues result;
 	uint8_t	frame[] = { ALPHA_SLAVE_ID, MODBUS_FN_WRITEDATAREGISTER,
@@ -4713,7 +4717,8 @@ modbusRequestAndResponseStatusValues RegisterHandler::writeDispatchRegisters(uin
 			0x00, 0x00, 0x00, 0x00,									// Reactive Power (just use zero)
 			(uint8_t)((mode >> 8) & 0xff), (uint8_t)(mode & 0xff),					// Dispatch Mode
 			(uint8_t)((socTarget >> 8) & 0xff), (uint8_t)(socTarget & 0xff),			// SOC Target
-			0x7F, 0xFF, 0xFF, 0xFF,									// Time (essentially forever)
+			(uint8_t)((dispatchTime >> 24) & 0xff), (uint8_t)((dispatchTime >> 16) & 0xff),		// Time
+			(uint8_t)((dispatchTime >> 8) & 0xff), (uint8_t)(dispatchTime & 0xff),
 			0, 0 };
 	result = _modBus->sendModbus(frame, sizeof(frame), rs);
 	// And now it has been sent to the device, the response is essentially synchronos so by the time we get a response we will know if success or failure

@@ -76,6 +76,26 @@ TEST_CASE("mqtt entities: copy and index helpers round-trip by id")
 	}
 }
 
+TEST_CASE("mqtt entities: name lookup round-trips by index")
+{
+	const mqttState *desc = mqttEntitiesDesc();
+	REQUIRE(desc != nullptr);
+	const size_t count = mqttEntitiesCount();
+	REQUIRE(count > 0);
+
+	for (size_t i = 0; i < count; ++i) {
+		char name[64];
+		size_t idx = count;
+		mqttEntityNameCopy(&desc[i], name, sizeof(name));
+		REQUIRE(name[0] != '\0');
+		REQUIRE(mqttEntityIndexByName(name, &idx));
+		CHECK(idx == i);
+	}
+
+	size_t missingIdx = 0;
+	CHECK_FALSE(mqttEntityIndexByName("Definitely_Not_A_Real_Entity", &missingIdx));
+}
+
 TEST_CASE("mqtt entities: full catalog copy mirrors descriptor metadata")
 {
 	const mqttState *desc = mqttEntitiesDesc();
@@ -222,6 +242,19 @@ TEST_CASE("mqtt entities: legacy-compatible direct readbacks are exposed as regi
 	CHECK(mqttEntityNameEquals(dispatchTime, "Dispatch_Time"));
 	CHECK(dispatchTime->haClass == homeAssistantClass::haClassDuration);
 	CHECK(dispatchTime->readKey == REG_DISPATCH_RW_DISPATCH_TIME_1);
+
+	const mqttState *dispatchDuration = mqttEntityById(mqttEntityId::entityDispatchDuration);
+	REQUIRE(dispatchDuration != nullptr);
+	CHECK(mqttEntityNameEquals(dispatchDuration, "Dispatch_Duration"));
+	CHECK(dispatchDuration->haClass == homeAssistantClass::haClassNumber);
+	CHECK(dispatchDuration->readKind == MqttEntityReadKind::Control);
+	CHECK(dispatchDuration->subscribe);
+
+	const mqttState *dispatchRemaining = mqttEntityById(mqttEntityId::entityDispatchRemaining);
+	REQUIRE(dispatchRemaining != nullptr);
+	CHECK(mqttEntityNameEquals(dispatchRemaining, "Dispatch_Remaining"));
+	CHECK(dispatchRemaining->haClass == homeAssistantClass::haClassDuration);
+	CHECK(dispatchRemaining->readKind == MqttEntityReadKind::Derived);
 
 	const mqttState *maxFeedin = mqttEntityById(mqttEntityId::entityMaxFeedinPercent);
 	REQUIRE(maxFeedin != nullptr);

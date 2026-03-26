@@ -55,7 +55,11 @@ class RegisterHandler
 		modbusRequestAndResponseStatusValues writeRawSingleRegister(uint16_t registerAddress, uint16_t value, modbusRequestAndResponse* rs);
 		modbusRequestAndResponseStatusValues writeRawDataRegister(uint16_t registerAddress, uint32_t value, modbusRequestAndResponse* rs);
 		modbusRequestAndResponseStatusValues writeDispatchStop(modbusRequestAndResponse* rs);
-		modbusRequestAndResponseStatusValues writeDispatchRegisters(uint32_t activePower, uint16_t mode, uint16_t socTarget, modbusRequestAndResponse* rs);
+		modbusRequestAndResponseStatusValues writeDispatchRegisters(uint32_t activePower,
+		                                                          uint16_t mode,
+		                                                          uint16_t socTarget,
+		                                                          uint32_t dispatchTime,
+		                                                          modbusRequestAndResponse* rs);
 };
 
 
