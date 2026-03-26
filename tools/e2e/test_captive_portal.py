@@ -1141,6 +1141,13 @@ def _extract_form_action_with_input(body: str, required_input: str) -> str:
     raise PortalTestError(f"Could not find form action for input {required_input!r}")
 
 
+def _extract_input_value(body: str, name: str) -> str:
+    match = re.search(rf'name=["\']{re.escape(name)}["\'][^>]*value=["\']([^"\']*)["\']', body, flags=re.IGNORECASE)
+    if not match:
+        raise PortalTestError(f"Could not find input value for {name!r}")
+    return match.group(1)
+
+
 def _wait_for_polling_page_persisted(
     ssh: PiSsh,
     *,
@@ -1205,7 +1212,7 @@ def _prime_runtime_topics(mqtt: "MqttClient", device_root: str) -> None:
             pass
 
 
-def _join_ap_and_load_wifi_page(ssh: "PiSsh", mqtt: "MqttClient", *, iface: str) -> tuple[str, str]:
+def _join_ap_and_load_wifi_page(ssh: "PiSsh", mqtt: "MqttClient", *, iface: str) -> tuple[str, str, str]:
     join = _pi_join_esp_ap(ssh, iface=iface, ssid_prefix="Alpha2MQTT-")
     ap_ssid = str(join.get("ssid", ""))
     if not ap_ssid.startswith("Alpha2MQTT-"):
@@ -1239,23 +1246,29 @@ def _join_ap_and_load_wifi_page(ssh: "PiSsh", mqtt: "MqttClient", *, iface: str)
         time.sleep(1.0)
     if not wifi_action or "s" not in input_names or "p" not in input_names:
         raise PortalTestError(f"wifi form missing ssid/password inputs: names={sorted(input_names)!r}")
-    return ap_ssid, wifi_action
+    return ap_ssid, wifi_action, wifi_body
 
 
-def _save_wifi_and_wait_connected(ssh: "PiSsh", *, wifi_ssid: str, wifi_pwd: str, wifi_action: str) -> str:
+def _save_wifi_and_wait_connected(
+    ssh: "PiSsh",
+    *,
+    wifi_ssid: str,
+    wifi_pwd: str,
+    wifi_action: str,
+    wifi_body: str,
+) -> str:
+    csrf = _extract_input_value(wifi_body, "csrf")
     save_wifi = _pi_http_request(
         ssh,
-        method="GET",
-        url=urllib.parse.urljoin(
-            "http://192.168.4.1/0wifi",
-            f"{wifi_action}?{urllib.parse.urlencode({'s': wifi_ssid, 'p': wifi_pwd})}",
-        ),
+        method="POST",
+        url=urllib.parse.urljoin("http://192.168.4.1/0wifi", wifi_action),
+        form={"s": wifi_ssid, "p": wifi_pwd, "csrf": csrf},
         timeout_s=30,
     )
     save_wifi_status = int(save_wifi.get("status", 0))
     save_wifi_body = str(save_wifi.get("body", ""))
     if save_wifi_status not in (0, 200, 302):
-        raise PortalTestError(f"Portal GET /wifisave returned {save_wifi_status}")
+        raise PortalTestError(f"Portal POST /wifisave returned {save_wifi_status}")
     if save_wifi_status != 200:
         _http_log(
             "portal wifi save transport did not complete cleanly; "
@@ -1436,12 +1449,13 @@ def _run_wifi_only_case(
     _erase_and_flash_real_firmware(fw_path, serial_port=serial_port, baud=flash_baud)
     time.sleep(8)
 
-    ap_ssid, wifi_action = _join_ap_and_load_wifi_page(ssh, mqtt, iface=iface)
+    ap_ssid, wifi_action, wifi_body = _join_ap_and_load_wifi_page(ssh, mqtt, iface=iface)
     portal_runtime_ip = _save_wifi_and_wait_connected(
         ssh,
         wifi_ssid=wifi_ssid,
         wifi_pwd=wifi_pwd,
         wifi_action=wifi_action,
+        wifi_body=wifi_body,
     )
     portal_base_url, portal_root_body = _discover_sta_portal_base(
         ssh,
@@ -1488,12 +1502,13 @@ def _run_wifi_plus_mqtt_case(
     _erase_and_flash_real_firmware(fw_path, serial_port=serial_port, baud=flash_baud)
     time.sleep(8)
 
-    device_root, wifi_action = _join_ap_and_load_wifi_page(ssh, mqtt, iface=iface)
+    device_root, wifi_action, wifi_body = _join_ap_and_load_wifi_page(ssh, mqtt, iface=iface)
     portal_runtime_ip = _save_wifi_and_wait_connected(
         ssh,
         wifi_ssid=wifi_ssid,
         wifi_pwd=wifi_pwd,
         wifi_action=wifi_action,
+        wifi_body=wifi_body,
     )
     portal_base_url, portal_root_body = _discover_sta_portal_base(
         ssh,
@@ -1525,19 +1540,21 @@ def _run_wifi_plus_mqtt_case(
     base_url = _rediscover_sta_portal_after_reboot_wifi(ssh, base_url, timeout_s=90)
 
     bucket_map = "State_of_Charge=ten_sec;"
-    save_query = urllib.parse.urlencode(
-        {
+    polling_page_resp = _pi_http_request(ssh, method="GET", url=base_url + "/config/polling", timeout_s=10)
+    if int(polling_page_resp.get("status", 0)) != 200:
+        raise PortalTestError(f"/config/polling returned unexpected status={polling_page_resp.get('status')}")
+    polling_csrf = _extract_input_value(str(polling_page_resp.get("body", "")), "csrf")
+    save_resp = _pi_http_request(
+        ssh,
+        method="POST",
+        url=base_url + "/config/polling/save",
+        form={
             "family": "battery",
             "page": "0",
             "poll_interval_s": "13",
             "bucket_map_full": bucket_map,
-        }
-    )
-    save_resp = _pi_http_request(
-        ssh,
-        method="GET",
-        url=base_url + "/config/polling/save?" + save_query,
-        form=None,
+            "csrf": polling_csrf,
+        },
         timeout_s=20,
     )
     save_status = int(save_resp.get("status", 0))
@@ -1666,20 +1683,19 @@ def _run_normal_to_wifi_portal_bad_wifi_falls_back_to_ap_case(
         raise PortalTestError(f"/reboot/wifi returned unexpected status={reboot_wifi_status}")
 
     base_url = _rediscover_sta_portal_after_reboot_wifi(ssh, base_url, timeout_s=90)
-    _wifi_body, wifi_action = _load_sta_wifi_page(ssh, base_url=base_url, timeout_s=30)
+    wifi_body, wifi_action = _load_sta_wifi_page(ssh, base_url=base_url, timeout_s=30)
+    wifi_csrf = _extract_input_value(wifi_body, "csrf")
     bad_ssid = f"{wifi_ssid}-bad-{int(time.time())}"
     save_wifi = _pi_http_request(
         ssh,
-        method="GET",
-        url=urllib.parse.urljoin(
-            base_url + "/0wifi",
-            f"{wifi_action}?{urllib.parse.urlencode({'s': bad_ssid, 'p': wifi_pwd})}",
-        ),
+        method="POST",
+        url=urllib.parse.urljoin(base_url + "/0wifi", wifi_action),
+        form={"s": bad_ssid, "p": wifi_pwd, "csrf": wifi_csrf},
         timeout_s=20,
     )
     save_wifi_status = int(save_wifi.get("status", 0))
     if save_wifi_status not in (200, 302):
-        raise PortalTestError(f"Portal GET /wifisave returned {save_wifi_status}")
+        raise PortalTestError(f"Portal POST /wifisave returned {save_wifi_status}")
 
     saved_wifi_page = _pi_http_request(ssh, method="GET", url=base_url + "/0wifi?saved=1", timeout_s=10)
     if int(saved_wifi_page.get("status", 0)) != 200:
@@ -1701,7 +1717,7 @@ def _run_normal_to_wifi_portal_bad_wifi_falls_back_to_ap_case(
         context="sta portal /config/reboot-normal after wifi save",
     )
 
-    ap_ssid, _wifi_action = _join_ap_and_load_wifi_page(ssh, mqtt, iface=iface)
+    ap_ssid, _wifi_action, _wifi_body = _join_ap_and_load_wifi_page(ssh, mqtt, iface=iface)
     status_resp = _pi_http_request(ssh, method="GET", url="http://192.168.4.1/status", timeout_s=10)
     if int(status_resp.get("status", 0)) != 200:
         raise PortalTestError(f"AP fallback /status returned {status_resp.get('status')}")
@@ -1728,6 +1744,7 @@ def _run_normal_to_wifi_portal_bad_wifi_falls_back_to_ap_case(
         wifi_ssid=wifi_ssid,
         wifi_pwd=wifi_pwd,
         wifi_action=_wifi_action,
+        wifi_body=_wifi_body,
     )
     recovered_base_url, recovered_root = _discover_runtime_root(
         ssh,

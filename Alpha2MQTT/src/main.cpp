@@ -1205,7 +1205,7 @@ handleHttpRoot(void)
 #else
 	const char *rs485Backend = "real";
 #endif
-	char buf[256];
+	char buf[384];
 
 	httpServer.sendContent("<!doctype html><html><body>");
 	httpServer.sendContent("<h3>Alpha2MQTT Control</h3>");
@@ -2292,6 +2292,7 @@ handlePortalWifiPage(WiFiManager& wifiManager)
 		"<p>Leave the password blank for open networks.</p>"
 		"<p><button type=\"submit\">Save WiFi</button></p>"
 		"</form></body></html>";
+	refreshPortalUpdateCsrfToken();
 	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
 		if (!writer.writeP(kHead)) {
 			return false;
@@ -2318,8 +2319,10 @@ handlePortalWifiPage(WiFiManager& wifiManager)
 		    !writePortalMenuButton(writer, "/config/mqtt", "MQTT Setup", "get") ||
 		    !writePortalMenuButton(writer, "/config/polling", "Polling", "get") ||
 		    !writePortalMenuButton(writer, "/config/reboot-normal", "Reboot Normal", "post") ||
-		    // Query-string saves avoid the low-heap POST body parser that was dropping AP onboarding args.
-		    !writer.write("<form method=\"GET\" action=\"/wifisave\">")) {
+		    !writer.write("<form method=\"POST\" action=\"/wifisave\">") ||
+		    !writer.write("<input type=\"hidden\" name=\"csrf\" value=\"") ||
+		    !writer.write(portalUpdateCsrfToken) ||
+		    !writer.write("\">")) {
 			return false;
 		}
 		htmlEscapeInto(appConfig.wifiSSID.c_str(), escaped, sizeof(escaped));
@@ -2337,10 +2340,10 @@ handlePortalWifiPage(WiFiManager& wifiManager)
 			        "<p><label><input name=\"open\" type=\"checkbox\" value=\"1\"> Open network / clear saved "
 			        "password</label></p>")) {
 				return false;
+			}
+			return writer.writeP(kTailSta);
 		}
-		return writer.writeP(kTailSta);
-	}
-	return writer.writeP(kTailAp);
+		return writer.writeP(kTailAp);
 	};
 	(void)sendPortalHtmlResponse(wifiManager.server.get(), emitPage, "wifi setup unavailable");
 }
@@ -2349,6 +2352,10 @@ static void
 handlePortalWifiSave(WiFiManager& wifiManager)
 {
 	if (!wifiManager.server) {
+		return;
+	}
+	if (!portalUpdateRequestHasValidToken(&wifiManager)) {
+		wifiManager.server->send(403, "text/plain", "invalid csrf");
 		return;
 	}
 
@@ -3054,9 +3061,6 @@ bindPortalRoutes(WiFiManager &wifiManager)
 		handlePortalWifiPage(wifiManager);
 	});
 	if (currentBootMode == BootMode::WifiConfig) {
-		wifiManager.server->on("/wifisave", HTTP_GET, [&]() {
-			handlePortalWifiSave(wifiManager);
-		});
 		wifiManager.server->on("/wifisave", HTTP_POST, [&]() {
 			handlePortalWifiSave(wifiManager);
 		});
@@ -3092,16 +3096,8 @@ bindPortalRoutes(WiFiManager &wifiManager)
 		}, [&]() {
 			handlePortalUpdateUpload(wifiManager);
 		});
-		// Connected WiFiManager portal requests run with very little free heap.
-		// Query-string GETs avoid the POST body parsing path that was stalling or dropping saves.
-		wifiManager.server->on("/config/polling/save", HTTP_GET, [&]() {
-			handlePortalPollingSave(wifiManager);
-		});
 		wifiManager.server->on("/config/polling/save", HTTP_POST, [&]() {
 			handlePortalPollingSave(wifiManager);
-		});
-		wifiManager.server->on("/config/polling/clear", HTTP_GET, [&]() {
-			handlePortalPollingClear(wifiManager);
 		});
 		wifiManager.server->on("/config/polling/clear", HTTP_POST, [&]() {
 			handlePortalPollingClear(wifiManager);
@@ -3860,7 +3856,7 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		"<form action=\"/config/reboot-normal\" method=\"post\"><button type=\"submit\">Reboot Normal</button></form>";
 	static const char kSavedMsg[] PROGMEM = "<p><strong>Saved.</strong></p>";
 	static const char kErrMsg[] PROGMEM = "<p><strong>Some values were invalid and were ignored.</strong></p>";
-	static const char kFormOpen[] PROGMEM = "<form id=\"polling-form\" method=\"GET\" action=\"/config/polling/save\">";
+	static const char kFormOpen[] PROGMEM = "<form id=\"polling-form\" method=\"POST\" action=\"/config/polling/save\">";
 	static const char kTableOpen[] PROGMEM = "<table><tr><th>Entity</th><th>Bucket</th></tr>";
 	static const char kTableClose[] PROGMEM = "</table><p><button type=\"submit\">Save</button></p></form>";
 	static const char kNavOpen[] PROGMEM = "<p>";
@@ -3870,17 +3866,6 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 	static const char kFamilyNavFmt[] PROGMEM =
 		"<a href=\"/config/polling?family=%s&page=0\">%s%s</a> ";
 	static const char kPageHintFmt[] PROGMEM = "<p class=\"hint\">Family %s · Page %u of %u · %u entities</p>";
-	static const char kFormMetaFmt[] PROGMEM =
-		"<input type=\"hidden\" name=\"family\" value=\"%s\">"
-		"<input type=\"hidden\" name=\"page\" value=\"%u\">"
-		"<input type=\"hidden\" name=\"bucket_map_full\" value=\"\">"
-		"<label>poll_interval_s <input name=\"poll_interval_s\" type=\"number\" min=\"1\" max=\"120\" value=\"%lu\"></label><br><br>";
-	static const char kClearFormFmt[] PROGMEM =
-		"<form action=\"/config/polling/clear\" method=\"get\">"
-		"<input type=\"hidden\" name=\"family\" value=\"%s\">"
-		"<input type=\"hidden\" name=\"page\" value=\"%u\">"
-		"<button type=\"submit\">Disable All Entities</button>"
-		"</form><br>";
 	static const char kPrevFmt[] PROGMEM = "<a href=\"/config/polling?family=%s&page=%u\">Prev</a> ";
 	static const char kNextFmt[] PROGMEM = "<a href=\"/config/polling?family=%s&page=%u\">Next</a>";
 	static const char kRowFmt[] PROGMEM =
@@ -3894,6 +3879,7 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		"<option value=\"%s\"%s>%s</option>"
 		"</select></td></tr>";
 	char buf[256];
+	refreshPortalUpdateCsrfToken();
 	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
 		if (!writer.writeP(kPageHeadA)) {
 			return false;
@@ -3942,13 +3928,26 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		    !writer.writeP(kFormOpen)) {
 			return false;
 		}
-		snprintf_P(buf,
-		           sizeof(buf),
-		           kFormMetaFmt,
-		           familyKey,
-		           static_cast<unsigned>(view.page.safePage),
-		           static_cast<unsigned long>(storedIntervalSeconds));
-		if (!writer.write(buf) || !writer.writeP(kTableOpen)) {
+		if (!writer.write("<input type=\"hidden\" name=\"family\" value=\"") ||
+		    !writer.write(familyKey) ||
+		    !writer.write("\">")) {
+			return false;
+		}
+		snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(view.page.safePage));
+		if (!writer.write("<input type=\"hidden\" name=\"page\" value=\"") ||
+		    !writer.write(buf) ||
+		    !writer.write("\">") ||
+		    !writer.write("<input type=\"hidden\" name=\"csrf\" value=\"") ||
+		    !writer.write(portalUpdateCsrfToken) ||
+		    !writer.write("\">") ||
+		    !writer.write("<input type=\"hidden\" name=\"bucket_map_full\" value=\"\">")) {
+			return false;
+		}
+		snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(storedIntervalSeconds));
+		if (!writer.write("<label>poll_interval_s <input name=\"poll_interval_s\" type=\"number\" min=\"1\" max=\"120\" value=\"") ||
+		    !writer.write(buf) ||
+		    !writer.write("\"></label><br><br>") ||
+		    !writer.writeP(kTableOpen)) {
 			return false;
 		}
 		for (size_t row = 0; row < view.visibleCount; ++row) {
@@ -3987,12 +3986,19 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		if (!writer.writeP(kTableClose)) {
 			return false;
 		}
-		snprintf_P(buf,
-		           sizeof(buf),
-		           kClearFormFmt,
-		           familyKey,
-		           static_cast<unsigned>(view.page.safePage));
-		if (!writer.write(buf) || !writer.writeP(kNavOpen)) {
+		snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(view.page.safePage));
+		if (!writer.write("<form action=\"/config/polling/clear\" method=\"post\">") ||
+		    !writer.write("<input type=\"hidden\" name=\"family\" value=\"") ||
+		    !writer.write(familyKey) ||
+		    !writer.write("\">") ||
+		    !writer.write("<input type=\"hidden\" name=\"page\" value=\"") ||
+		    !writer.write(buf) ||
+		    !writer.write("\">") ||
+		    !writer.write("<input type=\"hidden\" name=\"csrf\" value=\"") ||
+		    !writer.write(portalUpdateCsrfToken) ||
+		    !writer.write("\">") ||
+		    !writer.write("<button type=\"submit\">Disable All Entities</button></form><br>") ||
+		    !writer.writeP(kNavOpen)) {
 			return false;
 		}
 		if (view.page.safePage > 0) {
@@ -4028,6 +4034,10 @@ static void
 handlePortalPollingSave(WiFiManager &wifiManager)
 {
 	if (!wifiManager.server) {
+		return;
+	}
+	if (!portalUpdateRequestHasValidToken(&wifiManager)) {
+		wifiManager.server->send(403, "text/plain", "invalid csrf");
 		return;
 	}
 	ensurePortalPollingRuntimeReady();
@@ -4182,6 +4192,10 @@ static void
 handlePortalPollingClear(WiFiManager &wifiManager)
 {
 	if (!wifiManager.server) {
+		return;
+	}
+	if (!portalUpdateRequestHasValidToken(&wifiManager)) {
+		wifiManager.server->send(403, "text/plain", "invalid csrf");
 		return;
 	}
 	ensurePortalPollingRuntimeReady();

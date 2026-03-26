@@ -3587,6 +3587,7 @@ def main() -> int:
             raise E2EError("portal polling page missing simplified header/navigation")
         if "bucket_map_full" not in html:
             raise E2EError("portal polling page missing hidden bucket_map_full field")
+        csrf = _extract_input_value(html, "csrf")
         if 'href="/config/polling?family=battery&page=0">Battery</a>' not in html and \
            'href="/config/polling?family=battery&page=0">[Battery</a>' not in html:
             raise E2EError("portal polling family nav did not render human-readable labels")
@@ -3605,13 +3606,14 @@ def main() -> int:
         fields = {
             "family": target_family,
             "page": str(target_page),
+            "csrf": csrf,
             "poll_interval_s": "13",
             f"b{row}": desired_bucket,
         }
         save_url = base + "/config/polling/save"
-        print(f"[e2e] GET {save_url} fields: family={target_family} page={target_page} poll_interval_s=13 b{row}={desired_bucket}")
+        print(f"[e2e] POST {save_url} fields: family={target_family} page={target_page} poll_interval_s=13 b{row}={desired_bucket}")
         try:
-            save_status = _http_get_form(save_url, fields, timeout_s=20)
+            save_status = _http_post_form(save_url, fields, timeout_s=20)
             if save_status not in (200, 302):
                 raise E2EError(f"polling save failed status={save_status}")
         except Exception as e:
@@ -3736,13 +3738,14 @@ def main() -> int:
         if restored_bucket != desired_bucket:
             raise E2EError(f"{target} bucket UI value not restored after reboot (expected {desired_bucket!r}, got {restored_bucket!r})")
 
-        print(f"[e2e] GET {base}/config/polling/clear (clear-all check)")
+        print(f"[e2e] POST {base}/config/polling/clear (clear-all check)")
         try:
-            clear_status = _http_get_form(
+            clear_status = _http_post_form(
                 base + "/config/polling/clear",
                 {
                     "family": target_family,
                     "page": str(target_page),
+                    "csrf": csrf,
                 },
                 timeout_s=20,
             )
@@ -3829,12 +3832,13 @@ def main() -> int:
         wifi_action, wifi_html = _load_wifi_page(base)
         ssid = _extract_input_value(wifi_html, "s")
         password = _extract_input_value(wifi_html, "p")
+        csrf = _extract_input_value(wifi_html, "csrf")
         if not ssid:
             raise E2EError("portal wifi page exposed a blank SSID")
 
         save_url = urllib.parse.urljoin(base + "/0wifi", wifi_action)
         print(f"[e2e] POST {save_url} fields: s=<current> p=<current>")
-        save_status = _http_post_form(save_url, {"s": ssid, "p": password}, timeout_s=20)
+        save_status = _http_post_form(save_url, {"s": ssid, "p": password, "csrf": csrf}, timeout_s=20)
         if save_status not in (200, 302):
             raise E2EError(f"wifi save failed status={save_status}")
 
