@@ -2302,9 +2302,9 @@ def main() -> int:
             '{"mode":"online","soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0}',
             label="suite baseline",
         )
-        wait_runtime_poll_interval_applied(13)
+        wait_runtime_poll_interval_applied(9)
         wait_polling_config_applied(
-            13,
+            9,
             {
                 "Register_Number": "one_min",
                 "Register_Value": "one_min",
@@ -2790,7 +2790,7 @@ def main() -> int:
             ha_unique,
             label_prefix="dispatch timed no-rewrite",
             duration_s=25,
-            poll_interval_s=20,
+            poll_interval_s=9,
             timeout_s=8,
         )
         remaining_topic = _state_topic(ha_unique, "Dispatch_Remaining")
@@ -2812,7 +2812,7 @@ def main() -> int:
         writes_before = int(before.get("rs485_stub_writes", 0))
         attempts_before = int(before.get("ess_snapshot_attempts", 0))
 
-        # Countdown publishes every 5s, while the next evaluation is delayed by the 20s
+        # Countdown publishes every 5s, while the next evaluation is delayed by the 9s
         # user interval. If a write appears before the next fresh snapshot attempt, it came from
         # stale snapshot data rather than a legitimate reevaluation.
         _sleep_with_mqtt(mqtt, 7)
@@ -2832,7 +2832,7 @@ def main() -> int:
             ha_unique,
             label_prefix="dispatch disable",
             duration_s=12,
-            poll_interval_s=13,
+            poll_interval_s=9,
             timeout_s=8,
         )
 
@@ -2856,7 +2856,7 @@ def main() -> int:
             poll_s=1.0,
         )
 
-        # The countdown cadence is 5s. With poll_interval_s=13, any extra write
+        # The countdown cadence is 5s. With poll_interval_s=9, any extra write
         # seen in the next 7s window can only come from the stale countdown path.
         _sleep_with_mqtt(mqtt, 7)
         after_disable = _fetch_poll(mqtt, poll_topic)
@@ -3366,7 +3366,7 @@ def main() -> int:
         )
 
     def _soc_drift_poll_interval() -> int:
-        return int(_fetch_poll(mqtt, poll_topic).get("poll_interval_s", 13))
+        return int(_fetch_poll(mqtt, poll_topic).get("poll_interval_s", 9))
 
     soc_drift_verified = False
 
@@ -3538,7 +3538,7 @@ def main() -> int:
         if new_bucket == old_bucket:
             raise E2EError(f"unable to select alternate bucket for {target} (bucket={old_bucket})")
 
-        poll_interval = 13
+        poll_interval = 9
         wait_polling_config_applied(
             poll_interval,
             {target: new_bucket},
@@ -3607,11 +3607,11 @@ def main() -> int:
             "family": target_family,
             "page": str(target_page),
             "csrf": csrf,
-            "poll_interval_s": "13",
+            "poll_interval_s": "9",
             f"b{row}": desired_bucket,
         }
         save_url = base + "/config/polling/save"
-        print(f"[e2e] POST {save_url} fields: family={target_family} page={target_page} poll_interval_s=13 b{row}={desired_bucket}")
+        print(f"[e2e] POST {save_url} fields: family={target_family} page={target_page} poll_interval_s=9 b{row}={desired_bucket}")
         try:
             save_status = _http_post_form(save_url, fields, timeout_s=20)
             if save_status not in (200, 302):
@@ -3624,7 +3624,7 @@ def main() -> int:
         interval_match = re.search(r'name="poll_interval_s"[^>]*value="(\d+)"', saved_html)
         if not interval_match:
             raise E2EError("polling page missing poll_interval_s input after save")
-        if int(interval_match.group(1)) != 13:
+        if int(interval_match.group(1)) != 9:
             raise E2EError(f"poll_interval_s UI value not updated after save: {interval_match.group(1)}")
         _, saved_bucket = _extract_entity_row_and_selected_bucket(saved_html, target)
         if saved_bucket != desired_bucket:
@@ -3705,7 +3705,7 @@ def main() -> int:
             runtime_interval = int(poll.get("poll_interval_s", 0))
             actual_bucket = str(intervals.get(target, ""))
             detail = f"poll_interval_s={runtime_interval} {target}={actual_bucket!r}"
-            return (runtime_interval == 13 and actual_bucket == desired_bucket), detail
+            return (runtime_interval == 9 and actual_bucket == desired_bucket), detail
 
         _assert_eventually(
             "portal save is reflected in runtime mqtt state after reboot",
@@ -3723,10 +3723,11 @@ def main() -> int:
         if not polling_path2.startswith("/config/polling"):
             raise E2EError(f"unexpected polling menu path after reboot: {polling_path2!r}")
 
+        csrf2 = _extract_input_value(html2, "csrf")
         interval_match = re.search(r'name="poll_interval_s"[^>]*value="(\d+)"', html2)
         if not interval_match:
             raise E2EError("polling page missing poll_interval_s input after reboot")
-        if int(interval_match.group(1)) != 13:
+        if int(interval_match.group(1)) != 9:
             raise E2EError(f"poll_interval_s UI value not restored after reboot: {interval_match.group(1)}")
 
         restored_family, restored_page, _, _, restored_bucket, _ = _locate_entity_on_polling_pages(base, html2, target)
@@ -3745,7 +3746,7 @@ def main() -> int:
                 {
                     "family": target_family,
                     "page": str(target_page),
-                    "csrf": csrf,
+                    "csrf": csrf2,
                 },
                 timeout_s=20,
             )

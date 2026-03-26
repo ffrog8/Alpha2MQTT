@@ -1745,7 +1745,7 @@ def _run_wifi_plus_mqtt_case(
         form={
             "family": "battery",
             "page": "0",
-            "poll_interval_s": "13",
+            "poll_interval_s": "9",
             "bucket_map_full": bucket_map,
             "csrf": polling_csrf,
         },
@@ -1765,7 +1765,7 @@ def _run_wifi_plus_mqtt_case(
         page="0",
         entity_name="State_of_Charge",
         expected_bucket="ten_sec",
-        expected_poll_interval_s="13",
+        expected_poll_interval_s="9",
         timeout_s=30,
     )
 
@@ -1790,7 +1790,7 @@ def _run_wifi_plus_mqtt_case(
         device_root=device_root,
         entity_name="State_of_Charge",
         expected_bucket="ten_sec",
-        expected_poll_interval_s="13",
+        expected_poll_interval_s="9",
         timeout_s=60,
     )
     return base_url
