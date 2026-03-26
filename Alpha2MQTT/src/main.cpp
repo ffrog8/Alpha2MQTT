@@ -668,7 +668,7 @@ static void handlePortalRestartRequest(WiFiManager& wifiManager);
 void handlePortalRebootNormalRequest(WiFiManager& wifiManager);
 bool portalHasPersistedWifiCredentials(void);
 void configHandlerSta(void);
-const char *portalCustomHeadScript(void);
+const char *portalCustomHeadElement(void);
 static inline bool isMqttPumpBlocked(void);
 static bool pumpMqttOnce(void);
 
@@ -1167,6 +1167,178 @@ triggerRestart(void)
 	ESP.restart();
 }
 
+enum class PortalUiMode : uint8_t {
+	Normal,
+	Wifi,
+	Ap,
+};
+
+namespace {
+
+#define A2M_UI_SHARED_STYLE \
+	"<style>" \
+	"body{margin:0 auto;padding:20px 16px 32px;max-width:460px;background:#eef3f6;color:#173042;font-family:Verdana,Geneva,sans-serif;line-height:1.45;}" \
+	"h1,h2,h3,h4{margin:0 0 12px;color:var(--a2m-accent-dark);}p{margin:0 0 14px;}form{margin:0 0 12px;}a{color:var(--a2m-accent-dark);}" \
+	"button,.btn,input[type='submit'],input[type='button']{width:100%;min-height:52px;padding:14px 16px;border:0;border-radius:14px;background:var(--a2m-accent);color:#fff;font-size:16px;font-weight:700;line-height:1.2;box-shadow:0 4px 0 var(--a2m-accent-dark);cursor:pointer;}" \
+	"button:active,.btn:active,input[type='submit']:active,input[type='button']:active{transform:translateY(2px);box-shadow:0 2px 0 var(--a2m-accent-dark);}" \
+	"button:focus-visible,.btn:focus-visible,input[type='submit']:focus-visible,input[type='button']:focus-visible{outline:2px solid rgba(23,48,66,.25);outline-offset:2px;}" \
+	"strong{color:var(--a2m-accent-dark);}" \
+	"</style>"
+
+#define A2M_PORTAL_AUTOMATION_SCRIPT \
+	"<script>" \
+	"(function(){" \
+	"var p=(window.location&&window.location.pathname)||'';" \
+	"if(p==='/wifisave'){window.location.href='/status';return;}" \
+	"if(p==='/restart'||p==='/restart/'){function probe(){fetch('/',{cache:'no-store'}).then(function(r){if(r&&r.ok){window.location.href='/';return;}setTimeout(probe,1000);}).catch(function(){setTimeout(probe,1000);});}setTimeout(probe,300);}" \
+	"if(p==='/0wifi'){window.addEventListener('DOMContentLoaded',function(){var nodes=document.querySelectorAll(\"form[action^='/wifi?refresh=1']\");for(var i=0;i<nodes.length;i++){nodes[i].remove();}});}" \
+	"})();" \
+	"</script>"
+
+static const char kUiPageHeadOpen[] PROGMEM =
+	"<!DOCTYPE html><html><head>"
+	"<meta charset=\"utf-8\">"
+	"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+	"<meta name=\"a2m-ui\" content=\"buttons-v1\">"
+	"<meta name=\"a2m-mode\" content=\"";
+static const char kUiPageHeadAccentOpen[] PROGMEM = "\"><meta name=\"a2m-accent\" content=\"";
+static const char kUiPageHeadVarsOpen[] PROGMEM =
+	"\"><style>:root{--a2m-accent:";
+static const char kUiPageHeadVarsMid[] PROGMEM =
+	";--a2m-accent-dark:";
+static const char kUiPageHeadVarsClose[] PROGMEM =
+	";}</style>";
+static const char kUiSharedStyle[] PROGMEM = A2M_UI_SHARED_STYLE;
+static const char kUiPageTitleOpen[] PROGMEM = "<title>";
+static const char kUiPageTitleClose[] PROGMEM = "</title>";
+static const char kUiPageBodyOpen[] PROGMEM = "<body data-a2m-mode=\"";
+static const char kUiPageHeadingOpen[] PROGMEM = "\"><h2>";
+static const char kUiPageHeadingClose[] PROGMEM = "</h2>";
+static const char kUiPageTail[] PROGMEM = "</body></html>";
+static const char kPortalCustomHeadAp[] PROGMEM =
+	"<meta name=\"a2m-ui\" content=\"buttons-v1\">"
+	"<meta name=\"a2m-mode\" content=\"ap\">"
+	"<meta name=\"a2m-accent\" content=\"#1c6bcf\">"
+	"<style>:root{--a2m-accent:#1c6bcf;--a2m-accent-dark:#15539f;}</style>"
+	A2M_UI_SHARED_STYLE
+	A2M_PORTAL_AUTOMATION_SCRIPT;
+static const char kPortalCustomHeadWifi[] PROGMEM =
+	"<meta name=\"a2m-ui\" content=\"buttons-v1\">"
+	"<meta name=\"a2m-mode\" content=\"wifi\">"
+	"<meta name=\"a2m-accent\" content=\"#c57a00\">"
+	"<style>:root{--a2m-accent:#c57a00;--a2m-accent-dark:#8d5700;}</style>"
+	A2M_UI_SHARED_STYLE
+	A2M_PORTAL_AUTOMATION_SCRIPT;
+
+#undef A2M_UI_SHARED_STYLE
+#undef A2M_PORTAL_AUTOMATION_SCRIPT
+
+static const char *
+portalUiModeToken(PortalUiMode mode)
+{
+	switch (mode) {
+	case PortalUiMode::Ap:
+		return "ap";
+	case PortalUiMode::Wifi:
+		return "wifi";
+	case PortalUiMode::Normal:
+	default:
+		return "normal";
+	}
+}
+
+static const char *
+portalUiAccentHex(PortalUiMode mode)
+{
+	switch (mode) {
+	case PortalUiMode::Ap:
+		return "#1c6bcf";
+	case PortalUiMode::Wifi:
+		return "#c57a00";
+	case PortalUiMode::Normal:
+	default:
+		return "#1d8c4b";
+	}
+}
+
+static const char *
+portalUiAccentDarkHex(PortalUiMode mode)
+{
+	switch (mode) {
+	case PortalUiMode::Ap:
+		return "#15539f";
+	case PortalUiMode::Wifi:
+		return "#8d5700";
+	case PortalUiMode::Normal:
+	default:
+		return "#146238";
+	}
+}
+
+static bool
+sendHttpContentP(PGM_P content)
+{
+	if (content == nullptr) {
+		return false;
+	}
+	char scratch[256];
+	size_t remaining = strlen_P(content);
+	size_t offset = 0;
+	while (remaining > 0) {
+		const size_t chunk = (remaining < (sizeof(scratch) - 1)) ? remaining : (sizeof(scratch) - 1);
+		memcpy_P(scratch, content + offset, chunk);
+		scratch[chunk] = '\0';
+		httpServer.sendContent(scratch);
+		offset += chunk;
+		remaining -= chunk;
+	}
+	return true;
+}
+
+static bool
+sendHttpUiPageStart(const char *title, const char *heading, PortalUiMode mode, PGM_P extraHead = nullptr)
+{
+	if (!sendHttpContentP(kUiPageHeadOpen)) {
+		return false;
+	}
+	httpServer.sendContent(portalUiModeToken(mode));
+	if (!sendHttpContentP(kUiPageHeadAccentOpen)) {
+		return false;
+	}
+	httpServer.sendContent(portalUiAccentHex(mode));
+	if (!sendHttpContentP(kUiPageHeadVarsOpen)) {
+		return false;
+	}
+	httpServer.sendContent(portalUiAccentHex(mode));
+	if (!sendHttpContentP(kUiPageHeadVarsMid)) {
+		return false;
+	}
+	httpServer.sendContent(portalUiAccentDarkHex(mode));
+	if (!sendHttpContentP(kUiPageHeadVarsClose)) {
+		return false;
+	}
+	if (extraHead != nullptr && !sendHttpContentP(extraHead)) {
+		return false;
+	}
+	if (!sendHttpContentP(kUiPageTitleOpen)) {
+		return false;
+	}
+	httpServer.sendContent(title != nullptr ? title : "Alpha2MQTT");
+	if (!sendHttpContentP(kUiPageTitleClose) ||
+	    !sendHttpContentP(kUiSharedStyle) ||
+	    !sendHttpContentP(kUiPageBodyOpen)) {
+		return false;
+	}
+	httpServer.sendContent(portalUiModeToken(mode));
+	if (!sendHttpContentP(kUiPageHeadingOpen)) {
+		return false;
+	}
+	httpServer.sendContent(heading != nullptr ? heading : "Alpha2MQTT");
+	return sendHttpContentP(kUiPageHeadingClose);
+}
+
+} // namespace
+
 void
 setupHttpControlPlane(void)
 {
@@ -1217,8 +1389,7 @@ handleHttpRoot(void)
 #endif
 	char buf[384];
 
-	httpServer.sendContent("<!doctype html><html><body>");
-	httpServer.sendContent("<h3>Alpha2MQTT Control</h3>");
+	sendHttpUiPageStart("Alpha2MQTT Control", "Alpha2MQTT Control", PortalUiMode::Normal);
 	snprintf(buf, sizeof(buf), "<p>Boot mode: %s<br>Boot intent: %s<br>Reset reason: %s</p>",
 	         bootModeToString(currentBootMode),
 	         bootIntentToString(currentBootIntent),
@@ -1269,7 +1440,7 @@ handleHttpRoot(void)
 	snprintf(buf, sizeof(buf), "<br>Heap free: %u", ESP.getFreeHeap());
 #endif
 	httpServer.sendContent(buf);
-	httpServer.sendContent("</p></body></html>");
+	sendHttpContentP(kUiPageTail);
 	httpServer.sendContent("");
 }
 
@@ -2198,6 +2369,34 @@ struct PortalResponseWriter {
 	}
 };
 
+static bool
+writePortalUiPageStart(PortalResponseWriter &writer,
+                       const char *title,
+                       const char *heading,
+                       PortalUiMode mode,
+                       PGM_P extraHead = nullptr)
+{
+	return writer.writeP(kUiPageHeadOpen) &&
+	       writer.write(portalUiModeToken(mode)) &&
+	       writer.writeP(kUiPageHeadAccentOpen) &&
+	       writer.write(portalUiAccentHex(mode)) &&
+	       writer.writeP(kUiPageHeadVarsOpen) &&
+	       writer.write(portalUiAccentHex(mode)) &&
+	       writer.writeP(kUiPageHeadVarsMid) &&
+	       writer.write(portalUiAccentDarkHex(mode)) &&
+	       writer.writeP(kUiPageHeadVarsClose) &&
+	       (extraHead == nullptr || writer.writeP(extraHead)) &&
+	       writer.writeP(kUiSharedStyle) &&
+	       writer.writeP(kUiPageTitleOpen) &&
+	       writer.write(title != nullptr ? title : "Alpha2MQTT") &&
+	       writer.writeP(kUiPageTitleClose) &&
+	       writer.writeP(kUiPageBodyOpen) &&
+	       writer.write(portalUiModeToken(mode)) &&
+	       writer.writeP(kUiPageHeadingOpen) &&
+	       writer.write(heading != nullptr ? heading : "Alpha2MQTT") &&
+	       writer.writeP(kUiPageHeadingClose);
+}
+
 template <typename ServerT, typename EmitFn>
 static bool
 sendPortalHtmlResponse(ServerT *server, EmitFn emitPage, const char *fallbackError)
@@ -2252,17 +2451,13 @@ sendPortalHtmlResponse(ServerT *server, EmitFn emitPage, const char *fallbackErr
 static bool
 writePortalMenuButton(PortalResponseWriter &writer, const char *action, const char *label, const char *method)
 {
-	char buf[192];
-	const int written = snprintf(buf,
-	                             sizeof(buf),
-	                             "<form action=\"%s\" method=\"%s\"><button>%s</button></form><br/>",
-	                             action != nullptr ? action : "/",
-	                             method != nullptr ? method : "get",
-	                             label != nullptr ? label : "Open");
-	if (written <= 0 || static_cast<size_t>(written) >= sizeof(buf)) {
-		return false;
-	}
-	return writer.write(buf);
+	return writer.write("<form action=\"") &&
+	       writer.write(action != nullptr ? action : "/") &&
+	       writer.write("\" method=\"") &&
+	       writer.write(method != nullptr ? method : "get") &&
+	       writer.write("\"><button type=\"submit\">") &&
+	       writer.write(label != nullptr ? label : "Open") &&
+	       writer.write("</button></form>");
 }
 
 static void
@@ -2275,21 +2470,15 @@ handlePortalMenuPage(WiFiManager& wifiManager)
 	const wl_status_t staStatus = WiFi.status();
 	const IPAddress ip = (currentBootMode == BootMode::ApConfig) ? WiFi.softAPIP() : WiFi.localIP();
 	char buf[192];
-	static const char kMenuHead[] PROGMEM =
-		"<!DOCTYPE html><html><head>"
-		"<meta charset=\"utf-8\">"
-		"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-		"<title>Alpha2MQTT Setup</title>"
-		"</head><body>"
-		"<h2>Alpha2MQTT Setup</h2>";
 	static const char kWifiPortalIntro[] PROGMEM =
 		"<p>WiFi config portal is active on the current LAN. Choose a setup page below.</p>";
 	static const char kApPortalIntro[] PROGMEM =
 		"<p>AP config portal is active. Configure WiFi or continue with setup below.</p>";
-	static const char kMenuTail[] PROGMEM = "</body></html>";
 
 	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
-		if (!writer.writeP(kMenuHead)) {
+		const PortalUiMode uiMode =
+			(currentBootMode == BootMode::WifiConfig) ? PortalUiMode::Wifi : PortalUiMode::Ap;
+		if (!writePortalUiPageStart(writer, "Alpha2MQTT Setup", "Alpha2MQTT Setup", uiMode)) {
 			return false;
 		}
 		if (currentBootMode == BootMode::WifiConfig) {
@@ -2320,7 +2509,7 @@ handlePortalMenuPage(WiFiManager& wifiManager)
 		    !writePortalMenuButton(writer, "/config/reboot-normal", "Reboot Normal", "post")) {
 			return false;
 		}
-		return writer.writeP(kMenuTail);
+		return writer.writeP(kUiPageTail);
 	};
 	(void)sendPortalHtmlResponse(wifiManager.server.get(), emitPage, "portal menu unavailable");
 }
@@ -2338,13 +2527,6 @@ handlePortalWifiPage(WiFiManager& wifiManager)
 	const bool errPass = errCode == "pass";
 
 	char escaped[6 * kPrefWifiPasswordMaxLen] = "";
-	static const char kHead[] PROGMEM =
-		"<!DOCTYPE html><html><head>"
-		"<meta charset=\"utf-8\">"
-		"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-		"<title>Alpha2MQTT WiFi Setup</title>"
-		"</head><body>"
-		"<h2>WiFi Setup</h2>";
 	static const char kWifiConfigIntro[] PROGMEM =
 		"<p>WiFi changes are saved now and applied on the next reboot.</p>";
 	static const char kApConfigIntro[] PROGMEM =
@@ -2366,7 +2548,9 @@ handlePortalWifiPage(WiFiManager& wifiManager)
 		"</form></body></html>";
 	refreshPortalUpdateCsrfToken();
 	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
-		if (!writer.writeP(kHead)) {
+		const PortalUiMode uiMode =
+			(currentBootMode == BootMode::WifiConfig) ? PortalUiMode::Wifi : PortalUiMode::Ap;
+		if (!writePortalUiPageStart(writer, "Alpha2MQTT WiFi Setup", "WiFi Setup", uiMode)) {
 			return false;
 		}
 		if (currentBootMode == BootMode::WifiConfig) {
@@ -2477,19 +2661,14 @@ handlePortalParamPage(WiFiManager& wifiManager)
 	const bool err = wifiManager.server->hasArg("err");
 
 	char escaped[6 * kPrefMqttPasswordMaxLen] = "";
-	static const char kHead[] PROGMEM =
-		"<!DOCTYPE html><html><head>"
-		"<meta charset=\"utf-8\">"
-		"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-		"<title>Alpha2MQTT MQTT Setup</title>"
-		"</head><body>"
-		"<h2>MQTT Setup</h2>";
 	static const char kSaved[] PROGMEM = "<p><strong>Saved.</strong></p>";
 	static const char kErr[] PROGMEM = "<p><strong>Invalid MQTT values.</strong></p>";
 	static const char kTail[] PROGMEM =
 		"<p><button type=\"submit\">Save</button></p></form></body></html>";
 	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
-		if (!writer.writeP(kHead)) {
+		const PortalUiMode uiMode =
+			(currentBootMode == BootMode::WifiConfig) ? PortalUiMode::Wifi : PortalUiMode::Ap;
+		if (!writePortalUiPageStart(writer, "Alpha2MQTT MQTT Setup", "MQTT Setup", uiMode)) {
 			return false;
 		}
 		if (saved && !writer.writeP(kSaved)) {
@@ -2644,29 +2823,25 @@ handlePortalStatusRequest(WiFiManager& wifiManager)
 	strlcpy(snapshot.disconnectLabel, portalLastDisconnectLabel, sizeof(snapshot.disconnectLabel));
 
 	char buf[256];
-	static const char kHead[] PROGMEM =
-		"<!DOCTYPE html><html><head>"
-		"<meta charset=\"utf-8\">"
-		"<meta http-equiv=\"refresh\" content=\"1\">"
-		"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-		"<title>Alpha2MQTT WiFi Status</title>"
-		"</head><body>";
+	static const char kRefreshHead[] PROGMEM = "<meta http-equiv=\"refresh\" content=\"1\">";
 	static const char kDiagOpen[] PROGMEM = "<h3>Diagnostics</h3><p>";
 	static const char kTail[] PROGMEM =
 		"<form method=\"POST\" action=\"/config/reboot-normal\"><button type=\"submit\">Reboot Normal</button></form>"
 		"<p>Page refreshes every second.</p></body></html>";
 	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
-		if (!writer.writeP(kHead)) {
-			return false;
-		}
-
-		snprintf(buf, sizeof(buf), "<h2>WiFi Status: %s</h2>", portalStatusLabel(snapshot.status));
-		if (!writer.write(buf)) {
+		const PortalUiMode uiMode =
+			(currentBootMode == BootMode::WifiConfig) ? PortalUiMode::Wifi : PortalUiMode::Ap;
+		if (!writePortalUiPageStart(writer, "Alpha2MQTT WiFi Status", "WiFi Status", uiMode, kRefreshHead)) {
 			return false;
 		}
 
 		if (snapshot.status == portalStatusSuccess) {
-			snprintf(buf, sizeof(buf), "<p>Connected SSID: %s<br>IP: %s</p>", snapshot.statusSsid, snapshot.statusIp);
+			snprintf(buf,
+			         sizeof(buf),
+			         "<p><strong>WiFi Status: %s</strong><br>SSID: %s<br>IP: %s</p>",
+			         portalStatusLabel(snapshot.status),
+			         snapshot.statusSsid,
+			         snapshot.statusIp);
 			if (!writer.write(buf)) {
 				return false;
 			}
@@ -2683,16 +2858,24 @@ handlePortalStatusRequest(WiFiManager& wifiManager)
 			if (snapshot.needsMqttConfig) {
 				if (!writer.write("<p><strong>MQTT settings not set.</strong> Redirecting to MQTT settings...</p>") ||
 				    !writer.write("<p><a href=\"/config/mqtt\">Open MQTT settings</a></p>") ||
-				    !writer.write("<script>setTimeout(function(){window.location.href='/config/mqtt';},500);</script>")) {
+		    !writer.write("<script>setTimeout(function(){window.location.href='/config/mqtt';},500);</script>")) {
 					return false;
 				}
 			}
 		} else if (snapshot.status == portalStatusFailed) {
-			snprintf(buf, sizeof(buf), "<p>Reason: %s</p>", snapshot.statusReason);
+			snprintf(buf,
+			         sizeof(buf),
+			         "<p><strong>WiFi Status: %s</strong><br>Reason: %s</p>",
+			         portalStatusLabel(snapshot.status),
+			         snapshot.statusReason);
 			if (!writer.write(buf)) {
 				return false;
 			}
 		} else {
+			snprintf(buf, sizeof(buf), "<p><strong>WiFi Status: %s</strong></p>", portalStatusLabel(snapshot.status));
+			if (!writer.write(buf)) {
+				return false;
+			}
 			if (snapshot.bootMode == BootMode::WifiConfig) {
 				if (!writer.write("<p>Portal active. WiFi changes apply on reboot.</p>")) {
 					return false;
@@ -2795,21 +2978,16 @@ handlePortalUpdatePage(WiFiManager &wifiManager)
 
 	refreshPortalUpdateCsrfToken();
 
-	static const char kHead[] PROGMEM =
-		"<!DOCTYPE html><html><head>"
-		"<meta charset=\"utf-8\">"
-		"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-		"<title>Alpha2MQTT OTA Update</title>"
-		"</head><body>"
-		"<h2>OTA Update</h2>"
-		"<p>Upload a firmware binary. The device reboots automatically after a successful update.</p>";
 	static const char kTail[] PROGMEM =
 		"<p><input type=\"file\" name=\"firmware\" id=\"firmware\"></p>"
 		"<p><button type=\"submit\">Upload Firmware</button></p>"
 		"</form>"
 		"</body></html>";
 	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
-		if (!writer.writeP(kHead) ||
+		const PortalUiMode uiMode =
+			(currentBootMode == BootMode::WifiConfig) ? PortalUiMode::Wifi : PortalUiMode::Ap;
+		if (!writePortalUiPageStart(writer, "Alpha2MQTT OTA Update", "OTA Update", uiMode) ||
+		    !writer.write("<p>Upload a firmware binary. The device reboots automatically after a successful update.</p>") ||
 		    !writePortalMenuButton(writer, "/", "Menu", "get") ||
 		    !writePortalMenuButton(writer, "/config/reboot-normal", "Reboot Normal", "post")) {
 			return false;
@@ -3865,33 +4043,9 @@ portalApplyBucketMapString(const char *map,
 }
 
 const char *
-portalCustomHeadScript(void)
+portalCustomHeadElement(void)
 {
-	return
-		"<script>"
-		"(function(){"
-		"var p=(window.location&&window.location.pathname)||'';"
-		"if (p === '/wifisave') {"
-		"window.location.href='/status';"
-		"return;"
-		"}"
-		"if (p === '/restart' || p === '/restart/') {"
-		"function probe(){"
-		"fetch('/',{cache:'no-store'}).then(function(r){"
-		"if (r && r.ok) { window.location.href='/'; return; }"
-		"setTimeout(probe,1000);"
-		"}).catch(function(){setTimeout(probe,1000);});"
-		"}"
-		"setTimeout(probe,300);"
-		"}"
-		"if (p === '/0wifi') {"
-		"window.addEventListener('DOMContentLoaded', function(){"
-		"var nodes=document.querySelectorAll(\"form[action^='/wifi?refresh=1']\");"
-		"for (var i=0;i<nodes.length;i++){nodes[i].remove();}"
-		"});"
-		"}"
-		"})();"
-		"</script>";
+	return (currentBootMode == BootMode::WifiConfig) ? kPortalCustomHeadWifi : kPortalCustomHeadAp;
 }
 
 static void
@@ -3943,15 +4097,6 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 	const bool saved = wifiManager.server->hasArg("saved") && wifiManager.server->arg("saved") == "1";
 	const bool err = wifiManager.server->hasArg("err") && wifiManager.server->arg("err") == "1";
 
-	static const char kPageHeadA[] PROGMEM =
-		"<!DOCTYPE html><html><head>"
-		"<meta charset=\"utf-8\">"
-		"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-		"<title>Polling Schedule</title>"
-		"</head><body>"
-		"<h2>Polling schedule</h2>"
-		"<p><a href=\"/\">Menu</a> | <a href=\"/config/mqtt\">MQTT Setup</a></p>"
-		"<form action=\"/config/reboot-normal\" method=\"post\"><button type=\"submit\">Reboot Normal</button></form>";
 	static const char kSavedMsg[] PROGMEM = "<p><strong>Saved.</strong></p>";
 	static const char kErrMsg[] PROGMEM = "<p><strong>Some values were invalid and were ignored.</strong></p>";
 	static const char kFormOpen[] PROGMEM = "<form id=\"polling-form\" method=\"POST\" action=\"/config/polling/save\">";
@@ -3979,7 +4124,11 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 	char buf[256];
 	refreshPortalUpdateCsrfToken();
 	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
-		if (!writer.writeP(kPageHeadA)) {
+		const PortalUiMode uiMode =
+			(currentBootMode == BootMode::WifiConfig) ? PortalUiMode::Wifi : PortalUiMode::Ap;
+		if (!writePortalUiPageStart(writer, "Polling Schedule", "Polling schedule", uiMode) ||
+		    !writer.write("<p><a href=\"/\">Menu</a> | <a href=\"/config/mqtt\">MQTT Setup</a></p>") ||
+		    !writePortalMenuButton(writer, "/config/reboot-normal", "Reboot Normal", "post")) {
 			return false;
 		}
 		if (saved && !writer.writeP(kSavedMsg)) {
@@ -4761,7 +4910,7 @@ configHandlerSta(void)
 	wifiManager.setConnectTimeout(20);
 	wifiManager.setConfigPortalTimeout(0);
 	wifiManager.setDisableConfigPortal(false);
-	wifiManager.setCustomHeadElement(portalCustomHeadScript());
+	wifiManager.setCustomHeadElement(portalCustomHeadElement());
 	wifiManager.setConfigResetCallback([&]() {
 		clearUserWifiCredentials();
 		clearSdkWifiCredentials();
@@ -4996,7 +5145,7 @@ configHandler(void)
 	});
 #endif
 
-	wifiManager.setCustomHeadElement(portalCustomHeadScript());
+	wifiManager.setCustomHeadElement(portalCustomHeadElement());
 	invalidatePortalRouteBinding("ap-portal-init");
 	// Called before WiFiManager begins the connect-on-save attempt.
 	// Use this to mark "connecting" so timeouts and status reflect reality even if connect fails.

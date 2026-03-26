@@ -956,6 +956,20 @@ def _assert_portal_root_menu(body: str, context: str) -> None:
         _assert_contains(body, needle, context)
 
 
+def _assert_button_theme(body: str, mode: str, context: str) -> None:
+    accents = {
+        "ap": "#1c6bcf",
+        "wifi": "#c57a00",
+        "normal": "#1d8c4b",
+    }
+    accent = accents[mode]
+    _assert_contains(body, 'meta name="a2m-ui" content="buttons-v1"', context)
+    _assert_contains(body, f'meta name="a2m-mode" content="{mode}"', context)
+    _assert_contains(body, f'meta name="a2m-accent" content="{accent}"', context)
+    _assert_contains(body, "border-radius:14px", context)
+    _assert_contains(body, "min-height:52px", context)
+
+
 def _extract_runtime_ip_from_status(body: str) -> str:
     m = re.search(r"SSID:\s*[^<]+<br>IP:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)", body, flags=re.IGNORECASE)
     if not m:
@@ -1057,7 +1071,7 @@ def _discover_runtime_root(ssh: PiSsh, *, previous_ip: str, hostname: str, timeo
         pass
 
     script = f"""
-import concurrent.futures, ipaddress, json, urllib.request
+import concurrent.futures, ipaddress, json, subprocess, urllib.request
 previous_ip = {json.dumps(previous_ip)}
 hostname = {json.dumps(hostname)}
 timeout_s = {int(timeout_s)}
@@ -1076,11 +1090,40 @@ urls = []
 if hostname:
     urls.append(f"http://{{hostname}}/")
 
-network = ipaddress.ip_network(previous_ip + "/24", strict=False)
-preferred = [ipaddress.ip_address(previous_ip)]
-others = [ip for ip in network.hosts() if ip != preferred[0]]
-ordered = preferred + others
-urls.extend([f"http://{{ip}}/" for ip in ordered])
+seen = set(urls)
+
+def add_url(url: str):
+    if url not in seen:
+        seen.add(url)
+        urls.append(url)
+
+if previous_ip:
+    network = ipaddress.ip_network(previous_ip + "/24", strict=False)
+    preferred = [ipaddress.ip_address(previous_ip)]
+    others = [ip for ip in network.hosts() if ip != preferred[0]]
+    ordered = preferred + others
+    for ip in ordered:
+        add_url(f"http://{{ip}}/")
+else:
+    try:
+        addr_data = json.loads(subprocess.check_output(["ip", "-json", "-4", "addr", "show", "up"], text=True))
+    except Exception:
+        addr_data = []
+    for iface in addr_data:
+        for info in iface.get("addr_info", []):
+            if info.get("family") != "inet" or info.get("scope") != "global":
+                continue
+            local = info.get("local")
+            prefixlen = int(info.get("prefixlen", 24))
+            if not local:
+                continue
+            try:
+                addr = ipaddress.ip_address(local)
+            except ValueError:
+                continue
+            network = ipaddress.ip_network(f"{{local}}/{{max(prefixlen, 24)}}", strict=False)
+            for ip in network.hosts():
+                add_url(f"http://{{ip}}/")
 
 with concurrent.futures.ThreadPoolExecutor(max_workers=32) as ex:
     futures = [ex.submit(probe_url, url) for url in urls]
@@ -1327,6 +1370,7 @@ def _join_ap_and_load_wifi_page(ssh: "PiSsh", mqtt: "MqttClient", *, iface: str)
         raise PortalTestError(f"Portal GET / returned {root_resp.get('status')}")
     root_body = str(root_resp.get("body", ""))
     _assert_portal_root_menu(root_body, "portal root")
+    _assert_button_theme(root_body, "ap", "portal root")
 
     deadline = time.time() + 20
     wifi_body = ""
@@ -1348,6 +1392,7 @@ def _join_ap_and_load_wifi_page(ssh: "PiSsh", mqtt: "MqttClient", *, iface: str)
         time.sleep(1.0)
     if not wifi_action or "s" not in input_names or "p" not in input_names:
         raise PortalTestError(f"wifi form missing ssid/password inputs: names={sorted(input_names)!r}")
+    _assert_button_theme(wifi_body, "ap", "portal wifi page")
     return ap_ssid, wifi_action, wifi_body
 
 
@@ -1584,6 +1629,7 @@ def _run_wifi_only_case(
         timeout_s=180,
     )
     _assert_portal_root_menu(portal_root_body, "sta portal root (wifi-only case)")
+    _assert_button_theme(portal_root_body, "wifi", "sta portal root (wifi-only case)")
     portal_runtime_ip = urllib.parse.urlparse(portal_base_url).hostname or portal_runtime_ip
 
     _reboot_normal_and_tolerate_disconnect(
@@ -1600,6 +1646,7 @@ def _run_wifi_only_case(
     )
     _assert_contains(root_page, "Boot mode: normal", "runtime root (wifi-only case)")
     _assert_contains(root_page, "MQTT connected: 0", "runtime root (wifi-only case)")
+    _assert_button_theme(root_page, "normal", "runtime root (wifi-only case)")
     return base_url
 
 
@@ -1647,9 +1694,11 @@ def _run_wifi_plus_mqtt_case(
         _assert_contains(root_page, "Boot mode: normal", "runtime root (wifi+mqtt default path)")
         root_page = _wait_for_runtime_root_contains(ssh, base_url, "MQTT connected: 1", timeout_s=180)
         _assert_contains(root_page, "Boot mode: normal", "runtime root (wifi+mqtt default path)")
+        _assert_button_theme(root_page, "normal", "runtime root (wifi+mqtt default path)")
         return base_url
     portal_root_body = _wait_for_page_contains(ssh, url=portal_base_url + "/", needle="/config/mqtt", timeout_s=20)
     _assert_portal_root_menu(portal_root_body, "sta portal root (wifi+mqtt case)")
+    _assert_button_theme(portal_root_body, "wifi", "sta portal root (wifi+mqtt case)")
     literal_portal_ip = _literal_ip_from_base_url(portal_base_url)
     if literal_portal_ip:
         portal_runtime_ip = literal_portal_ip
@@ -1672,6 +1721,7 @@ def _run_wifi_plus_mqtt_case(
     _assert_contains(root_page, "Boot mode: normal", "runtime root")
     root_page = _wait_for_runtime_root_contains(ssh, base_url, "MQTT connected: 1", timeout_s=180)
     _assert_contains(root_page, "Boot mode: normal", "runtime root")
+    _assert_button_theme(root_page, "normal", "runtime root")
 
     reboot_wifi_resp = _pi_http_request(ssh, method="POST", url=base_url + "/reboot/wifi", timeout_s=15)
     reboot_wifi_status = int(reboot_wifi_resp.get("status", 0))

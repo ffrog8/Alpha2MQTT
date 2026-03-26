@@ -17,12 +17,12 @@ constexpr const char *kPortalMenuIds[] = {
 	"restart",
 };
 constexpr char kPortalMenuPolling[] =
-	"<form action='/config/mqtt' method='get'><button>MQTT Setup</button></form><br/>\n"
-	"<form action='/config/polling' method='get'><button>Polling</button></form><br/>\n";
+	"<form action='/config/mqtt' method='get'><button type='submit'>MQTT Setup</button></form>\n"
+	"<form action='/config/polling' method='get'><button type='submit'>Polling</button></form>\n";
 constexpr char kPortalMenuSta[] =
-	"<form action='/0wifi' method='get'><button>WiFi Setup</button></form><br/>\n"
-	"<form action='/config/mqtt' method='get'><button>MQTT Setup</button></form><br/>\n"
-	"<form action='/config/polling' method='get'><button>Polling</button></form><br/>\n";
+	"<form action='/0wifi' method='get'><button type='submit'>WiFi Setup</button></form>\n"
+	"<form action='/config/mqtt' method='get'><button type='submit'>MQTT Setup</button></form>\n"
+	"<form action='/config/polling' method='get'><button type='submit'>Polling</button></form>\n";
 #if !defined(MP_ESP8266) || !defined(ARDUINO)
 constexpr char kPortalRebootNormal[] =
 	"<!doctype html><html><head>"
