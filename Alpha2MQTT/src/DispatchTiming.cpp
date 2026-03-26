@@ -57,6 +57,25 @@ dispatchCountdownPublishDue(uint32_t lastCountdownPublishMs, uint32_t nowMs)
 	return static_cast<uint32_t>(nowMs - lastCountdownPublishMs) >= kDispatchCountdownPublishIntervalMs;
 }
 
+bool
+dispatchUseFastEvalCadence(const TimedDispatchRuntimeState &state,
+                           bool timedEnabled,
+                           bool rs485Live)
+{
+	if (!rs485Live) {
+		return false;
+	}
+	if (state.evalPending) {
+		return true;
+	}
+	if (!timedEnabled) {
+		return false;
+	}
+	const bool pendingGeneration = dispatchHasPendingGeneration(state);
+	return (pendingGeneration && state.activeGeneration == 0) || state.bootStopPending ||
+	       state.awaitingStopAck;
+}
+
 void
 dispatchNoteRequestedGeneration(TimedDispatchRuntimeState &state)
 {

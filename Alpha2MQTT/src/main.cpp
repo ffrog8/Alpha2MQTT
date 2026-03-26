@@ -3444,13 +3444,11 @@ loadPollingBucketsForPortal(const mqttState *entities,
 #endif
 		}
 		preferences.end();
-		if (usePersistedOnly) {
-			g_portalPollingCacheValid = true;
-			g_portalPollingCacheEntityCount = entityCount;
-			g_portalPollingCacheIntervalSeconds = outPollIntervalSeconds;
-			if (outBuckets != g_portalBucketsScratch) {
-				memcpy(g_portalBucketsScratch, outBuckets, entityCount * sizeof(BucketId));
-			}
+		g_portalPollingCacheValid = true;
+		g_portalPollingCacheEntityCount = entityCount;
+		g_portalPollingCacheIntervalSeconds = outPollIntervalSeconds;
+		if (outBuckets != g_portalBucketsScratch) {
+			memcpy(g_portalBucketsScratch, outBuckets, entityCount * sizeof(BucketId));
 		}
 		return true;
 	}
@@ -10962,14 +10960,12 @@ dispatchService(void)
 
 	const uint32_t nowMs = millis();
 	const bool timedEnabled = dispatchDurationIsTimed(timedDispatchState.configuredDurationSeconds);
-	const bool pendingGeneration = timedEnabled && dispatchHasPendingGeneration(timedDispatchState);
 	const bool rs485Live = (rs485ConnectState == Rs485ConnectState::Connected) && inverterReady;
-	const bool handshakeActive = (pendingGeneration && timedDispatchState.activeGeneration == 0) ||
-	                             (timedDispatchState.bootStopPending && rs485Live) ||
-	                             (timedDispatchState.awaitingStopAck && rs485Live);
-	const uint32_t evalIntervalMs =
-		(handshakeActive || timedDispatchState.evalPending) ? kDispatchHandshakeIntervalMs :
-		                                                     (pollIntervalSeconds * 1000UL);
+	const bool pendingGeneration = timedEnabled && dispatchHasPendingGeneration(timedDispatchState);
+	const bool fastEvalCadence =
+		dispatchUseFastEvalCadence(timedDispatchState, timedEnabled, rs485Live);
+	const uint32_t evalIntervalMs = fastEvalCadence ? kDispatchHandshakeIntervalMs :
+	                                                  (pollIntervalSeconds * 1000UL);
 	const bool dueEval = dispatchEvalDue(
 		timedDispatchState.lastEvalMs, nowMs, evalIntervalMs, false);
 	const bool dueCountdown = timedEnabled &&

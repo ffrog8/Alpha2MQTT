@@ -78,3 +78,27 @@ TEST_CASE("dispatch timing evaluation and countdown cadences are independent")
 	CHECK_FALSE(dispatchCountdownPublishDue(1000, 5999));
 	CHECK(dispatchCountdownPublishDue(1000, 6000));
 }
+
+TEST_CASE("dispatch timing fast cadence requires rs485 liveness")
+{
+	TimedDispatchRuntimeState state{};
+	state.evalPending = true;
+	CHECK_FALSE(dispatchUseFastEvalCadence(state, true, false));
+	CHECK(dispatchUseFastEvalCadence(state, true, true));
+
+	state.evalPending = false;
+	state.requestedGeneration = 1;
+	state.activeGeneration = 0;
+	CHECK_FALSE(dispatchUseFastEvalCadence(state, true, false));
+	CHECK(dispatchUseFastEvalCadence(state, true, true));
+
+	state.requestedGeneration = 0;
+	state.bootStopPending = true;
+	CHECK_FALSE(dispatchUseFastEvalCadence(state, true, false));
+	CHECK(dispatchUseFastEvalCadence(state, true, true));
+
+	state.bootStopPending = false;
+	state.awaitingStopAck = true;
+	CHECK_FALSE(dispatchUseFastEvalCadence(state, true, false));
+	CHECK(dispatchUseFastEvalCadence(state, true, true));
+}
