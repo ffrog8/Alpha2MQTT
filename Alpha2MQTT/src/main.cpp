@@ -24,6 +24,7 @@ First, go and customise options at the top of Definitions.h!
 #include "../include/BootModes.h"
 #include "../include/BootEvent.h"
 #include "../include/WifiGuard.h"
+#include "../include/WifiRecoveryPolicy.h"
 #include "../include/BucketScheduler.h"
 #include "../include/MqttEntities.h"
 #include "../include/PortalConfig.h"
@@ -150,10 +151,16 @@ unsigned long portalRebootAt = 0;
 bool portalWifiCredentialsChanged = false;
 uint8_t portalRouteRebindRetriesRemaining = 0;
 unsigned long portalRouteRebindRetryAt = 0;
+unsigned long portalLastActivityAt = 0;
 bool deferredControlPlaneRebootScheduled = false;
 BootIntent deferredControlPlaneRebootIntent = BootIntent::Normal;
 unsigned long deferredControlPlaneRebootAt = 0;
 void *portalRoutesBoundServer = nullptr;
+int wifiLastDisconnectReason = -1;
+char wifiLastDisconnectLabel[32] = "";
+#if defined(MP_ESP8266)
+static WiFiEventHandler runtimeWifiDisconnectHandler;
+#endif
 const char kPreferenceBootIntent[] = "Boot_Intent";
 const char kPreferenceBootMode[] = "Boot_Mode";
 const char kPreferenceInverterLabel[] = "Inverter_Label";
@@ -212,8 +219,6 @@ const int kSafeModePin = 0; // D3 (GPIO0) strap for safe mode.
 const uint32_t kEventRateLimitMs = 30000;
 const uint32_t kPollOverrunMs = 5000;
 const uint32_t kMqttCommandWarmupMs = 3000;
-static constexpr int kInitialWifiConnectMaxTries = 40;
-static constexpr int kWifiReconnectMaxTries = 5000;
 uint32_t wifiReconnectCount = 0;
 uint32_t mqttReconnectCount = 0;
 uint32_t lastMqttConnectMs = 0;
@@ -645,6 +650,7 @@ void handleHttpRoot(void);
 void handleHttpRestartAlias(void);
 void handleRebootNormal(void);
 void handleRebootAp(void);
+static bool portalRequestHasMqttFields(WiFiManager &wifiManager);
 void handleRebootWifi(void);
 void triggerRestart(void);
 void subscribeInverterTopics(void);
@@ -653,6 +659,10 @@ const char* portalStatusLabel(PortalStatus status);
 const char* wifiStatusReason(wl_status_t status);
 const char* wifiStatusLabel(wl_status_t status);
 const char* wifiModeLabel(WiFiMode_t mode);
+static const char* wifiDisconnectReasonLabel(int reason);
+static void notePortalActivity(void);
+static void clearWifiFailureTracking(void);
+static WifiFailureSignals currentWifiFailureSignals(void);
 void handlePortalStatusRequest(WiFiManager& wifiManager);
 static void handlePortalRestartRequest(WiFiManager& wifiManager);
 void handlePortalRebootNormalRequest(WiFiManager& wifiManager);
@@ -1649,14 +1659,7 @@ struct ScopedCharBuffer {
 
 	explicit ScopedCharBuffer(size_t bufferSize)
 	{
-		if (bufferSize == 0) {
-			return;
-		}
-		data = new (std::nothrow) char[bufferSize];
-		if (data != nullptr) {
-			size = bufferSize;
-			data[0] = '\0';
-		}
+		(void)reset(bufferSize);
 	}
 
 	~ScopedCharBuffer()
@@ -1667,6 +1670,23 @@ struct ScopedCharBuffer {
 	bool ok() const
 	{
 		return data != nullptr;
+	}
+
+	bool reset(size_t bufferSize)
+	{
+		delete[] data;
+		data = nullptr;
+		size = 0;
+		if (bufferSize == 0) {
+			return true;
+		}
+		data = new (std::nothrow) char[bufferSize];
+		if (data == nullptr) {
+			return false;
+		}
+		size = bufferSize;
+		data[0] = '\0';
+		return true;
 	}
 };
 
@@ -1987,6 +2007,58 @@ wifiModeLabel(WiFiMode_t mode)
 	default:
 		return "Unknown";
 	}
+}
+
+static const char*
+wifiDisconnectReasonLabel(int reason)
+{
+#if defined(MP_ESP8266)
+	switch (reason) {
+	case REASON_AUTH_FAIL:
+		return "Auth failed";
+	case REASON_NO_AP_FOUND:
+		return "AP not found";
+	case REASON_ASSOC_FAIL:
+		return "Association failed";
+	case REASON_HANDSHAKE_TIMEOUT:
+		return "Handshake timeout";
+	default:
+		return "Disconnect";
+	}
+#else
+	(void)reason;
+	return "Disconnect";
+#endif
+}
+
+static void
+notePortalActivity(void)
+{
+	portalLastActivityAt = millis();
+}
+
+static void
+clearWifiFailureTracking(void)
+{
+	wifiLastDisconnectReason = -1;
+	wifiLastDisconnectLabel[0] = '\0';
+}
+
+static WifiFailureSignals
+currentWifiFailureSignals(void)
+{
+	WifiFailureSignals signals;
+	const wl_status_t status = WiFi.status();
+	signals.connected = status == WL_CONNECTED;
+	signals.missingSsid = status == WL_NO_SSID_AVAIL;
+	signals.connectFailed = status == WL_CONNECT_FAILED;
+#if defined(MP_ESP8266)
+	signals.authFailed = wifiLastDisconnectReason == REASON_AUTH_FAIL;
+	if (wifiLastDisconnectReason == REASON_NO_AP_FOUND) {
+		signals.missingSsid = true;
+	}
+#endif
+	return signals;
 }
 
 static void
@@ -3028,33 +3100,40 @@ bindPortalRoutes(WiFiManager &wifiManager)
 	portalLog("Binding portal routes to server=%p", portalRoutesBoundServer);
 #endif
 	wifiManager.server->on("/", HTTP_GET, [&]() {
+		notePortalActivity();
 		handlePortalMenuPage(wifiManager);
 	});
-		wifiManager.server->on("/restart", HTTP_GET, [&]() {
-			handlePortalRestartRequest(wifiManager);
-		});
-		wifiManager.server->on("/restart/", HTTP_GET, [&]() {
-			handlePortalRestartRequest(wifiManager);
-		});
+	wifiManager.server->on("/restart", HTTP_GET, [&]() {
+		notePortalActivity();
+		handlePortalRestartRequest(wifiManager);
+	});
+	wifiManager.server->on("/restart/", HTTP_GET, [&]() {
+		notePortalActivity();
+		handlePortalRestartRequest(wifiManager);
+	});
 	wifiManager.server->on("/status", [&]() {
+		notePortalActivity();
 #ifdef DEBUG_OVER_SERIAL
 		portalLog("route hit: /status");
 #endif
 		handlePortalStatusRequest(wifiManager);
 	});
 	wifiManager.server->on("/config/polling", HTTP_GET, [&]() {
+		notePortalActivity();
 #ifdef DEBUG_OVER_SERIAL
 		portalLog("route hit: /config/polling");
 #endif
 		handlePortalPollingPage(wifiManager);
 	});
 	wifiManager.server->on("/0wifi", HTTP_GET, [&]() {
+		notePortalActivity();
 #ifdef DEBUG_OVER_SERIAL
 		portalLog("route hit: /0wifi");
 #endif
 		handlePortalWifiPage(wifiManager);
 	});
 	wifiManager.server->on("/wifi", HTTP_GET, [&]() {
+		notePortalActivity();
 #ifdef DEBUG_OVER_SERIAL
 		portalLog("route hit: /wifi");
 #endif
@@ -3062,50 +3141,65 @@ bindPortalRoutes(WiFiManager &wifiManager)
 	});
 	if (currentBootMode == BootMode::WifiConfig) {
 		wifiManager.server->on("/wifisave", HTTP_POST, [&]() {
+			notePortalActivity();
 			handlePortalWifiSave(wifiManager);
 		});
 	}
-		wifiManager.server->on("/config/mqtt", HTTP_GET, [&]() {
+	wifiManager.server->on("/config/mqtt", HTTP_GET, [&]() {
+		notePortalActivity();
 #ifdef DEBUG_OVER_SERIAL
-			portalLog("route hit: /config/mqtt");
+		portalLog("route hit: /config/mqtt");
 #endif
-			handlePortalParamPage(wifiManager);
-		});
-		wifiManager.server->on("/param", HTTP_GET, [&]() {
-			handlePortalParamPage(wifiManager);
-		});
-		wifiManager.server->on("/config/mqtt/save", HTTP_POST, [&]() {
-			handlePortalParamSave(wifiManager);
-		});
-		wifiManager.server->on("/paramsave", HTTP_POST, [&]() {
-			handlePortalParamSave(wifiManager);
-		});
-		wifiManager.server->on("/config/update", HTTP_GET, [&]() {
-			handlePortalUpdatePage(wifiManager);
-		});
-		wifiManager.server->on("/update", HTTP_GET, [&]() {
-			handlePortalUpdatePage(wifiManager);
-		});
-		wifiManager.server->on("/config/update", HTTP_POST, [&]() {
-			handlePortalUpdatePost(wifiManager);
-		}, [&]() {
-			handlePortalUpdateUpload(wifiManager);
-		});
-		wifiManager.server->on("/u", HTTP_POST, [&]() {
-			handlePortalUpdatePost(wifiManager);
-		}, [&]() {
-			handlePortalUpdateUpload(wifiManager);
-		});
-		wifiManager.server->on("/config/polling/save", HTTP_POST, [&]() {
-			handlePortalPollingSave(wifiManager);
-		});
-		wifiManager.server->on("/config/polling/clear", HTTP_POST, [&]() {
-			handlePortalPollingClear(wifiManager);
-		});
+		handlePortalParamPage(wifiManager);
+	});
+	wifiManager.server->on("/param", HTTP_GET, [&]() {
+		notePortalActivity();
+		handlePortalParamPage(wifiManager);
+	});
+	wifiManager.server->on("/config/mqtt/save", HTTP_POST, [&]() {
+		notePortalActivity();
+		handlePortalParamSave(wifiManager);
+	});
+	wifiManager.server->on("/paramsave", HTTP_POST, [&]() {
+		notePortalActivity();
+		handlePortalParamSave(wifiManager);
+	});
+	wifiManager.server->on("/config/update", HTTP_GET, [&]() {
+		notePortalActivity();
+		handlePortalUpdatePage(wifiManager);
+	});
+	wifiManager.server->on("/update", HTTP_GET, [&]() {
+		notePortalActivity();
+		handlePortalUpdatePage(wifiManager);
+	});
+	wifiManager.server->on("/config/update", HTTP_POST, [&]() {
+		notePortalActivity();
+		handlePortalUpdatePost(wifiManager);
+	}, [&]() {
+		notePortalActivity();
+		handlePortalUpdateUpload(wifiManager);
+	});
+	wifiManager.server->on("/u", HTTP_POST, [&]() {
+		notePortalActivity();
+		handlePortalUpdatePost(wifiManager);
+	}, [&]() {
+		notePortalActivity();
+		handlePortalUpdateUpload(wifiManager);
+	});
+	wifiManager.server->on("/config/polling/save", HTTP_POST, [&]() {
+		notePortalActivity();
+		handlePortalPollingSave(wifiManager);
+	});
+	wifiManager.server->on("/config/polling/clear", HTTP_POST, [&]() {
+		notePortalActivity();
+		handlePortalPollingClear(wifiManager);
+	});
 	wifiManager.server->on("/config/reboot-normal", HTTP_POST, [&]() {
+		notePortalActivity();
 		handlePortalRebootNormalRequest(wifiManager);
 	});
 	wifiManager.server->on("/config/reboot-normal/", HTTP_POST, [&]() {
+		notePortalActivity();
 		handlePortalRebootNormalRequest(wifiManager);
 	});
 }
@@ -3339,10 +3433,6 @@ loadPollingBucketsForPortal(const mqttState *entities,
 		currentBootMode == BootMode::ApConfig || currentBootMode == BootMode::WifiConfig;
 	outPollIntervalSeconds = clampPollInterval(pollIntervalSeconds);
 	if (usePersistedOnly || !mqttEntitiesRtAvailable()) {
-		const mqttState *defaultEntities = entities ? entities : mqttEntitiesDesc();
-		if (defaultEntities == nullptr) {
-			return false;
-		}
 		if (g_portalPollingCacheValid && g_portalPollingCacheEntityCount == entityCount) {
 			outPollIntervalSeconds = g_portalPollingCacheIntervalSeconds;
 			// The portal cache lives in g_portalBucketsScratch. Do not prefill
@@ -3350,13 +3440,19 @@ loadPollingBucketsForPortal(const mqttState *entities,
 			// overrides get clobbered and the page falsely reverts to defaults.
 			if (outBuckets != g_portalBucketsScratch) {
 				memcpy(outBuckets, g_portalBucketsScratch, entityCount * sizeof(BucketId));
+				}
+				return true;
 			}
-			return true;
-		}
-		for (size_t i = 0; i < entityCount; ++i) {
-			outBuckets[i] = bucketIdFromFreq(defaultEntities[i].updateFreq);
-		}
-		Preferences preferences;
+			for (size_t i = 0; i < entityCount; ++i) {
+				mqttState entity{};
+				if (entities != nullptr) {
+					entity = entities[i];
+				} else if (!mqttEntityCopyByIndex(i, &entity)) {
+					return false;
+				}
+				outBuckets[i] = bucketIdFromFreq(entity.updateFreq);
+			}
+			Preferences preferences;
 		preferences.begin(DEVICE_NAME, true);
 		outPollIntervalSeconds = clampPollInterval(preferences.getUInt(kPreferencePollInterval, pollIntervalSeconds));
 
@@ -3368,45 +3464,45 @@ loadPollingBucketsForPortal(const mqttState *entities,
 		          ESP.getFreeHeap(),
 		          ESP.getMaxFreeBlockSize(),
 		          ESP.getHeapFragmentation());
-#endif
-		if (preferences.isKey(kPreferenceBucketMap)) {
-			const size_t persistedMapBufferLen =
-				preferenceStringBufferLen(preferences, kPreferenceBucketMap, kPrefBucketMapMaxLen);
-			ScopedCharBuffer persistedMap(persistedMapBufferLen);
-			if (!persistedMap.ok()) {
+	#endif
+	if (preferences.isKey(kPreferenceBucketMap)) {
+		const size_t persistedMapBufferLen =
+			preferenceStringBufferLen(preferences, kPreferenceBucketMap, kPrefBucketMapMaxLen);
+		ScopedCharBuffer persistedMap(persistedMapBufferLen);
+		if (!persistedMap.ok()) {
 #ifdef DEBUG_OVER_SERIAL
-				portalLog("portal polling load: persistedMap alloc failed len=%u",
-				          static_cast<unsigned>(persistedMapBufferLen));
+			portalLog("portal polling load: persistedMap alloc failed len=%u",
+			          static_cast<unsigned>(persistedMapBufferLen));
 #endif
-				preferences.end();
-				return false;
-			}
-			persistedMap.data[0] = '\0';
-			preferences.getString(kPreferenceBucketMap, persistedMap.data, persistedMapBufferLen);
-			uint32_t unknownCount = 0;
-			uint32_t invalidCount = 0;
-			uint32_t duplicateCount = 0;
-			const bool applied = bucketMapUsesDescriptorIndices(persistedMap.data)
-			                         ? portalApplyLegacyBucketMapString(persistedMap.data,
-			                                                           entityCount,
-			                                                           outBuckets,
-			                                                           unknownCount,
-			                                                           invalidCount,
-			                                                           duplicateCount)
-			                         : portalApplyBucketMapString(persistedMap.data,
-			                                                      entityCount,
-			                                                      outBuckets,
-			                                                      unknownCount,
-			                                                      invalidCount,
-			                                                      duplicateCount);
-			if (!applied) {
+			preferences.end();
+			return false;
+		}
+		persistedMap.data[0] = '\0';
+		preferences.getString(kPreferenceBucketMap, persistedMap.data, persistedMapBufferLen);
+		uint32_t unknownCount = 0;
+		uint32_t invalidCount = 0;
+		uint32_t duplicateCount = 0;
+		const bool applied = bucketMapUsesDescriptorIndices(persistedMap.data)
+		                         ? portalApplyLegacyBucketMapString(persistedMap.data,
+		                                                           entityCount,
+		                                                           outBuckets,
+		                                                           unknownCount,
+		                                                           invalidCount,
+		                                                           duplicateCount)
+		                         : portalApplyBucketMapString(persistedMap.data,
+		                                                      entityCount,
+		                                                      outBuckets,
+		                                                      unknownCount,
+		                                                      invalidCount,
+		                                                      duplicateCount);
+		if (!applied) {
 #ifdef DEBUG_OVER_SERIAL
-				portalLog("portal polling load: persisted map apply failed");
+			portalLog("portal polling load: persisted map apply failed");
 #endif
-				preferences.end();
-				return false;
-			}
-		} else if (!legacyMigrated) {
+			preferences.end();
+			return false;
+		}
+	} else if (!legacyMigrated) {
 			bool hadLegacyOverrides = false;
 			for (size_t idx = 0; idx < entityCount; ++idx) {
 				mqttState entity{};
@@ -4343,6 +4439,21 @@ void setup()
 	Serial.printf("Firmware version: %s\r\n", _version);
 
 	buildDeviceName();
+#if defined(MP_ESP8266)
+	runtimeWifiDisconnectHandler = WiFi.onStationModeDisconnected([](const WiFiEventStationModeDisconnected& event) {
+		wifiLastDisconnectReason = static_cast<int>(event.reason);
+		strlcpy(wifiLastDisconnectLabel,
+		        wifiDisconnectReasonLabel(wifiLastDisconnectReason),
+		        sizeof(wifiLastDisconnectLabel));
+#ifdef DEBUG_OVER_SERIAL
+		if (currentBootMode == BootMode::Normal) {
+			Serial.printf("WiFi disconnect reason=%d (%s)\r\n",
+			              wifiLastDisconnectReason,
+			              wifiLastDisconnectLabel);
+		}
+#endif
+	});
+#endif
 	{
 		String resetReason = ESP.getResetReason();
 		strlcpy(lastResetReason, resetReason.c_str(), sizeof(lastResetReason));
@@ -4731,7 +4842,7 @@ configHandlerSta(void)
 
 		// Once MQTT params are saved, WiFi credentials should already be persisted from the
 		// earlier WiFi save path. Do not rewrite them on every loop tick while waiting to reboot.
-		if (portalMqttSaved && !portalNeedsMqttConfig && portalHasPersistedWifiCredentials()) {
+		if (portalMqttSaved && !portalNeedsMqttConfig && isWifiConfigComplete()) {
 			if (!portalRebootScheduled) {
 				portalRebootScheduled = true;
 				portalRebootAt = millis() + 1500;
@@ -4867,28 +4978,15 @@ configHandler(void)
 	portalRebootAt = 0;
 	portalRouteRebindRetriesRemaining = 0;
 	portalRouteRebindRetryAt = 0;
+	portalLastActivityAt = millis();
 
 #if defined MP_ESP8266
 	static WiFiEventHandler disconnectHandler;
 	disconnectHandler = WiFi.onStationModeDisconnected([](const WiFiEventStationModeDisconnected& event) {
 		portalLastDisconnectReason = static_cast<int>(event.reason);
-		switch (event.reason) {
-		case REASON_AUTH_FAIL:
-			strlcpy(portalLastDisconnectLabel, "Auth failed", sizeof(portalLastDisconnectLabel));
-			break;
-		case REASON_NO_AP_FOUND:
-			strlcpy(portalLastDisconnectLabel, "AP not found", sizeof(portalLastDisconnectLabel));
-			break;
-		case REASON_ASSOC_FAIL:
-			strlcpy(portalLastDisconnectLabel, "Association failed", sizeof(portalLastDisconnectLabel));
-			break;
-		case REASON_HANDSHAKE_TIMEOUT:
-			strlcpy(portalLastDisconnectLabel, "Handshake timeout", sizeof(portalLastDisconnectLabel));
-			break;
-		default:
-			strlcpy(portalLastDisconnectLabel, "Disconnect", sizeof(portalLastDisconnectLabel));
-			break;
-		}
+		strlcpy(portalLastDisconnectLabel,
+		        wifiDisconnectReasonLabel(portalLastDisconnectReason),
+		        sizeof(portalLastDisconnectLabel));
 #ifdef DEBUG_OVER_SERIAL
 		portalLog("WiFi disconnect: SSID=%s reason=%d (%s)",
 			portalStatusSsid,
@@ -4903,6 +5001,7 @@ configHandler(void)
 	// Called before WiFiManager begins the connect-on-save attempt.
 	// Use this to mark "connecting" so timeouts and status reflect reality even if connect fails.
 	wifiManager.setPreSaveConfigCallback([&]() {
+		notePortalActivity();
 		portalStatus = portalStatusConnecting;
 		portalConnectStart = millis();
 		String submittedSsid;
@@ -4932,6 +5031,33 @@ configHandler(void)
 #endif
 	});
 
+	// Persist MQTT parameters when /paramsave is used, independent of WiFi success/failure.
+	// Keeping this separate avoids WiFi saves clobbering MQTT values.
+	wifiManager.setSaveParamsCallback([&]() {
+		notePortalActivity();
+		if (!portalRequestHasMqttFields(wifiManager)) {
+#ifdef DEBUG_OVER_SERIAL
+			portalLog("Ignoring saveParams callback without MQTT fields.");
+#endif
+			return;
+		}
+		int port = strtol(gPortalMqttPort.getValue(), NULL, 10);
+		if (port < 0 || port > SHRT_MAX) {
+			port = 0;
+		}
+		persistUserMqttConfig(gPortalMqttServer.getValue(), port, gPortalMqttUser.getValue(), gPortalMqttPass.getValue());
+		if (inverterLabelOverrideIsValid(gPortalInverterLabel.getValue())) {
+			persistUserInverterLabel(gPortalInverterLabel.getValue());
+			appConfig.inverterLabel = gPortalInverterLabel.getValue();
+		}
+
+		portalMqttSaved = true;
+		portalNeedsMqttConfig = !mqttConfigIsComplete(
+			gPortalMqttServer.getValue(), static_cast<uint16_t>(port), gPortalMqttUser.getValue(), gPortalMqttPass.getValue());
+	#ifdef DEBUG_OVER_SERIAL
+		portalLog("MQTT params saved (server=%s)", gPortalMqttServer.getValue());
+	#endif
+	});
 	wifiManager.setWebServerCallback([&]() {
 		bindPortalRoutes(wifiManager);
 	});
@@ -5070,7 +5196,7 @@ configHandler(void)
 			// The WiFi save path already writes credentials, so avoid rewriting them on each loop tick.
 			// Do not block inside nested loops here; it can run in a non-yieldable context depending on
 			// the WiFiManager call path and cause a core panic in __yield().
-			if (portalMqttSaved && !portalNeedsMqttConfig && portalHasPersistedWifiCredentials()) {
+			if (portalMqttSaved && !portalNeedsMqttConfig && isWifiConfigComplete()) {
 				if (!portalRebootScheduled) {
 					portalRebootScheduled = true;
 					portalRebootAt = millis() + 1500;
@@ -5080,6 +5206,15 @@ configHandler(void)
 				}
 			}
 			if (portalRebootScheduled && static_cast<long>(millis() - portalRebootAt) >= 0) {
+				setBootIntentAndReboot(portalNormalRebootIntent());
+			}
+			const uint32_t portalIdleMs = millis() - portalLastActivityAt;
+			if (!portalRebootScheduled &&
+			    shouldRebootNormalAfterApIdle(isWifiConfigComplete(), portalIdleMs)) {
+#ifdef DEBUG_OVER_SERIAL
+				portalLog("AP portal idle timeout after %lu ms; rebooting to normal retry.",
+				          static_cast<unsigned long>(portalIdleMs));
+#endif
 				setBootIntentAndReboot(portalNormalRebootIntent());
 			}
 			diagDelay(50);
@@ -5257,6 +5392,19 @@ portalHasPersistedWifiCredentials(void)
 	return ssid[0] != '\0';
 }
 
+static bool
+portalRequestHasMqttFields(WiFiManager &wifiManager)
+{
+	if (!wifiManager.server) {
+		return false;
+	}
+	return wifiManager.server->hasArg("server") ||
+	       wifiManager.server->hasArg("port") ||
+	       wifiManager.server->hasArg("user") ||
+	       wifiManager.server->hasArg("mpass") ||
+	       wifiManager.server->hasArg("inverter_label");
+}
+
 bool
 mqttUpdateFreqFromString(const char *value, mqttUpdateFreq *result)
 {
@@ -5428,15 +5576,10 @@ loadPollingConfig(void)
 	Preferences preferences;
 	const size_t entityCount = mqttEntitiesCount();
 	BucketId *buckets = g_portalBucketsScratch;
-	ScopedCharBuffer bucketMapBuffer(kPrefBucketMapMaxLen);
 	bool appliedBucketMap = false;
 	bool migrateLegacyIndexBucketMap = false;
-	if (!bucketMapBuffer.ok()) {
-		persistLoadOk = 0;
-		persistLoadErr = 1;
-		return;
-	}
-	char *bucketMap = bucketMapBuffer.data;
+	ScopedCharBuffer migratedBucketMapBuffer(0);
+	const char *persistedBucketMap = nullptr;
 
 	persistLoadOk = 0;
 	persistLoadErr = 0;
@@ -5445,6 +5588,19 @@ loadPollingConfig(void)
 	persistDuplicateEntityCount = 0;
 
 	preferences.begin(DEVICE_NAME, true);
+	const bool storedBucketMapPresent = preferences.isKey(kPreferenceBucketMap);
+	const size_t bucketMapBufferSize = storedBucketMapPresent
+	                                     ? preferenceStringBufferLen(
+	                                           preferences, kPreferenceBucketMap, kPrefBucketMapMaxLen)
+	                                     : kPrefBucketMapMaxLen;
+	ScopedCharBuffer bucketMapBuffer(bucketMapBufferSize);
+	if (!bucketMapBuffer.ok()) {
+		preferences.end();
+		persistLoadOk = 0;
+		persistLoadErr = 1;
+		return;
+	}
+	char *bucketMap = bucketMapBuffer.data;
 
 	char lastChange[kPrefPollingLastChangeMaxLen] = "";
 	const size_t lastChangeLen = preferences.getString(kPreferencePollingLastChange,
@@ -5484,7 +5640,9 @@ loadPollingConfig(void)
 	};
 
 	bucketMap[0] = '\0';
-	preferences.getString(kPreferenceBucketMap, bucketMap, kPrefBucketMapMaxLen);
+	if (storedBucketMapPresent) {
+		preferences.getString(kPreferenceBucketMap, bucketMap, bucketMapBuffer.size);
+	}
 	const bool legacyMigrated = preferences.getBool(kPreferenceBucketMapMigrated, false);
 	if (bucketMap[0] != '\0') {
 		if (bucketMapUsesDescriptorIndices(bucketMap)) {
@@ -5500,23 +5658,35 @@ loadPollingConfig(void)
 				recomputeBucketCounts();
 				return;
 			}
-			appliedBucketMap = applyLegacyBucketMapString(bucketMap,
-			                                              entities,
-			                                              entityCount,
-			                                              buckets,
-			                                              persistUnknownEntityCount,
-			                                              persistInvalidBucketCount,
-			                                              persistDuplicateEntityCount);
-			if (appliedBucketMap) {
-				size_t appliedCount = 0;
-				if (buildBucketMapFromAssignments(
-					    entities, entityCount, buckets, bucketMap, kPrefBucketMapMaxLen, appliedCount)) {
-					migrateLegacyIndexBucketMap = true;
+				appliedBucketMap = applyLegacyBucketMapString(bucketMap,
+				                                              entities,
+				                                              entityCount,
+				                                              buckets,
+				                                              persistUnknownEntityCount,
+				                                              persistInvalidBucketCount,
+				                                              persistDuplicateEntityCount);
+				if (appliedBucketMap) {
+					if (!migratedBucketMapBuffer.reset(kPrefBucketMapMaxLen)) {
+						preferences.end();
+						persistLoadOk = 0;
+						persistLoadErr = 1;
+						return;
+					}
+					size_t appliedCount = 0;
+					if (buildBucketMapFromAssignments(
+						    entities,
+						    entityCount,
+						    buckets,
+						    migratedBucketMapBuffer.data,
+						    migratedBucketMapBuffer.size,
+						    appliedCount)) {
+						migrateLegacyIndexBucketMap = true;
+						persistedBucketMap = migratedBucketMapBuffer.data;
+					}
+					persistLoadOk = 1;
+				} else {
+					persistLoadErr = 1;
 				}
-				persistLoadOk = 1;
-			} else {
-				persistLoadErr = 1;
-			}
 		} else {
 			appliedBucketMap = portalApplyBucketMapString(bucketMap,
 			                                              entityCount,
@@ -5577,8 +5747,8 @@ loadPollingConfig(void)
 		persistLoadErr = 1;
 		return;
 	}
-	if (migrateLegacyIndexBucketMap) {
-		persistUserBucketMap(bucketMap);
+	if (migrateLegacyIndexBucketMap && persistedBucketMap != nullptr) {
+		persistUserBucketMap(persistedBucketMap);
 	}
 	recomputeBucketCounts();
 	pollingConfigLoadedFromStorage = true;
@@ -6494,6 +6664,9 @@ setupWifi(bool initialConnect)
 	char line3[OLED_CHARACTER_WIDTH];
 	char line4[OLED_CHARACTER_WIDTH];
 	bool bootConnectPhase = initialConnect;
+	const WifiRecoveryTiming recoveryTiming = wifiRecoveryTiming();
+	unsigned long recoveryWindowStart = millis();
+	clearWifiFailureTracking();
 
 	// We start by connecting to a WiFi network
 #ifdef DEBUG_OVER_SERIAL
@@ -6534,27 +6707,30 @@ setupWifi(bool initialConnect)
 	// And continually try to connect to WiFi.
 	// If it doesn't, the device will just wait here before continuing
 	for (int tries = 0; WiFi.status() != WL_CONNECTED; tries++) {
-		snprintf(line3, sizeof(line3), "WiFi %d ...", tries);
-
-		const int maxTries = bootConnectPhase ? kInitialWifiConnectMaxTries : kWifiReconnectMaxTries;
-		if (tries == maxTries) {
-			BootIntent failureIntent = BootIntent::Normal;
+		const unsigned long nowMs = millis();
+		const WifiFailureClass failureClass = classifyWifiFailure(currentWifiFailureSignals());
+		const uint32_t windowElapsedMs = nowMs - recoveryWindowStart;
+		const uint32_t windowBudgetMs =
+			bootConnectPhase ? recoveryTiming.bootValidationMs : recoveryTiming.runtimeValidationMs;
+		if (windowElapsedMs >= windowBudgetMs) {
 			if (bootConnectPhase) {
-				switch (initialWifiFailureAction(currentBootMode, currentBootIntent)) {
-				case InitialWifiFailureAction::RebootApConfig:
-					failureIntent = BootIntent::ApConfig;
-					break;
-				case InitialWifiFailureAction::ContinueReconnect:
-				default:
-					// Ordinary normal boots should stay up and keep retrying after
-					// the short initial window instead of entering a fast reboot loop.
-					bootConnectPhase = false;
-					tries = -1;
-					continue;
+				if (shouldRebootApOnInitialWifiFailure(currentBootMode, failureClass)) {
+					setBootIntentAndReboot(BootIntent::ApConfig);
 				}
+#ifdef DEBUG_OVER_SERIAL
+				Serial.println(F("Initial WiFi validation expired without invalid-config classification; continuing reconnect."));
+#endif
+				bootConnectPhase = false;
+			} else if (shouldRebootApOnRuntimeWifiFailure(currentBootMode,
+			                                             isWifiConfigComplete(),
+			                                             failureClass)) {
+				setBootIntentAndReboot(BootIntent::ApConfig);
 			}
-			setBootIntentAndReboot(failureIntent);
+			recoveryWindowStart = nowMs;
+			clearWifiFailureTracking();
 		}
+
+		snprintf(line3, sizeof(line3), "WiFi %d ...", tries);
 #ifdef BUTTON_PIN
 		// Read button state
 		if (digitalRead(BUTTON_PIN) == LOW) {
@@ -6609,6 +6785,8 @@ setupWifi(bool initialConnect)
 		}
 		diagDelay(500);
 	}
+
+	clearWifiFailureTracking();
 
 	// Output some debug information
 #ifdef DEBUG_OVER_SERIAL

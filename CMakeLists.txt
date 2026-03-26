@@ -21,12 +21,14 @@ add_executable(host_tests
     tests/test_rs485_stub_logic.cpp
     tests/test_reboot_request.cpp
     tests/test_wifi_guard.cpp
+    tests/test_wifi_recovery_policy.cpp
     tests/test_memory_health.cpp
     tests/test_discovery_model.cpp
     tests/test_dispatch_timing.cpp
     tests/src/TimeProviderHost.cpp
     Alpha2MQTT/src/Scheduler.cpp
     Alpha2MQTT/src/BootModes.cpp
+    Alpha2MQTT/src/WifiRecoveryPolicy.cpp
     Alpha2MQTT/src/BootEvent.cpp
     Alpha2MQTT/src/ConfigCodec.cpp
     Alpha2MQTT/src/MqttEntities.cpp

@@ -16,11 +16,6 @@ enum class BootIntent : uint8_t {
 	PortalNormal = 4,
 };
 
-enum class InitialWifiFailureAction : uint8_t {
-	ContinueReconnect = 0,
-	RebootApConfig = 1,
-};
-
 struct SubsystemStates {
 	bool mqttEnabled;
 	bool inverterEnabled;
@@ -38,7 +33,6 @@ SubsystemStates decideSubsystems(BootMode mode);
 SubsystemPlan planForBootMode(BootMode mode);
 BootMode bootModeAfterPortalSuccess(BootMode currentMode);
 BootIntent bootIntentAfterStaPortalConnectFailure(void);
-InitialWifiFailureAction initialWifiFailureAction(BootMode currentMode, BootIntent currentIntent);
 BootMode bootModeForIntent(BootIntent intent, BootMode currentMode);
 const char *bootModeToString(BootMode mode);
 BootMode bootModeFromString(const char *value);
