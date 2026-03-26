@@ -4136,6 +4136,9 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 	                                  persistedOverrideCount)) {
 		hadError = true;
 	}
+	if (!hadError && mqttEntitiesRtAvailable() && !mqttEntityCanApplyBuckets(buckets, entityCount)) {
+		hadError = true;
+	}
 	if (!hadError) {
 		if (persistUserPollingConfig(storedIntervalSeconds, canonicalMapBuffer.data)) {
 			memcpy(g_portalBucketsScratch, buckets, entityCount * sizeof(BucketId));
