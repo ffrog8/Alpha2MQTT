@@ -478,6 +478,42 @@ TEST_CASE("status stub JSON builder includes required keys")
 	CHECK(payload.find("\"soc_step_x10_per_snapshot\":-5") != std::string::npos);
 }
 
+TEST_CASE("status stub JSON builder needs the firmware-sized buffer for worst-case payloads")
+{
+	StatusStubSnapshot snapshot{};
+	snapshot.stubReads = 4294967295UL;
+	snapshot.stubWrites = 4294967295UL;
+	snapshot.stubUnknownReads = 4294967295UL;
+	snapshot.socX10 = 65535;
+	snapshot.lastReadStartReg = 65535;
+	snapshot.lastFn = 255;
+	snapshot.lastFailStartReg = 65535;
+	snapshot.lastFailFn = 255;
+	snapshot.lastFailType = "strict_unknown_register_failure";
+	snapshot.lastWriteFailStartReg = 65535;
+	snapshot.lastWriteFailFn = 255;
+	snapshot.lastWriteFailType = "strict_unknown_register_failure";
+	snapshot.failRegister = 65535;
+	snapshot.failType = "strict_unknown_register_failure";
+	snapshot.latencyMs = 65535;
+	snapshot.strictUnknown = true;
+	snapshot.failReads = true;
+	snapshot.failWrites = true;
+	snapshot.failEveryN = 4294967295UL;
+	snapshot.failForMs = 4294967295UL;
+	snapshot.flapOnlineMs = 4294967295UL;
+	snapshot.flapOfflineMs = 4294967295UL;
+	snapshot.probeAttempts = 4294967295UL;
+	snapshot.probeSuccessAfterN = 4294967295UL;
+	snapshot.socStepX10PerSnapshot = 32767;
+
+	char tooSmall[512];
+	CHECK_FALSE(buildStatusStubJson(snapshot, tooSmall, sizeof(tooSmall)));
+
+	char firmwareSized[768];
+	CHECK(buildStatusStubJson(snapshot, firmwareSized, sizeof(firmwareSized)));
+}
+
 TEST_CASE("status manual read JSON builder includes deterministic correlation fields")
 {
 	StatusManualReadSnapshot snapshot{};

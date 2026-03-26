@@ -502,6 +502,25 @@ mqttEntityIndexById(mqttEntityId id, size_t *outIdx)
 }
 
 bool
+mqttEntityIndexByName(const char *name, size_t *outIdx)
+{
+	if (name == nullptr || name[0] == '\0' || outIdx == nullptr) {
+		return false;
+	}
+	for (size_t i = 0; i < kMqttEntityDescriptorCount; ++i) {
+		mqttState entity{};
+		if (!copyEntityFromCatalog(i, &entity)) {
+			return false;
+		}
+		if (mqttEntityNameEquals(&entity, name)) {
+			*outIdx = i;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool
 mqttEntityCopyCatalog(mqttState *out, size_t count)
 {
 	if (out == nullptr || count != kMqttEntityDescriptorCount) {

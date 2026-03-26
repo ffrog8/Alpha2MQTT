@@ -44,6 +44,7 @@ RS485Handler::RS485Handler()
 	_RS485Serial = new HardwareSerial(HW_UART_NUM);
 	_RS485Serial->begin(DEFAULT_BAUD_RATE, SERIAL_8N1, RX_PIN, TX_PIN);
 #endif
+	baudRate = DEFAULT_BAUD_RATE;
 	
 	_rs485IsOnline = false;
 }
@@ -95,8 +96,19 @@ Sets the baud rate for communication
 */
 void RS485Handler::setBaudRate(unsigned long baudRate)
 {
+	if (this->baudRate == baudRate) {
+		return;
+	}
 	_RS485Serial->flush();
+#if defined MP_ESP8266
+	// SoftwareSerial allocates RX/TX state in begin(); end() releases it. Re-probing baud
+	// rates without end() leaks heap until the ESP8266 crashes in background RS485 probing.
+	_RS485Serial->end();
+	_RS485Serial->begin(baudRate, SWSERIAL_8N1);
+#elif defined MP_ESP32
 	_RS485Serial->begin(baudRate);
+#endif
+	this->baudRate = baudRate;
 }
 
 /*

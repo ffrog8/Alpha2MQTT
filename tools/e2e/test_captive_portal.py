@@ -486,11 +486,23 @@ def _build_container_name() -> str:
 def _container_firmware_path(path: Path, *, container_name: str) -> str:
     try:
         rel = path.relative_to(_repo_root())
-        return f"/project/{rel.as_posix()}"
+        rel_posix = rel.as_posix()
+        # Support both the legacy container layout (/project/...) and the current
+        # bind-mounted repo layout (/project/Alpha2MQTT/...).
+        for candidate in (f"/project/{rel_posix}", f"/project/Alpha2MQTT/{rel_posix}"):
+            result = subprocess.run(
+                ["docker", "exec", container_name, "test", "-f", candidate],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            if result.returncode == 0:
+                return candidate
     except ValueError:
-        staged = f"/tmp/{path.name}"
-        _run_checked(["docker", "cp", str(path), f"{container_name}:{staged}"], timeout_s=60)
-        return staged
+        pass
+    staged = f"/tmp/{path.name}"
+    _run_checked(["docker", "cp", str(path), f"{container_name}:{staged}"], timeout_s=60)
+    return staged
 
 
 def _find_esptool_path(container_name: str) -> str:
@@ -506,6 +518,63 @@ def _find_esptool_path(container_name: str) -> str:
     if not path:
         raise PortalTestError(f"Could not find esptool.py inside {container_name}")
     return path
+
+
+def _serial_line_toggle(container_name: str, *, serial_port: str, bootloader: bool) -> None:
+    if bootloader:
+        script = (
+            "import serial,time;"
+            f"ser=serial.Serial({serial_port!r},115200,timeout=0.25);"
+            "ser.setDTR(False);"
+            "ser.setRTS(True);"
+            "time.sleep(0.1);"
+            "ser.setDTR(True);"
+            "ser.setRTS(False);"
+            "time.sleep(0.05);"
+            "ser.setDTR(False);"
+            "time.sleep(0.2);"
+            "ser.close()"
+        )
+    else:
+        script = (
+            "import serial,time;"
+            f"ser=serial.Serial({serial_port!r},115200,timeout=0.25);"
+            "ser.setDTR(False);"
+            "ser.setRTS(True);"
+            "time.sleep(0.1);"
+            "ser.setRTS(False);"
+            "time.sleep(0.2);"
+            "ser.close()"
+        )
+    cmd = (
+        f"tail -f /dev/null | docker exec -i {shlex.quote(container_name)} "
+        f"python3 -c {shlex.quote(script)}"
+    )
+    _run_checked(["bash", "-lc", cmd], timeout_s=30)
+
+
+def _run_esptool_with_bootloader_retry(
+    container_name: str,
+    *,
+    serial_port: str,
+    cmd: str,
+    timeout_s: int,
+    attempts: int = 4,
+) -> None:
+    last_exc: PortalTestError | None = None
+    for attempt in range(1, attempts + 1):
+        _serial_line_toggle(container_name, serial_port=serial_port, bootloader=True)
+        try:
+            _run_checked(["bash", "-lc", cmd], timeout_s=timeout_s)
+            return
+        except PortalTestError as exc:
+            last_exc = exc
+            if attempt == attempts:
+                break
+            _announce(f"manual bootloader attempt {attempt}/{attempts} failed; retrying")
+            time.sleep(1.0)
+    assert last_exc is not None
+    raise last_exc
 
 
 def _erase_and_flash_real_firmware(fw_path: Path, *, serial_port: str, baud: str) -> None:
@@ -524,9 +593,39 @@ def _erase_and_flash_real_firmware(fw_path: Path, *, serial_port: str, baud: str
         f"write_flash 0x0 {shlex.quote(fw_in_container)}\""
     )
     _announce(f"erase flash on {serial_port}")
-    _run_checked(["bash", "-lc", erase_cmd], timeout_s=240)
+    try:
+        _run_checked(["bash", "-lc", erase_cmd], timeout_s=240)
+        _announce(f"flash real firmware {fw_path.name}")
+        _run_checked(["bash", "-lc", flash_cmd], timeout_s=240)
+        return
+    except PortalTestError as exc:
+        _announce(f"default_reset flash path failed; retrying manual bootloader entry ({exc})")
+
+    manual_erase_cmd = (
+        f"tail -f /dev/null | docker exec -i {shlex.quote(container_name)} bash -lc "
+        f"\"python3 {shlex.quote(esptool)} --chip esp8266 --port {shlex.quote(serial_port)} "
+        f"--baud {shlex.quote(baud)} --before no_reset --after no_reset erase_flash\""
+    )
+    manual_flash_cmd = (
+        f"tail -f /dev/null | docker exec -i {shlex.quote(container_name)} bash -lc "
+        f"\"python3 {shlex.quote(esptool)} --chip esp8266 --port {shlex.quote(serial_port)} "
+        f"--baud {shlex.quote(baud)} --before no_reset --after no_reset "
+        f"write_flash 0x0 {shlex.quote(fw_in_container)}\""
+    )
+    _run_esptool_with_bootloader_retry(
+        container_name,
+        serial_port=serial_port,
+        cmd=manual_erase_cmd,
+        timeout_s=240,
+    )
     _announce(f"flash real firmware {fw_path.name}")
-    _run_checked(["bash", "-lc", flash_cmd], timeout_s=240)
+    _run_esptool_with_bootloader_retry(
+        container_name,
+        serial_port=serial_port,
+        cmd=manual_flash_cmd,
+        timeout_s=240,
+    )
+    _serial_line_toggle(container_name, serial_port=serial_port, bootloader=False)
 
 
 class PiSsh:
@@ -907,21 +1006,17 @@ def _wait_for_sta_portal(ssh: PiSsh, base_url: str, *, timeout_s: int) -> str:
     last = ""
     while time.time() < deadline:
         try:
-            _pi_http_request(ssh, method="GET", url=base_url + "/", timeout_s=10)
-        except Exception:
-            pass
-        try:
-            resp = _pi_http_request(ssh, method="GET", url=base_url + "/config/polling", timeout_s=10)
+            resp = _pi_http_request(ssh, method="GET", url=base_url + "/", timeout_s=10)
         except Exception as exc:
             last = f"exc={exc}"
             time.sleep(2.0)
             continue
         status = int(resp.get("status", 0))
         last = str(resp.get("body", ""))
-        if status == 200 and "Polling" in last:
+        if status == 200 and all(token in last for token in ("/config/mqtt", "/config/polling", "/config/reboot-normal")):
             return last
         time.sleep(2.0)
-    raise PortalTestError(f"Timed out waiting for STA portal polling page. Last={last[:300]!r}")
+    raise PortalTestError(f"Timed out waiting for STA portal root menu. Last={last[:300]!r}")
 
 
 def _rediscover_sta_portal_after_reboot_wifi(ssh: PiSsh, base_url: str, *, timeout_s: int) -> str:
@@ -959,15 +1054,15 @@ def probe_url(url: str):
     try:
         with urllib.request.urlopen(url, timeout=1.5) as resp:
             body = resp.read().decode('utf-8', errors='replace')
-            if int(resp.getcode()) == 200 and 'Polling' in body:
-                return {{"url": url[:-len('/config/polling')], "body": body}}
+            if int(resp.getcode()) == 200 and '/config/mqtt' in body and '/config/polling' in body and '/config/reboot-normal' in body:
+                return {{"url": url[:-1], "body": body}}
     except Exception:
         return None
     return None
 
 urls = []
 if hostname:
-    urls.append(f"http://{{hostname}}/config/polling")
+    urls.append(f"http://{{hostname}}/")
 
 seen = set(urls)
 
@@ -982,7 +1077,7 @@ if previous_ip:
     others = [ip for ip in network.hosts() if ip != preferred[0]]
     ordered = preferred + others
     for ip in ordered:
-        add_url(f"http://{{ip}}/config/polling")
+        add_url(f"http://{{ip}}/")
 else:
     try:
         addr_data = json.loads(subprocess.check_output(["ip", "-json", "-4", "addr", "show", "up"], text=True))
@@ -1002,7 +1097,7 @@ else:
                 continue
             network = ipaddress.ip_network(f"{{local}}/{{max(prefixlen, 24)}}", strict=False)
             for ip in network.hosts():
-                add_url(f"http://{{ip}}/config/polling")
+                add_url(f"http://{{ip}}/")
 
 with concurrent.futures.ThreadPoolExecutor(max_workers=32) as ex:
     futures = [ex.submit(probe_url, url) for url in urls]
@@ -1046,6 +1141,13 @@ def _extract_form_action_with_input(body: str, required_input: str) -> str:
     raise PortalTestError(f"Could not find form action for input {required_input!r}")
 
 
+def _extract_input_value(body: str, name: str) -> str:
+    match = re.search(rf'name=["\']{re.escape(name)}["\'][^>]*value=["\']([^"\']*)["\']', body, flags=re.IGNORECASE)
+    if not match:
+        raise PortalTestError(f"Could not find input value for {name!r}")
+    return match.group(1)
+
+
 def _wait_for_polling_page_persisted(
     ssh: PiSsh,
     *,
@@ -1073,7 +1175,11 @@ def _wait_for_polling_page_persisted(
             continue
         body = str(resp.get("body", ""))
         last = body
-        poll_ok = f'name="poll_interval_s"' in body and f'value="{expected_poll_interval_s}"' in body
+        poll_ok = (
+            'name="poll_interval_s"' in body and
+            f'value="{expected_poll_interval_s}"' in body and
+            'max="120"' in body
+        )
         row_match = re.search(
             rf'<tr[^>]*data-entity="{re.escape(entity_name)}"[^>]*>(.*?)</tr>',
             body,
@@ -1106,7 +1212,7 @@ def _prime_runtime_topics(mqtt: "MqttClient", device_root: str) -> None:
             pass
 
 
-def _join_ap_and_load_wifi_page(ssh: "PiSsh", mqtt: "MqttClient", *, iface: str) -> tuple[str, str]:
+def _join_ap_and_load_wifi_page(ssh: "PiSsh", mqtt: "MqttClient", *, iface: str) -> tuple[str, str, str]:
     join = _pi_join_esp_ap(ssh, iface=iface, ssid_prefix="Alpha2MQTT-")
     ap_ssid = str(join.get("ssid", ""))
     if not ap_ssid.startswith("Alpha2MQTT-"):
@@ -1140,21 +1246,35 @@ def _join_ap_and_load_wifi_page(ssh: "PiSsh", mqtt: "MqttClient", *, iface: str)
         time.sleep(1.0)
     if not wifi_action or "s" not in input_names or "p" not in input_names:
         raise PortalTestError(f"wifi form missing ssid/password inputs: names={sorted(input_names)!r}")
-    return ap_ssid, wifi_action
+    return ap_ssid, wifi_action, wifi_body
 
 
-def _save_wifi_and_wait_connected(ssh: "PiSsh", *, wifi_ssid: str, wifi_pwd: str, wifi_action: str) -> str:
+def _save_wifi_and_wait_connected(
+    ssh: "PiSsh",
+    *,
+    wifi_ssid: str,
+    wifi_pwd: str,
+    wifi_action: str,
+    wifi_body: str,
+) -> str:
+    csrf = _extract_input_value(wifi_body, "csrf")
     save_wifi = _pi_http_request(
         ssh,
         method="POST",
         url=urllib.parse.urljoin("http://192.168.4.1/0wifi", wifi_action),
-        form={"s": wifi_ssid, "p": wifi_pwd},
+        form={"s": wifi_ssid, "p": wifi_pwd, "csrf": csrf},
         timeout_s=30,
     )
     save_wifi_status = int(save_wifi.get("status", 0))
     save_wifi_body = str(save_wifi.get("body", ""))
-    if save_wifi_status != 200:
+    if save_wifi_status not in (0, 200, 302):
         raise PortalTestError(f"Portal POST /wifisave returned {save_wifi_status}")
+    if save_wifi_status != 200:
+        _http_log(
+            "portal wifi save transport did not complete cleanly; "
+            f"continuing with connected-state discovery status={save_wifi_status} "
+            f"body={save_wifi_body[:300]!r}"
+        )
     try:
         _connected_status, portal_runtime_ip = _wait_for_portal_status_connected(ssh, timeout_s=20)
     except PortalTestError as exc:
@@ -1329,20 +1449,20 @@ def _run_wifi_only_case(
     _erase_and_flash_real_firmware(fw_path, serial_port=serial_port, baud=flash_baud)
     time.sleep(8)
 
-    ap_ssid, wifi_action = _join_ap_and_load_wifi_page(ssh, mqtt, iface=iface)
+    ap_ssid, wifi_action, wifi_body = _join_ap_and_load_wifi_page(ssh, mqtt, iface=iface)
     portal_runtime_ip = _save_wifi_and_wait_connected(
         ssh,
         wifi_ssid=wifi_ssid,
         wifi_pwd=wifi_pwd,
         wifi_action=wifi_action,
+        wifi_body=wifi_body,
     )
-    portal_base_url, _portal_page = _discover_sta_portal_base(
+    portal_base_url, portal_root_body = _discover_sta_portal_base(
         ssh,
         previous_ip=portal_runtime_ip,
         hostname=ap_ssid,
         timeout_s=180,
     )
-    portal_root_body = _wait_for_page_contains(ssh, url=portal_base_url + "/", needle="/config/mqtt", timeout_s=20)
     _assert_portal_root_menu(portal_root_body, "sta portal root (wifi-only case)")
     portal_runtime_ip = urllib.parse.urlparse(portal_base_url).hostname or portal_runtime_ip
 
@@ -1382,20 +1502,20 @@ def _run_wifi_plus_mqtt_case(
     _erase_and_flash_real_firmware(fw_path, serial_port=serial_port, baud=flash_baud)
     time.sleep(8)
 
-    device_root, wifi_action = _join_ap_and_load_wifi_page(ssh, mqtt, iface=iface)
+    device_root, wifi_action, wifi_body = _join_ap_and_load_wifi_page(ssh, mqtt, iface=iface)
     portal_runtime_ip = _save_wifi_and_wait_connected(
         ssh,
         wifi_ssid=wifi_ssid,
         wifi_pwd=wifi_pwd,
         wifi_action=wifi_action,
+        wifi_body=wifi_body,
     )
-    portal_base_url, _portal_page = _discover_sta_portal_base(
+    portal_base_url, portal_root_body = _discover_sta_portal_base(
         ssh,
         previous_ip=portal_runtime_ip,
         hostname=device_root,
         timeout_s=180,
     )
-    portal_root_body = _wait_for_page_contains(ssh, url=portal_base_url + "/", needle="/config/mqtt", timeout_s=20)
     _assert_portal_root_menu(portal_root_body, "sta portal root (wifi+mqtt case)")
     portal_runtime_ip = urllib.parse.urlparse(portal_base_url).hostname or portal_runtime_ip
 
@@ -1420,6 +1540,10 @@ def _run_wifi_plus_mqtt_case(
     base_url = _rediscover_sta_portal_after_reboot_wifi(ssh, base_url, timeout_s=90)
 
     bucket_map = "State_of_Charge=ten_sec;"
+    polling_page_resp = _pi_http_request(ssh, method="GET", url=base_url + "/config/polling", timeout_s=10)
+    if int(polling_page_resp.get("status", 0)) != 200:
+        raise PortalTestError(f"/config/polling returned unexpected status={polling_page_resp.get('status')}")
+    polling_csrf = _extract_input_value(str(polling_page_resp.get("body", "")), "csrf")
     save_resp = _pi_http_request(
         ssh,
         method="POST",
@@ -1429,6 +1553,7 @@ def _run_wifi_plus_mqtt_case(
             "page": "0",
             "poll_interval_s": "13",
             "bucket_map_full": bucket_map,
+            "csrf": polling_csrf,
         },
         timeout_s=20,
     )
@@ -1558,13 +1683,14 @@ def _run_normal_to_wifi_portal_bad_wifi_falls_back_to_ap_case(
         raise PortalTestError(f"/reboot/wifi returned unexpected status={reboot_wifi_status}")
 
     base_url = _rediscover_sta_portal_after_reboot_wifi(ssh, base_url, timeout_s=90)
-    _wifi_body, wifi_action = _load_sta_wifi_page(ssh, base_url=base_url, timeout_s=30)
+    wifi_body, wifi_action = _load_sta_wifi_page(ssh, base_url=base_url, timeout_s=30)
+    wifi_csrf = _extract_input_value(wifi_body, "csrf")
     bad_ssid = f"{wifi_ssid}-bad-{int(time.time())}"
     save_wifi = _pi_http_request(
         ssh,
         method="POST",
         url=urllib.parse.urljoin(base_url + "/0wifi", wifi_action),
-        form={"s": bad_ssid, "p": wifi_pwd},
+        form={"s": bad_ssid, "p": wifi_pwd, "csrf": wifi_csrf},
         timeout_s=20,
     )
     save_wifi_status = int(save_wifi.get("status", 0))
@@ -1579,7 +1705,11 @@ def _run_normal_to_wifi_portal_bad_wifi_falls_back_to_ap_case(
     polling_page = _pi_http_request(ssh, method="GET", url=base_url + "/config/polling", timeout_s=10)
     if int(polling_page.get("status", 0)) != 200:
         raise PortalTestError(f"Polling page not reachable after STA WiFi save: {polling_page.get('status')}")
-    _assert_contains(str(polling_page.get("body", "")), "Polling", "sta portal after wifi save")
+    polling_body = str(polling_page.get("body", ""))
+    _assert_contains(polling_body, "Polling", "sta portal after wifi save")
+    if 'href="/config/polling?family=battery&page=0">Battery</a>' not in polling_body and \
+       'href="/config/polling?family=battery&page=0">[Battery</a>' not in polling_body:
+        raise PortalTestError("sta portal polling nav did not render human-readable family labels")
 
     _reboot_normal_and_tolerate_disconnect(
         ssh,
@@ -1587,7 +1717,7 @@ def _run_normal_to_wifi_portal_bad_wifi_falls_back_to_ap_case(
         context="sta portal /config/reboot-normal after wifi save",
     )
 
-    ap_ssid, _wifi_action = _join_ap_and_load_wifi_page(ssh, mqtt, iface=iface)
+    ap_ssid, _wifi_action, _wifi_body = _join_ap_and_load_wifi_page(ssh, mqtt, iface=iface)
     status_resp = _pi_http_request(ssh, method="GET", url="http://192.168.4.1/status", timeout_s=10)
     if int(status_resp.get("status", 0)) != 200:
         raise PortalTestError(f"AP fallback /status returned {status_resp.get('status')}")
@@ -1599,7 +1729,11 @@ def _run_normal_to_wifi_portal_bad_wifi_falls_back_to_ap_case(
     polling_resp = _pi_http_request(ssh, method="GET", url="http://192.168.4.1/config/polling", timeout_s=10)
     if int(polling_resp.get("status", 0)) != 200:
         raise PortalTestError(f"AP fallback polling page returned {polling_resp.get('status')}")
-    _assert_contains(str(polling_resp.get("body", "")), "Polling", "ap fallback polling page")
+    polling_fallback_body = str(polling_resp.get("body", ""))
+    _assert_contains(polling_fallback_body, "Polling", "ap fallback polling page")
+    if 'href="/config/polling?family=battery&page=0">Battery</a>' not in polling_fallback_body and \
+       'href="/config/polling?family=battery&page=0">[Battery</a>' not in polling_fallback_body:
+        raise PortalTestError("ap fallback polling nav did not render human-readable family labels")
     _wait_for_page_contains(ssh, url="http://192.168.4.1/", needle="/config/update", timeout_s=20)
 
     # Keep the final portal case self-cleaning. This case intentionally stages bad
@@ -1610,6 +1744,7 @@ def _run_normal_to_wifi_portal_bad_wifi_falls_back_to_ap_case(
         wifi_ssid=wifi_ssid,
         wifi_pwd=wifi_pwd,
         wifi_action=_wifi_action,
+        wifi_body=_wifi_body,
     )
     recovered_base_url, recovered_root = _discover_runtime_root(
         ssh,

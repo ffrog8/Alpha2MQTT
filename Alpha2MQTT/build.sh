@@ -36,7 +36,9 @@ else
 fi
 
 BUILD_TS_MS="$(date +%s%3N)"
-BASE_BUILD_FLAGS="-DMP_ESP8266 -UMP_ESP32 -UMP_XIAO_ESP32C6 -DBUILD_TS_MS=${BUILD_TS_MS}ULL"
+# ESP8266 OTA uploads stream through HTTPUpload. Keep the upload buffer small enough to fit in
+# WiFi portal heap without pushing the parser into OOM.
+BASE_BUILD_FLAGS="-DMP_ESP8266 -UMP_ESP32 -UMP_XIAO_ESP32C6 -DHTTP_UPLOAD_BUFLEN=512 -DBUILD_TS_MS=${BUILD_TS_MS}ULL"
 OUTFILE_REAL="${OUTDIR}/Alpha2MQTT_${BUILD_TS_MS}_real.bin"
 OUTFILE_STUB="${OUTDIR}/Alpha2MQTT_${BUILD_TS_MS}_stub.bin"
 ESP8266_INDEX_URL="https://arduino.esp8266.com/stable/package_esp8266com_index.json"
