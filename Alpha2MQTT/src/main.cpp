@@ -3339,6 +3339,10 @@ loadPollingBucketsForPortal(const mqttState *entities,
 		currentBootMode == BootMode::ApConfig || currentBootMode == BootMode::WifiConfig;
 	outPollIntervalSeconds = clampPollInterval(pollIntervalSeconds);
 	if (usePersistedOnly || !mqttEntitiesRtAvailable()) {
+		const mqttState *defaultEntities = entities ? entities : mqttEntitiesDesc();
+		if (defaultEntities == nullptr) {
+			return false;
+		}
 		if (g_portalPollingCacheValid && g_portalPollingCacheEntityCount == entityCount) {
 			outPollIntervalSeconds = g_portalPollingCacheIntervalSeconds;
 			// The portal cache lives in g_portalBucketsScratch. Do not prefill
@@ -3350,7 +3354,7 @@ loadPollingBucketsForPortal(const mqttState *entities,
 			return true;
 		}
 		for (size_t i = 0; i < entityCount; ++i) {
-			outBuckets[i] = mqttEntityBucketByIndex(i);
+			outBuckets[i] = bucketIdFromFreq(defaultEntities[i].updateFreq);
 		}
 		Preferences preferences;
 		preferences.begin(DEVICE_NAME, true);
