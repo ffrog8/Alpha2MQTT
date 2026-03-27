@@ -3165,7 +3165,7 @@ handlePortalRebootNormalRequest(WiFiManager& wifiManager)
 	deferredControlPlaneRebootIntent = portalNormalRebootIntent();
 }
 
-static constexpr uint8_t kPollingPortalPageSize = 4;
+static constexpr uint8_t kPollingPortalPageSize = 8;
 static constexpr BucketId kPortalEstimateBuckets[] = {
 	BucketId::TenSec,
 	BucketId::OneMin,
@@ -4048,6 +4048,54 @@ portalCustomHeadElement(void)
 	return (currentBootMode == BootMode::WifiConfig) ? kPortalCustomHeadWifi : kPortalCustomHeadAp;
 }
 
+static const char kPollingPageExtraHead[] PROGMEM =
+	"<style>"
+	".polling-nav{display:flex;gap:12px;margin:18px 0 0;}"
+	".polling-nav-slot{flex:1;}"
+	".polling-nav-slot form{margin:0;}"
+	".polling-nav-slot button{margin:0;}"
+	".polling-nav-slot button[disabled]{background:#c6d1d8;box-shadow:0 4px 0 #98a8b3;color:#5d6a73;cursor:default;}"
+	".polling-nav-slot button[disabled]:active{transform:none;box-shadow:0 4px 0 #98a8b3;}"
+	"</style>";
+
+// Keep pagination controls in fixed left/right slots so navigation does not jump around between pages.
+static bool
+writePollingNavButton(PortalResponseWriter &writer,
+                      const char *familyKey,
+                      uint16_t page,
+                      const char *slotClass,
+                      const char *buttonId,
+                      const char *label,
+                      bool enabled)
+{
+	if (!writer.write("<div class=\"polling-nav-slot ") ||
+	    !writer.write(slotClass) ||
+	    !writer.write("\">")) {
+		return false;
+	}
+	if (!enabled) {
+		return writer.write("<button id=\"") &&
+		       writer.write(buttonId) &&
+		       writer.write("\" type=\"button\" disabled>") &&
+		       writer.write(label) &&
+		       writer.write("</button></div>");
+	}
+	char pageBuf[8];
+	snprintf(pageBuf, sizeof(pageBuf), "%u", static_cast<unsigned>(page));
+	return writer.write("<form method=\"get\" action=\"/config/polling\">") &&
+	       writer.write("<input type=\"hidden\" name=\"family\" value=\"") &&
+	       writer.write(familyKey) &&
+	       writer.write("\">") &&
+	       writer.write("<input type=\"hidden\" name=\"page\" value=\"") &&
+	       writer.write(pageBuf) &&
+	       writer.write("\">") &&
+	       writer.write("<button id=\"") &&
+	       writer.write(buttonId) &&
+	       writer.write("\" type=\"submit\">") &&
+	       writer.write(label) &&
+	       writer.write("</button></form></div>");
+}
+
 static void
 handlePortalPollingPage(WiFiManager &wifiManager)
 {
@@ -4102,15 +4150,11 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 	static const char kFormOpen[] PROGMEM = "<form id=\"polling-form\" method=\"POST\" action=\"/config/polling/save\">";
 	static const char kTableOpen[] PROGMEM = "<table><tr><th>Entity</th><th>Bucket</th></tr>";
 	static const char kTableClose[] PROGMEM = "</table><p><button type=\"submit\">Save</button></p></form>";
-	static const char kNavOpen[] PROGMEM = "<p>";
-	static const char kNavClose[] PROGMEM = "</p></body></html>";
 	static const char kFamilyNavOpen[] PROGMEM = "<p>";
 	static const char kFamilyNavClose[] PROGMEM = "</p>";
 	static const char kFamilyNavFmt[] PROGMEM =
 		"<a href=\"/config/polling?family=%s&page=0\">%s%s</a> ";
 	static const char kPageHintFmt[] PROGMEM = "<p class=\"hint\">Family %s · Page %u of %u · %u entities</p>";
-	static const char kPrevFmt[] PROGMEM = "<a href=\"/config/polling?family=%s&page=%u\">Prev</a> ";
-	static const char kNextFmt[] PROGMEM = "<a href=\"/config/polling?family=%s&page=%u\">Next</a>";
 	static const char kRowFmt[] PROGMEM =
 		"<tr data-entity=\"%s\"><td>%s</td><td><select name=\"b%u\">"
 		"<option value=\"%s\"%s>%s</option>"
@@ -4126,7 +4170,7 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
 		const PortalUiMode uiMode =
 			(currentBootMode == BootMode::WifiConfig) ? PortalUiMode::Wifi : PortalUiMode::Ap;
-		if (!writePortalUiPageStart(writer, "Polling Schedule", "Polling schedule", uiMode) ||
+		if (!writePortalUiPageStart(writer, "Polling Schedule", "Polling schedule", uiMode, kPollingPageExtraHead) ||
 		    !writer.write("<p><a href=\"/\">Menu</a> | <a href=\"/config/mqtt\">MQTT Setup</a></p>") ||
 		    !writePortalMenuButton(writer, "/config/reboot-normal", "Reboot Normal", "post")) {
 			return false;
@@ -4244,31 +4288,28 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		    !writer.write("<input type=\"hidden\" name=\"csrf\" value=\"") ||
 		    !writer.write(portalUpdateCsrfToken) ||
 		    !writer.write("\">") ||
-		    !writer.write("<button type=\"submit\">Disable All Entities</button></form><br>") ||
-		    !writer.writeP(kNavOpen)) {
+		    !writer.write("<button type=\"submit\">Disable All Entities</button></form>") ||
+		    !writer.write("<div class=\"polling-nav\">") ||
+		    !writePollingNavButton(writer,
+		                           familyKey,
+		                           (view.page.safePage > 0) ? static_cast<uint16_t>(view.page.safePage - 1) : 0,
+		                           "polling-nav-prev",
+		                           "polling-nav-prev",
+		                           "Prev",
+		                           view.page.safePage > 0) ||
+		    !writePollingNavButton(writer,
+		                           familyKey,
+		                           (view.page.safePage < view.page.maxPage)
+		                               ? static_cast<uint16_t>(view.page.safePage + 1)
+		                               : view.page.safePage,
+		                           "polling-nav-next",
+		                           "polling-nav-next",
+		                           "Next",
+		                           view.page.safePage < view.page.maxPage) ||
+		    !writer.write("</div>")) {
 			return false;
 		}
-		if (view.page.safePage > 0) {
-			snprintf_P(buf,
-			           sizeof(buf),
-			           kPrevFmt,
-			           familyKey,
-			           static_cast<unsigned>(view.page.safePage - 1));
-			if (!writer.write(buf)) {
-				return false;
-			}
-		}
-		if (view.page.safePage < view.page.maxPage) {
-			snprintf_P(buf,
-			           sizeof(buf),
-			           kNextFmt,
-			           familyKey,
-			           static_cast<unsigned>(view.page.safePage + 1));
-			if (!writer.write(buf)) {
-				return false;
-			}
-		}
-		return writer.writeP(kNavClose);
+		return writer.writeP(kUiPageTail);
 	};
 	if (!sendPortalHtmlResponse(wifiManager.server.get(), emitPage, "polling config unavailable: emit")) {
 #ifdef DEBUG_OVER_SERIAL

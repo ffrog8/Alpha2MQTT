@@ -937,6 +937,20 @@ def _extract_polling_page_family_keys(poll_html: str) -> list[str]:
         keys.insert(0, current)
     return keys
 
+def _assert_polling_nav_buttons(poll_html: str, *, prev_enabled: bool, next_enabled: bool) -> None:
+    prev_idx = poll_html.find('id="polling-nav-prev"')
+    next_idx = poll_html.find('id="polling-nav-next"')
+    if prev_idx < 0 or next_idx < 0:
+        raise E2EError("polling page missing prev/next nav buttons")
+    if prev_idx > next_idx:
+        raise E2EError("polling nav buttons rendered in the wrong order")
+    prev_disabled = re.search(r'id="polling-nav-prev"[^>]*disabled', poll_html, flags=re.IGNORECASE) is not None
+    next_disabled = re.search(r'id="polling-nav-next"[^>]*disabled', poll_html, flags=re.IGNORECASE) is not None
+    if prev_enabled == prev_disabled:
+        raise E2EError(f"polling prev button state mismatch: prev_enabled={prev_enabled} prev_disabled={prev_disabled}")
+    if next_enabled == next_disabled:
+        raise E2EError(f"polling next button state mismatch: next_enabled={next_enabled} next_disabled={next_disabled}")
+
 def _load_polling_page(base: str, family: str, page: int) -> str:
     deadline = time.time() + 45
     url = f"{base}/config/polling?family={urllib.parse.quote(family)}&page={page}"
@@ -3587,7 +3601,6 @@ def main() -> int:
             raise E2EError("portal polling page missing simplified header/navigation")
         if "bucket_map_full" not in html:
             raise E2EError("portal polling page missing hidden bucket_map_full field")
-        csrf = _extract_input_value(html, "csrf")
         if 'href="/config/polling?family=battery&page=0">Battery</a>' not in html and \
            'href="/config/polling?family=battery&page=0">[Battery</a>' not in html:
             raise E2EError("portal polling family nav did not render human-readable labels")
@@ -3595,6 +3608,18 @@ def main() -> int:
         # Find which row index corresponds to a known stable mqttName.
         target = "State_of_Charge"
         target_family, target_page, total_pages, row, initial_bucket, family_keys = _locate_entity_on_polling_pages(base, html, target)
+        target_family_first_html = html if target_family == _extract_polling_page_family_key(html) else _load_polling_page(base, target_family, 0)
+        _assert_polling_nav_buttons(target_family_first_html, prev_enabled=False, next_enabled=(total_pages > 1))
+        if total_pages > 1:
+            target_family_last_html = _load_polling_page(base, target_family, total_pages - 1)
+            _assert_polling_nav_buttons(target_family_last_html, prev_enabled=True, next_enabled=False)
+        active_target_html = _load_polling_page(base, target_family, target_page)
+        csrf = _extract_input_value(active_target_html, "csrf")
+        row, current_bucket = _extract_entity_row_and_selected_bucket(active_target_html, target)
+        if current_bucket != initial_bucket:
+            raise E2EError(
+                f"{target} bucket changed while preparing nav assertions (expected {initial_bucket!r}, got {current_bucket!r})"
+            )
         for candidate_bucket in ("user", "ten_sec", "five_min", "one_hour", "disabled"):
             if initial_bucket != candidate_bucket:
                 desired_bucket = candidate_bucket
