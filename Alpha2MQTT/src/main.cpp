@@ -36,6 +36,7 @@ First, go and customise options at the top of Definitions.h!
 #include "../include/DiscoveryModel.h"
 #include "../include/DispatchTiming.h"
 #include "../include/Rs485ProbeLogic.h"
+#include "../include/SchedulerReadPolicy.h"
 #include "../include/Scheduler.h"
 #include "../include/TimeProvider.h"
 #include "../include/diag.h"
@@ -9745,6 +9746,11 @@ executePollTransaction(const MqttEntityActiveBucket &bucketPlan,
 	const size_t leaderIdx = bucketPlan.members[leaderOffset];
 	mqttState leader{};
 	if (!mqttEntityCopyByIndex(leaderIdx, &leader)) {
+		return;
+	}
+	if (shouldSkipScheduledEntityRead(mqttEntityScope(leader.entityId),
+	                                  inverterReady,
+	                                  inverterSerialKnown())) {
 		return;
 	}
 	modbusRequestAndResponse response;
