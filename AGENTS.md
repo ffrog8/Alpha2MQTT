@@ -11,10 +11,7 @@ If conflicts arise, **this file is the source of truth** for this repo.
 - `Alpha2MQTT/` — main firmware sketch, headers, and PlatformIO project
 - `Alpha2MQTT/build.sh` — Arduino CLI build script (ESP8266)
 - `Alpha2MQTT/legacy/` — legacy Arduino sketch
-- `AlphaSniffer/` — RS485 sniffer sketch
-- `Home Assistant/` — HA examples and dashboards
-- `Node Red Flows/` — Node-RED examples
-- `README.md` / `README-orig.md` — behavior and setup guidance
+- `README.md` — behavior and setup guidance
 
 ## General principles
 - Do not claim builds, tests, or verification unless they actually ran.
