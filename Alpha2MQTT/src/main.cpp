@@ -7856,6 +7856,9 @@ mqttReconnect(void)
 #endif
 				setStatusLedColor(0, 255, 0);
 				updateRunstate();
+				// Always republish controller HA discovery after MQTT connect so the bridge device
+				// appears in Home Assistant even before inverter identity is known.
+				requestHaDataResend();
 				publishPollingConfig();
 				if (inverterSubscriptionsAdded) {
 					inverterSubscriptionsSet = true;

@@ -320,6 +320,15 @@ class MqttClient:
                 return self._decode_publish(data)
         raise PortalTestError("Timeout waiting for MQTT publish")
 
+    def publish(self, topic: str, payload: str, retain: bool = False) -> None:
+        if not self.sock:
+            raise PortalTestError("MQTT not connected")
+        flags = 0x01 if retain else 0x00
+        fixed = 0x30 | flags
+        body = _encode_utf8(topic) + payload.encode("utf-8")
+        self.sock.sendall(bytes([fixed]) + _encode_varint(len(body)) + body)
+        self._last_tx = time.time()
+
     def _next_packet_id(self) -> int:
         pid = self._packet_id
         self._packet_id = (self._packet_id % 0xFFFF) + 1
@@ -485,6 +494,63 @@ def _wait_for_topic_change(mqtt: MqttClient, topic: str, previous_payload: str, 
         if payload != previous_payload:
             return payload
     raise PortalTestError(f"Timeout waiting for fresh {label} on {topic}")
+
+
+def _collect_homeassistant_topics_for_device(mqtt: MqttClient, *, device_root: str, timeout_s: int) -> list[tuple[str, str]]:
+    mqtt.subscribe("homeassistant/#", force=True)
+    deadline = time.time() + timeout_s
+    matches: list[tuple[str, str]] = []
+    while time.time() < deadline:
+        try:
+            got_topic, payload = mqtt.wait_for_publish(timeout_s=min(2.0, max(0.1, deadline - time.time())))
+        except PortalTestError as exc:
+            if "Timeout waiting for MQTT publish" in str(exc):
+                break
+            raise
+        if not got_topic.startswith("homeassistant/"):
+            continue
+        if device_root not in payload:
+            continue
+        matches.append((got_topic, payload))
+    return matches
+
+
+def _clear_homeassistant_topics_for_device(mqtt: MqttClient, *, device_root: str) -> None:
+    seen = _collect_homeassistant_topics_for_device(mqtt, device_root=device_root, timeout_s=3)
+    for topic, _payload in seen:
+        mqtt.publish(topic, "", retain=True)
+    if seen:
+        time.sleep(1.0)
+
+
+def _wait_for_controller_discovery(mqtt: MqttClient, *, device_root: str, timeout_s: int = 60) -> tuple[str, str]:
+    mqtt.subscribe("homeassistant/#", force=True)
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        got_topic, payload = mqtt.wait_for_publish(timeout_s=min(12.0, max(0.5, deadline - time.time())))
+        if not got_topic.endswith("/MQTT_Config/config"):
+            continue
+        if device_root not in payload:
+            continue
+        return got_topic, payload
+    raise PortalTestError(f"Timeout waiting for controller HA discovery for {device_root}")
+
+
+def _wait_for_homeassistant_quiet(mqtt: MqttClient, *, quiet_s: float = 2.0, timeout_s: float = 20.0) -> None:
+    mqtt.subscribe("homeassistant/#", force=True)
+    deadline = time.time() + timeout_s
+    quiet_deadline = time.time() + quiet_s
+    while time.time() < deadline:
+        remaining_quiet = max(0.1, quiet_deadline - time.time())
+        try:
+            got_topic, _payload = mqtt.wait_for_publish(timeout_s=min(remaining_quiet, 2.0))
+        except PortalTestError as exc:
+            if "Timeout waiting for MQTT publish" in str(exc):
+                return
+            raise
+        if got_topic.startswith("homeassistant/"):
+            quiet_deadline = time.time() + quiet_s
+    raise PortalTestError("Timed out waiting for Home Assistant discovery traffic to go quiet")
 
 
 def _http_request(method: str, url: str, *, body: Optional[bytes] = None, headers: Optional[dict[str, str]] = None, timeout_s: int = 20) -> Tuple[int, bytes]:
@@ -1713,6 +1779,7 @@ def _run_wifi_plus_mqtt_case(
     time.sleep(8)
 
     device_root, wifi_action, wifi_body = _join_ap_and_load_wifi_page(ssh, mqtt, iface=iface)
+    _clear_homeassistant_topics_for_device(mqtt, device_root=device_root)
     portal_runtime_ip = _save_wifi_and_wait_connected(
         ssh,
         wifi_ssid=wifi_ssid,
@@ -1765,6 +1832,8 @@ def _run_wifi_plus_mqtt_case(
     root_page = _wait_for_runtime_root_contains(ssh, base_url, "MQTT connected: 1", timeout_s=180)
     _assert_contains(root_page, "Boot mode: normal", "runtime root")
     _assert_button_theme(root_page, "normal", "runtime root")
+    _wait_for_controller_discovery(mqtt, device_root=device_root, timeout_s=60)
+    _wait_for_homeassistant_quiet(mqtt)
     _assert_runtime_root_stable_under_load(ssh, base_url=base_url)
 
     reboot_wifi_resp = _pi_http_request(ssh, method="POST", url=base_url + "/reboot/wifi", timeout_s=15)
