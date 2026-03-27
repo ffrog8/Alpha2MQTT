@@ -3,6 +3,7 @@
 
 #include <doctest/doctest.h>
 
+#include <cstdio>
 #include <cstring>
 #include <string>
 
@@ -180,6 +181,39 @@ TEST_CASE("portal config: requested family falls back to first non-empty family"
 	CHECK(portalNormalizePollingFamily(entities, 2, "pv") == MqttEntityFamily::Pv);
 	CHECK(portalNormalizePollingFamily(entities, 2, "battery") == MqttEntityFamily::Pv);
 	CHECK(portalNormalizePollingFamily(entities, 2, nullptr) == MqttEntityFamily::Pv);
+}
+
+TEST_CASE("portal config: family paging collects up to eight entities per page")
+{
+	mqttState entities[10]{};
+	for (size_t i = 0; i < 10; ++i) {
+		char name[24];
+		snprintf(name, sizeof(name), "Battery_%zu", i);
+		entities[i] = makeEntity(name, MqttEntityFamily::Battery);
+	}
+
+	PortalFamilyPage first = portalBuildFamilyPage(entities, 10, MqttEntityFamily::Battery, 0, 8);
+	CHECK(first.safePage == 0);
+	CHECK(first.maxPage == 1);
+	CHECK(first.totalEntityCount == 10);
+	CHECK(first.pageStartOffset == 0);
+	CHECK(first.pageCount == 8);
+
+	uint16_t firstIndices[8]{};
+	CHECK(portalCollectFamilyPageEntityIndices(entities, 10, first, firstIndices, 8) == 8);
+	CHECK(firstIndices[0] == 0);
+	CHECK(firstIndices[7] == 7);
+
+	PortalFamilyPage last = portalBuildFamilyPage(entities, 10, MqttEntityFamily::Battery, 99, 8);
+	CHECK(last.safePage == 1);
+	CHECK(last.maxPage == 1);
+	CHECK(last.pageStartOffset == 8);
+	CHECK(last.pageCount == 2);
+
+	uint16_t lastIndices[8]{};
+	CHECK(portalCollectFamilyPageEntityIndices(entities, 10, last, lastIndices, 8) == 2);
+	CHECK(lastIndices[0] == 8);
+	CHECK(lastIndices[1] == 9);
 }
 
 TEST_CASE("portal config: polling estimate collapses snapshot and shared register reads")
