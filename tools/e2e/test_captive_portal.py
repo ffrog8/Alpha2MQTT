@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ipaddress
 import json
 import os
 import re
@@ -31,7 +32,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 
 class PortalTestError(Exception):
@@ -41,6 +42,12 @@ class PortalTestError(Exception):
 VERBOSE = False
 TRACE_HTTP = False
 TRACE_SSH = False
+CASE_ORDER: tuple[str, ...] = (
+    "wifi_only",
+    "wifi_plus_mqtt",
+    "normal_to_wifi_portal_set_mqtt",
+    "normal_to_wifi_portal_bad_wifi_recovery_cycle",
+)
 
 
 def _announce(msg: str) -> None:
@@ -78,6 +85,16 @@ def _default_secrets_file() -> Path:
     return _repo_root() / ".secrets"
 
 
+def _load_json_run_defaults(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    if not isinstance(data, dict):
+        return {}
+    run = data.get("run", {})
+    return run if isinstance(run, dict) else {}
+
+
 def _load_json_file_defaults(path: Path) -> None:
     if not path.exists():
         return
@@ -96,6 +113,30 @@ def _load_json_file_defaults(path: Path) -> None:
             os.environ[key] = str(value)
         elif isinstance(value, str):
             os.environ[key] = value
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return default
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return _as_bool(raw, default)
+
+
+def _env_csv(name: str) -> list[str]:
+    raw = os.environ.get(name, "")
+    if not raw.strip():
+        return []
+    return [v.strip() for v in raw.split(",") if v.strip()]
 
 
 def _load_env_file_defaults(path: Path) -> None:
@@ -798,6 +839,67 @@ raise SystemExit(json.dumps({{"error": last_error or "connect failed", "ssid": b
     return json.loads(out.splitlines()[-1])
 
 
+def _wait_for_ap_ssid_cycle(ssh: PiSsh, *, iface: str, ssid: str, timeout_s: int) -> None:
+    script = f"""
+import json, re, subprocess, time
+iface = {json.dumps(iface)}
+ssid = {json.dumps(ssid)}
+timeout_s = {int(timeout_s)}
+
+def run(cmd, *, check=True):
+    cp = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if check and cp.returncode != 0:
+        raise SystemExit(json.dumps({{"error": cp.stdout.strip() or "command failed", "cmd": cmd}}))
+    return cp.stdout
+
+def scan_for_target():
+    run(["nmcli", "radio", "wifi", "on"], check=False)
+    run(["nmcli", "device", "wifi", "rescan", "ifname", iface], check=False)
+    scan = run([
+        "nmcli", "-t", "-f", "SSID,BSSID,SIGNAL",
+        "device", "wifi", "list", "ifname", iface,
+    ], check=False)
+    present = False
+    for raw in scan.splitlines():
+        if not raw:
+            continue
+        parts = re.split(r'(?<!\\\\):', raw, maxsplit=2)
+        if parts and parts[0] == ssid:
+            present = True
+            break
+    return present, scan
+
+run(["nmcli", "device", "disconnect", iface], check=False)
+deadline = time.time() + timeout_s
+saw_absent = False
+last_scan = ""
+while time.time() < deadline:
+    present, scan = scan_for_target()
+    last_scan = scan
+    if not saw_absent:
+        if not present:
+            saw_absent = True
+    elif present:
+        print(json.dumps({{"ssid": ssid, "cycled": True}}))
+        raise SystemExit(0)
+    time.sleep(2.0)
+
+raise SystemExit(json.dumps({{
+    "error": "ssid did not disappear and reappear in time",
+    "ssid": ssid,
+    "saw_absent": saw_absent,
+    "scan": last_scan,
+}}))
+"""
+    out = ssh.run_python(script, timeout_s=max(60, timeout_s + 15)).strip()
+    try:
+        parsed = json.loads(out.splitlines()[-1])
+    except json.JSONDecodeError as exc:
+        raise PortalTestError(f"Could not parse AP cycle result: {out[:300]!r}") from exc
+    if not parsed.get("cycled"):
+        raise PortalTestError(f"AP cycle wait failed: {parsed!r}")
+
+
 def _pi_http_request(ssh: PiSsh, *, method: str, url: str, form: Optional[dict[str, str]] = None, timeout_s: int = 20) -> dict[str, Any]:
     script = f"""
 import json, subprocess, urllib.parse
@@ -852,6 +954,20 @@ def _assert_contains_any(text: str, needles: list[str], context: str) -> None:
 def _assert_portal_root_menu(body: str, context: str) -> None:
     for needle in ("/0wifi", "/config/mqtt", "/config/polling", "/config/update", "/status", "/config/reboot-normal"):
         _assert_contains(body, needle, context)
+
+
+def _assert_button_theme(body: str, mode: str, context: str) -> None:
+    accents = {
+        "ap": "#1c6bcf",
+        "wifi": "#c57a00",
+        "normal": "#1d8c4b",
+    }
+    accent = accents[mode]
+    _assert_contains(body, 'meta name="a2m-ui" content="buttons-v1"', context)
+    _assert_contains(body, f'meta name="a2m-mode" content="{mode}"', context)
+    _assert_contains(body, f'meta name="a2m-accent" content="{accent}"', context)
+    _assert_contains(body, "border-radius:14px", context)
+    _assert_contains(body, "min-height:52px", context)
 
 
 def _extract_runtime_ip_from_status(body: str) -> str:
@@ -955,7 +1071,7 @@ def _discover_runtime_root(ssh: PiSsh, *, previous_ip: str, hostname: str, timeo
         pass
 
     script = f"""
-import concurrent.futures, ipaddress, json, urllib.request
+import concurrent.futures, ipaddress, json, subprocess, urllib.request
 previous_ip = {json.dumps(previous_ip)}
 hostname = {json.dumps(hostname)}
 timeout_s = {int(timeout_s)}
@@ -974,11 +1090,40 @@ urls = []
 if hostname:
     urls.append(f"http://{{hostname}}/")
 
-network = ipaddress.ip_network(previous_ip + "/24", strict=False)
-preferred = [ipaddress.ip_address(previous_ip)]
-others = [ip for ip in network.hosts() if ip != preferred[0]]
-ordered = preferred + others
-urls.extend([f"http://{{ip}}/" for ip in ordered])
+seen = set(urls)
+
+def add_url(url: str):
+    if url not in seen:
+        seen.add(url)
+        urls.append(url)
+
+if previous_ip:
+    network = ipaddress.ip_network(previous_ip + "/24", strict=False)
+    preferred = [ipaddress.ip_address(previous_ip)]
+    others = [ip for ip in network.hosts() if ip != preferred[0]]
+    ordered = preferred + others
+    for ip in ordered:
+        add_url(f"http://{{ip}}/")
+else:
+    try:
+        addr_data = json.loads(subprocess.check_output(["ip", "-json", "-4", "addr", "show", "up"], text=True))
+    except Exception:
+        addr_data = []
+    for iface in addr_data:
+        for info in iface.get("addr_info", []):
+            if info.get("family") != "inet" or info.get("scope") != "global":
+                continue
+            local = info.get("local")
+            prefixlen = int(info.get("prefixlen", 24))
+            if not local:
+                continue
+            try:
+                addr = ipaddress.ip_address(local)
+            except ValueError:
+                continue
+            network = ipaddress.ip_network(f"{{local}}/{{max(prefixlen, 24)}}", strict=False)
+            for ip in network.hosts():
+                add_url(f"http://{{ip}}/")
 
 with concurrent.futures.ThreadPoolExecutor(max_workers=32) as ex:
     futures = [ex.submit(probe_url, url) for url in urls]
@@ -1225,6 +1370,7 @@ def _join_ap_and_load_wifi_page(ssh: "PiSsh", mqtt: "MqttClient", *, iface: str)
         raise PortalTestError(f"Portal GET / returned {root_resp.get('status')}")
     root_body = str(root_resp.get("body", ""))
     _assert_portal_root_menu(root_body, "portal root")
+    _assert_button_theme(root_body, "ap", "portal root")
 
     deadline = time.time() + 20
     wifi_body = ""
@@ -1246,6 +1392,7 @@ def _join_ap_and_load_wifi_page(ssh: "PiSsh", mqtt: "MqttClient", *, iface: str)
         time.sleep(1.0)
     if not wifi_action or "s" not in input_names or "p" not in input_names:
         raise PortalTestError(f"wifi form missing ssid/password inputs: names={sorted(input_names)!r}")
+    _assert_button_theme(wifi_body, "ap", "portal wifi page")
     return ap_ssid, wifi_action, wifi_body
 
 
@@ -1352,6 +1499,24 @@ def _wait_for_page_contains(ssh: "PiSsh", *, url: str, needle: str, timeout_s: i
             return body
         time.sleep(1.0)
     raise PortalTestError(f"{url}: missing {needle!r}; last={last[:300]!r}")
+
+
+def _extract_uptime_ms(status_body: str) -> int:
+    match = re.search(r"Uptime \(ms\):\s*(\d+)", status_body, flags=re.IGNORECASE)
+    if not match:
+        raise PortalTestError(f"Could not parse uptime from status page: {status_body[:300]!r}")
+    return int(match.group(1))
+
+
+def _literal_ip_from_base_url(base_url: str) -> str:
+    host = urllib.parse.urlparse(base_url).hostname or ""
+    if not host:
+        return ""
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return ""
+    return host
 
 
 def _resolve_http_base_url(
@@ -1464,6 +1629,7 @@ def _run_wifi_only_case(
         timeout_s=180,
     )
     _assert_portal_root_menu(portal_root_body, "sta portal root (wifi-only case)")
+    _assert_button_theme(portal_root_body, "wifi", "sta portal root (wifi-only case)")
     portal_runtime_ip = urllib.parse.urlparse(portal_base_url).hostname or portal_runtime_ip
 
     _reboot_normal_and_tolerate_disconnect(
@@ -1480,6 +1646,7 @@ def _run_wifi_only_case(
     )
     _assert_contains(root_page, "Boot mode: normal", "runtime root (wifi-only case)")
     _assert_contains(root_page, "MQTT connected: 0", "runtime root (wifi-only case)")
+    _assert_button_theme(root_page, "normal", "runtime root (wifi-only case)")
     return base_url
 
 
@@ -1510,14 +1677,31 @@ def _run_wifi_plus_mqtt_case(
         wifi_action=wifi_action,
         wifi_body=wifi_body,
     )
-    portal_base_url, portal_root_body = _discover_sta_portal_base(
-        ssh,
-        previous_ip=portal_runtime_ip,
-        hostname=device_root,
-        timeout_s=180,
-    )
+    try:
+        portal_base_url, _portal_page = _discover_sta_portal_base(
+            ssh,
+            previous_ip=portal_runtime_ip,
+            hostname=device_root,
+            timeout_s=180,
+        )
+    except Exception:
+        base_url, root_page = _discover_runtime_root(
+            ssh,
+            previous_ip=portal_runtime_ip,
+            hostname=device_root,
+            timeout_s=180,
+        )
+        _assert_contains(root_page, "Boot mode: normal", "runtime root (wifi+mqtt default path)")
+        root_page = _wait_for_runtime_root_contains(ssh, base_url, "MQTT connected: 1", timeout_s=180)
+        _assert_contains(root_page, "Boot mode: normal", "runtime root (wifi+mqtt default path)")
+        _assert_button_theme(root_page, "normal", "runtime root (wifi+mqtt default path)")
+        return base_url
+    portal_root_body = _wait_for_page_contains(ssh, url=portal_base_url + "/", needle="/config/mqtt", timeout_s=20)
     _assert_portal_root_menu(portal_root_body, "sta portal root (wifi+mqtt case)")
-    portal_runtime_ip = urllib.parse.urlparse(portal_base_url).hostname or portal_runtime_ip
+    _assert_button_theme(portal_root_body, "wifi", "sta portal root (wifi+mqtt case)")
+    literal_portal_ip = _literal_ip_from_base_url(portal_base_url)
+    if literal_portal_ip:
+        portal_runtime_ip = literal_portal_ip
 
     _save_mqtt_params(
         ssh,
@@ -1528,9 +1712,16 @@ def _run_wifi_plus_mqtt_case(
         mqtt_pass=mqtt_pass,
     )
 
-    base_url = portal_base_url
+    base_url, root_page = _discover_runtime_root(
+        ssh,
+        previous_ip=portal_runtime_ip,
+        hostname=device_root,
+        timeout_s=180,
+    )
+    _assert_contains(root_page, "Boot mode: normal", "runtime root")
     root_page = _wait_for_runtime_root_contains(ssh, base_url, "MQTT connected: 1", timeout_s=180)
     _assert_contains(root_page, "Boot mode: normal", "runtime root")
+    _assert_button_theme(root_page, "normal", "runtime root")
 
     reboot_wifi_resp = _pi_http_request(ssh, method="POST", url=base_url + "/reboot/wifi", timeout_s=15)
     reboot_wifi_status = int(reboot_wifi_resp.get("status", 0))
@@ -1538,6 +1729,9 @@ def _run_wifi_plus_mqtt_case(
         raise PortalTestError(f"/reboot/wifi returned unexpected status={reboot_wifi_status}")
 
     base_url = _rediscover_sta_portal_after_reboot_wifi(ssh, base_url, timeout_s=90)
+    literal_portal_ip = _literal_ip_from_base_url(base_url)
+    if literal_portal_ip:
+        portal_runtime_ip = literal_portal_ip
 
     bucket_map = "State_of_Charge=ten_sec;"
     polling_page_resp = _pi_http_request(ssh, method="GET", url=base_url + "/config/polling", timeout_s=10)
@@ -1551,7 +1745,7 @@ def _run_wifi_plus_mqtt_case(
         form={
             "family": "battery",
             "page": "0",
-            "poll_interval_s": "13",
+            "poll_interval_s": "9",
             "bucket_map_full": bucket_map,
             "csrf": polling_csrf,
         },
@@ -1571,7 +1765,7 @@ def _run_wifi_plus_mqtt_case(
         page="0",
         entity_name="State_of_Charge",
         expected_bucket="ten_sec",
-        expected_poll_interval_s="13",
+        expected_poll_interval_s="9",
         timeout_s=30,
     )
 
@@ -1583,6 +1777,12 @@ def _run_wifi_plus_mqtt_case(
     except Exception as exc:
         _http_log(f"/config/reboot-normal transport did not complete cleanly: {exc}")
 
+    base_url, final_root_page = _discover_runtime_root(
+        ssh,
+        previous_ip=portal_runtime_ip,
+        hostname=device_root,
+        timeout_s=60,
+    )
     final_root_page = _wait_for_runtime_root_contains(ssh, base_url, "MQTT connected: 1", timeout_s=60)
     _assert_contains(final_root_page, "Boot mode: normal", "final runtime root")
     _wait_for_config_interval(
@@ -1590,7 +1790,7 @@ def _run_wifi_plus_mqtt_case(
         device_root=device_root,
         entity_name="State_of_Charge",
         expected_bucket="ten_sec",
-        expected_poll_interval_s="13",
+        expected_poll_interval_s="9",
         timeout_s=60,
     )
     return base_url
@@ -1662,7 +1862,7 @@ def _run_normal_to_wifi_portal_bad_wifi_falls_back_to_ap_case(
     mqtt_user: str,
     mqtt_pass: str,
 ) -> None:
-    _announce("case: fresh blank flash -> wifi plus mqtt -> sta portal -> save bad wifi -> ap fallback")
+    _announce("case: fresh blank flash -> wifi plus mqtt -> sta portal -> save bad wifi -> AP recovery cycle")
     base_url = _run_wifi_plus_mqtt_case(
         ssh,
         mqtt,
@@ -1736,6 +1936,33 @@ def _run_normal_to_wifi_portal_bad_wifi_falls_back_to_ap_case(
         raise PortalTestError("ap fallback polling nav did not render human-readable family labels")
     _wait_for_page_contains(ssh, url="http://192.168.4.1/", needle="/config/update", timeout_s=20)
 
+    _announce("waiting for AP idle timeout to cycle back through normal retry")
+    ap_idle_recovery_wait_s = int(os.environ.get("A2M_AP_IDLE_RECOVERY_WAIT_S", "0") or "0")
+    if ap_idle_recovery_wait_s > 0:
+        time.sleep(ap_idle_recovery_wait_s)
+    else:
+        _wait_for_ap_ssid_cycle(ssh, iface=iface, ssid=ap_ssid, timeout_s=420)
+    ap_ssid, _wifi_action, _wifi_body = _join_ap_and_load_wifi_page(ssh, mqtt, iface=iface)
+    status_resp = _pi_http_request(ssh, method="GET", url="http://192.168.4.1/status", timeout_s=10)
+    if int(status_resp.get("status", 0)) != 200:
+        raise PortalTestError(f"AP recovery-cycle /status returned {status_resp.get('status')}")
+    status_body = str(status_resp.get("body", ""))
+    _assert_contains(status_body, "Boot mode: ap_config", "ap recovery-cycle status")
+    _assert_contains(status_body, bad_ssid, "ap recovery-cycle target ssid")
+    if ap_idle_recovery_wait_s > 0:
+        recovery_uptime_ms = _extract_uptime_ms(status_body)
+        max_recovery_uptime_ms = int(
+            os.environ.get(
+                "A2M_AP_IDLE_RECOVERY_MAX_UPTIME_MS",
+                str(max(10000, max(1, ap_idle_recovery_wait_s - 20) * 1000)),
+            )
+        )
+        if recovery_uptime_ms > max_recovery_uptime_ms:
+            raise PortalTestError(
+                "AP recovery-cycle uptime was too high to prove reboot: "
+                f"uptime_ms={recovery_uptime_ms} threshold_ms={max_recovery_uptime_ms}"
+            )
+
     # Keep the final portal case self-cleaning. This case intentionally stages bad
     # WiFi to prove AP fallback, but the suite should finish with the device back on
     # the normal LAN so follow-up checks and manual access do not inherit AP mode.
@@ -1765,21 +1992,53 @@ def _run_normal_to_wifi_portal_bad_wifi_falls_back_to_ap_case(
 def main() -> int:
     global VERBOSE, TRACE_HTTP, TRACE_SSH
 
-    _load_json_file_defaults(_default_json_file())
+    json_cfg_path = _default_json_file()
+    run_cfg = _load_json_run_defaults(json_cfg_path)
+    _load_json_file_defaults(json_cfg_path)
     _load_env_file_defaults(_default_env_file())
     _load_secrets_defaults(_default_secrets_file())
+
+    default_verbose = _env_bool("E2E_VERBOSE", _as_bool(run_cfg.get("verbose", False)))
+    default_trace_http = _env_bool("E2E_TRACE_HTTP", _as_bool(run_cfg.get("trace_http", False)))
+    default_trace_ssh = _env_bool("E2E_TRACE_SSH", _as_bool(run_cfg.get("trace_ssh", False)))
+    default_cases = _env_csv("E2E_CASES")
+    if not default_cases:
+        cfg_cases = run_cfg.get("cases", [])
+        if isinstance(cfg_cases, list):
+            default_cases = [str(v).strip() for v in cfg_cases if str(v).strip()]
+    default_from_case = os.environ.get("E2E_FROM_CASE", "").strip()
+    if not default_from_case:
+        raw_from_case = run_cfg.get("from_case", "")
+        if isinstance(raw_from_case, str):
+            default_from_case = raw_from_case.strip()
 
     ap = argparse.ArgumentParser(description="Real-device captive portal verification")
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--trace-http", action="store_true")
     ap.add_argument("--trace-ssh", action="store_true")
+    ap.add_argument("--list-cases", action="store_true", help="List available test cases and exit.")
+    ap.add_argument("--case", action="append", dest="cases", default=[], help="Run only the named case.")
+    ap.add_argument("--from-case", default="", help="Run starting from the named case.")
     ap.add_argument("--serial-port", default=os.environ.get("A2M_SERIAL_PORT", "/dev/ttyUSB0"))
     ap.add_argument("--flash-baud", default=os.environ.get("A2M_FLASH_BAUD", "460800"))
     ap.add_argument("--pi-wifi-iface", default=os.environ.get("PI_WIFI_IFACE", "wlan0"))
     args = ap.parse_args()
-    VERBOSE = args.verbose
-    TRACE_HTTP = args.trace_http
-    TRACE_SSH = args.trace_ssh
+    if args.list_cases:
+        for name in CASE_ORDER:
+            print(name)
+        return 0
+
+    selected_cases = args.cases if args.cases else default_cases
+    from_case = args.from_case.strip() if args.from_case else default_from_case
+    for name in selected_cases:
+        if name not in CASE_ORDER:
+            raise PortalTestError(f"Unknown case: {name!r}")
+    if from_case and from_case not in CASE_ORDER:
+        raise PortalTestError(f"Unknown from-case: {from_case!r}")
+
+    VERBOSE = bool(args.verbose or default_verbose)
+    TRACE_HTTP = bool(args.trace_http or default_trace_http)
+    TRACE_SSH = bool(args.trace_ssh or default_trace_ssh)
 
     mqtt_host = _require_env("MQTT_HOST")
     mqtt_port = int(os.environ.get("MQTT_PORT", "1883"))
@@ -1797,58 +2056,84 @@ def main() -> int:
     mqtt = MqttClient(mqtt_host, mqtt_port, mqtt_user, mqtt_pass)
     try:
         mqtt.connect()
-        _run_wifi_only_case(
-            ssh,
-            mqtt,
-            iface=args.pi_wifi_iface,
-            fw_path=fw_path,
-            serial_port=args.serial_port,
-            flash_baud=args.flash_baud,
-            wifi_ssid=wifi_ssid,
-            wifi_pwd=wifi_pwd,
-        )
-        _run_wifi_plus_mqtt_case(
-            ssh,
-            mqtt,
-            iface=args.pi_wifi_iface,
-            fw_path=fw_path,
-            serial_port=args.serial_port,
-            flash_baud=args.flash_baud,
-            wifi_ssid=wifi_ssid,
-            wifi_pwd=wifi_pwd,
-            mqtt_host=mqtt_host,
-            mqtt_port=mqtt_port,
-            mqtt_user=mqtt_user,
-            mqtt_pass=mqtt_pass,
-        )
-        _run_normal_to_wifi_portal_set_mqtt_case(
-            ssh,
-            mqtt,
-            iface=args.pi_wifi_iface,
-            fw_path=fw_path,
-            serial_port=args.serial_port,
-            flash_baud=args.flash_baud,
-            wifi_ssid=wifi_ssid,
-            wifi_pwd=wifi_pwd,
-            mqtt_host=mqtt_host,
-            mqtt_port=mqtt_port,
-            mqtt_user=mqtt_user,
-            mqtt_pass=mqtt_pass,
-        )
-        _run_normal_to_wifi_portal_bad_wifi_falls_back_to_ap_case(
-            ssh,
-            mqtt,
-            iface=args.pi_wifi_iface,
-            fw_path=fw_path,
-            serial_port=args.serial_port,
-            flash_baud=args.flash_baud,
-            wifi_ssid=wifi_ssid,
-            wifi_pwd=wifi_pwd,
-            mqtt_host=mqtt_host,
-            mqtt_port=mqtt_port,
-            mqtt_user=mqtt_user,
-            mqtt_pass=mqtt_pass,
-        )
+        cases: list[tuple[str, Callable[[], None]]] = [
+            (
+                "wifi_only",
+                lambda: _run_wifi_only_case(
+                    ssh,
+                    mqtt,
+                    iface=args.pi_wifi_iface,
+                    fw_path=fw_path,
+                    serial_port=args.serial_port,
+                    flash_baud=args.flash_baud,
+                    wifi_ssid=wifi_ssid,
+                    wifi_pwd=wifi_pwd,
+                ),
+            ),
+            (
+                "wifi_plus_mqtt",
+                lambda: _run_wifi_plus_mqtt_case(
+                    ssh,
+                    mqtt,
+                    iface=args.pi_wifi_iface,
+                    fw_path=fw_path,
+                    serial_port=args.serial_port,
+                    flash_baud=args.flash_baud,
+                    wifi_ssid=wifi_ssid,
+                    wifi_pwd=wifi_pwd,
+                    mqtt_host=mqtt_host,
+                    mqtt_port=mqtt_port,
+                    mqtt_user=mqtt_user,
+                    mqtt_pass=mqtt_pass,
+                ),
+            ),
+            (
+                "normal_to_wifi_portal_set_mqtt",
+                lambda: _run_normal_to_wifi_portal_set_mqtt_case(
+                    ssh,
+                    mqtt,
+                    iface=args.pi_wifi_iface,
+                    fw_path=fw_path,
+                    serial_port=args.serial_port,
+                    flash_baud=args.flash_baud,
+                    wifi_ssid=wifi_ssid,
+                    wifi_pwd=wifi_pwd,
+                    mqtt_host=mqtt_host,
+                    mqtt_port=mqtt_port,
+                    mqtt_user=mqtt_user,
+                    mqtt_pass=mqtt_pass,
+                ),
+            ),
+            (
+                "normal_to_wifi_portal_bad_wifi_recovery_cycle",
+                lambda: _run_normal_to_wifi_portal_bad_wifi_falls_back_to_ap_case(
+                    ssh,
+                    mqtt,
+                    iface=args.pi_wifi_iface,
+                    fw_path=fw_path,
+                    serial_port=args.serial_port,
+                    flash_baud=args.flash_baud,
+                    wifi_ssid=wifi_ssid,
+                    wifi_pwd=wifi_pwd,
+                    mqtt_host=mqtt_host,
+                    mqtt_port=mqtt_port,
+                    mqtt_user=mqtt_user,
+                    mqtt_pass=mqtt_pass,
+                ),
+            ),
+        ]
+        case_map = {name: fn for name, fn in cases}
+        ordered_names = [name for name, _fn in cases]
+        if from_case:
+            ordered_names = ordered_names[ordered_names.index(from_case):]
+        if selected_cases:
+            selected_set = set(selected_cases)
+            ordered_names = [name for name in ordered_names if name in selected_set]
+        if not ordered_names:
+            raise PortalTestError("No cases selected to run")
+
+        for name in ordered_names:
+            case_map[name]()
 
         _announce("OK")
         return 0
