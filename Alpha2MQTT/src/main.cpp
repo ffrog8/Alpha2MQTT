@@ -1276,66 +1276,132 @@ portalUiAccentDarkHex(PortalUiMode mode)
 	}
 }
 
-static bool
-sendHttpContentP(PGM_P content)
-{
-	if (content == nullptr) {
-		return false;
+struct HttpResponseWriter {
+	WiFiClient *client = nullptr;
+
+	bool
+	writeBytes(const uint8_t *data, size_t len)
+	{
+		if (data == nullptr || client == nullptr) {
+			return false;
+		}
+
+		size_t written = 0;
+		uint8_t idleSpins = 0;
+		while (written < len) {
+			if (!client->connected()) {
+				return false;
+			}
+			const size_t chunkWritten = client->write(data + written, len - written);
+			if (chunkWritten == 0) {
+				if (++idleSpins >= 8) {
+					return false;
+				}
+				delay(1);
+#if defined(MP_ESP8266)
+				ESP.wdtFeed();
+#endif
+				continue;
+			}
+			written += chunkWritten;
+			idleSpins = 0;
+			delay(0);
+#if defined(MP_ESP8266)
+			ESP.wdtFeed();
+#endif
+		}
+		return true;
 	}
-	char scratch[256];
-	size_t remaining = strlen_P(content);
-	size_t offset = 0;
-	while (remaining > 0) {
-		const size_t chunk = (remaining < (sizeof(scratch) - 1)) ? remaining : (sizeof(scratch) - 1);
-		memcpy_P(scratch, content + offset, chunk);
-		scratch[chunk] = '\0';
-		httpServer.sendContent(scratch);
-		offset += chunk;
-		remaining -= chunk;
+
+	bool
+	write(const char *content)
+	{
+		if (content == nullptr) {
+			return false;
+		}
+		return writeBytes(reinterpret_cast<const uint8_t *>(content), strlen(content));
 	}
-	return true;
-}
+
+	bool
+	writeP(PGM_P content)
+	{
+		if (content == nullptr) {
+			return false;
+		}
+		char scratch[256];
+		size_t remaining = strlen_P(content);
+		size_t offset = 0;
+		while (remaining > 0) {
+			const size_t chunk = (remaining < (sizeof(scratch) - 1)) ? remaining : (sizeof(scratch) - 1);
+			memcpy_P(scratch, content + offset, chunk);
+			scratch[chunk] = '\0';
+			if (!writeBytes(reinterpret_cast<const uint8_t *>(scratch), chunk)) {
+				return false;
+			}
+			offset += chunk;
+			remaining -= chunk;
+		}
+		return true;
+	}
+};
 
 static bool
-sendHttpUiPageStart(const char *title, const char *heading, PortalUiMode mode, PGM_P extraHead = nullptr)
+writeHttpUiPageStart(HttpResponseWriter &writer,
+                     const char *title,
+                     const char *heading,
+                     PortalUiMode mode,
+                     PGM_P extraHead = nullptr)
 {
-	if (!sendHttpContentP(kUiPageHeadOpen)) {
+	return writer.writeP(kUiPageHeadOpen) &&
+	       writer.write(portalUiModeToken(mode)) &&
+	       writer.writeP(kUiPageHeadAccentOpen) &&
+	       writer.write(portalUiAccentHex(mode)) &&
+	       writer.writeP(kUiPageHeadVarsOpen) &&
+	       writer.write(portalUiAccentHex(mode)) &&
+	       writer.writeP(kUiPageHeadVarsMid) &&
+	       writer.write(portalUiAccentDarkHex(mode)) &&
+	       writer.writeP(kUiPageHeadVarsClose) &&
+	       (extraHead == nullptr || writer.writeP(extraHead)) &&
+	       writer.writeP(kUiSharedStyle) &&
+	       writer.writeP(kUiPageTitleOpen) &&
+	       writer.write(title != nullptr ? title : "Alpha2MQTT") &&
+	       writer.writeP(kUiPageTitleClose) &&
+	       writer.writeP(kUiPageBodyOpen) &&
+	       writer.write(portalUiModeToken(mode)) &&
+	       writer.writeP(kUiPageHeadingOpen) &&
+	       writer.write(heading != nullptr ? heading : "Alpha2MQTT") &&
+	       writer.writeP(kUiPageHeadingClose);
+}
+
+template <typename EmitFn>
+static bool
+sendHttpHtmlResponse(EmitFn emitPage)
+{
+	WiFiClient client = httpServer.client();
+	if (!client.connected()) {
 		return false;
 	}
-	httpServer.sendContent(portalUiModeToken(mode));
-	if (!sendHttpContentP(kUiPageHeadAccentOpen)) {
+
+	HttpResponseWriter writer;
+	writer.client = &client;
+	char header[192];
+	const int headerLen = snprintf(header,
+	                               sizeof(header),
+	                               "HTTP/1.1 200 OK\r\n"
+	                               "Content-Type: text/html\r\n"
+	                               "Cache-Control: no-store\r\n"
+	                               "Connection: close\r\n"
+	                               "\r\n");
+	if (headerLen <= 0 || static_cast<size_t>(headerLen) >= sizeof(header) || !writer.write(header)) {
+		client.stop();
 		return false;
 	}
-	httpServer.sendContent(portalUiAccentHex(mode));
-	if (!sendHttpContentP(kUiPageHeadVarsOpen)) {
+	if (!emitPage(writer)) {
+		client.stop();
 		return false;
 	}
-	httpServer.sendContent(portalUiAccentHex(mode));
-	if (!sendHttpContentP(kUiPageHeadVarsMid)) {
-		return false;
-	}
-	httpServer.sendContent(portalUiAccentDarkHex(mode));
-	if (!sendHttpContentP(kUiPageHeadVarsClose)) {
-		return false;
-	}
-	if (extraHead != nullptr && !sendHttpContentP(extraHead)) {
-		return false;
-	}
-	if (!sendHttpContentP(kUiPageTitleOpen)) {
-		return false;
-	}
-	httpServer.sendContent(title != nullptr ? title : "Alpha2MQTT");
-	if (!sendHttpContentP(kUiPageTitleClose) ||
-	    !sendHttpContentP(kUiSharedStyle) ||
-	    !sendHttpContentP(kUiPageBodyOpen)) {
-		return false;
-	}
-	httpServer.sendContent(portalUiModeToken(mode));
-	if (!sendHttpContentP(kUiPageHeadingOpen)) {
-		return false;
-	}
-	httpServer.sendContent(heading != nullptr ? heading : "Alpha2MQTT");
-	return sendHttpContentP(kUiPageHeadingClose);
+	client.flush();
+	return true;
 }
 
 } // namespace
@@ -1376,9 +1442,6 @@ handleHttpRoot(void)
 		httpServer.send(503, "text/plain", "Reboot pending");
 		return;
 	}
-	httpServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
-	httpServer.sendHeader("Connection", "close");
-	httpServer.send(200, "text/html", "");
 
 	const IPAddress ip = WiFi.localIP();
 	const wl_status_t wifiStatus = WiFi.status();
@@ -1389,60 +1452,68 @@ handleHttpRoot(void)
 	const char *rs485Backend = "real";
 #endif
 	char buf[384];
-
-	sendHttpUiPageStart("Alpha2MQTT Control", "Alpha2MQTT Control", PortalUiMode::Normal);
-	snprintf(buf, sizeof(buf), "<p>Boot mode: %s<br>Boot intent: %s<br>Reset reason: %s</p>",
-	         bootModeToString(currentBootMode),
-	         bootIntentToString(currentBootIntent),
-	         lastResetReason);
-	httpServer.sendContent(buf);
-
-	httpServer.sendContent("<form method='POST' action='/reboot/normal'><button>Reboot Normal</button></form>");
-	httpServer.sendContent("<form method='POST' action='/reboot/ap'><button>Reboot AP Config</button></form>");
-	httpServer.sendContent("<form method='POST' action='/reboot/wifi'><button>Reboot WiFi Config</button></form>");
-
-	httpServer.sendContent("<h4>Status</h4><p>");
-	snprintf(buf, sizeof(buf),
-	         "Firmware version: %s<br>RS485 backend: %s<br>"
-	         "Uptime (ms): %lu<br>WiFi status: %d<br>RSSI (dBm): %d<br>IP: %u.%u.%u.%u",
-	         _version,
-	         rs485Backend,
-	         static_cast<unsigned long>(millis()),
-	         static_cast<int>(wifiStatus),
-	         WiFi.RSSI(),
-	         ip[0], ip[1], ip[2], ip[3]);
-	httpServer.sendContent(buf);
-	snprintf(buf, sizeof(buf),
-	         "<br>MQTT connected: %u<br>MQTT reconnects: %lu"
-	         "<br>Inverter ready: %u<br>RS485 state: %u<br>RS485 errors: %lu",
-	         _mqtt.connected() ? 1U : 0U,
-	         static_cast<unsigned long>(mqttReconnectCount),
-	         inverterReady ? 1U : 0U,
-	         static_cast<unsigned>(rs485ConnectState),
-	         rs485ErrorCount);
-	httpServer.sendContent(buf);
-	snprintf(buf, sizeof(buf),
-	         "<br>Poll ok: %lu<br>Poll err: %lu<br>Last poll ms: %lu"
-	         "<br>ESS snapshot ok: %u<br>ESS snapshot attempts: %lu<br>poll_interval_s: %lu",
-	         static_cast<unsigned long>(pollOkCount),
-	         static_cast<unsigned long>(pollErrCount),
-	         static_cast<unsigned long>(lastPollMs),
-	         essSnapshotLastOk ? 1U : 0U,
-	         static_cast<unsigned long>(essSnapshotAttemptCount),
-	         static_cast<unsigned long>(pollIntervalSeconds));
-	httpServer.sendContent(buf);
+	auto emitPage = [&](HttpResponseWriter &writer) -> bool {
+		if (!writeHttpUiPageStart(writer, "Alpha2MQTT Control", "Alpha2MQTT Control", PortalUiMode::Normal)) {
+			return false;
+		}
+		snprintf(buf, sizeof(buf), "<p>Boot mode: %s<br>Boot intent: %s<br>Reset reason: %s</p>",
+		         bootModeToString(currentBootMode),
+		         bootIntentToString(currentBootIntent),
+		         lastResetReason);
+		if (!writer.write(buf) ||
+		    !writer.write("<form method='POST' action='/reboot/normal'><button>Reboot Normal</button></form>") ||
+		    !writer.write("<form method='POST' action='/reboot/ap'><button>Reboot AP Config</button></form>") ||
+		    !writer.write("<form method='POST' action='/reboot/wifi'><button>Reboot WiFi Config</button></form>") ||
+		    !writer.write("<h4>Status</h4><p>")) {
+			return false;
+		}
+		snprintf(buf, sizeof(buf),
+		         "Firmware version: %s<br>RS485 backend: %s<br>"
+		         "Uptime (ms): %lu<br>WiFi status: %d<br>RSSI (dBm): %d<br>IP: %u.%u.%u.%u",
+		         _version,
+		         rs485Backend,
+		         static_cast<unsigned long>(millis()),
+		         static_cast<int>(wifiStatus),
+		         WiFi.RSSI(),
+		         ip[0], ip[1], ip[2], ip[3]);
+		if (!writer.write(buf)) {
+			return false;
+		}
+		snprintf(buf, sizeof(buf),
+		         "<br>MQTT connected: %u<br>MQTT reconnects: %lu"
+		         "<br>Inverter ready: %u<br>RS485 state: %u<br>RS485 errors: %lu",
+		         _mqtt.connected() ? 1U : 0U,
+		         static_cast<unsigned long>(mqttReconnectCount),
+		         inverterReady ? 1U : 0U,
+		         static_cast<unsigned>(rs485ConnectState),
+		         rs485ErrorCount);
+		if (!writer.write(buf)) {
+			return false;
+		}
+		snprintf(buf, sizeof(buf),
+		         "<br>Poll ok: %lu<br>Poll err: %lu<br>Last poll ms: %lu"
+		         "<br>ESS snapshot ok: %u<br>ESS snapshot attempts: %lu<br>poll_interval_s: %lu",
+		         static_cast<unsigned long>(pollOkCount),
+		         static_cast<unsigned long>(pollErrCount),
+		         static_cast<unsigned long>(lastPollMs),
+		         essSnapshotLastOk ? 1U : 0U,
+		         static_cast<unsigned long>(essSnapshotAttemptCount),
+		         static_cast<unsigned long>(pollIntervalSeconds));
+		if (!writer.write(buf)) {
+			return false;
+		}
 #if defined(MP_ESP8266)
-	snprintf(buf, sizeof(buf),
-	         "<br>Heap free/max/frag: %u/%u/%u",
-	         ESP.getFreeHeap(),
-	         ESP.getMaxFreeBlockSize(),
-	         ESP.getHeapFragmentation());
+		snprintf(buf, sizeof(buf),
+		         "<br>Heap free/max/frag: %u/%u/%u",
+		         ESP.getFreeHeap(),
+		         ESP.getMaxFreeBlockSize(),
+		         ESP.getHeapFragmentation());
 #else
-	snprintf(buf, sizeof(buf), "<br>Heap free: %u", ESP.getFreeHeap());
+		snprintf(buf, sizeof(buf), "<br>Heap free: %u", ESP.getFreeHeap());
 #endif
-	httpServer.sendContent(buf);
-	sendHttpContentP(kUiPageTail);
-	httpServer.sendContent("");
+		return writer.write(buf) && writer.writeP(kUiPageTail);
+	};
+	(void)sendHttpHtmlResponse(emitPage);
 }
 
 void

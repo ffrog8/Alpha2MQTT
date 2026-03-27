@@ -1063,6 +1063,49 @@ def _wait_for_runtime_root_contains(ssh: PiSsh, base_url: str, needle: str, *, t
     raise PortalTestError(f"runtime root: missing {needle!r}; last={last[:300]!r}")
 
 
+def _assert_runtime_root_stable_under_load(
+    ssh: PiSsh,
+    *,
+    base_url: str,
+    duration_s: int = 12,
+) -> None:
+    initial_resp = _pi_http_request(ssh, method="GET", url=base_url + "/", timeout_s=10)
+    if int(initial_resp.get("status", 0)) != 200:
+        raise PortalTestError(f"Initial runtime GET / failed under load with status={initial_resp.get('status')}")
+    initial_body = str(initial_resp.get("body", ""))
+    initial_match = re.search(r"Uptime \(ms\): (\d+)", initial_body)
+    if not initial_match:
+        raise PortalTestError(f"Runtime root missing uptime marker under load: {initial_body[:300]!r}")
+    initial_uptime_ms = int(initial_match.group(1))
+
+    deadline = time.time() + duration_s
+    last_body = ""
+    last_uptime_ms = initial_uptime_ms
+    while time.time() < deadline:
+        resp = _pi_http_request(ssh, method="GET", url=base_url + "/", timeout_s=10)
+        if int(resp.get("status", 0)) != 200:
+            raise PortalTestError(f"Runtime GET / failed under load with status={resp.get('status')}")
+        last_body = str(resp.get("body", ""))
+        if "Boot mode: normal" not in last_body or "MQTT connected: 1" not in last_body:
+            raise PortalTestError(f"Runtime root lost expected markers under load: {last_body[:300]!r}")
+        uptime_match = re.search(r"Uptime \(ms\): (\d+)", last_body)
+        if not uptime_match:
+            raise PortalTestError(f"Runtime root missing uptime marker under load: {last_body[:300]!r}")
+        current_uptime_ms = int(uptime_match.group(1))
+        if current_uptime_ms + 500 < last_uptime_ms:
+            raise PortalTestError(
+                f"Runtime uptime moved backwards under HTTP load: previous={last_uptime_ms}ms current={current_uptime_ms}ms"
+            )
+        last_uptime_ms = current_uptime_ms
+        time.sleep(0.5)
+
+    min_expected_ms = initial_uptime_ms + max(5000, (duration_s * 1000) // 2)
+    if last_uptime_ms < min_expected_ms:
+        raise PortalTestError(
+            f"Runtime uptime did not advance enough under HTTP load: start={initial_uptime_ms}ms end={last_uptime_ms}ms expected>={min_expected_ms}ms"
+        )
+
+
 def _discover_runtime_root(ssh: PiSsh, *, previous_ip: str, hostname: str, timeout_s: int) -> tuple[str, str]:
     direct_url = f"http://{previous_ip}"
     try:
@@ -1722,6 +1765,7 @@ def _run_wifi_plus_mqtt_case(
     root_page = _wait_for_runtime_root_contains(ssh, base_url, "MQTT connected: 1", timeout_s=180)
     _assert_contains(root_page, "Boot mode: normal", "runtime root")
     _assert_button_theme(root_page, "normal", "runtime root")
+    _assert_runtime_root_stable_under_load(ssh, base_url=base_url)
 
     reboot_wifi_resp = _pi_http_request(ssh, method="POST", url=base_url + "/reboot/wifi", timeout_s=15)
     reboot_wifi_status = int(reboot_wifi_resp.get("status", 0))
