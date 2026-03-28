@@ -1716,7 +1716,7 @@ subscribeInverterTopics(void)
 	lastSubscribeAttemptMs = nowMs;
 
 	char wildcardSubscription[100];
-	char dispatchSubscription[160];
+	char dispatchSubscription[96];
 	// Reassert a single wildcard subscription instead of dozens of per-entity subscriptions.
 	// This is both cheaper and more robust across identity refreshes and reconnects.
 	snprintf(wildcardSubscription, sizeof(wildcardSubscription), "%s/+/+/command", deviceName);
@@ -1726,10 +1726,11 @@ subscribeInverterTopics(void)
 	Serial.println(_debugOutput);
 #endif
 
+	// The atomic dispatch request is intentionally inverter-rooted so a
+	// controller replacement does not change the command path.
 	snprintf(dispatchSubscription,
 	         sizeof(dispatchSubscription),
-	         "%s/%s/dispatch/set",
-	         deviceName,
+	         "%s/dispatch/set",
 	         discoveryDeviceIdForScope(DiscoveryDeviceScope::Inverter));
 	subscribed = subscribed && _mqtt.subscribe(dispatchSubscription, MQTT_SUBSCRIBE_QOS);
 #ifdef DEBUG_OVER_SERIAL
@@ -7970,8 +7971,7 @@ mqttReconnect(void)
 #endif
 					snprintf(subscriptionDef,
 					         sizeof(subscriptionDef),
-					         "%s/%s/dispatch/set",
-					         deviceName,
+					         "%s/dispatch/set",
 					         discoveryDeviceIdForScope(DiscoveryDeviceScope::Inverter));
 					subscribed = subscribed && _mqtt.subscribe(subscriptionDef, MQTT_SUBSCRIBE_QOS);
 #ifdef DEBUG_OVER_SERIAL
@@ -11175,8 +11175,8 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 
 		snprintf(matchPrefix, sizeof(matchPrefix), "%s/", deviceName);
 		if (inverterReady && inverterDeviceId[0] != '\0') {
-			char dispatchSetTopic[160];
-			snprintf(dispatchSetTopic, sizeof(dispatchSetTopic), "%s/%s/dispatch/set", deviceName, inverterDeviceId);
+			char dispatchSetTopic[96];
+			snprintf(dispatchSetTopic, sizeof(dispatchSetTopic), "%s/dispatch/set", inverterDeviceId);
 			if (strcmp(topic, dispatchSetTopic) == 0) {
 				if (mqttCommandWarmupActive()) {
 #ifdef DEBUG_OVER_SERIAL

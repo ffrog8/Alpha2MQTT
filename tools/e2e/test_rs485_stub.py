@@ -2144,7 +2144,7 @@ def main() -> int:
         raise E2EError(f"{name} did not update to {expected!r}; last_seen={last_seen!r}")
 
     def _dispatch_set_topic(inverter_device_id: str) -> str:
-        return f"{device_root}/{inverter_device_id}/dispatch/set"
+        return f"{inverter_device_id}/dispatch/set"
 
     def _dispatch_status_topic(inverter_device_id: str) -> str:
         return _state_topic(inverter_device_id, "Dispatch_Request_Status")

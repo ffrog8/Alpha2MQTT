@@ -125,9 +125,9 @@ Before live inverter identity is known, the masked HA identity remains `A2M-UNKN
 ### Controlling Your ESS
 The firmware control path is now centered on a single MQTT dispatch request.  Rather than trying to coordinate several separate control entities and hoping they are all updated before dispatch starts, you publish one JSON payload to the inverter-specific dispatch topic:
 
-- **Topic:** `DEVICE_NAME/alpha2mqtt_inv_<serial>/dispatch/set`
+- **Topic:** `alpha2mqtt_inv_<serial>/dispatch/set`
 
-That `alpha2mqtt_inv_<serial>` part is the inverter device id.  Alpha2MQTT derives it from the live inverter serial and uses that same id for inverter-scoped MQTT discovery and state topics.
+That `alpha2mqtt_inv_<serial>` part is the inverter device id.  Alpha2MQTT derives it from the live inverter serial and uses that same id for inverter-scoped MQTT discovery and state topics.  The dispatch topic deliberately does **not** include the controller device name so that the command path follows the inverter rather than the controller hardware.
 
 Here is an example:
 
