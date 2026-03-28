@@ -37,6 +37,21 @@ TEST_CASE("dispatch request parses and maps state of charge control")
 	CHECK(plan.matchTime);
 }
 
+TEST_CASE("dispatch request preserves legacy full-charge SOC encoding")
+{
+	DispatchRequestPayload payload{};
+	char error[64] = "";
+	REQUIRE(parseDispatchRequestPayload(
+		R"({"mode":"state_of_charge_control","power_w":-3000,"soc_percent":100,"duration_s":1800})",
+		payload,
+		error,
+		sizeof(error)));
+
+	DispatchRequestPlan plan{};
+	REQUIRE(buildDispatchRequestPlan(payload, plan, error, sizeof(error)));
+	CHECK(plan.dispatchSocRaw == 252);
+}
+
 TEST_CASE("dispatch request rejects invalid or missing required fields")
 {
 	DispatchRequestPayload payload{};

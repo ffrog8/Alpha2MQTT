@@ -300,6 +300,11 @@ extractUint32Field(const char *payload, const char *key, uint32_t &out)
 static uint16_t
 socPercentToRaw(uint32_t socPercent)
 {
+	if (socPercent >= 100U) {
+		// Match the legacy dispatch controller's "slightly above 100%" encoding
+		// so full-charge requests do not complete prematurely at raw 250.
+		return 252U;
+	}
 	return static_cast<uint16_t>(socPercent / DISPATCH_SOC_MULTIPLIER);
 }
 
