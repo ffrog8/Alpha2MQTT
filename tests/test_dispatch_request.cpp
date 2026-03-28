@@ -69,6 +69,15 @@ TEST_CASE("dispatch request rejects invalid or missing required fields")
 	DispatchRequestPlan overflow_plan{};
 	CHECK_FALSE(buildDispatchRequestPlan(payload, overflow_plan, error, sizeof(error)));
 	CHECK(std::string(error) == "invalid soc");
+
+	REQUIRE(parseDispatchRequestPayload(
+		R"({"mode":"state_of_charge_control","note":"power_w:-500,soc_percent:80,duration_s:60"})",
+		payload,
+		error,
+		sizeof(error)));
+	DispatchRequestPlan spoofed_plan{};
+	CHECK_FALSE(buildDispatchRequestPlan(payload, spoofed_plan, error, sizeof(error)));
+	CHECK(std::string(error) == "invalid power");
 }
 
 TEST_CASE("dispatch request normal mode ignores extra fields and expects stop")

@@ -11680,12 +11680,6 @@ serviceAtomicDispatchRequest(void)
 		return;
 	}
 
-	if (!forcePublishDispatchMirror()) {
-		setDispatchRequestStatus("mirror publish failed");
-		atomicDispatchState = AtomicDispatchRuntimeState{};
-		return;
-	}
-
 	if (!dispatchRequestReadbackMatches(atomicDispatchState.plan, readback, error, sizeof(error))) {
 		if (atomicDispatchState.readbackAttempts >= kDispatchReadbackMaxAttempts) {
 			setDispatchRequestStatus(error);
@@ -11709,6 +11703,10 @@ serviceAtomicDispatchRequest(void)
 	} else {
 		dispatchMarkStopped(timedDispatchState, false);
 	}
+	// A disconnected MQTT session must not orphan an accepted timed dispatch.
+	// Readback-confirmed lifecycle state is updated first; mirror publish is
+	// best-effort and can replay later once MQTT recovers.
+	(void)forcePublishDispatchMirror();
 	publishDispatchAuxiliaryStates(true);
 
 	setDispatchRequestStatus("ok");

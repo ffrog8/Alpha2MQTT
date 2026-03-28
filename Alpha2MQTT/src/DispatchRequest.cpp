@@ -132,15 +132,6 @@ copyStatus(char *dest, size_t destSize, const char *message)
 	snprintf(dest, destSize, "%s", message);
 }
 
-static bool
-isTokenChar(char ch)
-{
-	return (ch >= '0' && ch <= '9') ||
-	       (ch >= 'A' && ch <= 'Z') ||
-	       (ch >= 'a' && ch <= 'z') ||
-	       ch == '_';
-}
-
 static const char *
 findFieldValue(const char *payload, const char *key)
 {
@@ -151,26 +142,36 @@ findFieldValue(const char *payload, const char *key)
 	const size_t keyLen = strlen(key);
 	const char *search = payload;
 	while (const char *pos = strstr(search, key)) {
-		const char prev = (pos == payload) ? '\0' : pos[-1];
-		const char next = pos[keyLen];
-		if ((pos == payload || !isTokenChar(prev)) &&
-		    (next == '\0' || !isTokenChar(next))) {
-			pos += keyLen;
-			if (*pos == '"') {
+		const char *openQuote = pos - 1;
+		const char *closeQuote = pos + keyLen;
+		if (openQuote >= payload &&
+		    *openQuote == '"' &&
+		    *closeQuote == '"' &&
+		    (openQuote == payload || openQuote[-1] != '\\')) {
+			const char *beforeKey = openQuote;
+			while (beforeKey > payload) {
+				const char ch = beforeKey[-1];
+				if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') {
+					beforeKey--;
+					continue;
+				}
+				break;
+			}
+			if (beforeKey == payload || beforeKey[-1] == '{' || beforeKey[-1] == ',') {
+				pos = closeQuote + 1;
+				while (*pos == ' ' || *pos == '\t' || *pos == '\r' || *pos == '\n') {
+					pos++;
+				}
+				if (*pos != ':') {
+					search = closeQuote + 1;
+					continue;
+				}
 				pos++;
+				while (*pos == ' ' || *pos == '\t' || *pos == '\r' || *pos == '\n') {
+					pos++;
+				}
+				return pos;
 			}
-			while (*pos == ' ' || *pos == '\t' || *pos == '\r' || *pos == '\n') {
-				pos++;
-			}
-			if (*pos != ':') {
-				search = pos;
-				continue;
-			}
-			pos++;
-			while (*pos == ' ' || *pos == '\t' || *pos == '\r' || *pos == '\n') {
-				pos++;
-			}
-			return pos;
 		}
 		search = pos + keyLen;
 	}
