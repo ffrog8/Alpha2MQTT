@@ -11592,48 +11592,99 @@ publishPendingDispatchMirror(void)
 }
 
 static bool
-readDispatchRegisterReadback(DispatchRegisterReadback &readback, char *error, size_t errorSize)
+readDispatchRegisterReadback(const DispatchRequestPlan &plan,
+                            DispatchRegisterReadback &readback,
+                            char *error,
+                            size_t errorSize)
 {
 	readback = DispatchRegisterReadback{};
+	readback.dispatchStart = opData.essDispatchStart;
+	readback.dispatchMode = opData.essDispatchMode;
+	readback.dispatchActivePower = opData.essDispatchActivePower;
+	readback.dispatchSocRaw = opData.essDispatchSoc;
+	readback.dispatchTimeRaw = opData.essDispatchTime;
 	modbusRequestAndResponse response{};
-	auto readRegister = [&](uint16_t reg, const char *readError) -> bool {
+	auto readRegister = [&](uint16_t reg, const char *readError, bool required, bool &updated) -> bool {
+		updated = false;
 		if (_registerHandler == nullptr) {
-			strlcpy(error, "readback timeout", errorSize);
-			return false;
+			if (required) {
+				strlcpy(error, "readback timeout", errorSize);
+				return false;
+			}
+			return true;
 		}
 		const modbusRequestAndResponseStatusValues result = _registerHandler->readHandledRegister(reg, &response);
 		if (result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
 			rs485Errors++;
-			strlcpy(error, readError, errorSize);
-			return false;
+			if (required) {
+				strlcpy(error, readError, errorSize);
+				return false;
+			}
+			return true;
 		}
+		updated = true;
 		return true;
 	};
 
-	if (!readRegister(REG_DISPATCH_RW_DISPATCH_START, "readback timeout")) {
+	bool updated = false;
+	if (!readRegister(REG_DISPATCH_RW_DISPATCH_START, "readback timeout", true, updated)) {
 		return false;
 	}
-	readback.dispatchStart = response.unsignedShortValue;
+	if (updated) {
+		readback.dispatchStart = response.unsignedShortValue;
+	}
 
-	if (!readRegister(REG_DISPATCH_RW_DISPATCH_MODE, "readback timeout")) {
+	if (plan.matchMode &&
+	    !readRegister(REG_DISPATCH_RW_DISPATCH_MODE, "readback timeout", true, updated)) {
 		return false;
 	}
-	readback.dispatchMode = response.unsignedShortValue;
+	if (updated) {
+		readback.dispatchMode = response.unsignedShortValue;
+	} else if (!plan.matchMode &&
+	           !readRegister(REG_DISPATCH_RW_DISPATCH_MODE, "readback timeout", false, updated)) {
+		return false;
+	} else if (updated) {
+		readback.dispatchMode = response.unsignedShortValue;
+	}
 
-	if (!readRegister(REG_DISPATCH_RW_ACTIVE_POWER_1, "readback timeout")) {
+	if (plan.matchPower &&
+	    !readRegister(REG_DISPATCH_RW_ACTIVE_POWER_1, "readback timeout", true, updated)) {
 		return false;
 	}
-	readback.dispatchActivePower = response.signedIntValue;
+	if (updated) {
+		readback.dispatchActivePower = response.signedIntValue;
+	} else if (!plan.matchPower &&
+	           !readRegister(REG_DISPATCH_RW_ACTIVE_POWER_1, "readback timeout", false, updated)) {
+		return false;
+	} else if (updated) {
+		readback.dispatchActivePower = response.signedIntValue;
+	}
 
-	if (!readRegister(REG_DISPATCH_RW_DISPATCH_SOC, "readback timeout")) {
+	if (plan.matchSoc &&
+	    !readRegister(REG_DISPATCH_RW_DISPATCH_SOC, "readback timeout", true, updated)) {
 		return false;
 	}
-	readback.dispatchSocRaw = response.unsignedShortValue;
+	if (updated) {
+		readback.dispatchSocRaw = response.unsignedShortValue;
+	} else if (!plan.matchSoc &&
+	           !readRegister(REG_DISPATCH_RW_DISPATCH_SOC, "readback timeout", false, updated)) {
+		return false;
+	} else if (updated) {
+		readback.dispatchSocRaw = response.unsignedShortValue;
+	}
 
-	if (!readRegister(REG_DISPATCH_RW_DISPATCH_TIME_1, "readback timeout")) {
+	if (plan.matchTime &&
+	    !readRegister(REG_DISPATCH_RW_DISPATCH_TIME_1, "readback timeout", true, updated)) {
 		return false;
 	}
-	readback.dispatchTimeRaw = response.unsignedIntValue;
+	if (updated) {
+		readback.dispatchTimeRaw = response.unsignedIntValue;
+	} else if (!plan.matchTime &&
+	           !readRegister(REG_DISPATCH_RW_DISPATCH_TIME_1, "readback timeout", false, updated)) {
+		return false;
+	} else if (updated) {
+		readback.dispatchTimeRaw = response.unsignedIntValue;
+	}
 
 	opData.essDispatchStart = readback.dispatchStart;
 	opData.essDispatchMode = readback.dispatchMode;
@@ -11717,7 +11768,7 @@ serviceAtomicDispatchRequest(void)
 	char error[64] = "";
 	DispatchRegisterReadback readback{};
 	atomicDispatchState.readbackAttempts++;
-	if (!readDispatchRegisterReadback(readback, error, sizeof(error))) {
+	if (!readDispatchRegisterReadback(atomicDispatchState.plan, readback, error, sizeof(error))) {
 		const uint32_t retryDecisionMs = millis();
 		if ((retryDecisionMs - atomicDispatchState.readbackStartedMs) >= kDispatchReadbackTimeoutMs) {
 			setDispatchRequestStatus(error[0] != '\0' ? error : "readback timeout");
