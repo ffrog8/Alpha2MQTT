@@ -8,6 +8,7 @@
 #include "../include/DispatchRequest.h"
 
 #include <cerrno>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -141,8 +142,50 @@ findFieldValue(const char *payload, const char *key)
 
 	const size_t keyLen = strlen(key);
 	int depth = 0;
+	bool inString = false;
+	bool escape = false;
+	bool candidateKey = false;
+	bool sawEscapeInString = false;
+	const char *stringStart = nullptr;
 	for (const char *pos = payload; *pos != '\0'; pos++) {
 		const char ch = *pos;
+		if (inString) {
+			if (escape) {
+				escape = false;
+				continue;
+			}
+			if (ch == '\\') {
+				escape = true;
+				sawEscapeInString = true;
+				continue;
+			}
+			if (ch != '"') {
+				continue;
+			}
+
+			inString = false;
+			if (!(candidateKey && !sawEscapeInString && stringStart != nullptr)) {
+				continue;
+			}
+			if (static_cast<size_t>(pos - stringStart) != keyLen ||
+			    strncmp(stringStart, key, keyLen) != 0) {
+				continue;
+			}
+
+			const char *value = pos + 1;
+			while (*value == ' ' || *value == '\t' || *value == '\r' || *value == '\n') {
+				value++;
+			}
+			if (*value != ':') {
+				continue;
+			}
+			value++;
+			while (*value == ' ' || *value == '\t' || *value == '\r' || *value == '\n') {
+				value++;
+			}
+			return value;
+		}
+
 		if (ch == '{' || ch == '[') {
 			depth++;
 			continue;
@@ -153,57 +196,24 @@ findFieldValue(const char *payload, const char *key)
 			}
 			continue;
 		}
-		if (ch != '"' || depth != 1) {
+		if (ch != '"') {
 			continue;
 		}
 
-		const char *stringStart = pos + 1;
-		const char *cursor = stringStart;
-		size_t matchIdx = 0;
-		bool exactMatch = true;
-		while (*cursor != '\0') {
-			if (*cursor == '\\') {
-				exactMatch = false;
-				if (cursor[1] == '\0') {
-					return nullptr;
-				}
-				cursor += 2;
+		const char *before = pos;
+		while (before > payload) {
+			const char prev = before[-1];
+			if (prev == ' ' || prev == '\t' || prev == '\r' || prev == '\n') {
+				before--;
 				continue;
 			}
-			if (*cursor == '"') {
-				break;
-			}
-			if (exactMatch) {
-				if (matchIdx >= keyLen || *cursor != key[matchIdx]) {
-					exactMatch = false;
-				} else {
-					matchIdx++;
-				}
-			}
-			cursor++;
+			break;
 		}
-		if (*cursor != '"') {
-			return nullptr;
-		}
-
-		if (!(exactMatch && matchIdx == keyLen)) {
-			pos = cursor;
-			continue;
-		}
-
-		const char *value = cursor + 1;
-		while (*value == ' ' || *value == '\t' || *value == '\r' || *value == '\n') {
-			value++;
-		}
-		if (*value != ':') {
-			pos = cursor;
-			continue;
-		}
-		value++;
-		while (*value == ' ' || *value == '\t' || *value == '\r' || *value == '\n') {
-			value++;
-		}
-		return value;
+		candidateKey = (depth == 1 && before > payload && (before[-1] == '{' || before[-1] == ','));
+		sawEscapeInString = false;
+		escape = false;
+		inString = true;
+		stringStart = pos + 1;
 	}
 	return nullptr;
 }
@@ -246,7 +256,7 @@ extractInt32Field(const char *payload, const char *key, int32_t &out)
 	errno = 0;
 	char *endPtr = nullptr;
 	const long parsed = strtol(value, &endPtr, 10);
-	if (endPtr == value || errno != 0) {
+	if (endPtr == value || errno != 0 || parsed < INT32_MIN || parsed > INT32_MAX) {
 		return false;
 	}
 	if (*endPtr == '"') {
@@ -273,7 +283,7 @@ extractUint32Field(const char *payload, const char *key, uint32_t &out)
 	errno = 0;
 	char *endPtr = nullptr;
 	const unsigned long parsed = strtoul(value, &endPtr, 10);
-	if (endPtr == value || errno != 0) {
+	if (endPtr == value || errno != 0 || parsed > UINT32_MAX) {
 		return false;
 	}
 	if (*endPtr == '"') {

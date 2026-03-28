@@ -71,6 +71,15 @@ TEST_CASE("dispatch request rejects invalid or missing required fields")
 	CHECK(std::string(error) == "invalid soc");
 
 	REQUIRE(parseDispatchRequestPayload(
+		R"({"mode":"state_of_charge_control","power_w":-1000,"soc_percent":4294967396,"duration_s":60})",
+		payload,
+		error,
+		sizeof(error)));
+	DispatchRequestPlan wrapped_plan{};
+	CHECK_FALSE(buildDispatchRequestPlan(payload, wrapped_plan, error, sizeof(error)));
+	CHECK(std::string(error) == "invalid soc");
+
+	REQUIRE(parseDispatchRequestPayload(
 		R"({"mode":"state_of_charge_control","note":"power_w:-500,soc_percent:80,duration_s:60"})",
 		payload,
 		error,
@@ -158,7 +167,7 @@ TEST_CASE("dispatch request ignores nested metadata keys and uses top-level fiel
 	DispatchRequestPayload payload{};
 	char error[64] = "";
 	REQUIRE(parseDispatchRequestPayload(
-		R"({"meta":{"mode":"normal_mode","power_w":123,"soc_percent":99,"duration_s":999},"mode":"state_of_charge_control","power_w":-3000,"soc_percent":20,"duration_s":1800})",
+		R"({"meta":{"mode":"normal_mode","power_w":123,"soc_percent":99,"duration_s":999},"note":"ignore {nested:[values]} in strings","mode":"state_of_charge_control","power_w":-3000,"soc_percent":20,"duration_s":1800})",
 		payload,
 		error,
 		sizeof(error)));
