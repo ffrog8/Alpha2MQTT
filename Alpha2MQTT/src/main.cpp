@@ -239,6 +239,7 @@ char dispatchLastSkipReason[48] = "";
 static TimedDispatchRuntimeState timedDispatchState;
 static char dispatchRequestStatus[96] = "";
 static bool dispatchRequestStatusDirty = false;
+static bool dispatchMirrorPublishPending = false;
 static uint32_t dispatchRequestQueuedMs = 0;
 static constexpr uint8_t kDispatchReadbackMaxAttempts = 5;
 static constexpr uint32_t kDispatchReadbackRetryMs = 25;
@@ -595,6 +596,7 @@ static void resetAtomicDispatchState(void);
 static bool publishDispatchRequestStatus(void);
 static bool readDispatchRegisterReadback(DispatchRegisterReadback &readback, char *error, size_t errorSize);
 static bool forcePublishDispatchMirror(void);
+static bool publishPendingDispatchMirror(void);
 static void processPendingDispatchRequest(void);
 static void serviceAtomicDispatchRequest(void);
 static void handleMqttReconnectDispatchReset(void);
@@ -788,7 +790,9 @@ handleMqttReconnectDispatchReset(void)
 	setDispatchRequestStatus("");
 	resetAtomicDispatchState();
 	// MQTT reconnects should only clear MQTT-facing request state. Preserving
-	// timedDispatchState avoids re-arming bootStopPending mid-run.
+	// timedDispatchState and pending mirror replay avoids re-arming
+	// bootStopPending mid-run and lets disabled Dispatch_* mirrors republish
+	// after a transient broker disconnect.
 	dispatchRequestQueuedMs = 0;
 }
 
@@ -10752,6 +10756,9 @@ serviceDeferredMqttWork(void)
 		if (dispatchRequestStatusDirty && publishDispatchRequestStatus()) {
 			didWork = true;
 		}
+		if (dispatchMirrorPublishPending && publishPendingDispatchMirror()) {
+			didWork = true;
+		}
 		if (pendingPollingConfigSet) {
 			processPendingPollingConfigPayload();
 			didWork = true;
@@ -11546,6 +11553,27 @@ forcePublishDispatchMirror(void)
 }
 
 static bool
+publishPendingDispatchMirror(void)
+{
+	if (!dispatchMirrorPublishPending || !mqttSubsystemEnabled()) {
+		return !dispatchMirrorPublishPending;
+	}
+	if (!inverterReady || !inverterSerialKnown()) {
+		return false;
+	}
+	if (!forcePublishDispatchMirror()) {
+		return false;
+	}
+	// Dispatch_Remaining is derived from timed runtime state rather than the raw
+	// register mirror. Refresh it alongside the forced mirror replay when MQTT
+	// recovers so HA sees the accepted dispatch window without waiting for the
+	// next countdown tick.
+	publishDispatchAuxiliaryStates(true);
+	dispatchMirrorPublishPending = false;
+	return true;
+}
+
+static bool
 readDispatchRegisterReadback(DispatchRegisterReadback &readback, char *error, size_t errorSize)
 {
 	readback = DispatchRegisterReadback{};
@@ -11706,8 +11734,8 @@ serviceAtomicDispatchRequest(void)
 	// A disconnected MQTT session must not orphan an accepted timed dispatch.
 	// Readback-confirmed lifecycle state is updated first; mirror publish is
 	// best-effort and can replay later once MQTT recovers.
-	(void)forcePublishDispatchMirror();
-	publishDispatchAuxiliaryStates(true);
+	dispatchMirrorPublishPending = true;
+	(void)publishPendingDispatchMirror();
 
 	setDispatchRequestStatus("ok");
 	atomicDispatchState = AtomicDispatchRuntimeState{};
