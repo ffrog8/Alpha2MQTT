@@ -11976,16 +11976,12 @@ dispatchService(void)
 			if (remainingSeconds == 0) {
 				strlcpy(dispatchLastSkipReason, "timed_complete", sizeof(dispatchLastSkipReason));
 				if (opData.essDispatchStart == DISPATCH_START_START) {
-					if (dueEval) {
-						writeStop("timed_complete", false);
-					}
+					writeStop("timed_complete", false);
 					return;
 				}
-				if (dueEval) {
-					dispatchMarkStopped(timedDispatchState, true);
-					publishDispatchAuxiliaryStates(true);
-					dispatchLastSkipReason[0] = '\0';
-				}
+				dispatchMarkStopped(timedDispatchState, true);
+				publishDispatchAuxiliaryStates(true);
+				dispatchLastSkipReason[0] = '\0';
 				return;
 			}
 		}

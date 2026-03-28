@@ -1135,6 +1135,57 @@ def _fetch_latest_json(mqtt: MqttClient, topic: str, label: str, *, timeout_s: i
     return _mqtt_retry(mqtt, f"fetch_latest_json({label})", inner)
 
 
+def _fetch_live_json(mqtt: MqttClient, topic: str, label: str, *, timeout_s: int = 15) -> dict[str, Any]:
+    """
+    Wait for a new publish on an already-known topic without forcing a resubscribe.
+
+    Rationale:
+    - force-subscribing on every poll can re-deliver retained payloads, which is not
+      authoritative enough immediately after OTA/reboot or stub mode changes.
+    - callers use this when they need proof of live runtime progress rather than the
+      broker's current retained snapshot.
+    """
+
+    def inner() -> dict[str, Any]:
+        mqtt.subscribe(topic)
+        deadline = time.time() + timeout_s
+        last_observed = ""
+        while time.time() < deadline:
+            try:
+                got_topic, payload = mqtt.wait_for_publish(timeout_s=12.0)
+            except E2EError as e:
+                if "Timeout waiting for MQTT publish" in str(e):
+                    continue
+                raise
+            last_observed = f"topic={got_topic} payload={payload!r}"
+            if got_topic != topic:
+                _log(f"{label} live wait: ignoring other topic={got_topic}")
+                continue
+
+            latest = payload
+            settle_deadline = time.time() + 0.25
+            while time.time() < settle_deadline:
+                nxt = mqtt._try_wait_for_publish(timeout_s=0.25)
+                if not nxt:
+                    break
+                got_topic2, payload2 = nxt
+                if got_topic2 == topic:
+                    latest = payload2
+                    settle_deadline = time.time() + 0.25
+                else:
+                    _log(f"{label} live wait: ignoring other topic={got_topic2}")
+
+            try:
+                _log(f"{label} live wait: got bytes={len(latest)}")
+                return _parse_json(latest)
+            except Exception as e:
+                raise E2EError(f"{label} payload was not valid JSON on {topic}: {latest!r} ({e})")
+
+        raise E2EError(f"Timeout waiting for live {label} JSON on {topic}. Last observed: {last_observed}")
+
+    return _mqtt_retry(mqtt, f"fetch_live_json({label})", inner)
+
+
 def _fetch_poll(mqtt: MqttClient, topic: str) -> dict[str, Any]:
     return _fetch_latest_json(mqtt, topic, label="poll")
 
@@ -1966,7 +2017,7 @@ def main() -> int:
 
         def pred() -> Tuple[bool, str]:
             nonlocal last_pub
-            cur_poll = _fetch_latest_json(mqtt, poll_topic, f"{label}_poll_current", timeout_s=15)
+            cur_poll = _fetch_live_json(mqtt, poll_topic, f"{label}_poll_current", timeout_s=15)
             cur_stub = _fetch_cached_or_latest_json(mqtt, stub_topic, f"{label}_stub_current")
             mode = str(cur_poll.get("rs485_stub_mode", ""))
             strict_unknown = bool(cur_stub.get("strict_unknown", False))
@@ -2014,7 +2065,7 @@ def main() -> int:
             return ready, detail
 
         while time.time() < deadline:
-            cur_poll = _fetch_latest_json(mqtt, poll_topic, f"{label}_poll_current", timeout_s=15)
+            cur_poll = _fetch_live_json(mqtt, poll_topic, f"{label}_poll_current", timeout_s=15)
             ready, last_detail = poll_ready_detail(cur_poll)
             if ready:
                 return
@@ -2422,47 +2473,37 @@ def main() -> int:
         )
 
     def _wait_for_inverter_identity() -> str:
-        controller_serial_filter = f"{device_root}/+/inverter_serial/state"
         mqtt.subscribe(poll_topic, force=True)
-        mqtt.subscribe(controller_serial_filter, force=True)
+        mqtt.subscribe(status_core_topic, force=True)
 
-        def inverter_id_from_serial(serial: str) -> str:
-            serial = serial.strip()
+        def inverter_id_from_ha_unique(ha_unique: str) -> str:
+            ha_unique = ha_unique.strip()
+            if not ha_unique.startswith("A2M-"):
+                return ""
+            serial = ha_unique[len("A2M-"):].strip()
             if not serial or serial.lower() == "unknown":
                 return ""
             return f"alpha2mqtt_inv_{serial}"
-        inverter_ready = False
-        controller_serial = ""
+
         deadline = time.time() + 60.0
-        last_detail = "waiting for live poll + controller serial"
+        last_detail = "waiting for live poll + status/core identity"
         while time.time() < deadline:
-            try:
-                got_topic, payload = mqtt.wait_for_publish(timeout_s=min(5.0, max(0.1, deadline - time.time())))
-            except E2EError as e:
-                if "Timeout waiting for MQTT publish" in str(e):
-                    continue
-                raise
-
-            if got_topic == poll_topic:
-                try:
-                    poll = _parse_json(payload)
-                except Exception:
-                    continue
-                inverter_ready = bool(poll.get("inverter_ready", False))
-            elif got_topic.startswith(f"{device_root}/") and got_topic.endswith("/inverter_serial/state"):
-                controller_serial = str(payload).strip()
-            else:
-                continue
-
-            inverter_id = inverter_id_from_serial(controller_serial)
+            poll = _fetch_live_json(mqtt, poll_topic, "identity_poll")
+            inverter_ready = bool(poll.get("inverter_ready", False))
+            backend = str(poll.get("rs485_backend", "")).strip()
+            if inverter_ready and backend == "stub":
+                return "alpha2mqtt_inv_STUBSN000000000"
+            core = _fetch_cached_or_latest_json(mqtt, status_core_topic, "identity_core")
+            ha_unique = str(core.get("ha_unique_id", "")).strip()
+            inverter_id = inverter_id_from_ha_unique(ha_unique)
             last_detail = (
-                f"inverter_ready={inverter_ready} "
-                f"controller_serial={controller_serial!r} inverter_id={inverter_id!r}"
+                f"backend={backend!r} inverter_ready={inverter_ready} "
+                f"ha_unique_id={ha_unique!r} inverter_id={inverter_id!r}"
             )
             if inverter_ready and inverter_id:
                 return inverter_id
 
-        raise E2EError(f"inverter identity became ready but controller inverter_serial/state was not observed: {last_detail}")
+        raise E2EError(f"inverter identity did not become live: {last_detail}")
 
     def _ensure_online_inverter_identity(label: str) -> str:
         ensure_stub_online_backend(
@@ -2828,78 +2869,85 @@ def main() -> int:
     def case_dispatch_timed_restart_and_expire() -> None:
         print("[e2e] case: timed dispatch countdown restarts and expires cleanly")
         ha_unique = _ensure_online_inverter_identity("timed dispatch baseline")
-        ensure_dispatch_write(
-            ha_unique,
-            label_prefix="dispatch timed",
-            duration_s=12,
-            timeout_s=8,
-        )
-        dispatch_start_stop = _discover_define_value("DISPATCH_START_STOP")
-        remaining_topic = _state_topic(ha_unique, "Dispatch_Remaining")
-        start_topic = _state_topic(ha_unique, "Dispatch_Start")
-        mqtt.subscribe(remaining_topic, force=True)
-        mqtt.subscribe(start_topic, force=True)
+        current_config = _fetch_config(mqtt, config_topic)
+        original_poll_interval = int(current_config.get("poll_interval_s", 9) or 9)
+        long_poll_interval = 120
+        try:
+            ensure_dispatch_write(
+                ha_unique,
+                label_prefix="dispatch timed",
+                duration_s=12,
+                poll_interval_s=long_poll_interval,
+                timeout_s=8,
+            )
+            dispatch_start_stop = _discover_define_value("DISPATCH_START_STOP")
+            remaining_topic = _state_topic(ha_unique, "Dispatch_Remaining")
+            start_topic = _state_topic(ha_unique, "Dispatch_Start")
+            mqtt.subscribe(remaining_topic, force=True)
+            mqtt.subscribe(start_topic, force=True)
 
-        first_remaining_text = ""
+            first_remaining_text = ""
 
-        def initial_remaining_pred() -> Tuple[bool, str]:
-            nonlocal first_remaining_text
-            first_remaining_text = _fetch_latest_text(mqtt, remaining_topic, label="dispatch_remaining_initial")
+            def initial_remaining_pred() -> Tuple[bool, str]:
+                nonlocal first_remaining_text
+                first_remaining_text = _fetch_latest_text(mqtt, remaining_topic, label="dispatch_remaining_initial")
+                first_remaining = int(first_remaining_text.strip())
+                return (0 < first_remaining <= 12), f"remaining={first_remaining}"
+
+            _assert_eventually(
+                "initial timed Dispatch_Remaining becomes positive",
+                initial_remaining_pred,
+                timeout_s=20,
+                poll_s=1.0,
+            )
             first_remaining = int(first_remaining_text.strip())
-            return (0 < first_remaining <= 12), f"remaining={first_remaining}"
 
-        _assert_eventually(
-            "initial timed Dispatch_Remaining becomes positive",
-            initial_remaining_pred,
-            timeout_s=20,
-            poll_s=1.0,
-        )
-        first_remaining = int(first_remaining_text.strip())
+            dropped_text = _wait_for_topic_change(
+                mqtt,
+                remaining_topic,
+                first_remaining_text,
+                timeout_s=12,
+                label="dispatch_remaining_drop",
+            )
+            dropped = int(dropped_text.strip())
+            if dropped >= first_remaining:
+                raise E2EError(f"Dispatch_Remaining did not decrease: {first_remaining} -> {dropped}")
 
-        dropped_text = _wait_for_topic_change(
-            mqtt,
-            remaining_topic,
-            first_remaining_text,
-            timeout_s=12,
-            label="dispatch_remaining_drop",
-        )
-        dropped = int(dropped_text.strip())
-        if dropped >= first_remaining:
-            raise E2EError(f"Dispatch_Remaining did not decrease: {first_remaining} -> {dropped}")
+            publish_dispatch_request_and_wait_status(
+                ha_unique,
+                _default_dispatch_request(duration_s=12),
+                expected_status="ok",
+                timeout_s=25,
+            )
+            restarted_text = ""
 
-        publish_dispatch_request_and_wait_status(
-            ha_unique,
-            _default_dispatch_request(duration_s=12),
-            expected_status="ok",
-            timeout_s=25,
-        )
-        restarted_text = ""
+            def restart_pred() -> Tuple[bool, str]:
+                nonlocal restarted_text
+                restarted_text = _fetch_latest_text(mqtt, remaining_topic, label="dispatch_remaining_restart")
+                restarted = int(restarted_text.strip())
+                return (restarted > dropped and restarted >= 8), f"remaining={restarted}"
 
-        def restart_pred() -> Tuple[bool, str]:
-            nonlocal restarted_text
-            restarted_text = _fetch_latest_text(mqtt, remaining_topic, label="dispatch_remaining_restart")
-            restarted = int(restarted_text.strip())
-            return (restarted > dropped and restarted >= 8), f"remaining={restarted}"
+            _assert_eventually(
+                "Dispatch_Remaining restarts upward after identical command",
+                restart_pred,
+                timeout_s=25,
+                poll_s=1.0,
+            )
 
-        _assert_eventually(
-            "Dispatch_Remaining restarts upward after identical command",
-            restart_pred,
-            timeout_s=25,
-            poll_s=1.0,
-        )
+            def expiry_pred() -> Tuple[bool, str]:
+                start_state = _fetch_latest_text(mqtt, start_topic, label="dispatch_start_expire").strip()
+                remaining_state = _fetch_latest_text(mqtt, remaining_topic, label="dispatch_remaining_expire").strip()
+                stop_seen = start_state.lower() in ("stop", "stopped") or start_state == str(dispatch_start_stop)
+                remaining_zero = remaining_state == "0"
+                return stop_seen and remaining_zero, f"start={start_state!r} remaining={remaining_state!r}"
 
-        def expiry_pred() -> Tuple[bool, str]:
-            start_state = _fetch_latest_text(mqtt, start_topic, label="dispatch_start_expire").strip()
-            remaining_state = _fetch_latest_text(mqtt, remaining_topic, label="dispatch_remaining_expire").strip()
-            stop_seen = start_state.lower() in ("stop", "stopped") or start_state == str(dispatch_start_stop)
-            remaining_zero = remaining_state == "0"
-            return stop_seen and remaining_zero, f"start={start_state!r} remaining={remaining_state!r}"
-
-        _assert_eventually("timed dispatch expires to stop", expiry_pred, timeout_s=35, poll_s=2.0)
-        _sleep_with_mqtt(mqtt, 6)
-        start_after_expiry = _fetch_latest_text(mqtt, start_topic, label="dispatch_start_post_expire").strip()
-        if start_after_expiry.lower() not in ("stop", "stopped") and start_after_expiry != str(dispatch_start_stop):
-            raise E2EError(f"dispatch restarted after expiry instead of staying stopped: {start_after_expiry!r}")
+            _assert_eventually("timed dispatch expires to stop", expiry_pred, timeout_s=20, poll_s=2.0)
+            _sleep_with_mqtt(mqtt, 6)
+            start_after_expiry = _fetch_latest_text(mqtt, start_topic, label="dispatch_start_post_expire").strip()
+            if start_after_expiry.lower() not in ("stop", "stopped") and start_after_expiry != str(dispatch_start_stop):
+                raise E2EError(f"dispatch restarted after expiry instead of staying stopped: {start_after_expiry!r}")
+        finally:
+            wait_runtime_poll_interval_applied(original_poll_interval)
 
     def case_dispatch_timed_no_rewrite_without_fresh_snapshot() -> None:
         print("[e2e] case: timed countdown ticks do not rewrite without a new atomic request")
