@@ -152,3 +152,30 @@ TEST_CASE("dispatch request reports specific mismatch strings")
 	CHECK_FALSE(dispatchRequestReadbackMatches(plan, readback, error, sizeof(error)));
 	CHECK(std::string(error) == "dispatch time mismatch");
 }
+
+TEST_CASE("dispatch request ignores nested metadata keys and uses top-level fields")
+{
+	DispatchRequestPayload payload{};
+	char error[64] = "";
+	REQUIRE(parseDispatchRequestPayload(
+		R"({"meta":{"mode":"normal_mode","power_w":123,"soc_percent":99,"duration_s":999},"mode":"state_of_charge_control","power_w":-3000,"soc_percent":20,"duration_s":1800})",
+		payload,
+		error,
+		sizeof(error)));
+
+	CHECK(payload.mode == DispatchRequestMode::StateOfChargeControl);
+	CHECK(payload.hasPower);
+	CHECK(payload.powerW == -3000);
+	CHECK(payload.hasSoc);
+	CHECK(payload.socPercent == 20);
+	CHECK(payload.hasDuration);
+	CHECK(payload.durationS == 1800);
+
+	DispatchRequestPlan plan{};
+	REQUIRE(buildDispatchRequestPlan(payload, plan, error, sizeof(error)));
+	CHECK_FALSE(plan.stop);
+	CHECK(plan.dispatchMode == DISPATCH_MODE_STATE_OF_CHARGE_CONTROL);
+	CHECK(plan.dispatchActivePower == DISPATCH_ACTIVE_POWER_OFFSET - 3000);
+	CHECK(plan.dispatchSocRaw == 50);
+	CHECK(plan.dispatchTimeRaw == 1800);
+}

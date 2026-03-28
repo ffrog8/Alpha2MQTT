@@ -140,40 +140,70 @@ findFieldValue(const char *payload, const char *key)
 	}
 
 	const size_t keyLen = strlen(key);
-	const char *search = payload;
-	while (const char *pos = strstr(search, key)) {
-		const char *openQuote = pos - 1;
-		const char *closeQuote = pos + keyLen;
-		if (openQuote >= payload &&
-		    *openQuote == '"' &&
-		    *closeQuote == '"' &&
-		    (openQuote == payload || openQuote[-1] != '\\')) {
-			const char *beforeKey = openQuote;
-			while (beforeKey > payload) {
-				const char ch = beforeKey[-1];
-				if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') {
-					beforeKey--;
-					continue;
+	int depth = 0;
+	for (const char *pos = payload; *pos != '\0'; pos++) {
+		const char ch = *pos;
+		if (ch == '{' || ch == '[') {
+			depth++;
+			continue;
+		}
+		if (ch == '}' || ch == ']') {
+			if (depth > 0) {
+				depth--;
+			}
+			continue;
+		}
+		if (ch != '"' || depth != 1) {
+			continue;
+		}
+
+		const char *stringStart = pos + 1;
+		const char *cursor = stringStart;
+		size_t matchIdx = 0;
+		bool exactMatch = true;
+		while (*cursor != '\0') {
+			if (*cursor == '\\') {
+				exactMatch = false;
+				if (cursor[1] == '\0') {
+					return nullptr;
 				}
+				cursor += 2;
+				continue;
+			}
+			if (*cursor == '"') {
 				break;
 			}
-			if (beforeKey == payload || beforeKey[-1] == '{' || beforeKey[-1] == ',') {
-				pos = closeQuote + 1;
-				while (*pos == ' ' || *pos == '\t' || *pos == '\r' || *pos == '\n') {
-					pos++;
+			if (exactMatch) {
+				if (matchIdx >= keyLen || *cursor != key[matchIdx]) {
+					exactMatch = false;
+				} else {
+					matchIdx++;
 				}
-				if (*pos != ':') {
-					search = closeQuote + 1;
-					continue;
-				}
-				pos++;
-				while (*pos == ' ' || *pos == '\t' || *pos == '\r' || *pos == '\n') {
-					pos++;
-				}
-				return pos;
 			}
+			cursor++;
 		}
-		search = pos + keyLen;
+		if (*cursor != '"') {
+			return nullptr;
+		}
+
+		if (!(exactMatch && matchIdx == keyLen)) {
+			pos = cursor;
+			continue;
+		}
+
+		const char *value = cursor + 1;
+		while (*value == ' ' || *value == '\t' || *value == '\r' || *value == '\n') {
+			value++;
+		}
+		if (*value != ':') {
+			pos = cursor;
+			continue;
+		}
+		value++;
+		while (*value == ' ' || *value == '\t' || *value == '\r' || *value == '\n') {
+			value++;
+		}
+		return value;
 	}
 	return nullptr;
 }
