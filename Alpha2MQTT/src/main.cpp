@@ -8506,6 +8506,20 @@ readEntity(const mqttState *singleEntity, modbusRequestAndResponse* rs)
 			result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
 		}
 		break;
+	case mqttEntityId::entityLoadPwr:
+		if (opData.essPvPower == INT32_MAX ||
+		    opData.essGridPower == INT32_MAX ||
+		    opData.essBatteryPower == INT16_MAX) {
+			result = modbusRequestAndResponseStatusValues::readDataInvalidValue;
+		} else {
+			const int32_t loadPower =
+				opData.essPvPower +
+				opData.essGridPower +
+				static_cast<int32_t>(opData.essBatteryPower);
+			sprintf(rs->dataValueFormatted, "%ld", loadPower);
+			result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
+		}
+		break;
 	case mqttEntityId::entityGridAvail:
 		// Nothing to write.  Included already in statusTopic
 		result = modbusRequestAndResponseStatusValues::preProcessing;
