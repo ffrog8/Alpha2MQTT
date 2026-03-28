@@ -11697,9 +11697,7 @@ serviceAtomicDispatchRequest(void)
 	}
 
 	timedDispatchState.configuredDurationSeconds =
-		atomicDispatchState.payload.hasDuration
-			? clampDispatchDurationSeconds(atomicDispatchState.payload.durationS)
-			: kDispatchDurationForeverSeconds;
+		dispatchAcceptedDurationSeconds(atomicDispatchState.payload, atomicDispatchState.plan);
 	if (atomicDispatchState.plan.stop) {
 		dispatchMarkStopped(timedDispatchState, true);
 	} else if (dispatchDurationIsTimed(timedDispatchState.configuredDurationSeconds)) {

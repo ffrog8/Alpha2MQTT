@@ -89,6 +89,7 @@ TEST_CASE("dispatch request normal mode ignores extra fields and expects stop")
 	CHECK_FALSE(plan.matchPower);
 	CHECK_FALSE(plan.matchSoc);
 	CHECK_FALSE(plan.matchTime);
+	CHECK(dispatchAcceptedDurationSeconds(payload, plan) == kDispatchDurationForeverSeconds);
 
 	DispatchRegisterReadback stopped{};
 	stopped.dispatchStart = DISPATCH_START_STOP;

@@ -391,6 +391,15 @@ buildDispatchRequestPlan(const DispatchRequestPayload &payload,
 	return true;
 }
 
+uint32_t
+dispatchAcceptedDurationSeconds(const DispatchRequestPayload &payload, const DispatchRequestPlan &plan)
+{
+	if (plan.stop || !payload.hasDuration) {
+		return kDispatchDurationForeverSeconds;
+	}
+	return clampDispatchDurationSeconds(payload.durationS);
+}
+
 bool
 dispatchRequestReadbackMatches(const DispatchRequestPlan &plan,
                                const DispatchRegisterReadback &readback,

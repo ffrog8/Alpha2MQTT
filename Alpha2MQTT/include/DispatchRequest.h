@@ -64,6 +64,8 @@ bool buildDispatchRequestPlan(const DispatchRequestPayload &payload,
                               DispatchRequestPlan &out,
                               char *error,
                               size_t errorSize);
+uint32_t dispatchAcceptedDurationSeconds(const DispatchRequestPayload &payload,
+                                         const DispatchRequestPlan &plan);
 bool dispatchRequestReadbackMatches(const DispatchRequestPlan &plan,
                                     const DispatchRegisterReadback &readback,
                                     char *error,
