@@ -1,7 +1,7 @@
 # Alpha2MQTT (A2M)
 ## A Home Assistant controller for AlphaESS solar and battery inverters.
 
-_**Credit!** This project is entirely derived from https://github.com/dxoverdy/Alpha2MQTT (original README is [here](README-orig.md)) which is a really great bit of work.  My hardware includes some tweaks and modernizations on that project's hardware.  My software has changed a lot from that project, but at its core, this project is derived from that project and would not exist without that project. So HUGE credit and thanks._
+_**Credit!** This project is entirely derived from <https://github.com/dxoverdy/Alpha2MQTT>, which is a really great bit of work. My hardware includes some tweaks and modernizations on that project's hardware. My software has changed a lot from that project, but at its core, this project is derived from that project and would not exist without that project. So huge credit and thanks._
 
 **What is this?** This project is a controller (a small hardware device) that connects Home Assistant to an AlphaESS system via RS485 and uses MQTT discovery to set up a ready to go integration.  This is local control with NO cloud dependancy.  Once you plug-in and turn on this A2M hardware, your ESS will appear as a unique HA/MQTT device with HA entities ready to monitor and [control](#controlling-your-ess) your AlphaESS system.  No HA configuration is needed.  The HA device and HA entities are ready to be used with all units, classes, icons, unique IDs, and more and provides up-to-date availability status of each entity.   Entities are ready to be used by the Energy dashboard and can be included in other [dashboards](#dashboard-example) and [automations](#automation-examples).  This controller also provides [Operating Modes](#operating-modes) that enhance the AlphaESS functionality while making it simpler to [control](#controlling-your-ess).
 
@@ -14,7 +14,7 @@ The configuration (WiFi and MQTT settings) of this hardware itself is now done v
 ### Supported AlphaESS devices are:
 - I have only tested this on a SMILE-SPB system.
 
-- The [original project](README-orig.md) was tested on these systems which _should_ work, but I really can't say until someone tests them.
+- The original upstream project reported testing on these systems, which _should_ work, but I really can't say until someone tests them.
   - SMILE5,
   - SMILE-B3,
   - SMILE-T10,
@@ -24,7 +24,7 @@ The configuration (WiFi and MQTT settings) of this hardware itself is now done v
 
 ## Steps to get running.
 - Build the hardware.  (See [HARDWARE](#hardware) below)
-- Configure, build and load the software.  Follow the instructions in the [original README](README-orig.md#flashing) for setting up the software environment and compiling/loading.  Few, if any, changes are now needed in `Definitions.h` and you should follow the instructions in the file itself.  (Do not follow the original README instructions for modifying `Definitions.h`.)  Only a small number of hardware details *may* need to be changed in the top section of `Definitions.h`.
+- Configure, build and load the software. Follow the current repository instructions and `Definitions.h` comments for setup and compilation. Few, if any, changes are now needed in `Definitions.h`. Only a small number of hardware details *may* need to be changed in the top section of `Definitions.h`.
 - Enable MQTT discovery in Home Assistant (if this isn't on already).
 - Plug in RS485 and power (USB).  Then [configure WiFi and MQTT](#configuring-wifi-and-mqtt).
 - At this point your device/entities will appear under the MQTT integration as "A2M-ALXXXXXXXXXXXXX".)  You can now see and monitor your ESS in HA.
@@ -138,7 +138,7 @@ Alpha2MQTT honours 1.28 AlphaESS Modbus documentation.  The latest register list
 - [AlphaESS Register List](Pics/AlphaESS_Modbus_Protocol_V1.28.pdf)
 
 ### Hardware
-To build this hardware you should start with the [original project instructions](README-orig.md#how-to-build).  I originally started with an ESP8266, then I switched to an ESP32 for better WiFi and I have only tested with the ESP32 for a while.  (However, the ESP8266 _should_ still work.)  I also went to a larger display.  This isn't necessary, but did help with debugging.  And I used a different MAX3485 part because I liked the form factor better.  If you use this, be sure to connect the EN pin.  Finally I switched from a "generic" ESP32 to the Seeed XIAO ESP32C6 which is insanely small, has FAR better WiFi (including WiFi 6), and is quite cheap.  The XAIO ESP32C6 supports both an internal and external antennas (selectable via software).  I found the XAIO ESP32C6 internal antenna gave me a stronger signal than my older ESP32s with an external antenna.  (Select which antenna you are using in `Definitions.h`)
+To build this hardware, use the current wiring notes below together with the upstream project page for historical background if needed. I originally started with an ESP8266, then switched to an ESP32 for better WiFi and have only tested with the ESP32 for a while. (However, the ESP8266 _should_ still work.) I also went to a larger display. This is not necessary, but it did help with debugging. I used a different MAX3485 part because I liked the form factor better. If you use this, be sure to connect the EN pin. Finally I switched from a "generic" ESP32 to the Seeed XIAO ESP32C6, which is very small, has much better WiFi (including WiFi 6), and is quite cheap. The XIAO ESP32C6 supports both internal and external antennas (selectable via software). I found the XIAO ESP32C6 internal antenna gave me a stronger signal than my older ESP32 boards with an external antenna. (Select which antenna you are using in `Definitions.h`)
 
 Here are links to the parts I used.
 - XIAO ESP32C6 - [Seeed](https://www.seeedstudio.com/XIAO-Main-ESP32C6-2354.html), [amazon](https://www.amazon.com/gp/product/B0D2NKVB34)
@@ -161,7 +161,7 @@ Device wiring:
 
 ### Dashboard Example
 - I tied into the Home Assistant builtin Energy dashboard by simply editing its configuration and adding grid to/from, solar, battery to/from, and battery SOC.  Voila!
-- Here is my ESS dashboard.  This was simple to make using the HA builtin visual editor. ([Here](Dave_Examples/Dave_ESS_Dashboard.yaml.txt) is the yaml.)  I used the builtin"energy-distribution" card and "power-flow-card-plus" which is available through HACS.  In the middle section there are several entities that appear and disappear depending on the current Op Mode.
+- Here is my ESS dashboard.  This was simple to make using the HA builtin visual editor.  I used the builtin "energy-distribution" card and "power-flow-card-plus" which is available through HACS.  In the middle section there are several entities that appear and disappear depending on the current Op Mode.
 - Here is the same dashboard when the ESS is in a different Op Mode.  Note: The middle column has more entities showing in this Op Mode.
 - The "Electricity Tariff" and "NWS Alerts" are the two entities on this page that don't come from Alpha2MQTT.  I include them here because my automations use these to help control the ESS.
 - You will also note that this dashboard also has views for an "Energy" (almost identical to HA's builtin Energy Dashboard) and "Power".  I won't bore you with pics, but the yaml has all the details.
@@ -172,7 +172,7 @@ Device wiring:
     - I try to ONLY use battery or solar during peak and mid-peak.
     - I try to push some saved battery power back to the grid during peak, but only if the SOC is high enough and only when there are no storm alerts. I check, and adjust, each hour during peak.
     - Even though it costs the same, I prefer to charge using solar rather than using the grid, except when there are storms, and then I charge as soon as the rates are cheap.  A bit before rates get expensive, I fill the battery from the grid in case it isn't full. (It is _almost_ always already full.)
-  - [Here](Dave_Examples/Dave_ESS_Automation.yaml.txt) is my yaml that accomplishes this.  This is all in a single automation named "ESS".
+  - This is all in a single automation named "ESS".
 - Other Device control
   - You can also use the ESS state to control other devices in Home Assistant.  For example, if Alpha2MQTT detects that the grid has become unavailable, then it turns off my EVSE (car "charger").
   - I'd love to hear what you are controlling...
@@ -192,7 +192,4 @@ Device wiring:
 - The RS485 code has been tweaked to better handle more than two peers on the RS485 bus.  While this situation is rare, I had to deal with it during development because my vendor provided control via RS485 as well.  So until I trusted my device to take over, I had to make both controllers coexist.  RS485 fully supports more than two peers.  However, the MAX3485 doesn't provide enough control to make this perfect.  But I was able to make it robust enough.  Also, MODBUS says there can be only one "master" and Alpha2MQTT and my vendor's device were both masters.  But again, it still works well enough.  And now that I trust this controller, I have disconnected the vendor's device.
 - The larger display support allows for easier debugging.  This really isn't needed for anything other than debugging.
 - There's a lot of debugging information available via MQTT and the large display.  Enabling the different DEBUG options in `Definitions.h` will add more rotating debug values on the screen and add new Diagnostic entities under the MQTT device.
-- The AlphaSniffer project is a quick and dirty RS485 sniffer that lets this hardware sniff the RS485 bus while some other master talks to your AlphaESS.  It streams the (somewhat parsed) output over TCP to a host.
 
-### Legacy Arduino sketch
-The original Arduino sketch now lives at `Alpha2MQTT/legacy/Alpha2MQTT_legacy.ino` for legacy Arduino builds and retains the second-by-second schedule (`_mqttSecondStatusRegisters`). If you use it, provide WiFi/MQTT credentials via a local `Secrets.h` (gitignored), or via a local `secrets.txt` workflow that generates the same `WIFI_SSID`, `WIFI_PASSWORD`, `MQTT_SERVER`, `MQTT_USERNAME`, and `MQTT_PASSWORD` definitions.
