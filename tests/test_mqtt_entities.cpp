@@ -243,6 +243,13 @@ TEST_CASE("mqtt entities: legacy-compatible direct readbacks are exposed as regi
 	CHECK(dispatchTime->haClass == homeAssistantClass::haClassDuration);
 	CHECK(dispatchTime->readKey == REG_DISPATCH_RW_DISPATCH_TIME_1);
 
+	const mqttState *dispatchRequestStatus = mqttEntityById(mqttEntityId::entityDispatchRequestStatus);
+	REQUIRE(dispatchRequestStatus != nullptr);
+	CHECK(mqttEntityNameEquals(dispatchRequestStatus, "Dispatch_Request_Status"));
+	CHECK(dispatchRequestStatus->haClass == homeAssistantClass::haClassInfo);
+	CHECK(dispatchRequestStatus->readKind == MqttEntityReadKind::Derived);
+	CHECK_FALSE(dispatchRequestStatus->subscribe);
+
 	const mqttState *dispatchDuration = mqttEntityById(mqttEntityId::entityDispatchDuration);
 	REQUIRE(dispatchDuration != nullptr);
 	CHECK(mqttEntityNameEquals(dispatchDuration, "Dispatch_Duration"));
@@ -326,6 +333,7 @@ TEST_CASE("mqtt entities: controller diagnostics append after the legacy persist
 	size_t registerValueIdx = count;
 	size_t batteryCurrentIdx = count;
 	size_t maxFeedinIdx = count;
+	size_t dispatchRequestStatusIdx = count;
 	size_t rs485ErrorsIdx = count;
 	size_t budgetExceededIdx = count;
 
@@ -339,6 +347,9 @@ TEST_CASE("mqtt entities: controller diagnostics append after the legacy persist
 		if (mqttEntityNameEquals(&desc[i], "Max_Feedin_Percent")) {
 			maxFeedinIdx = i;
 		}
+		if (mqttEntityNameEquals(&desc[i], "Dispatch_Request_Status")) {
+			dispatchRequestStatusIdx = i;
+		}
 		if (mqttEntityNameEquals(&desc[i], "A2M_RS485_Errors")) {
 			rs485ErrorsIdx = i;
 		}
@@ -350,10 +361,12 @@ TEST_CASE("mqtt entities: controller diagnostics append after the legacy persist
 	REQUIRE(registerValueIdx < count);
 	REQUIRE(batteryCurrentIdx < count);
 	REQUIRE(maxFeedinIdx < count);
+	REQUIRE(dispatchRequestStatusIdx < count);
 	REQUIRE(rs485ErrorsIdx < count);
 	REQUIRE(budgetExceededIdx < count);
 	CHECK(registerValueIdx < batteryCurrentIdx);
 	CHECK(batteryCurrentIdx < maxFeedinIdx);
+	CHECK(maxFeedinIdx < dispatchRequestStatusIdx);
 	CHECK(maxFeedinIdx < rs485ErrorsIdx);
 	CHECK(registerValueIdx < rs485ErrorsIdx);
 	CHECK(registerValueIdx < budgetExceededIdx);

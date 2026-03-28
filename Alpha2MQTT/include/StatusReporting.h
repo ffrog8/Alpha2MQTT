@@ -87,7 +87,9 @@ struct StatusPollSnapshot {
 	uint32_t rs485StubFailRemaining;
 	uint32_t rs485StubWriteCount;
 	uint16_t rs485StubLastWriteStartReg;
+	uint16_t rs485StubLastWriteRegCount;
 	uint32_t rs485StubLastWriteMs;
+	uint32_t dispatchRequestQueuedMs;
 	uint32_t dispatchLastRunMs;
 	const char *dispatchLastSkipReason;
 	uint32_t pollIntervalSeconds;
