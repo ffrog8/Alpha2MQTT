@@ -243,6 +243,13 @@ TEST_CASE("mqtt entities: legacy-compatible direct readbacks are exposed as regi
 	CHECK(dispatchTime->haClass == homeAssistantClass::haClassDuration);
 	CHECK(dispatchTime->readKey == REG_DISPATCH_RW_DISPATCH_TIME_1);
 
+	const mqttState *dispatchRequestStatus = mqttEntityById(mqttEntityId::entityDispatchRequestStatus);
+	REQUIRE(dispatchRequestStatus != nullptr);
+	CHECK(mqttEntityNameEquals(dispatchRequestStatus, "Dispatch_Request_Status"));
+	CHECK(dispatchRequestStatus->haClass == homeAssistantClass::haClassInfo);
+	CHECK(dispatchRequestStatus->readKind == MqttEntityReadKind::Derived);
+	CHECK_FALSE(dispatchRequestStatus->subscribe);
+
 	const mqttState *dispatchDuration = mqttEntityById(mqttEntityId::entityDispatchDuration);
 	REQUIRE(dispatchDuration != nullptr);
 	CHECK(mqttEntityNameEquals(dispatchDuration, "Dispatch_Duration"));

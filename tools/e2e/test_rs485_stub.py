@@ -94,8 +94,9 @@ CASE_ORDER: tuple[str, ...] = (
     "strict_unknown_register_reads",
     "bucket_snapshot_skip_only",
     "dispatch_write_via_commands",
+    "dispatch_invalid_payload_no_write",
     "dispatch_write_feedback",
-    "dispatch_eval_user_interval",
+    "dispatch_write_under_100ms",
     "dispatch_timed_restart_expire",
     "dispatch_timed_no_rewrite_without_fresh_snapshot",
     "dispatch_disable_timed_stops_countdown_wakes",
@@ -2089,6 +2090,94 @@ def main() -> int:
             time.sleep(1.0)
         raise E2EError(f"{name} did not update to {expected!r}; last_seen={last_seen!r}")
 
+    def _dispatch_set_topic(inverter_device_id: str) -> str:
+        return f"{device_root}/{inverter_device_id}/dispatch/set"
+
+    def _dispatch_status_topic(inverter_device_id: str) -> str:
+        return _state_topic(inverter_device_id, "Dispatch_Request_Status")
+
+    def _default_dispatch_request(
+        *,
+        mode: str = "state_of_charge_control",
+        power_w: int = -1200,
+        soc_percent: int = 80,
+        duration_s: int = 0,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"mode": mode}
+        if mode == "normal_mode":
+            return payload
+        payload["duration_s"] = duration_s
+        if mode in ("battery_only_charges_from_pv", "state_of_charge_control", "load_following"):
+            payload["power_w"] = power_w
+        if mode == "state_of_charge_control":
+            payload["soc_percent"] = soc_percent
+        return payload
+
+    def publish_dispatch_request_and_wait_status(
+        inverter_device_id: str,
+        payload: dict[str, Any],
+        *,
+        expected_status: Optional[str] = "ok",
+        timeout_s: int = 25,
+    ) -> str:
+        status_topic = _dispatch_status_topic(inverter_device_id)
+        mqtt.subscribe(status_topic, force=True)
+
+        payload_text = json.dumps(payload, separators=(",", ":"))
+        last_status = ""
+        baseline_queued_ms = int(_fetch_poll(mqtt, poll_topic).get("dispatch_request_queued_ms", 0))
+
+        for attempt in range(2):
+            try:
+                _fetch_latest_text(mqtt, status_topic, label="dispatch_status_baseline")
+            except E2EError:
+                pass
+
+            mqtt.publish(_dispatch_set_topic(inverter_device_id), payload_text, retain=False)
+
+            deadline = time.time() + timeout_s
+            saw_status = False
+            last_status = ""
+            while time.time() < deadline:
+                try:
+                    got_topic, status_payload = mqtt.wait_for_publish(
+                        timeout_s=min(5.0, max(0.5, deadline - time.time()))
+                    )
+                except E2EError as e:
+                    if "Timeout waiting for MQTT publish" in str(e):
+                        continue
+                    raise
+
+                if got_topic != status_topic:
+                    continue
+
+                saw_status = True
+                last_status = status_payload.strip()
+                if expected_status is None or last_status == expected_status:
+                    return last_status
+                break
+
+            current_queued_ms = int(_fetch_poll(mqtt, poll_topic).get("dispatch_request_queued_ms", 0))
+            request_never_queued = current_queued_ms <= baseline_queued_ms
+            if attempt == 0 and request_never_queued and last_status == "":
+                _sleep_with_mqtt(mqtt, 4.0)
+                continue
+
+            if not saw_status:
+                raise E2EError(
+                    f"Timeout waiting for dispatch request status on {status_topic}; "
+                    f"last_status={last_status!r} payload={payload_text}"
+                )
+
+            raise E2EError(
+                f"dispatch request returned unexpected status: expected={expected_status!r} "
+                f"got={last_status!r} payload={payload_text}"
+            )
+
+        raise E2EError(
+            f"dispatch request did not queue or publish status after retry: payload={payload_text}"
+        )
+
     def ensure_dispatch_write(
         ha_unique: str,
         *,
@@ -2096,54 +2185,57 @@ def main() -> int:
         duration_s: Optional[int] = None,
         poll_interval_s: Optional[int] = None,
         timeout_s: int = 45,
-    ) -> tuple[str, int, int]:
-        base = f"{device_root}/{ha_unique}"
+    ) -> tuple[int, int]:
         reg_dispatch_start = _discover_register_value("REG_DISPATCH_RW_DISPATCH_START")
         dispatch_start_start = _discover_define_value("DISPATCH_START_START")
-        op_mode_target = _discover_define_string("OP_MODE_DESC_TARGET")
 
         ensure_stub_online_backend(
             '{"mode":"online","soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0}',
             label=f"{label_prefix} backend",
         )
 
-        dispatch_duration_payload = str(duration_s) if duration_s is not None else "0"
-
-        def publish_dispatch_trigger() -> None:
-            # Op_Mode is the final trigger once the other control values are already staged.
-            mqtt.publish(f"{base}/Op_Mode/command", op_mode_target, retain=False)
-
         ensure_stub_online_backend(
             '{"mode":"online","dispatch_start":0,"dispatch_mode":65535,"dispatch_active_power":0,"dispatch_soc":0}',
             label=f"{label_prefix} mismatch backend",
         )
 
-        # Retained config snapshots can lag runtime during reconnect/reboot transitions.
-        # Use live poll status as the authority for the currently applied user interval.
-        current_poll = _fetch_poll(mqtt, poll_topic)
-        current_poll_interval = int(current_poll.get("poll_interval_s", 4) or 4)
-        target_poll_interval = poll_interval_s if poll_interval_s is not None else current_poll_interval
-        wait_runtime_poll_interval_applied(target_poll_interval)
+        if poll_interval_s is not None:
+            wait_runtime_poll_interval_applied(poll_interval_s)
 
-        publish_and_wait_state(ha_unique, "Dispatch_Duration", dispatch_duration_payload)
-        publish_and_wait_state(ha_unique, "SOC_Target", "80")
-        publish_and_wait_state(ha_unique, "Charge_Power", "1200")
-        publish_and_wait_state(ha_unique, "Discharge_Power", "1200")
-        publish_and_wait_state(ha_unique, "Push_Power", "500")
-        publish_and_wait_state(ha_unique, "Op_Mode", op_mode_target)
-        last_pub = time.time()
+        before = _fetch_poll(mqtt, poll_topic)
+        baseline_writes = int(before.get("rs485_stub_writes", 0))
+        baseline_last_write_ms = int(before.get("rs485_stub_last_write_ms", 0))
+        baseline_queued_ms = int(before.get("dispatch_request_queued_ms", 0))
+
+        request_payload = _default_dispatch_request(
+            duration_s=duration_s if duration_s is not None else 0,
+        )
+        publish_dispatch_request_and_wait_status(
+            ha_unique,
+            request_payload,
+            expected_status="ok",
+            timeout_s=timeout_s,
+        )
 
         def pred() -> Tuple[bool, str]:
-            nonlocal last_pub
             cur = _fetch_poll(mqtt, poll_topic)
             writes = int(cur.get("rs485_stub_writes", 0))
             last_reg = int(cur.get("rs485_stub_last_write_reg", 0))
+            last_reg_count = int(cur.get("rs485_stub_last_write_reg_count", 0))
             last_ms = int(cur.get("rs485_stub_last_write_ms", 0))
-            detail = f"writes={writes} last_reg={last_reg} last_ms={last_ms} expect_reg={reg_dispatch_start}"
-            if time.time() - last_pub > 8.0:
-                publish_dispatch_trigger()
-                last_pub = time.time()
-            return (last_reg == reg_dispatch_start and last_ms > 0 and writes > 0), detail
+            queued_ms = int(cur.get("dispatch_request_queued_ms", 0))
+            detail = (
+                f"writes={writes} last_reg={last_reg} last_reg_count={last_reg_count} "
+                f"last_ms={last_ms} queued_ms={queued_ms} expect_reg={reg_dispatch_start}"
+            )
+            return (
+                writes > baseline_writes
+                and last_reg == reg_dispatch_start
+                and last_reg_count == 9
+                and last_ms > baseline_last_write_ms
+                and queued_ms > baseline_queued_ms
+                and last_ms >= queued_ms
+            ), detail
 
         _assert_eventually(
             f"{label_prefix} dispatch write observed in stub backend",
@@ -2151,21 +2243,17 @@ def main() -> int:
             timeout_s=timeout_s,
             poll_s=1.0,
         )
-        return base, reg_dispatch_start, dispatch_start_start
+        return reg_dispatch_start, dispatch_start_start
 
     def measure_dispatch_write_latency(
         ha_unique: str,
         *,
         label_prefix: str,
         duration_s: int,
-        poll_interval_s: int,
+        poll_interval_s: Optional[int],
         timeout_s: int = 20,
-    ) -> float:
-        base = f"{device_root}/{ha_unique}"
-        op_mode_target = _discover_define_string("OP_MODE_DESC_TARGET")
-        dispatch_start_start = _discover_define_value("DISPATCH_START_START")
-        dispatch_time_topic = _state_topic(ha_unique, "Dispatch_Time")
-        dispatch_start_topic = _state_topic(ha_unique, "Dispatch_Start")
+    ) -> int:
+        reg_dispatch_start = _discover_register_value("REG_DISPATCH_RW_DISPATCH_START")
 
         ensure_stub_online_backend(
             '{"mode":"online","soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0}',
@@ -2177,47 +2265,53 @@ def main() -> int:
             label=f"{label_prefix} mismatch backend",
         )
 
-        wait_runtime_poll_interval_applied(poll_interval_s)
+        if poll_interval_s is not None:
+            wait_runtime_poll_interval_applied(poll_interval_s)
 
-        last_pub = 0.0
-        mqtt.subscribe(dispatch_time_topic, force=True)
-        mqtt.subscribe(dispatch_start_topic, force=True)
-        baseline_dispatch_time = _fetch_latest_text(mqtt, dispatch_time_topic, label=f"{label_prefix}_dispatch_time_baseline").strip()
-        baseline_dispatch_start = _fetch_latest_text(mqtt, dispatch_start_topic, label=f"{label_prefix}_dispatch_start_baseline").strip()
+        before = _fetch_poll(mqtt, poll_topic)
+        baseline_writes = int(before.get("rs485_stub_writes", 0))
+        baseline_last_write_ms = int(before.get("rs485_stub_last_write_ms", 0))
+        baseline_queued_ms = int(before.get("dispatch_request_queued_ms", 0))
 
-        def publish_ready_commands() -> None:
-            nonlocal last_pub
-            mqtt.publish(f"{base}/Dispatch_Duration/command", str(duration_s), retain=False)
-            mqtt.publish(f"{base}/Op_Mode/command", op_mode_target, retain=False)
-            mqtt.publish(f"{base}/SOC_Target/command", "80", retain=False)
-            mqtt.publish(f"{base}/Charge_Power/command", "1200", retain=False)
-            mqtt.publish(f"{base}/Discharge_Power/command", "1200", retain=False)
-            mqtt.publish(f"{base}/Push_Power/command", "500", retain=False)
-            last_pub = time.time()
-
-        publish_ready_commands()
-        deadline = time.time() + timeout_s
-        while time.time() < deadline:
-            elapsed = time.time() - last_pub
-            if elapsed >= 4.0:
-                publish_ready_commands()
-            try:
-                got_topic, payload = mqtt.wait_for_publish(timeout_s=min(2.0, max(0.5, deadline - time.time())))
-            except E2EError:
-                continue
-
-            value = payload.strip()
-            if got_topic == dispatch_time_topic and value != baseline_dispatch_time and value == str(duration_s):
-                return time.time() - last_pub
-            if got_topic == dispatch_start_topic:
-                is_started = value.lower() in ("start", "started") or value == str(dispatch_start_start)
-                if value != baseline_dispatch_start and is_started:
-                    return time.time() - last_pub
-
-        raise E2EError(
-            f"{label_prefix} dispatch write not observed within {timeout_s}s; "
-            f"last_start={baseline_dispatch_start!r} last_time={baseline_dispatch_time!r}"
+        publish_dispatch_request_and_wait_status(
+            ha_unique,
+            _default_dispatch_request(duration_s=duration_s),
+            expected_status="ok",
+            timeout_s=timeout_s,
         )
+
+        result: dict[str, int] = {}
+
+        def pred() -> Tuple[bool, str]:
+            cur = _fetch_poll(mqtt, poll_topic)
+            writes = int(cur.get("rs485_stub_writes", 0))
+            last_reg = int(cur.get("rs485_stub_last_write_reg", 0))
+            last_reg_count = int(cur.get("rs485_stub_last_write_reg_count", 0))
+            last_ms = int(cur.get("rs485_stub_last_write_ms", 0))
+            queued_ms = int(cur.get("dispatch_request_queued_ms", 0))
+            if (
+                writes > baseline_writes
+                and last_reg == reg_dispatch_start
+                and last_reg_count == 9
+                and last_ms > baseline_last_write_ms
+                and queued_ms > baseline_queued_ms
+                and last_ms >= queued_ms
+            ):
+                result["delta_ms"] = last_ms - queued_ms
+                return True, f"delta_ms={result['delta_ms']}"
+            return (
+                False,
+                f"writes={writes} last_reg={last_reg} last_reg_count={last_reg_count} "
+                f"last_ms={last_ms} queued_ms={queued_ms}",
+            )
+
+        _assert_eventually(
+            f"{label_prefix} dispatch timing captured",
+            pred,
+            timeout_s=timeout_s,
+            poll_s=1.0,
+        )
+        return result["delta_ms"]
 
     def set_polling_config(poll_interval_s: int, bucket_map: str) -> None:
         # Config-set parser expects string values, not numbers. An empty bucket map means
@@ -2600,22 +2694,42 @@ def main() -> int:
         )
 
     def case_dispatch_write_via_commands() -> None:
-        print("[e2e] case: dispatch write via command topics (virtual inverter)")
+        print("[e2e] case: dispatch write via atomic request")
         ha_unique = _ensure_online_inverter_identity("dispatch write baseline")
         ensure_dispatch_write(ha_unique, label_prefix="dispatch")
-        publish_and_wait_state(
+        publish_dispatch_request_and_wait_status(
             ha_unique,
-            "Op_Mode",
-            _discover_define_string("OP_MODE_DESC_NORMAL"),
+            _default_dispatch_request(mode="normal_mode"),
+            expected_status="ok",
         )
         return
 
+    def case_dispatch_invalid_payload_no_write() -> None:
+        print("[e2e] case: invalid atomic dispatch payload reports an error without writing RS485")
+        ha_unique = _ensure_online_inverter_identity("dispatch invalid baseline")
+        before = _fetch_poll(mqtt, poll_topic)
+        writes_before = int(before.get("rs485_stub_writes", 0))
+
+        publish_dispatch_request_and_wait_status(
+            ha_unique,
+            {"mode": "not_a_real_mode"},
+            expected_status="invalid mode",
+            timeout_s=10,
+        )
+
+        after = _fetch_poll(mqtt, poll_topic)
+        writes_after = int(after.get("rs485_stub_writes", 0))
+        if writes_after != writes_before:
+            raise E2EError(
+                f"invalid dispatch payload should not touch RS485 writes: "
+                f"{writes_before}->{writes_after}"
+            )
+
     def case_dispatch_write_feedback_via_register_value() -> None:
-        print("[e2e] case: dispatch write feedback (Register_Value reflects new dispatch state)")
+        print("[e2e] case: atomic dispatch write feedback (Register_Value reflects new dispatch state)")
         ha_unique = _ensure_online_inverter_identity("dispatch feedback baseline")
-        _, reg_dispatch_start, dispatch_start_start = ensure_dispatch_write(ha_unique, label_prefix="dispatch feedback")
+        reg_dispatch_start, dispatch_start_start = ensure_dispatch_write(ha_unique, label_prefix="dispatch feedback")
         dispatch_start_stop = _discover_define_value("DISPATCH_START_STOP")
-        op_mode_normal = _discover_define_string("OP_MODE_DESC_NORMAL")
         dispatch_start_topic = _state_topic(ha_unique, "Dispatch_Start")
         current_config = _fetch_config(mqtt, config_topic)
         current_poll_interval = int(current_config.get("poll_interval_s", 4) or 4)
@@ -2660,22 +2774,11 @@ def main() -> int:
                 f"but got last={last_val!r}"
             )
 
-        mqtt.publish(_command_topic(ha_unique, "Op_Mode"), op_mode_normal, retain=False)
-        normal_state_topic = _state_topic(ha_unique, "Op_Mode")
-        mqtt.subscribe(normal_state_topic, force=True)
-        last_normal_state = ""
-        def normal_pred() -> Tuple[bool, str]:
-            nonlocal last_normal_state
-            last_normal_state = _fetch_latest_text(mqtt, normal_state_topic, label="op_mode_normal")
-            return (
-                last_normal_state.strip().lower() == op_mode_normal.strip().lower(),
-                f"last={last_normal_state!r}",
-            )
-        _assert_eventually(
-            "op mode returns to normal",
-            normal_pred,
+        publish_dispatch_request_and_wait_status(
+            ha_unique,
+            _default_dispatch_request(mode="normal_mode"),
+            expected_status="ok",
             timeout_s=25,
-            poll_s=1.0,
         )
         manual_stopped = _select_register_and_wait_manual_read(
             mqtt,
@@ -2693,23 +2796,20 @@ def main() -> int:
                 f"but got last={stopped_val!r}"
             )
 
-    def case_dispatch_eval_uses_user_interval() -> None:
-        user_interval_s = 3
-        print("[e2e] case: dispatch evaluation follows the 3s user interval, not the 10s bucket")
-        ha_unique = _ensure_online_inverter_identity("dispatch 3s baseline")
-        elapsed = measure_dispatch_write_latency(
+    def case_dispatch_write_under_100ms() -> None:
+        print("[e2e] case: atomic dispatch request writes the 9-register block within 100 ms")
+        ha_unique = _ensure_online_inverter_identity("dispatch timing baseline")
+        elapsed_ms = measure_dispatch_write_latency(
             ha_unique,
-            label_prefix="dispatch 3s",
+            label_prefix="dispatch timing",
             duration_s=12,
-            poll_interval_s=user_interval_s,
+            poll_interval_s=None,
             timeout_s=12,
         )
-        # This measures the full confirmation path (dispatch eval + write + raw register readback publish),
-        # so keep the bound comfortably below the legacy 10s cadence while allowing a 3s user bucket.
-        if elapsed > 7.0:
+        if elapsed_ms > 100:
             raise E2EError(
-                f"dispatch write took too long after the final control burst with poll_interval_s={user_interval_s}: "
-                f"elapsed={elapsed:.2f}s"
+                f"dispatch block write exceeded 100 ms from queued command to stub-observed 9-register write: "
+                f"elapsed_ms={elapsed_ms}"
             )
 
         dispatch_time_topic = _state_topic(ha_unique, "Dispatch_Time")
@@ -2726,13 +2826,11 @@ def main() -> int:
 
     def case_dispatch_timed_restart_and_expire() -> None:
         print("[e2e] case: timed dispatch countdown restarts and expires cleanly")
-        user_interval_s = 3
         ha_unique = _ensure_online_inverter_identity("timed dispatch baseline")
         ensure_dispatch_write(
             ha_unique,
             label_prefix="dispatch timed",
             duration_s=12,
-            poll_interval_s=user_interval_s,
             timeout_s=8,
         )
         dispatch_start_stop = _discover_define_value("DISPATCH_START_STOP")
@@ -2768,7 +2866,12 @@ def main() -> int:
         if dropped >= first_remaining:
             raise E2EError(f"Dispatch_Remaining did not decrease: {first_remaining} -> {dropped}")
 
-        publish_and_wait_state(ha_unique, "Dispatch_Duration", "12")
+        publish_dispatch_request_and_wait_status(
+            ha_unique,
+            _default_dispatch_request(duration_s=12),
+            expected_status="ok",
+            timeout_s=25,
+        )
         restarted_text = ""
 
         def restart_pred() -> Tuple[bool, str]:
@@ -2798,13 +2901,12 @@ def main() -> int:
             raise E2EError(f"dispatch restarted after expiry instead of staying stopped: {start_after_expiry!r}")
 
     def case_dispatch_timed_no_rewrite_without_fresh_snapshot() -> None:
-        print("[e2e] case: timed countdown ticks do not rewrite without a fresh snapshot")
+        print("[e2e] case: timed countdown ticks do not rewrite without a new atomic request")
         ha_unique = _ensure_online_inverter_identity("dispatch timed no-rewrite baseline")
         ensure_dispatch_write(
             ha_unique,
             label_prefix="dispatch timed no-rewrite",
             duration_s=25,
-            poll_interval_s=9,
             timeout_s=8,
         )
         remaining_topic = _state_topic(ha_unique, "Dispatch_Remaining")
@@ -2824,43 +2926,44 @@ def main() -> int:
 
         before = _fetch_poll(mqtt, poll_topic)
         writes_before = int(before.get("rs485_stub_writes", 0))
-        attempts_before = int(before.get("ess_snapshot_attempts", 0))
 
-        # Countdown publishes every 5s, while the next evaluation is delayed by the 9s
-        # user interval. If a write appears before the next fresh snapshot attempt, it came from
-        # stale snapshot data rather than a legitimate reevaluation.
+        # Countdown publishes every 5s, but the atomic request path should not rewrite dispatch
+        # during those wakeups unless a fresh external request arrives.
         _sleep_with_mqtt(mqtt, 7)
         after = _fetch_poll(mqtt, poll_topic)
         writes_after = int(after.get("rs485_stub_writes", 0))
-        attempts_after = int(after.get("ess_snapshot_attempts", 0))
-        if writes_after != writes_before and attempts_after == attempts_before:
+        if writes_after != writes_before:
             raise E2EError(
-                "Timed countdown rewrote dispatch without a fresh ESS snapshot: "
-                f"writes {writes_before}->{writes_after}, attempts {attempts_before}->{attempts_after}"
+                f"Timed countdown rewrote dispatch without a new atomic request: "
+                f"writes {writes_before}->{writes_after}"
             )
 
     def case_dispatch_disable_timed_stops_countdown_wakes() -> None:
-        print("[e2e] case: disabling timed dispatch does not keep 5s rewrite bursts alive")
+        print("[e2e] case: normal_mode stop does not keep countdown-triggered rewrites alive")
         ha_unique = _ensure_online_inverter_identity("dispatch disable baseline")
         ensure_dispatch_write(
             ha_unique,
             label_prefix="dispatch disable",
             duration_s=12,
-            poll_interval_s=9,
             timeout_s=8,
         )
 
-        before_disable = _fetch_poll(mqtt, poll_topic)
-        writes_before_disable = int(before_disable.get("rs485_stub_writes", 0))
+        before_disable = _fetch_stub(mqtt, stub_topic)
+        writes_before_disable = int(before_disable.get("stub_writes", 0))
 
-        publish_and_wait_state(ha_unique, "Dispatch_Duration", "0")
+        publish_dispatch_request_and_wait_status(
+            ha_unique,
+            _default_dispatch_request(mode="normal_mode"),
+            expected_status="ok",
+            timeout_s=10,
+        )
 
         disable_write_count = writes_before_disable
 
         def disable_write_pred() -> Tuple[bool, str]:
             nonlocal disable_write_count
-            cur = _fetch_poll(mqtt, poll_topic)
-            disable_write_count = int(cur.get("rs485_stub_writes", 0))
+            cur = _fetch_cached_or_latest_json(mqtt, stub_topic, "stub")
+            disable_write_count = int(cur.get("stub_writes", 0))
             return disable_write_count > writes_before_disable, f"writes={disable_write_count}"
 
         _assert_eventually(
@@ -2870,14 +2973,13 @@ def main() -> int:
             poll_s=1.0,
         )
 
-        # The countdown cadence is 5s. With poll_interval_s=9, any extra write
-        # seen in the next 7s window can only come from the stale countdown path.
+        # After a confirmed normal-mode stop, the old countdown wake path should stay quiet.
         _sleep_with_mqtt(mqtt, 7)
-        after_disable = _fetch_poll(mqtt, poll_topic)
-        writes_after_disable = int(after_disable.get("rs485_stub_writes", 0))
+        after_disable = _fetch_cached_or_latest_json(mqtt, stub_topic, "stub")
+        writes_after_disable = int(after_disable.get("stub_writes", 0))
         if writes_after_disable != disable_write_count:
             raise E2EError(
-                f"Dispatch_Duration=0 kept countdown-triggered writes alive: "
+                f"normal_mode kept countdown-triggered writes alive: "
                 f"{disable_write_count}->{writes_after_disable}"
             )
 
@@ -3312,18 +3414,28 @@ def main() -> int:
             '"soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0,"dispatch_start":0,"dispatch_mode":0,"dispatch_soc":0}}',
             ("online",),
         )
-        ha_unique = _ensure_online_inverter_identity("fail writes identity baseline")
-        base = f"{device_root}/{ha_unique}"
 
-        def publish_ready_commands() -> None:
-            mqtt.publish(f"{base}/Op_Mode/command", "target", retain=False)
-            mqtt.publish(f"{base}/SOC_Target/command", "80", retain=False)
-            mqtt.publish(f"{base}/Charge_Power/command", "1200", retain=False)
-            mqtt.publish(f"{base}/Discharge_Power/command", "1200", retain=False)
-            mqtt.publish(f"{base}/Push_Power/command", "500", retain=False)
+        def write_fail_armed_pred() -> Tuple[bool, str]:
+            cur_stub = _fetch_latest_json(mqtt, stub_topic, "stub")
+            fail_writes = bool(cur_stub.get("fail_writes", False))
+            fail_reg = int(cur_stub.get("fail_reg", 0))
+            detail = f"fail_writes={fail_writes} fail_reg={fail_reg}"
+            return fail_writes and fail_reg == reg_dispatch_start, detail
 
-        publish_ready_commands()
-        last_pub = time.time()
+        _assert_eventually(
+            "stub write-fail injection armed",
+            write_fail_armed_pred,
+            timeout_s=20,
+            poll_s=1.0,
+        )
+
+        ha_unique = _wait_for_inverter_identity()
+        publish_dispatch_request_and_wait_status(
+            ha_unique,
+            _default_dispatch_request(),
+            expected_status="modbus write failed",
+            timeout_s=20,
+        )
 
         manual_topic = _manual_read_topic()
         regnum_topic = _state_topic(ha_unique, "Register_Number")
@@ -3331,10 +3443,6 @@ def main() -> int:
         def pred() -> Tuple[bool, str]:
             cur = _fetch_poll(mqtt, poll_topic)
             ok = bool(cur.get("ess_snapshot_last_ok", False))
-            nonlocal last_pub
-            if time.time() - last_pub > 8.0:
-                publish_ready_commands()
-                last_pub = time.time()
             manual = _select_register_and_wait_manual_read(
                 mqtt,
                 _command_topic(ha_unique, "Register_Number"),
@@ -3921,8 +4029,9 @@ def main() -> int:
         ("strict_unknown_register_reads", case_strict_unknown_register_reads),
         ("bucket_snapshot_skip_only", case_bucket_snapshot_skip_only),
         ("dispatch_write_via_commands", case_dispatch_write_via_commands),
+        ("dispatch_invalid_payload_no_write", case_dispatch_invalid_payload_no_write),
         ("dispatch_write_feedback", case_dispatch_write_feedback_via_register_value),
-        ("dispatch_eval_user_interval", case_dispatch_eval_uses_user_interval),
+        ("dispatch_write_under_100ms", case_dispatch_write_under_100ms),
         ("dispatch_timed_restart_expire", case_dispatch_timed_restart_and_expire),
         ("dispatch_timed_no_rewrite_without_fresh_snapshot", case_dispatch_timed_no_rewrite_without_fresh_snapshot),
         ("dispatch_disable_timed_stops_countdown_wakes", case_dispatch_disable_timed_stops_countdown_wakes),

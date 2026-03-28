@@ -150,7 +150,9 @@ TEST_CASE("status poll JSON builder includes required keys")
 	snapshot.rs485StubFailRemaining = 0;
 	snapshot.rs485StubWriteCount = 3;
 	snapshot.rs485StubLastWriteStartReg = 4123;
+	snapshot.rs485StubLastWriteRegCount = 9;
 	snapshot.rs485StubLastWriteMs = 4242;
+	snapshot.dispatchRequestQueuedMs = 4000;
 	snapshot.dispatchLastRunMs = 0;
 	snapshot.dispatchLastSkipReason = "ess_snapshot_failed";
 	snapshot.pollIntervalSeconds = 30;
@@ -188,7 +190,9 @@ TEST_CASE("status poll JSON builder includes required keys")
 	CHECK(payload.find("\"rs485_stub_fail_remaining\":0") != std::string::npos);
 	CHECK(payload.find("\"rs485_stub_writes\":3") != std::string::npos);
 	CHECK(payload.find("\"rs485_stub_last_write_reg\":4123") != std::string::npos);
+	CHECK(payload.find("\"rs485_stub_last_write_reg_count\":9") != std::string::npos);
 	CHECK(payload.find("\"rs485_stub_last_write_ms\":4242") != std::string::npos);
+	CHECK(payload.find("\"dispatch_request_queued_ms\":4000") != std::string::npos);
 	CHECK(payload.find("\"inverter_ready\":true") != std::string::npos);
 	CHECK(payload.find("\"ess_snapshot_ok\":false") != std::string::npos);
 	CHECK(payload.find("\"mem\":{\"f\":5555") != std::string::npos);
@@ -246,7 +250,9 @@ TEST_CASE("status poll compact JSON includes snapshot/dispatch and stub schedule
 	snapshot.rs485StubFailRemaining = 0;
 	snapshot.rs485StubWriteCount = 2;
 	snapshot.rs485StubLastWriteStartReg = 4096;
+	snapshot.rs485StubLastWriteRegCount = 9;
 	snapshot.rs485StubLastWriteMs = 111;
+	snapshot.dispatchRequestQueuedMs = 80;
 	snapshot.inverterReady = true;
 	snapshot.essSnapshotOk = true;
 	snapshot.essSnapshotLastOk = true;
@@ -281,6 +287,8 @@ TEST_CASE("status poll compact JSON includes snapshot/dispatch and stub schedule
 	CHECK(payload.find("\"ess_snapshot_ok\":true") != std::string::npos);
 	CHECK(payload.find("\"ess_snapshot_attempts\":42") != std::string::npos);
 	CHECK(payload.find("\"dispatch_last_run_ms\":1000") != std::string::npos);
+	CHECK(payload.find("\"rs485_stub_last_write_reg_count\":9") != std::string::npos);
+	CHECK(payload.find("\"dispatch_request_queued_ms\":80") != std::string::npos);
 	CHECK(payload.find("\"poll_budget\":{\"x\":false,\"c\":3") != std::string::npos);
 	CHECK(payload.find("\"b\":[0,1,0,0,0,0]") != std::string::npos);
 	CHECK(payload.find("\"a\":[0,8000,0,0,0,0]") != std::string::npos);

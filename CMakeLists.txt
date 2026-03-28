@@ -25,6 +25,7 @@ add_executable(host_tests
     tests/test_memory_health.cpp
     tests/test_discovery_model.cpp
     tests/test_dispatch_timing.cpp
+    tests/test_dispatch_request.cpp
     tests/test_scheduler_read_policy.cpp
     tests/src/TimeProviderHost.cpp
     Alpha2MQTT/src/Scheduler.cpp
@@ -42,6 +43,7 @@ add_executable(host_tests
     Alpha2MQTT/src/ModbusCodec.cpp
     Alpha2MQTT/src/DiscoveryModel.cpp
     Alpha2MQTT/src/DispatchTiming.cpp
+    Alpha2MQTT/src/DispatchRequest.cpp
     Alpha2MQTT/src/SchedulerReadPolicy.cpp
 )
 

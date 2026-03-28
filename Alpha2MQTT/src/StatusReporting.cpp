@@ -289,7 +289,9 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		"\"rs485_stub_fail_remaining\":%lu,"
 		"\"rs485_stub_writes\":%lu,"
 		"\"rs485_stub_last_write_reg\":%u,"
+		"\"rs485_stub_last_write_reg_count\":%u,"
 		"\"rs485_stub_last_write_ms\":%lu,"
+		"\"dispatch_request_queued_ms\":%lu,"
 		"\"inverter_ready\":%s,"
 		"\"ess_snapshot_ok\":%s,"
 		"\"mem\":{\"f\":%lu,\"m\":%lu,\"g\":%u,\"l\":%u},"
@@ -342,7 +344,9 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		static_cast<unsigned long>(snapshot.rs485StubFailRemaining),
 		static_cast<unsigned long>(snapshot.rs485StubWriteCount),
 		static_cast<unsigned>(snapshot.rs485StubLastWriteStartReg),
+		static_cast<unsigned>(snapshot.rs485StubLastWriteRegCount),
 		static_cast<unsigned long>(snapshot.rs485StubLastWriteMs),
+		static_cast<unsigned long>(snapshot.dispatchRequestQueuedMs),
 		snapshot.inverterReady ? "true" : "false",
 		snapshot.essSnapshotOk ? "true" : "false",
 		static_cast<unsigned long>(snapshot.heapFreeB),
@@ -446,7 +450,9 @@ buildStatusPollJsonCompact(const StatusPollSnapshot &snapshot, char *out, size_t
 		"\"rs485_stub_fail_remaining\":%lu,"
 		"\"rs485_stub_writes\":%lu,"
 		"\"rs485_stub_last_write_reg\":%u,"
+		"\"rs485_stub_last_write_reg_count\":%u,"
 		"\"rs485_stub_last_write_ms\":%lu,"
+		"\"dispatch_request_queued_ms\":%lu,"
 		"\"inverter_ready\":%s,"
 		"\"ess_snapshot_ok\":%s,"
 		"\"ess_snapshot_last_ok\":%s,"
@@ -474,7 +480,9 @@ buildStatusPollJsonCompact(const StatusPollSnapshot &snapshot, char *out, size_t
 		static_cast<unsigned long>(snapshot.rs485StubFailRemaining),
 		static_cast<unsigned long>(snapshot.rs485StubWriteCount),
 		static_cast<unsigned>(snapshot.rs485StubLastWriteStartReg),
+		static_cast<unsigned>(snapshot.rs485StubLastWriteRegCount),
 		static_cast<unsigned long>(snapshot.rs485StubLastWriteMs),
+		static_cast<unsigned long>(snapshot.dispatchRequestQueuedMs),
 		snapshot.inverterReady ? "true" : "false",
 		snapshot.essSnapshotOk ? "true" : "false",
 		snapshot.essSnapshotLastOk ? "true" : "false",
