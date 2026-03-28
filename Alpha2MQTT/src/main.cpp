@@ -241,13 +241,17 @@ static char dispatchRequestStatus[96] = "";
 static bool dispatchRequestStatusDirty = false;
 static bool dispatchMirrorPublishPending = false;
 static uint32_t dispatchRequestQueuedMs = 0;
-static constexpr uint8_t kDispatchReadbackMaxAttempts = 5;
-static constexpr uint32_t kDispatchReadbackRetryMs = 25;
+// Readback-confirmed acceptance is what arms timed dispatch lifecycle tracking.
+// Give the inverter/RS485 path a bounded settle window instead of assuming the
+// registers will reflect within a handful of 25 ms retries.
+static constexpr uint32_t kDispatchReadbackTimeoutMs = 2500;
+static constexpr uint32_t kDispatchReadbackRetryMs = 100;
 struct AtomicDispatchRuntimeState {
 	bool inFlight = false;
 	DispatchRequestPayload payload{};
 	DispatchRequestPlan plan{};
 	uint32_t queuedMs = 0;
+	uint32_t readbackStartedMs = 0;
 	uint32_t nextReadbackAtMs = 0;
 	uint8_t readbackAttempts = 0;
 };
@@ -11690,7 +11694,8 @@ processPendingDispatchRequest(void)
 	atomicDispatchState.payload = payload;
 	atomicDispatchState.plan = plan;
 	atomicDispatchState.queuedMs = dispatchRequestQueuedMs;
-	atomicDispatchState.nextReadbackAtMs = millis();
+	atomicDispatchState.readbackStartedMs = millis();
+	atomicDispatchState.nextReadbackAtMs = atomicDispatchState.readbackStartedMs;
 	atomicDispatchState.readbackAttempts = 0;
 	timedDispatchState.bootStopPending = false;
 	timedDispatchState.awaitingStopAck = false;
@@ -11713,21 +11718,23 @@ serviceAtomicDispatchRequest(void)
 	DispatchRegisterReadback readback{};
 	atomicDispatchState.readbackAttempts++;
 	if (!readDispatchRegisterReadback(readback, error, sizeof(error))) {
-		if (atomicDispatchState.readbackAttempts >= kDispatchReadbackMaxAttempts) {
+		const uint32_t retryDecisionMs = millis();
+		if ((retryDecisionMs - atomicDispatchState.readbackStartedMs) >= kDispatchReadbackTimeoutMs) {
 			setDispatchRequestStatus(error[0] != '\0' ? error : "readback timeout");
 			atomicDispatchState = AtomicDispatchRuntimeState{};
 		} else {
-			atomicDispatchState.nextReadbackAtMs = nowMs + kDispatchReadbackRetryMs;
+			atomicDispatchState.nextReadbackAtMs = retryDecisionMs + kDispatchReadbackRetryMs;
 		}
 		return;
 	}
 
 	if (!dispatchRequestReadbackMatches(atomicDispatchState.plan, readback, error, sizeof(error))) {
-		if (atomicDispatchState.readbackAttempts >= kDispatchReadbackMaxAttempts) {
+		const uint32_t retryDecisionMs = millis();
+		if ((retryDecisionMs - atomicDispatchState.readbackStartedMs) >= kDispatchReadbackTimeoutMs) {
 			setDispatchRequestStatus(error);
 			atomicDispatchState = AtomicDispatchRuntimeState{};
 		} else {
-			atomicDispatchState.nextReadbackAtMs = nowMs + kDispatchReadbackRetryMs;
+			atomicDispatchState.nextReadbackAtMs = retryDecisionMs + kDispatchReadbackRetryMs;
 		}
 		return;
 	}

@@ -108,6 +108,7 @@ CASE_ORDER: tuple[str, ...] = (
     "probe_delayed",
     "identity_reboot_unknown",
     "fail_writes_only",
+    "dispatch_readback_window",
     "fail_for_ms",
     "soc_drift_backend_ready",
     "stub_soc_drift_applies",
@@ -2170,8 +2171,25 @@ def main() -> int:
         payload: dict[str, Any],
         *,
         expected_status: Optional[str] = "ok",
+        require_queue_advance: bool = True,
         timeout_s: int = 25,
     ) -> str:
+        def request_was_queued_after(baseline_queued_ms: int) -> bool:
+            cur_poll = _fetch_poll(mqtt, poll_topic)
+            return int(cur_poll.get("dispatch_request_queued_ms", 0)) > baseline_queued_ms
+
+        def recover_dispatch_backend(label: str) -> None:
+            ensure_stub_online_backend(
+                '{"mode":"online","soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0}',
+                label=label,
+            )
+            recovered_inverter_id = _wait_for_inverter_identity()
+            if recovered_inverter_id != inverter_device_id:
+                raise E2EError(
+                    f"dispatch retry recovered unexpected inverter identity: "
+                    f"expected={inverter_device_id!r} got={recovered_inverter_id!r}"
+                )
+
         status_topic = _dispatch_status_topic(inverter_device_id)
         mqtt.subscribe(status_topic, force=True)
 
@@ -2179,7 +2197,14 @@ def main() -> int:
         last_status = ""
         baseline_queued_ms = int(_fetch_poll(mqtt, poll_topic).get("dispatch_request_queued_ms", 0))
 
-        for attempt in range(2):
+        for attempt in range(3):
+            current_poll = _fetch_poll(mqtt, poll_topic)
+            stub_mode = str(current_poll.get("rs485_stub_mode", "")).strip()
+            inverter_ready = bool(current_poll.get("inverter_ready", False))
+            if stub_mode != "online" or not inverter_ready:
+                recover_dispatch_backend(f"dispatch request preflight {attempt + 1}")
+                current_poll = _fetch_poll(mqtt, poll_topic)
+
             try:
                 _fetch_latest_text(mqtt, status_topic, label="dispatch_status_baseline")
             except E2EError:
@@ -2206,13 +2231,22 @@ def main() -> int:
                 saw_status = True
                 last_status = status_payload.strip()
                 if expected_status is None or last_status == expected_status:
+                    if expected_status == "ok" and require_queue_advance and not request_was_queued_after(baseline_queued_ms):
+                        # A stale retained/cached "ok" from an earlier request is not
+                        # enough; the current request must advance queued_ms before we
+                        # treat the status as success.
+                        continue
                     return last_status
                 break
 
             current_queued_ms = int(_fetch_poll(mqtt, poll_topic).get("dispatch_request_queued_ms", 0))
             request_never_queued = current_queued_ms <= baseline_queued_ms
-            if attempt == 0 and request_never_queued and last_status == "":
-                _sleep_with_mqtt(mqtt, 4.0)
+            if attempt < 2 and request_never_queued and (last_status == "" or (expected_status == "ok" and require_queue_advance)):
+                stub_mode = str(current_poll.get("rs485_stub_mode", "")).strip()
+                inverter_ready = bool(current_poll.get("inverter_ready", False))
+                if stub_mode != "online" or not inverter_ready:
+                    recover_dispatch_backend(f"dispatch request retry {attempt + 1}")
+                _sleep_with_mqtt(mqtt, 2.0)
                 continue
 
             if not saw_status:
@@ -2255,8 +2289,6 @@ def main() -> int:
             wait_runtime_poll_interval_applied(poll_interval_s)
 
         before = _fetch_poll(mqtt, poll_topic)
-        baseline_writes = int(before.get("rs485_stub_writes", 0))
-        baseline_last_write_ms = int(before.get("rs485_stub_last_write_ms", 0))
         baseline_queued_ms = int(before.get("dispatch_request_queued_ms", 0))
 
         request_payload = _default_dispatch_request(
@@ -2281,10 +2313,8 @@ def main() -> int:
                 f"last_ms={last_ms} queued_ms={queued_ms} expect_reg={reg_dispatch_start}"
             )
             return (
-                writes > baseline_writes
-                and last_reg == reg_dispatch_start
+                last_reg == reg_dispatch_start
                 and last_reg_count == 9
-                and last_ms > baseline_last_write_ms
                 and queued_ms > baseline_queued_ms
                 and last_ms >= queued_ms
             ), detail
@@ -2321,8 +2351,6 @@ def main() -> int:
             wait_runtime_poll_interval_applied(poll_interval_s)
 
         before = _fetch_poll(mqtt, poll_topic)
-        baseline_writes = int(before.get("rs485_stub_writes", 0))
-        baseline_last_write_ms = int(before.get("rs485_stub_last_write_ms", 0))
         baseline_queued_ms = int(before.get("dispatch_request_queued_ms", 0))
 
         publish_dispatch_request_and_wait_status(
@@ -2342,10 +2370,8 @@ def main() -> int:
             last_ms = int(cur.get("rs485_stub_last_write_ms", 0))
             queued_ms = int(cur.get("dispatch_request_queued_ms", 0))
             if (
-                writes > baseline_writes
-                and last_reg == reg_dispatch_start
+                last_reg == reg_dispatch_start
                 and last_reg_count == 9
-                and last_ms > baseline_last_write_ms
                 and queued_ms > baseline_queued_ms
                 and last_ms >= queued_ms
             ):
@@ -2491,16 +2517,17 @@ def main() -> int:
             poll = _fetch_live_json(mqtt, poll_topic, "identity_poll")
             inverter_ready = bool(poll.get("inverter_ready", False))
             backend = str(poll.get("rs485_backend", "")).strip()
-            if inverter_ready and backend == "stub":
-                return "alpha2mqtt_inv_STUBSN000000000"
-            core = _fetch_cached_or_latest_json(mqtt, status_core_topic, "identity_core")
+            # A buffered /status/poll can outlive a reboot and briefly report the old
+            # ready state even after the runtime has fallen back to A2M-UNKNOWN. Require
+            # a fresh core publish before trusting the inverter device id for dispatch.
+            core = _fetch_live_json(mqtt, status_core_topic, "identity_core")
             ha_unique = str(core.get("ha_unique_id", "")).strip()
             inverter_id = inverter_id_from_ha_unique(ha_unique)
             last_detail = (
                 f"backend={backend!r} inverter_ready={inverter_ready} "
                 f"ha_unique_id={ha_unique!r} inverter_id={inverter_id!r}"
             )
-            if inverter_ready and inverter_id:
+            if inverter_ready and backend == "stub" and inverter_id:
                 return inverter_id
 
         raise E2EError(f"inverter identity did not become live: {last_detail}")
@@ -2738,11 +2765,40 @@ def main() -> int:
     def case_dispatch_write_via_commands() -> None:
         print("[e2e] case: dispatch write via atomic request")
         ha_unique = _ensure_online_inverter_identity("dispatch write baseline")
-        ensure_dispatch_write(ha_unique, label_prefix="dispatch")
+        reg_dispatch_start, _ = ensure_dispatch_write(ha_unique, label_prefix="dispatch")
+        before_stop = _fetch_poll(mqtt, poll_topic)
+        writes_before_stop = int(before_stop.get("rs485_stub_writes", 0))
+        last_write_ms_before_stop = int(before_stop.get("rs485_stub_last_write_ms", 0))
         publish_dispatch_request_and_wait_status(
             ha_unique,
             _default_dispatch_request(mode="normal_mode"),
             expected_status="ok",
+            require_queue_advance=False,
+        )
+
+        def stop_write_pred() -> Tuple[bool, str]:
+            cur = _fetch_poll(mqtt, poll_topic)
+            writes = int(cur.get("rs485_stub_writes", 0))
+            last_reg = int(cur.get("rs485_stub_last_write_reg", 0))
+            last_reg_count = int(cur.get("rs485_stub_last_write_reg_count", 0))
+            last_ms = int(cur.get("rs485_stub_last_write_ms", 0))
+            detail = (
+                f"writes={writes} last_reg={last_reg} last_reg_count={last_reg_count} "
+                f"last_ms={last_ms} baseline_writes={writes_before_stop} "
+                f"baseline_last_write_ms={last_write_ms_before_stop}"
+            )
+            return (
+                writes > writes_before_stop
+                and last_reg == reg_dispatch_start
+                and last_reg_count == 1
+                and last_ms > last_write_ms_before_stop
+            ), detail
+
+        _assert_eventually(
+            "normal_mode stop write observed in stub backend",
+            stop_write_pred,
+            timeout_s=15,
+            poll_s=1.0,
         )
         return
 
@@ -2820,6 +2876,7 @@ def main() -> int:
             ha_unique,
             _default_dispatch_request(mode="normal_mode"),
             expected_status="ok",
+            require_queue_advance=False,
             timeout_s=25,
         )
         manual_stopped = _select_register_and_wait_manual_read(
@@ -3004,6 +3061,7 @@ def main() -> int:
             ha_unique,
             _default_dispatch_request(mode="normal_mode"),
             expected_status="ok",
+            require_queue_advance=False,
             timeout_s=10,
         )
 
@@ -3507,6 +3565,47 @@ def main() -> int:
             return (ok and observed_reg == reg_dispatch_start and still_stopped), detail
 
         _assert_eventually("dispatch write failure leaves dispatch stopped without breaking snapshot", pred, timeout_s=90, poll_s=5.0)
+
+    def case_dispatch_readback_window_tolerates_transient_read_failures() -> None:
+        print("[e2e] case: atomic dispatch waits out transient readback failures")
+        ensure_stub_online_backend(
+            '{"mode":"online","soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0,'
+            '"dispatch_start":0,"dispatch_mode":0,"dispatch_soc":0,"dispatch_time":0}',
+            label="dispatch_readback_window backend",
+        )
+
+        # Arm a short read-only failure window immediately before the request so
+        # the dispatch write still succeeds, but the first readback attempts are
+        # forced to retry. This exercises the widened firmware confirmation
+        # window instead of pinning a specific register failed forever.
+        set_mode(
+            '{"mode":"online","fail_for_ms":600,"fail_reads":1,"fail_writes":0,"fail_type":0,'
+            '"soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0,'
+            '"dispatch_start":0,"dispatch_mode":0,"dispatch_soc":0,"dispatch_time":0}'
+        )
+
+        def transient_read_failure_armed_pred() -> Tuple[bool, str]:
+            cur_stub = _fetch_latest_json(mqtt, stub_topic, "stub")
+            fail_reads = bool(cur_stub.get("fail_reads", False))
+            fail_writes = bool(cur_stub.get("fail_writes", False))
+            fail_for_ms = int(cur_stub.get("fail_for_ms", 0))
+            detail = f"fail_reads={fail_reads} fail_writes={fail_writes} fail_for_ms={fail_for_ms}"
+            return fail_reads and not fail_writes and fail_for_ms == 600, detail
+
+        _assert_eventually(
+            "stub transient readback failure injection armed",
+            transient_read_failure_armed_pred,
+            timeout_s=10,
+            poll_s=0.5,
+        )
+
+        ha_unique = _wait_for_inverter_identity()
+        publish_dispatch_request_and_wait_status(
+            ha_unique,
+            _default_dispatch_request(duration_s=60),
+            expected_status="ok",
+            timeout_s=35,
+        )
 
     def case_fail_for_ms_then_recover() -> None:
         print("[e2e] case: fail for N ms then recover")
@@ -4146,6 +4245,7 @@ def main() -> int:
         ("probe_delayed", case_probe_delayed_online),
         ("identity_reboot_unknown", case_identity_reboot_unknown_after_offline_reboot),
         ("fail_writes_only", case_fail_writes_only_dispatch_write_fails),
+        ("dispatch_readback_window", case_dispatch_readback_window_tolerates_transient_read_failures),
         ("fail_for_ms", case_fail_for_ms_then_recover),
         ("soc_drift_backend_ready", case_soc_drift_backend_ready),
         ("stub_soc_drift_applies", case_stub_soc_drift_applies),
