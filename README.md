@@ -3,7 +3,7 @@
 
 _**Credit!** This project is entirely derived from <https://github.com/dxoverdy/Alpha2MQTT>, which is a really great bit of work. My hardware includes some tweaks and modernizations on that project's hardware. My software has changed a lot from that project, but at its core, this project is derived from that project and would not exist without that project. So huge credit and thanks._
 
-**What is this?** This project is a controller (a small hardware device) that connects Home Assistant to an AlphaESS system via RS485 and uses MQTT discovery to set up a ready to go integration.  This is local control with NO cloud dependancy.  Once you plug-in and turn on this A2M hardware, your ESS will appear as a unique HA/MQTT device with HA entities ready to monitor and [control](#controlling-your-ess) your AlphaESS system.  No HA configuration is needed.  The HA device and HA entities are ready to be used with all units, classes, icons, unique IDs, and more and provides up-to-date availability status of each entity.   Entities are ready to be used by the Energy dashboard and can be included in other [dashboards](#dashboard-example) and [automations](#automation-examples).  This controller also provides [Operating Modes](#operating-modes) that enhance the AlphaESS functionality while making it simpler to [control](#controlling-your-ess).
+**What is this?** This project is a controller (a small hardware device) that connects Home Assistant to an AlphaESS system via RS485 and uses MQTT discovery to set up a ready to go integration.  This is local control with NO cloud dependancy.  Once you plug-in and turn on this A2M hardware, your ESS will appear as a unique HA/MQTT device with HA entities ready to monitor and [control](#controlling-your-ess) your AlphaESS system.  No HA configuration is needed.  The HA device and HA entities are ready to be used with all units, classes, icons, unique IDs, and more and provides up-to-date availability status of each entity.   Entities are ready to be used by the Energy dashboard and can be included in other [dashboards](#dashboard-example) and [automations](#automation-examples).  The firmware also provides a direct MQTT dispatch request interface so that ESS control can be done with one compact payload rather than a series of loosely-related control writes.
 
 **What's Different?** The big change is that rather than being a general purpose interface between MQTT and the raw AlphaESS system data, this project is a controller specifically designed to work as a Home Assistant integration for your AlphaESS system.  It uses MQTT discovery to be plug-and-play so that no HA configuration is needed.  And it adds some "smart", real-time capabilities in the controller so that HA automation control is simplified.  This also incorporates several newer versions of the [AlphaESS specs](#alphaess-specs), and has enhancements/tweaks/fixes to WiFi and RS485 functionality.
 
@@ -118,17 +118,54 @@ Before live inverter identity is known, the masked HA identity remains `A2M-UNKN
 
 ### What you will see
 - Once your Alpha2MQTT device is working, in Home Assistant go to Settings->Devices & Services->Integrations->MQTT->devices
-- In this list you will see your inverter-focused Alpha2MQTT device, and you may also see a small controller-side diagnostic device. The inverter-facing entities are the main telemetry and control surface. The controller-side entities are there to help you understand connectivity and polling health.
+- In this list you will see your inverter-focused Alpha2MQTT device, and you may also see a small controller-side diagnostic device. The inverter-facing entities are the main telemetry and status surface. The controller-side entities are there to help you understand connectivity and polling health.
 - Many optional telemetry entities are disabled by default, so the exact list you see will reflect what you have chosen to enable.
+- When you send dispatch requests, you will also see `Dispatch Request Status` and the `Dispatch Start/Mode/Power/SOC/Time` readback entities update to reflect what the inverter is actually doing.
 
 ### Controlling Your ESS
-There are 5 control entities for controlling your ESS.  There is "**Op Mode**", "**SOC Target**", "**Charge Power**", "**Discharge Power**", and "**Push Power**".  Control is simple.  You set an "**Op Mode**" and the other control entities that are appropriate for that mode.  Operating Modes are a bit different from AlphaESS internal modes.  They are similar, but add more fuctionality.  For example, most Alpha modes don't honor a target SOC, but most Operating Modes do.  Here are all the modes and which other controls each uses:
-- "**Load Follow**": This is the same as the AlphaESS "Load Follow" except this also honors the "**SOC Target**" setting.  (Alpha says their "Load Follow" mode and their "Normal" modes are the same.)  This mode uses "**Charge Power**" and "**Discharge Power**" settings.  I don't personally use this mode in my automations.
-- "**Target SOC**": This will charge or discharge the ESS, as appropriate, to reach the "**SOC Target**".  This will use the "**Charge Power**" and "**Discharge Power**" settings.
-- "**Push To Grid**": This will push power to the grid until the "**SOC Target**" is reached.  It only uses the "**Push Power**" setting to determine the discharge power.  When PV is producing more than the house load, this pushes the excess PV power **plus** the "**Push Power**" amount to the grid.  When PV is producing less than the house load, then this pushes the "**Push Power**" amount to the grid.  The Alpha2MQTT controller dynamically adjusts the AlphaESS setting (without needing HA involvement) to achieve this.
-- "**PV Charge**": This will charge the ESS only from PV power that exceeds the house load.  This uses the "**SOC Target**" and "**Charge Power**" settings.  When PV power is less than the house load, the grid is used to supply the remainder of the house load.  The ESS is charged only when PV power exceeds the house load.  If PV power exceeds the house load plus "**Charge Power**", or if the "**SOC Target**" is reached, then excess PV is pushed to the grid.
-- "**Max Charge**": This will charge the ESS from any source (PV or grid) as fast as it can until it is full.  Grid supplies the house load.  Excess PV is pushed to the grid.
-- "**No Charge**": This will not charge the ESS from any source, and will use the ESS for house loads when PV is less than the house load.  Excess PV is pushed to the grid.
+The firmware control path is now centered on a single MQTT dispatch request.  Rather than trying to coordinate several separate control entities and hoping they are all updated before dispatch starts, you publish one JSON payload to the inverter-specific dispatch topic:
+
+- **Topic:** `DEVICE_NAME/alpha2mqtt_inv_<serial>/dispatch/set`
+
+That `alpha2mqtt_inv_<serial>` part is the inverter device id.  Alpha2MQTT derives it from the live inverter serial and uses that same id for inverter-scoped MQTT discovery and state topics.
+
+Here is an example:
+
+```json
+{
+  "mode": "state_of_charge_control",
+  "power_w": 3000,
+  "soc_percent": 20,
+  "duration_s": 1800
+}
+```
+
+The payload fields are:
+- `mode`: which AlphaESS dispatch mode to request
+- `power_w`: signed power in watts.  Negative means charge.  Positive means discharge.
+- `soc_percent`: target SOC percentage for modes that use it
+- `duration_s`: dispatch duration in seconds for modes that use it
+
+The currently supported mode names are:
+- `battery_only_charges_from_pv`
+- `state_of_charge_control`
+- `load_following`
+- `maximise_output`
+- `normal_mode`
+- `optimise_consumption`
+- `maximise_consumption`
+
+Not every mode uses every field.  For example, `normal_mode` is a stop/release request and ignores the other fields.  The firmware validates the payload, writes the AlphaESS dispatch registers as one atomic block, reads back the resulting dispatch values, and then force-publishes the inverter's dispatch state to MQTT/HA.
+
+To see whether the request worked, use:
+- `Dispatch Request Status`: `ok` on success, otherwise a short human-readable error message such as `invalid mode`, `invalid power`, `modbus write failed`, or a readback mismatch description
+- `Dispatch Start`
+- `Dispatch Mode`
+- `Dispatch Power`
+- `Dispatch SOC`
+- `Dispatch Time`
+
+Those `Dispatch *` entities are the actual inverter readback values, so they are the best way to see what the inverter is currently doing.
 
 ### AlphaESS Specs
 Alpha2MQTT honours 1.28 AlphaESS Modbus documentation.  The latest register list I found came from October 2024.
@@ -161,13 +198,13 @@ Device wiring:
 
 ### Dashboard Example
 - I tied into the Home Assistant builtin Energy dashboard by simply editing its configuration and adding grid to/from, solar, battery to/from, and battery SOC.  Voila!
-- Here is my ESS dashboard.  This was simple to make using the HA builtin visual editor.  I used the builtin "energy-distribution" card and "power-flow-card-plus" which is available through HACS.  In the middle section there are several entities that appear and disappear depending on the current Op Mode.
-- Here is the same dashboard when the ESS is in a different Op Mode.  Note: The middle column has more entities showing in this Op Mode.
+- Here is my ESS dashboard.  This was simple to make using the HA builtin visual editor.  I used the builtin "energy-distribution" card and "power-flow-card-plus" which is available through HACS.  In the middle section there are several entities that appear and disappear depending on the current dispatch state.
+- Here is the same dashboard when the ESS is in a different dispatch state.  Note: The middle column has more entities showing in that state.
 - The "Electricity Tariff" and "NWS Alerts" are the two entities on this page that don't come from Alpha2MQTT.  I include them here because my automations use these to help control the ESS.
 - You will also note that this dashboard also has views for an "Energy" (almost identical to HA's builtin Energy Dashboard) and "Power".  I won't bore you with pics, but the yaml has all the details.
 ### Automation Examples
 - ESS control - First off, I **highly** recommend that you have only ONE system controlling your ESS.  Alpha2MQTT can be used to simply monitor your ESS.  However, if you are using Alpha2MQTT to control your ESS, then be sure no other system is controlling it.  I allow the Alpha cloud to monitor my system, but it does NO control.
-  - This control is a little complex, but not too bad.  Let me try to explain all the parts.
+  - This control is a little complex, but not too bad.  In Home Assistant I now shape that control around one dispatch request payload plus the `Dispatch *` readback entities.  Let me try to explain all the parts.
     - My peak electricity price hours are 4pm to 9pm.  My mid-peak is 3pm to 4pm and 9pm to midnight.  Off-peak is midnight to 3pm.  My tarrif allows me to sell power that I push to the grid for the same price that I would pay for it.
     - I try to ONLY use battery or solar during peak and mid-peak.
     - I try to push some saved battery power back to the grid during peak, but only if the SOC is high enough and only when there are no storm alerts. I check, and adjust, each hour during peak.
@@ -178,7 +215,7 @@ Device wiring:
   - I'd love to hear what you are controlling...
 
 ### Tips/Hints/Suggestions
-- Only the "**Max Charge**" "Op Mode" will do cell balancing.  Other modes are fine to use, but every so often you should run a "**Max Charge**" to balance things out.
+- The AlphaESS battery still benefits from occasionally being brought all the way up so it can balance properly.  Most of the time I run other dispatch modes, but every so often I still make sure the pack reaches full charge.
 - There are several Faults and Warnings entities for each of the system components, and each of them monitors multiple AlphaESS registers.  These entities are simple numbers, but they also have an attribute which provides more detail. Click on the entity, then click Attributes, and you will see which registers are monitored and which bits are set.
 - There is one entity ("**Register Number**") that allows you to view the actual AlphaESS register values.  Enter a register number (in decimal, not hex) in this entity, and you will then see the (formatted) register value displayed in "**Register Value**".  This is only intended for debugging.
 
@@ -187,9 +224,8 @@ Device wiring:
 - The firmware now supports a much broader optional telemetry catalog while keeping most additional entities disabled by default until you opt in.
 - Polling is now intended to be user-shaped rather than treated as one fixed built-in schedule. If you ask for too much at a given cadence, the controller stays responsive and surfaces the pressure through diagnostics rather than silently hiding it.
 - This uses an MQTT Last Will and Testament (LWT) to set availability for all entities.  In addition some entities also use the RS485 status to set their availability.  And for others, even the grid status is used.
-- This uses the MQTT retain flag along with other MQTT options to ensure as-graceful-as-possible handling of situations where this device, HA, or the MQTT broker might reboot or go offline.  By default, HA is assumed to be the authority for knowing what state the ESS should be in.  If Alpha2MQTT reboots, HA will set the state upon reconnect.  However, this can be changed in `Definitions.h` so that the ESS is the authority and Alpha2MQTT will then tell HA what the state is.
+- This uses the MQTT retain flag along with other MQTT options to ensure as-graceful-as-possible handling of situations where this device, HA, or the MQTT broker might reboot or go offline.
 - The WiFi code has been tweaked to better handle Multi-AP environments and low signal situations.
 - The RS485 code has been tweaked to better handle more than two peers on the RS485 bus.  While this situation is rare, I had to deal with it during development because my vendor provided control via RS485 as well.  So until I trusted my device to take over, I had to make both controllers coexist.  RS485 fully supports more than two peers.  However, the MAX3485 doesn't provide enough control to make this perfect.  But I was able to make it robust enough.  Also, MODBUS says there can be only one "master" and Alpha2MQTT and my vendor's device were both masters.  But again, it still works well enough.  And now that I trust this controller, I have disconnected the vendor's device.
 - The larger display support allows for easier debugging.  This really isn't needed for anything other than debugging.
 - There's a lot of debugging information available via MQTT and the large display.  Enabling the different DEBUG options in `Definitions.h` will add more rotating debug values on the screen and add new Diagnostic entities under the MQTT device.
-
