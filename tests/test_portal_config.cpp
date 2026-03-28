@@ -221,15 +221,17 @@ TEST_CASE("portal config: polling estimate collapses snapshot and shared registe
 	mqttState entities[] = {
 		makeEntity("Battery_Temp", MqttEntityFamily::Battery),
 		makeEntity("Max_Cell_Temp", MqttEntityFamily::Battery),
+		makeEntity("Load_Power", MqttEntityFamily::System),
 		makeEntity("Op_Mode", MqttEntityFamily::Inverter),
 	};
 	entities[0].needsEssSnapshot = true;
 	entities[1].needsEssSnapshot = true;
-	entities[2].readKind = MqttEntityReadKind::Control;
-	const BucketId buckets[] = { BucketId::TenSec, BucketId::TenSec, BucketId::TenSec };
+	entities[2].needsEssSnapshot = true;
+	entities[3].readKind = MqttEntityReadKind::Control;
+	const BucketId buckets[] = { BucketId::TenSec, BucketId::TenSec, BucketId::TenSec, BucketId::TenSec };
 
-	PortalPollingEstimate estimate = portalBuildPollingEstimate(entities, 3, buckets, BucketId::TenSec, 13000, 5000);
-	CHECK(estimate.entityCount == 3);
+	PortalPollingEstimate estimate = portalBuildPollingEstimate(entities, 4, buckets, BucketId::TenSec, 13000, 5000);
+	CHECK(estimate.entityCount == 4);
 	CHECK(estimate.transactionCount == 2);
 	CHECK(estimate.estimatedUsedMs == 500);
 	CHECK(estimate.budgetMs == 5000);

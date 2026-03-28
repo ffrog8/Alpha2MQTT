@@ -177,4 +177,11 @@ TEST_CASE("discovery model builds canonical inverter metric ids and display name
 	buildEntityDisplayName(&controllerUptime, DiscoveryDeviceScope::Controller, displayName, sizeof(displayName));
 	CHECK(std::string(metricId) == "a2m_uptime");
 	CHECK(std::string(displayName) == "A2M uptime");
+
+	mqttState loadPower{};
+	REQUIRE(mqttEntityCopyById(mqttEntityId::entityLoadPwr, &loadPower));
+	buildEntityMetricId(&loadPower, metricId, sizeof(metricId));
+	buildEntityDisplayName(&loadPower, DiscoveryDeviceScope::Inverter, displayName, sizeof(displayName));
+	CHECK(std::string(metricId) == "load_power");
+	CHECK(std::string(displayName) == "Load Power");
 }

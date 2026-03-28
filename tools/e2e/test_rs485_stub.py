@@ -112,6 +112,7 @@ CASE_ORDER: tuple[str, ...] = (
     "stub_soc_drift_applies",
     "soc_publish_respects_bucket",
     "soc_drift_e2e",
+    "load_power_formula",
     "polling_config",
     "portal_polling_ui",
     "portal_wifi_save_reboot_only",
@@ -3528,6 +3529,60 @@ def main() -> int:
             if f3 <= f2:
                 raise E2EError(f"SOC did not monotonically increase across publishes: {v1!r} {v2!r} {v3!r}")
 
+    def case_load_power_snapshot_formula() -> None:
+        print("[e2e] case: Load_Power uses snapshot formula without extra reads")
+        config_before = _fetch_config(mqtt, config_topic)
+        original_intervals = config_before.get("entity_intervals", {})
+        if not isinstance(original_intervals, dict):
+            raise E2EError(f"config entity_intervals missing or invalid: {config_before}")
+        original_interval = int(config_before.get("poll_interval_s", 9) or 9)
+        original_bucket = _effective_bucket(original_intervals, "Load_Power")
+
+        def wait_load_state(load_topic: str, expected: str, *, label: str, timeout_s: int = 60) -> str:
+            mqtt.subscribe(load_topic, force=True)
+
+            def pred() -> Tuple[bool, str]:
+                try:
+                    current = _fetch_latest_text(mqtt, load_topic, label=label).strip()
+                except E2EError as exc:
+                    return False, str(exc)
+                return (current == expected), f"state={current!r}"
+
+            _assert_eventually(label, pred, timeout_s=timeout_s, poll_s=2.0)
+            return _fetch_latest_text(mqtt, load_topic, label=f"{label}_final").strip()
+
+        try:
+            wait_polling_config_applied(
+                9,
+                {"Load_Power": "user"},
+                timeout_s=60,
+                republish_every_s=5.0,
+            )
+            ensure_stub_online_backend(
+                '{"mode":"online","soc_pct":50,"battery_power_w":200,"grid_power_w":300,"pv_ct_power_w":500}',
+                label="load power positive backend",
+            )
+            ha_unique = _wait_for_inverter_identity()
+            load_topic = _state_topic(ha_unique, "Load_Power")
+            first = wait_load_state(load_topic, "1000", label="load_power_initial")
+            if first != "1000":
+                raise E2EError(f"unexpected initial Load_Power state: {first!r}")
+
+            ensure_stub_online_backend(
+                '{"mode":"online","soc_pct":50,"battery_power_w":-50,"grid_power_w":-150,"pv_ct_power_w":400}',
+                label="load power signed backend",
+            )
+            second = wait_load_state(load_topic, "200", label="load_power_signed")
+            if second != "200":
+                raise E2EError(f"unexpected signed Load_Power state: {second!r}")
+        finally:
+            wait_polling_config_applied(
+                original_interval,
+                {"Load_Power": original_bucket},
+                timeout_s=60,
+                republish_every_s=5.0,
+            )
+
     def case_polling_config_persistence() -> None:
         print("[e2e] case: polling config mapping + poll_interval_s takes effect")
         ensure_stub_online_backend(
@@ -3939,6 +3994,7 @@ def main() -> int:
         ("stub_soc_drift_applies", case_stub_soc_drift_applies),
         ("soc_publish_respects_bucket", case_soc_publish_respects_bucket),
         ("soc_drift_e2e", case_soc_drift_e2e),
+        ("load_power_formula", case_load_power_snapshot_formula),
         ("polling_config", case_polling_config_persistence),
         ("portal_polling_ui", case_portal_polling_ui),
         ("portal_wifi_save_reboot_only", case_portal_wifi_save_reboot_only),
