@@ -11634,6 +11634,7 @@ readDispatchRegisterReadback(const DispatchRequestPlan &plan,
 		readback.dispatchStart = response.unsignedShortValue;
 	}
 
+	updated = false;
 	if (plan.matchMode &&
 	    !readRegister(REG_DISPATCH_RW_DISPATCH_MODE, "readback timeout", true, updated)) {
 		return false;
@@ -11647,6 +11648,7 @@ readDispatchRegisterReadback(const DispatchRequestPlan &plan,
 		readback.dispatchMode = response.unsignedShortValue;
 	}
 
+	updated = false;
 	if (plan.matchPower &&
 	    !readRegister(REG_DISPATCH_RW_ACTIVE_POWER_1, "readback timeout", true, updated)) {
 		return false;
@@ -11660,6 +11662,7 @@ readDispatchRegisterReadback(const DispatchRequestPlan &plan,
 		readback.dispatchActivePower = response.signedIntValue;
 	}
 
+	updated = false;
 	if (plan.matchSoc &&
 	    !readRegister(REG_DISPATCH_RW_DISPATCH_SOC, "readback timeout", true, updated)) {
 		return false;
@@ -11673,6 +11676,7 @@ readDispatchRegisterReadback(const DispatchRequestPlan &plan,
 		readback.dispatchSocRaw = response.unsignedShortValue;
 	}
 
+	updated = false;
 	if (plan.matchTime &&
 	    !readRegister(REG_DISPATCH_RW_DISPATCH_TIME_1, "readback timeout", true, updated)) {
 		return false;
