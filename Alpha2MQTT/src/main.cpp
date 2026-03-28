@@ -792,12 +792,17 @@ static void
 handleMqttReconnectDispatchReset(void)
 {
 	setDispatchRequestStatus("");
-	resetAtomicDispatchState();
+	pendingDispatchRequestSet = false;
+	pendingDispatchPayload[0] = '\0';
 	// MQTT reconnects should only clear MQTT-facing request state. Preserving
 	// timedDispatchState and pending mirror replay avoids re-arming
 	// bootStopPending mid-run and lets disabled Dispatch_* mirrors republish
-	// after a transient broker disconnect.
-	dispatchRequestQueuedMs = 0;
+	// after a transient broker disconnect. Preserve an in-flight atomic
+	// dispatch confirmation window for the same reason.
+	if (!atomicDispatchState.inFlight) {
+		atomicDispatchState = AtomicDispatchRuntimeState{};
+		dispatchRequestQueuedMs = 0;
+	}
 }
 
 void

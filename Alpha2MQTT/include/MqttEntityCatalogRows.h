@@ -149,7 +149,6 @@ MQTT_ENTITY_ROW(entityDispatchMode, "Dispatch_Mode", freqDisabled, false, true, 
 MQTT_ENTITY_ROW(entityDispatchPower, "Dispatch_Power", freqDisabled, false, true, haClassPower, MqttEntityFamily::System, MqttEntityScope::Inverter, MqttEntityReadKind::Register, REG_DISPATCH_RW_ACTIVE_POWER_1, false)
 MQTT_ENTITY_ROW(entityDispatchSoc, "Dispatch_SOC", freqDisabled, false, true, haClassBattery, MqttEntityFamily::System, MqttEntityScope::Inverter, MqttEntityReadKind::Register, REG_DISPATCH_RW_DISPATCH_SOC, false)
 MQTT_ENTITY_ROW(entityDispatchTime, "Dispatch_Time", freqDisabled, false, true, haClassDuration, MqttEntityFamily::System, MqttEntityScope::Inverter, MqttEntityReadKind::Register, REG_DISPATCH_RW_DISPATCH_TIME_1, false)
-MQTT_ENTITY_ROW(entityDispatchRequestStatus, "Dispatch_Request_Status", freqOneMin, false, false, haClassInfo, MqttEntityFamily::System, MqttEntityScope::Inverter, MqttEntityReadKind::Derived, 0, false)
 MQTT_ENTITY_ROW(entityMaxFeedinPercent, "Max_Feedin_Percent", freqDisabled, false, true, haClassNumber, MqttEntityFamily::System, MqttEntityScope::Inverter, MqttEntityReadKind::Register, REG_SYSTEM_CONFIG_RW_MAX_FEED_INTO_GRID_PERCENT, false)
 
 // Append controller diagnostics after the stable register catalog so legacy
@@ -189,6 +188,7 @@ MQTT_ENTITY_ROW(entityPollingBacklogOldestAgeMsUser, "Polling_Backlog_Oldest_Age
 MQTT_ENTITY_ROW(entityPollingLastFullCycleAgeMsUser, "Polling_Last_Full_Cycle_Age_ms_user", freqDisabled, false, false, haClassInfo, MqttEntityFamily::Controller, MqttEntityScope::Controller, MqttEntityReadKind::Derived, 0, false)
 MQTT_ENTITY_ROW(entityDispatchDuration, "Dispatch_Duration", freqOneMin, true, true, haClassNumber, MqttEntityFamily::System, MqttEntityScope::Inverter, MqttEntityReadKind::Control, 0, false)
 MQTT_ENTITY_ROW(entityDispatchRemaining, "Dispatch_Remaining", freqDisabled, false, true, haClassDuration, MqttEntityFamily::System, MqttEntityScope::Inverter, MqttEntityReadKind::Derived, 0, false)
+MQTT_ENTITY_ROW(entityDispatchRequestStatus, "Dispatch_Request_Status", freqOneMin, false, false, haClassInfo, MqttEntityFamily::System, MqttEntityScope::Inverter, MqttEntityReadKind::Derived, 0, false)
 
 // Append new inverter-side derived metrics after the long-lived catalog so
 // compact legacy Bucket_Map indices continue to resolve to prior entities.

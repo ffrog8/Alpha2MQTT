@@ -333,6 +333,7 @@ TEST_CASE("mqtt entities: controller diagnostics append after the legacy persist
 	size_t registerValueIdx = count;
 	size_t batteryCurrentIdx = count;
 	size_t maxFeedinIdx = count;
+	size_t dispatchRequestStatusIdx = count;
 	size_t rs485ErrorsIdx = count;
 	size_t budgetExceededIdx = count;
 
@@ -346,6 +347,9 @@ TEST_CASE("mqtt entities: controller diagnostics append after the legacy persist
 		if (mqttEntityNameEquals(&desc[i], "Max_Feedin_Percent")) {
 			maxFeedinIdx = i;
 		}
+		if (mqttEntityNameEquals(&desc[i], "Dispatch_Request_Status")) {
+			dispatchRequestStatusIdx = i;
+		}
 		if (mqttEntityNameEquals(&desc[i], "A2M_RS485_Errors")) {
 			rs485ErrorsIdx = i;
 		}
@@ -357,10 +361,12 @@ TEST_CASE("mqtt entities: controller diagnostics append after the legacy persist
 	REQUIRE(registerValueIdx < count);
 	REQUIRE(batteryCurrentIdx < count);
 	REQUIRE(maxFeedinIdx < count);
+	REQUIRE(dispatchRequestStatusIdx < count);
 	REQUIRE(rs485ErrorsIdx < count);
 	REQUIRE(budgetExceededIdx < count);
 	CHECK(registerValueIdx < batteryCurrentIdx);
 	CHECK(batteryCurrentIdx < maxFeedinIdx);
+	CHECK(maxFeedinIdx < dispatchRequestStatusIdx);
 	CHECK(maxFeedinIdx < rs485ErrorsIdx);
 	CHECK(registerValueIdx < rs485ErrorsIdx);
 	CHECK(registerValueIdx < budgetExceededIdx);

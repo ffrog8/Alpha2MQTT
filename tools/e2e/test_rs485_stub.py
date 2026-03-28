@@ -2216,6 +2216,14 @@ def main() -> int:
             saw_status = False
             last_status = ""
             while time.time() < deadline:
+                if (
+                    saw_status
+                    and expected_status == "ok"
+                    and require_queue_advance
+                    and last_status == expected_status
+                    and request_was_queued_after(baseline_queued_ms)
+                ):
+                    return last_status
                 try:
                     got_topic, status_payload = mqtt.wait_for_publish(
                         timeout_s=min(5.0, max(0.5, deadline - time.time()))
