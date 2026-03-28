@@ -787,7 +787,8 @@ handleMqttReconnectDispatchReset(void)
 {
 	setDispatchRequestStatus("");
 	resetAtomicDispatchState();
-	timedDispatchState = TimedDispatchRuntimeState{};
+	// MQTT reconnects should only clear MQTT-facing request state. Preserving
+	// timedDispatchState avoids re-arming bootStopPending mid-run.
 	dispatchRequestQueuedMs = 0;
 }
 

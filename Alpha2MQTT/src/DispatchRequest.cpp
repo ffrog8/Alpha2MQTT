@@ -257,7 +257,7 @@ extractUint32Field(const char *payload, const char *key, uint32_t &out)
 }
 
 static uint16_t
-socPercentToRaw(uint16_t socPercent)
+socPercentToRaw(uint32_t socPercent)
 {
 	return static_cast<uint16_t>(socPercent / DISPATCH_SOC_MULTIPLIER);
 }
@@ -322,7 +322,7 @@ parseDispatchRequestPayload(const char *payload,
 	}
 	if (extractUint32Field(payload, "soc_percent", unsignedValue)) {
 		out.hasSoc = true;
-		out.socPercent = static_cast<uint16_t>(unsignedValue);
+		out.socPercent = unsignedValue;
 	}
 	if (extractUint32Field(payload, "duration_s", unsignedValue)) {
 		out.hasDuration = true;

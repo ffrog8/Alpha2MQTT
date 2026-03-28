@@ -27,7 +27,7 @@ struct DispatchRequestPayload {
 	bool hasPower = false;
 	int32_t powerW = 0;
 	bool hasSoc = false;
-	uint16_t socPercent = 0;
+	uint32_t socPercent = 0;
 	bool hasDuration = false;
 	uint32_t durationS = 0;
 };
