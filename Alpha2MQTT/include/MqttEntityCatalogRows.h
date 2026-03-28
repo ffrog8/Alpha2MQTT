@@ -188,3 +188,7 @@ MQTT_ENTITY_ROW(entityPollingBacklogOldestAgeMsUser, "Polling_Backlog_Oldest_Age
 MQTT_ENTITY_ROW(entityPollingLastFullCycleAgeMsUser, "Polling_Last_Full_Cycle_Age_ms_user", freqDisabled, false, false, haClassInfo, MqttEntityFamily::Controller, MqttEntityScope::Controller, MqttEntityReadKind::Derived, 0, false)
 MQTT_ENTITY_ROW(entityDispatchDuration, "Dispatch_Duration", freqOneMin, true, true, haClassNumber, MqttEntityFamily::System, MqttEntityScope::Inverter, MqttEntityReadKind::Control, 0, false)
 MQTT_ENTITY_ROW(entityDispatchRemaining, "Dispatch_Remaining", freqDisabled, false, true, haClassDuration, MqttEntityFamily::System, MqttEntityScope::Inverter, MqttEntityReadKind::Derived, 0, false)
+
+// Append new inverter-side derived metrics after the long-lived catalog so
+// compact legacy Bucket_Map indices continue to resolve to prior entities.
+MQTT_ENTITY_ROW(entityLoadPwr, "Load_Power", freqDisabled, false, true, haClassPower, MqttEntityFamily::System, MqttEntityScope::Inverter, MqttEntityReadKind::Derived, REG_CUSTOM_LOAD, true)
