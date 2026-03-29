@@ -12213,11 +12213,6 @@ readDispatchRegisterReadback(const DispatchRequestPlan &plan,
                             size_t errorSize)
 {
 	readback = DispatchRegisterReadback{};
-	readback.dispatchStart = opData.essDispatchStart;
-	readback.dispatchMode = opData.essDispatchMode;
-	readback.dispatchActivePower = opData.essDispatchActivePower;
-	readback.dispatchSocRaw = opData.essDispatchSoc;
-	readback.dispatchTimeRaw = opData.essDispatchTime;
 	modbusRequestAndResponse response{};
 	auto readRegister = [&](uint16_t reg, const char *readError, bool required, bool &updated) -> bool {
 		updated = false;
@@ -12249,59 +12244,38 @@ readDispatchRegisterReadback(const DispatchRequestPlan &plan,
 		readback.dispatchStart = response.unsignedShortValue;
 	}
 
+	// The confirmed readback snapshot is reused for next-tick mirror publishes, so
+	// all dispatch fields must come from one fresh read sequence rather than a mix
+	// of newly-read and previously-cached controller state.
 	updated = false;
-	if (plan.matchMode &&
-	    !readRegister(REG_DISPATCH_RW_DISPATCH_MODE, "readback timeout", true, updated)) {
+	if (!readRegister(REG_DISPATCH_RW_DISPATCH_MODE, "readback timeout", true, updated)) {
 		return false;
 	}
 	if (updated) {
 		readback.dispatchMode = response.unsignedShortValue;
-	} else if (!plan.matchMode &&
-	           !readRegister(REG_DISPATCH_RW_DISPATCH_MODE, "readback timeout", false, updated)) {
-		return false;
-	} else if (updated) {
-		readback.dispatchMode = response.unsignedShortValue;
 	}
 
 	updated = false;
-	if (plan.matchPower &&
-	    !readRegister(REG_DISPATCH_RW_ACTIVE_POWER_1, "readback timeout", true, updated)) {
+	if (!readRegister(REG_DISPATCH_RW_ACTIVE_POWER_1, "readback timeout", true, updated)) {
 		return false;
 	}
 	if (updated) {
 		readback.dispatchActivePower = response.signedIntValue;
-	} else if (!plan.matchPower &&
-	           !readRegister(REG_DISPATCH_RW_ACTIVE_POWER_1, "readback timeout", false, updated)) {
-		return false;
-	} else if (updated) {
-		readback.dispatchActivePower = response.signedIntValue;
 	}
 
 	updated = false;
-	if (plan.matchSoc &&
-	    !readRegister(REG_DISPATCH_RW_DISPATCH_SOC, "readback timeout", true, updated)) {
+	if (!readRegister(REG_DISPATCH_RW_DISPATCH_SOC, "readback timeout", true, updated)) {
 		return false;
 	}
 	if (updated) {
 		readback.dispatchSocRaw = response.unsignedShortValue;
-	} else if (!plan.matchSoc &&
-	           !readRegister(REG_DISPATCH_RW_DISPATCH_SOC, "readback timeout", false, updated)) {
-		return false;
-	} else if (updated) {
-		readback.dispatchSocRaw = response.unsignedShortValue;
 	}
 
 	updated = false;
-	if (plan.matchTime &&
-	    !readRegister(REG_DISPATCH_RW_DISPATCH_TIME_1, "readback timeout", true, updated)) {
+	if (!readRegister(REG_DISPATCH_RW_DISPATCH_TIME_1, "readback timeout", true, updated)) {
 		return false;
 	}
 	if (updated) {
-		readback.dispatchTimeRaw = response.unsignedIntValue;
-	} else if (!plan.matchTime &&
-	           !readRegister(REG_DISPATCH_RW_DISPATCH_TIME_1, "readback timeout", false, updated)) {
-		return false;
-	} else if (updated) {
 		readback.dispatchTimeRaw = response.unsignedIntValue;
 	}
 
