@@ -2,7 +2,9 @@
 #include "../include/PortalConfig.h"
 
 #include "../include/BucketScheduler.h"
+#include "../include/WifiRecoveryPolicy.h"
 
+#include <cstdio>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
@@ -256,6 +258,36 @@ portalRebootToNormalHtml(void)
 #else
 	return kPortalRebootNormal;
 #endif
+}
+
+bool
+buildPortalRebootToApConfirmHtml(char *buffer, size_t bufferSize)
+{
+	if (buffer == nullptr || bufferSize == 0) {
+		return false;
+	}
+
+	const WifiRecoveryTiming timing = wifiRecoveryTiming();
+	const unsigned long autoReturnMinutes = static_cast<unsigned long>((timing.apIdleTimeoutMs + 59999U) / 60000U);
+	const int written = snprintf(
+		buffer,
+		bufferSize,
+		"<!doctype html><html><head>"
+		"<meta charset='utf-8'>"
+		"<meta name='viewport' content='width=device-width,initial-scale=1'>"
+		"<title>Confirm AP config reboot</title>"
+		"</head><body>"
+		"<h3>Reboot into AP config?</h3>"
+		"<p>Are you sure? This action will remove the device from your network for at least %lu minute%s.</p>"
+		"<p>If you make no changes and saved WiFi credentials already exist, the firmware will auto-reboot back to normal after about %lu minute%s.</p>"
+		"<form method='POST' action='/reboot/ap'><button type='submit'>Yes, reboot AP Config</button></form>"
+		"<form method='GET' action='/'><button type='submit'>Cancel</button></form>"
+		"</body></html>",
+		autoReturnMinutes,
+		(autoReturnMinutes == 1UL) ? "" : "s",
+		autoReturnMinutes,
+		(autoReturnMinutes == 1UL) ? "" : "s");
+	return written > 0 && static_cast<size_t>(written) < bufferSize;
 }
 
 uint16_t

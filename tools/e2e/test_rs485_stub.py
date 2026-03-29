@@ -121,6 +121,7 @@ CASE_ORDER: tuple[str, ...] = (
     "load_power_formula",
     "polling_config",
     "portal_polling_ui",
+    "reboot_ap_confirmation",
     "portal_wifi_save_reboot_only",
 )
 
@@ -4400,6 +4401,46 @@ def main() -> int:
 
         _assert_eventually("polling config restored after clear-all portal check", restored_pred, timeout_s=60, poll_s=3.0)
 
+    def case_reboot_ap_confirmation() -> None:
+        print("[e2e] case: reboot AP config requires an explicit confirmation page")
+        portal_stub_baseline = (
+            '{"mode":"online","fail_n":0,"fail_reads":0,"fail_writes":0,'
+            '"fail_type":0,"fail_every_n":0,"fail_for_ms":0,'
+            '"flap_online_ms":0,"flap_offline_ms":0,'
+            '"probe_success_after_n":0,"strict_unknown":0,"strict":0}'
+        )
+        ensure_stub_online_backend(portal_stub_baseline, label="reboot ap confirmation baseline")
+        base = _resolve_device_http_base(mqtt, device_root)
+
+        root_status, root_body = _http_request_full("GET", base + "/", headers={}, body=b"", timeout_s=20)
+        if root_status != 200:
+            raise E2EError(f"runtime root returned status={root_status}")
+        root_html = root_body.decode("utf-8", errors="replace")
+        if "Alpha2MQTT Control" not in root_html:
+            raise E2EError("runtime root missing control-plane heading before AP confirmation check")
+        if "method='GET' action='/reboot/ap'" not in root_html:
+            raise E2EError("runtime root did not expose GET-based AP reboot confirmation entrypoint")
+
+        confirm_status, confirm_body = _http_request_full("GET", base + "/reboot/ap", headers={}, body=b"", timeout_s=20)
+        if confirm_status != 200:
+            raise E2EError(f"GET /reboot/ap returned status={confirm_status}")
+        confirm_html = confirm_body.decode("utf-8", errors="replace")
+        for required in (
+            "Reboot into AP config?",
+            "remove the device from your network for at least 5 minutes",
+            "auto-reboot back to normal after about 5 minutes",
+            "Yes, reboot AP Config",
+            "Cancel",
+        ):
+            if required not in confirm_html:
+                raise E2EError(f"AP reboot confirmation page missing expected warning/control: {required}")
+
+        root_status_after, root_body_after = _http_request_full("GET", base + "/", headers={}, body=b"", timeout_s=20)
+        if root_status_after != 200:
+            raise E2EError(f"runtime root became unavailable after GET /reboot/ap: status={root_status_after}")
+        if "Alpha2MQTT Control" not in root_body_after.decode("utf-8", errors="replace"):
+            raise E2EError("GET /reboot/ap unexpectedly left normal runtime")
+
     def case_portal_wifi_save_reboot_only() -> None:
         reboot_url = _discover_reboot_wifi_path_from_code()
         if not reboot_url:
@@ -4505,6 +4546,7 @@ def main() -> int:
         ("load_power_formula", case_load_power_snapshot_formula),
         ("polling_config", case_polling_config_persistence),
         ("portal_polling_ui", case_portal_polling_ui),
+        ("reboot_ap_confirmation", case_reboot_ap_confirmation),
         ("portal_wifi_save_reboot_only", case_portal_wifi_save_reboot_only),
     ]
 

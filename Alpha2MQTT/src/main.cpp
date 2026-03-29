@@ -33,6 +33,7 @@ First, go and customise options at the top of Definitions.h!
 #include "../include/PollingConfig.h"
 #include "../include/RebootRequest.h"
 #include "../include/StatusReporting.h"
+#include "../include/StatusLedPolicy.h"
 #include "../include/DiscoveryModel.h"
 #include "../include/DispatchTiming.h"
 #include "../include/DispatchRequest.h"
@@ -340,6 +341,8 @@ bool lastWifiConnected = false;
 bool lastMqttConnected = false;
 bool pendingWifiDisconnectEvent = false;
 bool pendingMqttDisconnectEvent = false;
+uint32_t mqttActivityPulseUntilMs = 0;
+static constexpr uint32_t kMqttActivityPulseMs = 60U;
 uint32_t eventCounts[static_cast<uint8_t>(MqttEventCode::MaxValue)] = {};
 EventLimiter eventLimiter;
 
@@ -678,6 +681,7 @@ static bool runtimeDiagSampleIsWorse(const MemSample &candidate, const MemSample
 static void noteRuntimeMemObservation(const MemSample &sample);
 static void noteRuntimePhaseObservation(RuntimeDiagPhase phase);
 static void noteTrackedMqttPayload(const char *kind, size_t payloadLen);
+static void noteMqttActivityPulse(void);
 static bool publishTrackedTextPayload(const char *topic, const char *payload, bool retain);
 static bool readDispatchRegisterReadback(const DispatchRequestPlan &plan,
                                          DispatchRegisterReadback &readback,
@@ -771,6 +775,7 @@ void setupHttpControlPlane(void);
 void handleHttpRoot(void);
 void handleHttpRestartAlias(void);
 void handleRebootNormal(void);
+void handleRebootApConfirm(void);
 void handleRebootAp(void);
 static bool portalRequestHasMqttFields(WiFiManager &wifiManager);
 void handleRebootWifi(void);
@@ -1095,6 +1100,9 @@ publishBootEventOncePerBoot(void)
 		 static_cast<unsigned long long>(BUILD_TS_MS));
 
 	const bool published = _mqtt.publish(bootTopic, payload, true);
+	if (published) {
+		noteMqttActivityPulse();
+	}
 	bootEventPublished = bootEventPublishedAfterAttempt(bootEventPublished, published);
 }
 
@@ -1834,6 +1842,7 @@ setupHttpControlPlane(void)
 	httpServerRef().on("/restart", HTTP_GET, handleHttpRestartAlias);
 	httpServerRef().on("/restart/", HTTP_GET, handleHttpRestartAlias);
 	httpServerRef().on("/reboot/normal", HTTP_POST, handleRebootNormal);
+	httpServerRef().on("/reboot/ap", HTTP_GET, handleRebootApConfirm);
 	httpServerRef().on("/reboot/ap", HTTP_POST, handleRebootAp);
 	httpServerRef().on("/reboot/wifi", HTTP_POST, handleRebootWifi);
 	httpServerRef().begin();
@@ -1875,7 +1884,7 @@ handleHttpRoot(void)
 		         lastResetReason);
 		if (!writer.write(buf) ||
 		    !writer.write("<form method='POST' action='/reboot/normal'><button>Reboot Normal</button></form>") ||
-		    !writer.write("<form method='POST' action='/reboot/ap'><button>Reboot AP Config</button></form>") ||
+		    !writer.write("<form method='GET' action='/reboot/ap'><button>Reboot AP Config</button></form>") ||
 		    !writer.write("<form method='POST' action='/reboot/wifi'><button>Reboot WiFi Config</button></form>") ||
 		    !writer.write("<h4>Status</h4><p>")) {
 			return false;
@@ -1949,6 +1958,20 @@ handleRebootNormal(void)
 #endif
 	httpServerRef().send(200, "text/plain", "Rebooting into MODE_NORMAL...");
 	scheduleDeferredControlPlaneReboot(BootIntent::Normal);
+}
+
+void
+handleRebootApConfirm(void)
+{
+#ifdef DEBUG_OVER_SERIAL
+	Serial.println("HTTP GET /reboot/ap");
+#endif
+	char html[640];
+	if (!buildPortalRebootToApConfirmHtml(html, sizeof(html))) {
+		httpServerRef().send(500, "text/plain", "Failed to build AP reboot confirmation page");
+		return;
+	}
+	httpServerRef().send(200, "text/html", html);
 }
 
 void
@@ -2100,7 +2123,9 @@ publishEvent(MqttEventCode code, const char *detail)
 			 static_cast<unsigned long>(eventCounts[index]),
 			 static_cast<unsigned long>(millis()));
 	}
-	_mqtt.publish(topic, payload, false);
+	if (_mqtt.publish(topic, payload, false)) {
+		noteMqttActivityPulse();
+	}
 }
 
 MqttEventCode
@@ -6576,6 +6601,9 @@ publishCountedMqttPayload(const char *topic, bool retain, CountedMqttEmitter emi
 	if (countPass.length == 0) {
 		const bool published = _mqtt.publish(topic, "", retain);
 		noteRuntimePhaseObservation(currentRuntimeDiagPhase);
+		if (published) {
+			noteMqttActivityPulse();
+		}
 		return published;
 	}
 	if (!_mqtt.beginPublish(topic, static_cast<unsigned int>(countPass.length), retain)) {
@@ -6612,6 +6640,7 @@ publishCountedMqttPayload(const char *topic, bool retain, CountedMqttEmitter emi
 		return false;
 	}
 	noteRuntimePhaseObservation(currentRuntimeDiagPhase);
+	noteMqttActivityPulse();
 	return true;
 }
 
@@ -6740,6 +6769,7 @@ publishPollingConfigChunkClear(size_t startIndex, size_t endIndex)
 		if (!_mqtt.publish(topic, "", MQTT_RETAIN)) {
 			return false;
 		}
+		noteMqttActivityPulse();
 		maybeYield();
 	}
 	return true;
@@ -6966,7 +6996,9 @@ publishControllerInverterSerialState(void)
 	} else {
 		strlcpy(payload, "unknown", sizeof(payload));
 	}
-	_mqtt.publish(topic, payload, true);
+	if (_mqtt.publish(topic, payload, true)) {
+		noteMqttActivityPulse();
+	}
 }
 
 void
@@ -9322,7 +9354,9 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 		char stubTopic[160];
 		snprintf(stubTopic, sizeof(stubTopic), "%s/stub", statusTopic);
 		if (buildStatusStubJson(stub, g_statusJsonScratch, kStatusJsonScratchSize)) {
-			_mqtt.publish(stubTopic, g_statusJsonScratch, MQTT_RETAIN);
+			if (_mqtt.publish(stubTopic, g_statusJsonScratch, MQTT_RETAIN)) {
+				noteMqttActivityPulse();
+			}
 			maybeYield();
 		}
 	}
@@ -9332,6 +9366,7 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 		char stubTopic[160];
 		snprintf(stubTopic, sizeof(stubTopic), "%s/stub", statusTopic);
 		if (_mqtt.publish(stubTopic, "", MQTT_RETAIN)) {
+			noteMqttActivityPulse();
 			clearedRetainedStubStatus = true;
 		}
 		maybeYield();
@@ -10830,7 +10865,9 @@ publishManualRegisterReadStatus(int32_t requestedReg, const modbusRequestAndResp
 	snapshot.value = response.dataValueFormatted;
 	snprintf(manualReadTopic, sizeof(manualReadTopic), "%s/manual_read", statusTopic);
 	if (buildStatusManualReadJson(snapshot, g_statusJsonScratch, kStatusJsonScratchSize)) {
-		_mqtt.publish(manualReadTopic, g_statusJsonScratch, true);
+		if (_mqtt.publish(manualReadTopic, g_statusJsonScratch, true)) {
+			noteMqttActivityPulse();
+		}
 		maybeYield();
 	}
 }
@@ -11468,6 +11505,7 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 		~MqttCallbackGuard() { flag = false; }
 	} guard(inMqttCallback);
 	mqttCallbackSequence++;
+	noteMqttActivityPulse();
 
 	char mqttIncomingPayload[512] = ""; // Should be enough to cover command requests
 	mqttState mqttEntity{};
@@ -11706,6 +11744,20 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 
 
 /*
+ * noteMqttActivityPulse
+ *
+ * Latches a short activity pulse so updateStatusLed() can render it without
+ * doing any GPIO work in MQTT callback/publish call paths.
+ */
+static void
+noteMqttActivityPulse(void)
+{
+	const uint32_t nowMs = millis();
+	mqttActivityPulseUntilMs = nowMs + kMqttActivityPulseMs;
+}
+
+
+/*
  * sendMqtt
  *
  * Sends whatever is in the modular level payload to the specified topic.
@@ -11737,6 +11789,7 @@ publishTrackedTextPayload(const char *topic, const char *payload, bool retain)
 	}
 
 	noteRuntimePhaseObservation(currentRuntimeDiagPhase);
+	noteMqttActivityPulse();
 	return true;
 }
 
@@ -11789,6 +11842,7 @@ bool sendMqtt(const char *topic, bool retain)
 
 	// Empty payload for next use.
 	noteRuntimePhaseObservation(currentRuntimeDiagPhase);
+	noteMqttActivityPulse();
 	emptyPayload();
 	return true;
 }
@@ -12774,13 +12828,14 @@ setStatusLedColor(uint8_t red, uint8_t green, uint8_t blue)
 void
 updateStatusLed(void)
 {
-	if (WiFi.status() != WL_CONNECTED) {
-		setStatusLedColor(255, 0, 0);
-	} else if (!_mqtt.connected()) {
-		setStatusLedColor(255, 255, 0);
-	} else if (!opData.essRs485Connected) {
-		setStatusLedColor(128, 0, 128);
-	} else {
-		setStatusLedColor(0, 255, 0);
-	}
+	const bool mqttPulseActive = static_cast<long>(mqttActivityPulseUntilMs - millis()) > 0;
+	const StatusLedRender render = computeStatusLedRender(WiFi.status() == WL_CONNECTED,
+	                                                     _mqtt.connected(),
+	                                                     opData.essRs485Connected,
+	                                                     mqttPulseActive);
+#ifdef MP_ESPUNO_ESP32C6
+	setStatusLedColor(render.red, render.green, render.blue);
+#else
+	setStatusLed(render.monochromeOn);
+#endif
 }
