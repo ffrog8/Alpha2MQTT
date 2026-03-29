@@ -1713,35 +1713,23 @@ def _ensure_latest_stub_via_ota(
             field_name = _extract_file_input_name(update_html) if upload_mode != "raw" else ""
             upload_url = http_base.rstrip("/") + upload_path
 
-    # OTA uploads are performed through the Wi-Fi portal. After reboot the updated firmware may
-    # legitimately return to that portal first, without publishing a new runtime /boot message yet.
-    # Detect that state before waiting on MQTT; otherwise the test can block on a boot publish that
-    # will never arrive until we explicitly leave config mode.
-    def portal_ready_pred() -> Tuple[bool, str]:
+    # Successful OTA should come back in normal runtime automatically. Waiting on the normal
+    # root page keeps the test aligned with that contract instead of tolerating a legacy
+    # "return to Wi-Fi portal and require another reboot" flow.
+    def runtime_ready_pred() -> Tuple[bool, str]:
         try:
             status_root, body_root = _http_request_full("GET", http_base.rstrip("/") + "/", headers={}, body=b"", timeout_s=10)
         except Exception as exc:
             return False, f"err={exc}"
         root_html = body_root.decode("utf-8", errors="replace")
-        ready = status_root == 200 and "Alpha2MQTT Setup" in root_html and "/config/reboot-normal" in root_html
+        ready = status_root == 200 and "Alpha2MQTT Control" in root_html and "/reboot/wifi" in root_html
         return ready, f"status={status_root}"
-
-    ok_portal, _detail_portal = portal_ready_pred()
-    if not ok_portal:
-        try:
-            _assert_eventually("OTA reboot returns to Wi-Fi portal", portal_ready_pred, timeout_s=30, poll_s=2.0)
-            ok_portal = True
-        except Exception:
-            ok_portal = False
-    if ok_portal:
-        print("[e2e] OTA reboot returned to Wi-Fi portal; POST /config/reboot-normal")
-        _http_post_simple(http_base.rstrip("/") + "/config/reboot-normal", timeout_s=15)
-        _sleep_with_mqtt(mqtt, 8)
 
     print("[e2e] waiting for device to reboot and report new fw_build_ts_ms over MQTT...")
     # Ensure we observe a *new boot publish* with the new build id; otherwise the retained /boot
     # message can remain stale during this run and make verification flaky.
     _wait_for_boot_fw_build_ts_ms(mqtt, f"{device_root}/boot", expected_ts, timeout_s=120)
+    _assert_eventually("OTA reboot returns to normal runtime", runtime_ready_pred, timeout_s=60, poll_s=2.0)
 
     def pred() -> Tuple[bool, str]:
         ok2, det2 = _device_is_latest_stub(mqtt, device_root, expected_ts, status_poll_suffix)

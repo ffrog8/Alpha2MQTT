@@ -3622,10 +3622,10 @@ handlePortalUpdatePost(WiFiManager &wifiManager)
 		return;
 	}
 #ifdef DEBUG_OVER_SERIAL
-	portalLog("OTA post: rebooting after successful update");
+	portalLog("OTA post: rebooting to normal runtime after successful update");
 #endif
 	diagDelay(250);
-	ESP.restart();
+	setBootIntentAndReboot(portalNormalRebootIntent());
 }
 
 void
