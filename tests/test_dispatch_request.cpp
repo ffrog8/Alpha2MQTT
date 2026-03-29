@@ -228,3 +228,11 @@ TEST_CASE("dispatch request rejects a new command when one is pending or in flig
 	CHECK(dispatchRequestShouldRejectNewRequest(false, true));
 	CHECK(dispatchRequestShouldRejectNewRequest(true, true));
 }
+
+TEST_CASE("dispatch request status suppresses empty publishes")
+{
+	CHECK_FALSE(dispatchRequestStatusShouldPublish(nullptr));
+	CHECK_FALSE(dispatchRequestStatusShouldPublish(""));
+	CHECK(dispatchRequestStatusShouldPublish("ok"));
+	CHECK(dispatchRequestStatusShouldPublish("modbus write failed"));
+}

@@ -22,7 +22,7 @@ If conflicts arise, **this file is the source of truth** for this repo.
 - If a blocking constraint is encountered, stop and report it clearly.
 
 ## Boot-loop / unreachable-device policy (OTA safety)
-If the device is in a boot loop or is not stably reachable, **stop and ask for assistance**. Do not keep iterating on OTA/E2E as if it can self-recover.
+If the device is in a boot loop or is not stably reachable, do not keep iterating on OTA/E2E as if it can self-recover. First attempt serial-based diagnosis and any agent-executable rectification that follows from that analysis. Only stop after the serial-analysis path is unavailable or has been attempted and the device is still not stably reachable.
 
 Definition (any of the following):
 - Repeated resets observed on serial during NORMAL boot (e.g., soft WDT resets / exceptions).
@@ -30,13 +30,19 @@ Definition (any of the following):
 - MQTT connectivity is intermittent or absent (no stable `<device>/boot` / status publishes).
 
 Required behavior for the agent:
-- Clearly state: “Device is not stably reachable; OTA/E2E cannot proceed.”
-- Ask the user to manually reflash or otherwise recover the device to a stable baseline (outside the agent).
+- If serial access or serial logs are available, inspect them first:
+  - capture/reset logs where possible
+  - decode ESP8266 exception stacks using the panic-stack playbook below when applicable
+  - use that analysis to attempt the narrowest safe fix or recovery action the agent can execute
+- If serial access is not available, say so explicitly before stopping.
+- Clearly state: “Device is not stably reachable; OTA/E2E cannot proceed.” only after serial analysis is unavailable or has been attempted without restoring stability.
+- Ask the user to manually reflash or otherwise recover the device to a stable baseline (outside the agent) only after that serial-analysis attempt path is exhausted.
 - Only resume OTA/E2E once the device remains up long enough to serve HTTP (for OTA) and/or publish MQTT status consistently.
 
 Notes (why this policy exists):
 - OTA flashing requires a stable runtime window to accept HTTP requests; a boot loop removes that window.
-- In this state, further “try another OTA” actions are counterproductive; the correct next step is manual recovery (USB serial flash / physical intervention).
+- Serial evidence is the highest-signal path for deciding whether a software fix is possible without blind reflashing.
+- In this state, further “try another OTA” actions are counterproductive unless serial analysis has produced a concrete reason to do so; otherwise the correct next step is manual recovery (USB serial flash / physical intervention).
 
 
 ## OOM prevention policy (all firmware changes)

@@ -719,6 +719,29 @@ mqttEntityCompactPublicSurfaceAssignments(mqttState *entities, BucketId *buckets
 	return writeIdx;
 }
 
+size_t
+mqttEntityCopyCompactedPublicSurfaceAssignments(const mqttState *srcEntities,
+                                                const BucketId *srcBuckets,
+                                                size_t entityCount,
+                                                mqttState *outEntities,
+                                                BucketId *outBuckets)
+{
+	if (srcEntities == nullptr || srcBuckets == nullptr || outEntities == nullptr || outBuckets == nullptr) {
+		return 0;
+	}
+
+	size_t writeIdx = 0;
+	for (size_t readIdx = 0; readIdx < entityCount; ++readIdx) {
+		if (!mqttEntityIncludedInPublicSurface(&srcEntities[readIdx])) {
+			continue;
+		}
+		outEntities[writeIdx] = srcEntities[readIdx];
+		outBuckets[writeIdx] = srcBuckets[readIdx];
+		writeIdx++;
+	}
+	return writeIdx;
+}
+
 const MqttEntityActivePlan *
 mqttActivePlan()
 {

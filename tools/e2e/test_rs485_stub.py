@@ -89,6 +89,7 @@ CASE_ORDER: tuple[str, ...] = (
     "offline",
     "fail_then_recover",
     "online",
+    "boot_mem_publish",
     "scheduler_idle_no_extra_reads",
     "strict_unknown_snapshot",
     "strict_unknown_register_reads",
@@ -338,13 +339,13 @@ def _discover_define_string(name: str) -> str:
 def _discover_reboot_wifi_path_from_code() -> Optional[str]:
     data = _firmware_main_cpp().read_text(encoding="utf-8", errors="replace")
     # NORMAL-mode HTTP control plane route.
-    if 'httpServer.on("/reboot/wifi"' in data:
+    if 'httpServer.on("/reboot/wifi"' in data or 'httpServerRef().on("/reboot/wifi"' in data:
         return "/reboot/wifi"
     return None
 
 def _discover_reboot_normal_path_from_code() -> Optional[str]:
     data = _firmware_main_cpp().read_text(encoding="utf-8", errors="replace")
-    if 'httpServer.on("/reboot/normal"' in data:
+    if 'httpServer.on("/reboot/normal"' in data or 'httpServerRef().on("/reboot/normal"' in data:
         return "/reboot/normal"
     return None
 
@@ -1272,6 +1273,9 @@ def _fetch_boot(mqtt: MqttClient, boot_topic: str) -> dict[str, Any]:
     # Boot is retained, but if the broker has restarted (no retained state), we may need to
     # wait for a device reboot to republish it.
     return _fetch_latest_json(mqtt, boot_topic, label="boot", timeout_s=60)
+
+def _fetch_boot_mem(mqtt: MqttClient, boot_mem_topic: str) -> dict[str, Any]:
+    return _fetch_latest_json(mqtt, boot_mem_topic, label="boot_mem", timeout_s=60)
 
 def _wait_for_boot_fw_build_ts_ms(
     mqtt: MqttClient,
@@ -2810,6 +2814,55 @@ def main() -> int:
 
         _assert_eventually("online succeeds and dispatch not suppressed", pred, timeout_s=45)
 
+    def case_boot_mem_publish() -> None:
+        print("[e2e] case: boot/mem retained publish captures boot heap checkpoints")
+        base = _resolve_device_http_base(mqtt, device_root)
+        reboot_normal_path = _discover_reboot_normal_path_from_code()
+        if not reboot_normal_path:
+            raise E2EError("Could not discover /reboot/normal endpoint from firmware source")
+
+        boot_topic = f"{device_root}/boot"
+        boot_mem_topic = f"{device_root}/boot/mem"
+        previous_boot = _fetch_latest_text(mqtt, boot_topic, label="boot_before_boot_mem_reboot")
+        previous_boot_mem = mqtt.latest_payload(boot_mem_topic) or ""
+
+        reboot_status, _ = _http_request("POST", base + reboot_normal_path, headers={}, body=b"", timeout_s=20)
+        if reboot_status != 200:
+            raise E2EError(f"/reboot/normal returned unexpected status={reboot_status}")
+
+        _wait_for_topic_change(mqtt, boot_topic, previous_boot, timeout_s=60, label="boot after boot_mem reboot")
+        boot_mem_text = _wait_for_topic_change(
+            mqtt,
+            boot_mem_topic,
+            previous_boot_mem,
+            timeout_s=60,
+            label="boot/mem after reboot",
+        )
+        boot_mem = _parse_json(boot_mem_text)
+        if int(boot_mem.get("fw_build_ts_ms", 0)) != expected_ts:
+            raise E2EError(
+                f"boot/mem build mismatch: expected {expected_ts}, got {boot_mem.get('fw_build_ts_ms')!r}"
+            )
+
+        checkpoints = {
+            "heap_pre_wifi": int(boot_mem.get("heap_pre_wifi", 0)),
+            "heap_post_wifi": int(boot_mem.get("heap_post_wifi", 0)),
+            "heap_post_mqtt": int(boot_mem.get("heap_post_mqtt", 0)),
+            "heap_pre_rs485": int(boot_mem.get("heap_pre_rs485", 0)),
+            "heap_post_rs485": int(boot_mem.get("heap_post_rs485", 0)),
+        }
+        minimums = {
+            "heap_pre_wifi": 18500,
+            "heap_post_wifi": 17000,
+            "heap_post_mqtt": 12500,
+            "heap_pre_rs485": 10000,
+            "heap_post_rs485": 8000,
+        }
+        for key, minimum in minimums.items():
+            actual = checkpoints[key]
+            if actual < minimum:
+                raise E2EError(f"boot/mem {key} below threshold: actual={actual} minimum={minimum}")
+
     def case_bucket_snapshot_skip_only() -> None:
         print("[e2e] case: bucket gating skips only ESS snapshot entities (and dispatch) when snapshot fails")
 
@@ -2935,16 +2988,15 @@ def main() -> int:
     def case_dispatch_invalid_payload_no_write() -> None:
         print("[e2e] case: invalid atomic dispatch payload reports an error without writing RS485")
         ha_unique = _ensure_online_inverter_identity("dispatch invalid baseline")
-        mqtt.subscribe(_dispatch_status_topic(ha_unique), force=True)
         before = _fetch_poll(mqtt, poll_topic)
         writes_before = int(before.get("rs485_stub_writes", 0))
 
-        publish_dispatch_request_no_wait(ha_unique, {"mode": "not_a_real_mode"})
-        wait_for_dispatch_status_value(
+        publish_dispatch_request_and_wait_status(
             ha_unique,
-            "invalid mode",
+            {"mode": "not_a_real_mode"},
+            expected_status="invalid mode",
+            require_queue_advance=False,
             timeout_s=10,
-            label="dispatch_invalid_mode_status",
         )
 
         after = _fetch_poll(mqtt, poll_topic)
@@ -2958,7 +3010,6 @@ def main() -> int:
     def case_dispatch_invalid_numeric_payloads_no_write() -> None:
         print("[e2e] case: invalid numeric atomic dispatch payloads report errors without writing RS485")
         ha_unique = _ensure_online_inverter_identity("dispatch invalid numeric baseline")
-        mqtt.subscribe(_dispatch_status_topic(ha_unique), force=True)
         invalid_payloads = (
             (_default_dispatch_request(mode="battery_only_charges_from_pv", power_w=500, duration_s=60), "invalid power"),
             (_default_dispatch_request(mode="state_of_charge_control", power_w=-1000, soc_percent=101, duration_s=60), "invalid soc"),
@@ -2968,12 +3019,12 @@ def main() -> int:
         for payload, expected_status in invalid_payloads:
             before = _fetch_poll(mqtt, poll_topic)
             writes_before = int(before.get("rs485_stub_writes", 0))
-            publish_dispatch_request_no_wait(ha_unique, payload)
-            wait_for_dispatch_status_value(
+            publish_dispatch_request_and_wait_status(
                 ha_unique,
-                expected_status,
+                payload,
+                expected_status=expected_status,
+                require_queue_advance=False,
                 timeout_s=10,
-                label=f"dispatch_{expected_status.replace(' ', '_')}_status",
             )
             after = _fetch_poll(mqtt, poll_topic)
             writes_after = int(after.get("rs485_stub_writes", 0))
@@ -4434,6 +4485,7 @@ def main() -> int:
         ("offline", case_offline),
         ("fail_then_recover", case_fail_then_recover),
         ("online", case_online),
+        ("boot_mem_publish", case_boot_mem_publish),
         ("scheduler_idle_no_extra_reads", case_scheduler_idle_does_not_add_reads),
         ("strict_unknown_snapshot", case_strict_unknown_snapshot_has_no_unknown_reads),
         ("strict_unknown_register_reads", case_strict_unknown_register_reads),

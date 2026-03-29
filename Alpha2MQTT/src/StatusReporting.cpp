@@ -4,8 +4,20 @@
 #include "../include/StatusReporting.h"
 #include "../include/MemoryHealth.h"
 
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
+
+#if defined(ARDUINO)
+#include <pgmspace.h>
+#define A2M_FMT(str) PSTR(str)
+#define A2M_SNPRINTF snprintf_P
+#define A2M_VSNPRINTF vsnprintf_P
+#else
+#define A2M_FMT(str) str
+#define A2M_SNPRINTF snprintf
+#define A2M_VSNPRINTF vsnprintf
+#endif
 
 #ifndef RS485_STUB
 #define RS485_STUB 0
@@ -21,22 +33,25 @@ static bool
 appendEscapedJsonString(char *dest, size_t destSize, const char *src);
 
 static bool
+appendJsonf(char *dest, size_t destSize, size_t &used, const char *fmt, ...);
+
+static bool
 buildPollBudgetJson(const StatusPollSnapshot &snapshot, char *out, size_t outSize)
 {
 	if (out == nullptr || outSize == 0) {
 		return false;
 	}
 
-	int written = snprintf(
+	int written = A2M_SNPRINTF(
 		out,
 		outSize,
-		"\"poll_budget\":{\"k\":[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"],"
-		"\"x\":%s,\"c\":%lu,"
-		"\"u\":[%lu,%lu,%lu,%lu,%lu,%lu],"
-		"\"l\":[%lu,%lu,%lu,%lu,%lu,%lu],"
-		"\"b\":[%u,%u,%u,%u,%u,%u],"
-		"\"a\":[%lu,%lu,%lu,%lu,%lu,%lu],"
-		"\"f\":[%lu,%lu,%lu,%lu,%lu,%lu]}",
+		A2M_FMT("\"poll_budget\":{\"k\":[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"],"
+		        "\"x\":%s,\"c\":%lu,"
+		        "\"u\":[%lu,%lu,%lu,%lu,%lu,%lu],"
+		        "\"l\":[%lu,%lu,%lu,%lu,%lu,%lu],"
+		        "\"b\":[%u,%u,%u,%u,%u,%u],"
+		        "\"a\":[%lu,%lu,%lu,%lu,%lu,%lu],"
+		        "\"f\":[%lu,%lu,%lu,%lu,%lu,%lu]}"),
 		kPollBudgetBucketKeys[0],
 		kPollBudgetBucketKeys[1],
 		kPollBudgetBucketKeys[2],
@@ -88,13 +103,13 @@ buildPollBudgetJsonCompact(const StatusPollSnapshot &snapshot, char *out, size_t
 		return false;
 	}
 
-	int written = snprintf(
+	int written = A2M_SNPRINTF(
 		out,
 		outSize,
-		"\"poll_budget\":{\"x\":%s,\"c\":%lu,"
-		"\"b\":[%u,%u,%u,%u,%u,%u],"
-		"\"a\":[%lu,%lu,%lu,%lu,%lu,%lu],"
-		"\"f\":[%lu,%lu,%lu,%lu,%lu,%lu]}",
+		A2M_FMT("\"poll_budget\":{\"x\":%s,\"c\":%lu,"
+		        "\"b\":[%u,%u,%u,%u,%u,%u],"
+		        "\"a\":[%lu,%lu,%lu,%lu,%lu,%lu],"
+		        "\"f\":[%lu,%lu,%lu,%lu,%lu,%lu]}"),
 		snapshot.pollingBudgetExceeded ? "true" : "false",
 		static_cast<unsigned long>(snapshot.pollingBudgetOverrunCount),
 		static_cast<unsigned>(snapshot.pollingBacklogCount[0]),
@@ -115,6 +130,59 @@ buildPollBudgetJsonCompact(const StatusPollSnapshot &snapshot, char *out, size_t
 		static_cast<unsigned long>(snapshot.pollingLastFullCycleAgeMs[3]),
 		static_cast<unsigned long>(snapshot.pollingLastFullCycleAgeMs[4]),
 		static_cast<unsigned long>(snapshot.pollingLastFullCycleAgeMs[5]));
+	if (written < 0 || static_cast<size_t>(written) >= outSize) {
+		return false;
+	}
+	return true;
+}
+
+static bool
+buildNetMemoryJson(const StatusNetSnapshot &snapshot, char *out, size_t outSize)
+{
+	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+
+	const int written = A2M_SNPRINTF(
+		out,
+		outSize,
+		A2M_FMT("\"max_block\":%lu,\"frag_pct\":%u,\"min_free_heap\":%lu,\"min_max_block\":%lu,\"max_frag_pct\":%u"),
+		static_cast<unsigned long>(snapshot.maxBlock),
+		static_cast<unsigned>(snapshot.fragPct),
+		static_cast<unsigned long>(snapshot.minFreeHeap),
+		static_cast<unsigned long>(snapshot.minMaxBlock),
+		static_cast<unsigned>(snapshot.maxFragPct));
+	if (written < 0 || static_cast<size_t>(written) >= outSize) {
+		return false;
+	}
+	return true;
+}
+
+static bool
+buildRuntimeDiagJson(const StatusPollSnapshot &snapshot, char *out, size_t outSize)
+{
+	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+
+	char worstPhase[24];
+	char mqttMaxPayloadKind[24];
+	if (!appendEscapedJsonString(worstPhase, sizeof(worstPhase), snapshot.worstPhase) ||
+	    !appendEscapedJsonString(mqttMaxPayloadKind, sizeof(mqttMaxPayloadKind), snapshot.mqttMaxPayloadKind)) {
+		return false;
+	}
+
+	const int written = A2M_SNPRINTF(
+		out,
+		outSize,
+		A2M_FMT("\"worst_phase\":\"%s\",\"worst_free_heap\":%lu,\"worst_max_block\":%lu,\"worst_frag_pct\":%u,"
+		        "\"mqtt_max_payload_seen\":%lu,\"mqtt_max_payload_kind\":\"%s\""),
+		worstPhase,
+		static_cast<unsigned long>(snapshot.worstFreeHeapB),
+		static_cast<unsigned long>(snapshot.worstMaxBlockB),
+		static_cast<unsigned>(snapshot.worstFragPct),
+		static_cast<unsigned long>(snapshot.mqttMaxPayloadSeen),
+		mqttMaxPayloadKind);
 	if (written < 0 || static_cast<size_t>(written) >= outSize) {
 		return false;
 	}
@@ -190,19 +258,19 @@ buildStatusCoreJson(const StatusCoreSnapshot &snapshot, char *out, size_t outSiz
 	    !appendEscapedJsonString(haUniqueId, sizeof(haUniqueId), snapshot.haUniqueId)) {
 		return false;
 	}
-	int written = snprintf(
+	int written = A2M_SNPRINTF(
 		out,
 		outSize,
-		"{"
-		"\"presence\":\"%s\","
-		"\"a2mStatus\":\"%s\","
-		"\"rs485Status\":\"%s\","
-		"\"gridStatus\":\"%s\","
-		"\"boot_mode\":\"%s\","
-		"\"boot_intent\":\"%s\","
-		"\"http_control_plane_enabled\":%s,"
-		"\"ha_unique_id\":\"%s\""
-		"}",
+		A2M_FMT("{"
+		        "\"presence\":\"%s\","
+		        "\"a2mStatus\":\"%s\","
+		        "\"rs485Status\":\"%s\","
+		        "\"gridStatus\":\"%s\","
+		        "\"boot_mode\":\"%s\","
+		        "\"boot_intent\":\"%s\","
+		        "\"http_control_plane_enabled\":%s,"
+		        "\"ha_unique_id\":\"%s\""
+		        "}"),
 		presence,
 		a2mStatus,
 		rs485Status,
@@ -226,28 +294,32 @@ buildStatusNetJson(const StatusNetSnapshot &snapshot, char *out, size_t outSize)
 	char ip[64];
 	char ssid[128];
 	char wifiStatus[32];
+	char netMemory[128];
 	if (!appendEscapedJsonString(ip, sizeof(ip), snapshot.ip) ||
 	    !appendEscapedJsonString(ssid, sizeof(ssid), snapshot.ssid) ||
-	    !appendEscapedJsonString(wifiStatus, sizeof(wifiStatus), snapshot.wifiStatus)) {
+	    !appendEscapedJsonString(wifiStatus, sizeof(wifiStatus), snapshot.wifiStatus) ||
+	    !buildNetMemoryJson(snapshot, netMemory, sizeof(netMemory))) {
 		return false;
 	}
-	int written = snprintf(
+	int written = A2M_SNPRINTF(
 		out,
 		outSize,
-		"{"
-		"\"uptime_s\":%lu,"
-		"\"free_heap\":%lu,"
-		"\"rssi_dbm\":%d,"
-		"\"ip\":\"%s\","
-		"\"ssid\":\"%s\","
-		"\"mqtt_connected\":%s,"
-		"\"mqtt_reconnects\":%lu,"
-		"\"wifi_status\":\"%s\","
-		"\"wifi_status_code\":%d,"
-		"\"wifi_reconnects\":%lu"
-		"}",
+		A2M_FMT("{"
+		        "\"uptime_s\":%lu,"
+		        "\"free_heap\":%lu,"
+		        "%s,"
+		        "\"rssi_dbm\":%d,"
+		        "\"ip\":\"%s\","
+		        "\"ssid\":\"%s\","
+		        "\"mqtt_connected\":%s,"
+		        "\"mqtt_reconnects\":%lu,"
+		        "\"wifi_status\":\"%s\","
+		        "\"wifi_status_code\":%d,"
+		        "\"wifi_reconnects\":%lu"
+		        "}"),
 		static_cast<unsigned long>(snapshot.uptimeS),
 		static_cast<unsigned long>(snapshot.freeHeap),
+		netMemory,
 		snapshot.rssiDbm,
 		ip,
 		ssid,
@@ -268,6 +340,7 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 	if (out == nullptr || outSize == 0) {
 		return false;
 	}
+	out[0] = '\0';
 	char rs485Backend[32];
 	char rs485StubMode[32];
 	char dispatchLastSkipReason[64];
@@ -276,148 +349,167 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 	    !appendEscapedJsonString(dispatchLastSkipReason, sizeof(dispatchLastSkipReason), snapshot.dispatchLastSkipReason)) {
 		return false;
 	}
-	char pollBudget[768];
-	if (!buildPollBudgetJson(snapshot, pollBudget, sizeof(pollBudget))) {
+
+	size_t used = 0;
+	if (!appendJsonf(
+		    out,
+		    outSize,
+		    used,
+		    "{"
+		    "\"rs485_backend\":\"%s\","
+		    "\"rs485_stub_mode\":\"%s\","
+		    "\"rs485_stub_fail_remaining\":%lu,"
+		    "\"rs485_stub_writes\":%lu,"
+		    "\"rs485_stub_last_write_reg\":%u,"
+		    "\"rs485_stub_last_write_reg_count\":%u,"
+		    "\"rs485_stub_last_write_ms\":%lu,"
+		    "\"dispatch_request_queued_ms\":%lu,"
+		    "\"inverter_ready\":%s,"
+		    "\"ess_snapshot_ok\":%s,"
+		    "\"mem\":{\"f\":%lu,\"m\":%lu,\"g\":%u,\"l\":%u},"
+		    "\"boot_mem\":{\"l\":%u,\"s\":%u,\"f\":%lu,\"m\":%lu,\"g\":%u},"
+		    "\"ess_snapshot_last_ok\":%s,"
+		    "\"ess_snapshot_attempts\":%lu,"
+		    "\"dispatch_last_run_ms\":%lu,"
+		    "\"dispatch_last_skip_reason\":\"%s\",",
+		    rs485Backend,
+		    rs485StubMode,
+		    static_cast<unsigned long>(snapshot.rs485StubFailRemaining),
+		    static_cast<unsigned long>(snapshot.rs485StubWriteCount),
+		    static_cast<unsigned>(snapshot.rs485StubLastWriteStartReg),
+		    static_cast<unsigned>(snapshot.rs485StubLastWriteRegCount),
+		    static_cast<unsigned long>(snapshot.rs485StubLastWriteMs),
+		    static_cast<unsigned long>(snapshot.dispatchRequestQueuedMs),
+		    snapshot.inverterReady ? "true" : "false",
+		    snapshot.essSnapshotOk ? "true" : "false",
+		    static_cast<unsigned long>(snapshot.heapFreeB),
+		    static_cast<unsigned long>(snapshot.heapMaxBlockB),
+		    static_cast<unsigned>(snapshot.heapFragPct),
+		    static_cast<unsigned>(snapshot.memLevel),
+		    static_cast<unsigned>(snapshot.bootHeapLevel),
+		    static_cast<unsigned>(snapshot.bootHeapStage),
+		    static_cast<unsigned long>(snapshot.bootHeapFreeB),
+		    static_cast<unsigned long>(snapshot.bootHeapMaxBlockB),
+		    static_cast<unsigned>(snapshot.bootHeapFragPct),
+		    snapshot.essSnapshotLastOk ? "true" : "false",
+		    static_cast<unsigned long>(snapshot.essSnapshotAttempts),
+		    static_cast<unsigned long>(snapshot.dispatchLastRunMs),
+		    dispatchLastSkipReason)) {
 		return false;
 	}
-	int written = snprintf(
-		out,
-		outSize,
-		"{"
-		"\"rs485_backend\":\"%s\","
-		"\"rs485_stub_mode\":\"%s\","
-		"\"rs485_stub_fail_remaining\":%lu,"
-		"\"rs485_stub_writes\":%lu,"
-		"\"rs485_stub_last_write_reg\":%u,"
-		"\"rs485_stub_last_write_reg_count\":%u,"
-		"\"rs485_stub_last_write_ms\":%lu,"
-		"\"dispatch_request_queued_ms\":%lu,"
-		"\"inverter_ready\":%s,"
-		"\"ess_snapshot_ok\":%s,"
-		"\"mem\":{\"f\":%lu,\"m\":%lu,\"g\":%u,\"l\":%u},"
-		"\"boot_mem\":{\"l\":%u,\"s\":%u,\"f\":%lu,\"m\":%lu,\"g\":%u},"
-		"\"ess_snapshot_last_ok\":%s,"
-		"\"ess_snapshot_attempts\":%lu,"
-		"\"dispatch_last_run_ms\":%lu,"
-		"\"dispatch_last_skip_reason\":\"%s\","
-		"\"poll_interval_s\":%lu,"
+	if (!buildRuntimeDiagJson(snapshot, out + used, outSize - used)) {
+		return false;
+	}
+	used += strlen(out + used);
+	if (!appendJsonf(out, outSize, used, ",\"poll_interval_s\":%lu,", static_cast<unsigned long>(snapshot.pollIntervalSeconds))) {
+		return false;
+	}
 #if RS485_STUB
-		"\"s10_ms\":%lu,"
-		"\"s60_ms\":%lu,"
-		"\"s300_ms\":%lu,"
-		"\"s3600_ms\":%lu,"
-		"\"s86400_ms\":%lu,"
-		"\"su_ms\":%lu,"
+	if (!appendJsonf(out,
+	                 outSize,
+	                 used,
+	                 "\"s10_ms\":%lu,\"s60_ms\":%lu,\"s300_ms\":%lu,\"s3600_ms\":%lu,\"s86400_ms\":%lu,\"su_ms\":%lu,",
+	                 static_cast<unsigned long>(snapshot.schedTenSecLastRunMs),
+	                 static_cast<unsigned long>(snapshot.schedOneMinLastRunMs),
+	                 static_cast<unsigned long>(snapshot.schedFiveMinLastRunMs),
+	                 static_cast<unsigned long>(snapshot.schedOneHourLastRunMs),
+	                 static_cast<unsigned long>(snapshot.schedOneDayLastRunMs),
+	                 static_cast<unsigned long>(snapshot.schedUserLastRunMs))) {
+		return false;
+	}
 #endif
-		"\"sched_10s_last_run_ms\":%lu,"
-		"\"sched_1m_last_run_ms\":%lu,"
-		"\"sched_5m_last_run_ms\":%lu,"
-		"\"sched_1h_last_run_ms\":%lu,"
-		"\"sched_1d_last_run_ms\":%lu,"
-		"\"sched_user_last_run_ms\":%lu,"
-		"\"sched_10s_count\":%u,"
-		"\"sched_1m_count\":%u,"
-		"\"sched_5m_count\":%u,"
-		"\"sched_1h_count\":%u,"
-		"\"sched_1d_count\":%u,"
-		"\"sched_user_count\":%u,"
-		"\"persist_load_ok\":%lu,"
-		"\"persist_load_err\":%lu,"
-		"\"persist_unknown_entity_count\":%lu,"
-		"\"persist_invalid_bucket_count\":%lu,"
-		"\"persist_duplicate_entity_count\":%lu,"
-		"%s,"
-		"\"poll_ok_count\":%lu,"
-		"\"poll_err_count\":%lu,"
-		"\"last_poll_ms\":%lu,"
-		"\"last_ok_ts_ms\":%lu,"
-		"\"last_err_ts_ms\":%lu,"
-		"\"last_err_code\":%d,"
-		"\"rs485_probe_last_attempt_ms\":%lu,"
-		"\"rs485_probe_backoff_ms\":%lu"
+	if (!appendJsonf(
+		    out,
+		    outSize,
+		    used,
+		    "\"sched_10s_last_run_ms\":%lu,"
+		    "\"sched_1m_last_run_ms\":%lu,"
+		    "\"sched_5m_last_run_ms\":%lu,"
+		    "\"sched_1h_last_run_ms\":%lu,"
+		    "\"sched_1d_last_run_ms\":%lu,"
+		    "\"sched_user_last_run_ms\":%lu,"
+		    "\"sched_10s_count\":%u,"
+		    "\"sched_1m_count\":%u,"
+		    "\"sched_5m_count\":%u,"
+		    "\"sched_1h_count\":%u,"
+		    "\"sched_1d_count\":%u,"
+		    "\"sched_user_count\":%u,"
+		    "\"persist_load_ok\":%lu,"
+		    "\"persist_load_err\":%lu,"
+		    "\"persist_unknown_entity_count\":%lu,"
+		    "\"persist_invalid_bucket_count\":%lu,"
+		    "\"persist_duplicate_entity_count\":%lu,",
+		    static_cast<unsigned long>(snapshot.schedTenSecLastRunMs),
+		    static_cast<unsigned long>(snapshot.schedOneMinLastRunMs),
+		    static_cast<unsigned long>(snapshot.schedFiveMinLastRunMs),
+		    static_cast<unsigned long>(snapshot.schedOneHourLastRunMs),
+		    static_cast<unsigned long>(snapshot.schedOneDayLastRunMs),
+		    static_cast<unsigned long>(snapshot.schedUserLastRunMs),
+		    static_cast<unsigned int>(snapshot.schedTenSecCount),
+		    static_cast<unsigned int>(snapshot.schedOneMinCount),
+		    static_cast<unsigned int>(snapshot.schedFiveMinCount),
+		    static_cast<unsigned int>(snapshot.schedOneHourCount),
+		    static_cast<unsigned int>(snapshot.schedOneDayCount),
+		    static_cast<unsigned int>(snapshot.schedUserCount),
+		    static_cast<unsigned long>(snapshot.persistLoadOk),
+		    static_cast<unsigned long>(snapshot.persistLoadErr),
+		    static_cast<unsigned long>(snapshot.persistUnknownEntityCount),
+		    static_cast<unsigned long>(snapshot.persistInvalidBucketCount),
+		    static_cast<unsigned long>(snapshot.persistDuplicateEntityCount))) {
+		return false;
+	}
+	if (!buildPollBudgetJson(snapshot, out + used, outSize - used)) {
+		return false;
+	}
+	used += strlen(out + used);
+	if (!appendJsonf(
+		    out,
+		    outSize,
+		    used,
+		    ",\"poll_ok_count\":%lu,"
+		    "\"poll_err_count\":%lu,"
+		    "\"last_poll_ms\":%lu,"
+		    "\"last_ok_ts_ms\":%lu,"
+		    "\"last_err_ts_ms\":%lu,"
+		    "\"last_err_code\":%d,"
+		    "\"rs485_probe_last_attempt_ms\":%lu,"
+		    "\"rs485_probe_backoff_ms\":%lu",
+		    static_cast<unsigned long>(snapshot.pollOkCount),
+		    static_cast<unsigned long>(snapshot.pollErrCount),
+		    static_cast<unsigned long>(snapshot.lastPollMs),
+		    static_cast<unsigned long>(snapshot.lastOkTsMs),
+		    static_cast<unsigned long>(snapshot.lastErrTsMs),
+		    snapshot.lastErrCode,
+		    static_cast<unsigned long>(snapshot.rs485ProbeLastAttemptMs),
+		    static_cast<unsigned long>(snapshot.rs485ProbeBackoffMs))) {
+		return false;
+	}
 #if defined(DEBUG_OVER_SERIAL)
-		",\"mem_thr\":[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]"
+	if (!appendJsonf(
+		    out,
+		    outSize,
+		    used,
+		    ",\"mem_thr\":[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]",
+		    static_cast<unsigned>(kBoot0WarnFreeB),
+		    static_cast<unsigned>(kBoot0WarnMaxBlockB),
+		    static_cast<unsigned>(kBoot0CritFreeB),
+		    static_cast<unsigned>(kBoot0CritMaxBlockB),
+		    static_cast<unsigned>(kBootNWarnFreeB),
+		    static_cast<unsigned>(kBootNWarnMaxBlockB),
+		    static_cast<unsigned>(kBootNWarnFragPct),
+		    static_cast<unsigned>(kBootNCritFreeB),
+		    static_cast<unsigned>(kBootNCritMaxBlockB),
+		    static_cast<unsigned>(kBootNCritFragPct),
+		    static_cast<unsigned>(kRuntimeWarnFreeB),
+		    static_cast<unsigned>(kRuntimeWarnMaxBlockB),
+		    static_cast<unsigned>(kRuntimeWarnFragPct),
+		    static_cast<unsigned>(kRuntimeCritFreeB),
+		    static_cast<unsigned>(kRuntimeCritMaxBlockB),
+		    static_cast<unsigned>(kRuntimeCritFragPct))) {
+		return false;
+	}
 #endif
-		"}",
-		rs485Backend,
-		rs485StubMode,
-		static_cast<unsigned long>(snapshot.rs485StubFailRemaining),
-		static_cast<unsigned long>(snapshot.rs485StubWriteCount),
-		static_cast<unsigned>(snapshot.rs485StubLastWriteStartReg),
-		static_cast<unsigned>(snapshot.rs485StubLastWriteRegCount),
-		static_cast<unsigned long>(snapshot.rs485StubLastWriteMs),
-		static_cast<unsigned long>(snapshot.dispatchRequestQueuedMs),
-		snapshot.inverterReady ? "true" : "false",
-		snapshot.essSnapshotOk ? "true" : "false",
-		static_cast<unsigned long>(snapshot.heapFreeB),
-		static_cast<unsigned long>(snapshot.heapMaxBlockB),
-		static_cast<unsigned>(snapshot.heapFragPct),
-		static_cast<unsigned>(snapshot.memLevel),
-		static_cast<unsigned>(snapshot.bootHeapLevel),
-		static_cast<unsigned>(snapshot.bootHeapStage),
-		static_cast<unsigned long>(snapshot.bootHeapFreeB),
-		static_cast<unsigned long>(snapshot.bootHeapMaxBlockB),
-		static_cast<unsigned>(snapshot.bootHeapFragPct),
-		snapshot.essSnapshotLastOk ? "true" : "false",
-			static_cast<unsigned long>(snapshot.essSnapshotAttempts),
-			static_cast<unsigned long>(snapshot.dispatchLastRunMs),
-			dispatchLastSkipReason,
-			static_cast<unsigned long>(snapshot.pollIntervalSeconds),
-#if RS485_STUB
-			static_cast<unsigned long>(snapshot.schedTenSecLastRunMs),
-			static_cast<unsigned long>(snapshot.schedOneMinLastRunMs),
-			static_cast<unsigned long>(snapshot.schedFiveMinLastRunMs),
-			static_cast<unsigned long>(snapshot.schedOneHourLastRunMs),
-			static_cast<unsigned long>(snapshot.schedOneDayLastRunMs),
-			static_cast<unsigned long>(snapshot.schedUserLastRunMs),
-#endif
-			static_cast<unsigned long>(snapshot.schedTenSecLastRunMs),
-			static_cast<unsigned long>(snapshot.schedOneMinLastRunMs),
-			static_cast<unsigned long>(snapshot.schedFiveMinLastRunMs),
-		static_cast<unsigned long>(snapshot.schedOneHourLastRunMs),
-		static_cast<unsigned long>(snapshot.schedOneDayLastRunMs),
-		static_cast<unsigned long>(snapshot.schedUserLastRunMs),
-		static_cast<unsigned int>(snapshot.schedTenSecCount),
-		static_cast<unsigned int>(snapshot.schedOneMinCount),
-		static_cast<unsigned int>(snapshot.schedFiveMinCount),
-		static_cast<unsigned int>(snapshot.schedOneHourCount),
-		static_cast<unsigned int>(snapshot.schedOneDayCount),
-		static_cast<unsigned int>(snapshot.schedUserCount),
-		static_cast<unsigned long>(snapshot.persistLoadOk),
-		static_cast<unsigned long>(snapshot.persistLoadErr),
-		static_cast<unsigned long>(snapshot.persistUnknownEntityCount),
-		static_cast<unsigned long>(snapshot.persistInvalidBucketCount),
-		static_cast<unsigned long>(snapshot.persistDuplicateEntityCount),
-		pollBudget,
-		static_cast<unsigned long>(snapshot.pollOkCount),
-		static_cast<unsigned long>(snapshot.pollErrCount),
-		static_cast<unsigned long>(snapshot.lastPollMs),
-		static_cast<unsigned long>(snapshot.lastOkTsMs),
-		static_cast<unsigned long>(snapshot.lastErrTsMs),
-		snapshot.lastErrCode,
-		static_cast<unsigned long>(snapshot.rs485ProbeLastAttemptMs),
-		static_cast<unsigned long>(snapshot.rs485ProbeBackoffMs)
-#if defined(DEBUG_OVER_SERIAL)
-		,
-		static_cast<unsigned>(kBoot0WarnFreeB),
-		static_cast<unsigned>(kBoot0WarnMaxBlockB),
-		static_cast<unsigned>(kBoot0CritFreeB),
-		static_cast<unsigned>(kBoot0CritMaxBlockB),
-		static_cast<unsigned>(kBootNWarnFreeB),
-		static_cast<unsigned>(kBootNWarnMaxBlockB),
-		static_cast<unsigned>(kBootNWarnFragPct),
-		static_cast<unsigned>(kBootNCritFreeB),
-		static_cast<unsigned>(kBootNCritMaxBlockB),
-		static_cast<unsigned>(kBootNCritFragPct),
-		static_cast<unsigned>(kRuntimeWarnFreeB),
-		static_cast<unsigned>(kRuntimeWarnMaxBlockB),
-		static_cast<unsigned>(kRuntimeWarnFragPct),
-		static_cast<unsigned>(kRuntimeCritFreeB),
-		static_cast<unsigned>(kRuntimeCritMaxBlockB),
-		static_cast<unsigned>(kRuntimeCritFragPct)
-#endif
-		);
-	if (written < 0 || static_cast<size_t>(written) >= outSize) {
+	if (!appendJsonf(out, outSize, used, "}")) {
 		return false;
 	}
 	return true;
@@ -429,6 +521,7 @@ buildStatusPollJsonCompact(const StatusPollSnapshot &snapshot, char *out, size_t
 	if (out == nullptr || outSize == 0) {
 		return false;
 	}
+	out[0] = '\0';
 	char rs485Backend[32];
 	char rs485StubMode[32];
 	char dispatchLastSkipReason[64];
@@ -437,74 +530,88 @@ buildStatusPollJsonCompact(const StatusPollSnapshot &snapshot, char *out, size_t
 	    !appendEscapedJsonString(dispatchLastSkipReason, sizeof(dispatchLastSkipReason), snapshot.dispatchLastSkipReason)) {
 		return false;
 	}
-	char pollBudget[512];
-	if (!buildPollBudgetJsonCompact(snapshot, pollBudget, sizeof(pollBudget))) {
+
+	size_t used = 0;
+	if (!appendJsonf(
+		    out,
+		    outSize,
+		    used,
+		    "{"
+		    "\"rs485_backend\":\"%s\","
+		    "\"rs485_stub_mode\":\"%s\","
+		    "\"rs485_stub_fail_remaining\":%lu,"
+		    "\"rs485_stub_writes\":%lu,"
+		    "\"rs485_stub_last_write_reg\":%u,"
+		    "\"rs485_stub_last_write_reg_count\":%u,"
+		    "\"rs485_stub_last_write_ms\":%lu,"
+		    "\"dispatch_request_queued_ms\":%lu,"
+		    "\"inverter_ready\":%s,"
+		    "\"ess_snapshot_ok\":%s,"
+		    "\"ess_snapshot_last_ok\":%s,"
+		    "\"ess_snapshot_attempts\":%lu,"
+		    "\"dispatch_last_run_ms\":%lu,"
+		    "\"dispatch_last_skip_reason\":\"%s\",",
+		    rs485Backend,
+		    rs485StubMode,
+		    static_cast<unsigned long>(snapshot.rs485StubFailRemaining),
+		    static_cast<unsigned long>(snapshot.rs485StubWriteCount),
+		    static_cast<unsigned>(snapshot.rs485StubLastWriteStartReg),
+		    static_cast<unsigned>(snapshot.rs485StubLastWriteRegCount),
+		    static_cast<unsigned long>(snapshot.rs485StubLastWriteMs),
+		    static_cast<unsigned long>(snapshot.dispatchRequestQueuedMs),
+		    snapshot.inverterReady ? "true" : "false",
+		    snapshot.essSnapshotOk ? "true" : "false",
+		    snapshot.essSnapshotLastOk ? "true" : "false",
+		    static_cast<unsigned long>(snapshot.essSnapshotAttempts),
+		    static_cast<unsigned long>(snapshot.dispatchLastRunMs),
+		    dispatchLastSkipReason)) {
 		return false;
 	}
-	int written = snprintf(
-		out,
-		outSize,
-		"{"
-		"\"rs485_backend\":\"%s\","
-		"\"rs485_stub_mode\":\"%s\","
-		"\"rs485_stub_fail_remaining\":%lu,"
-		"\"rs485_stub_writes\":%lu,"
-		"\"rs485_stub_last_write_reg\":%u,"
-		"\"rs485_stub_last_write_reg_count\":%u,"
-		"\"rs485_stub_last_write_ms\":%lu,"
-		"\"dispatch_request_queued_ms\":%lu,"
-		"\"inverter_ready\":%s,"
-		"\"ess_snapshot_ok\":%s,"
-		"\"ess_snapshot_last_ok\":%s,"
-		"\"ess_snapshot_attempts\":%lu,"
-		"\"dispatch_last_run_ms\":%lu,"
-		"\"dispatch_last_skip_reason\":\"%s\","
-		"\"poll_interval_s\":%lu,"
+	if (!buildRuntimeDiagJson(snapshot, out + used, outSize - used)) {
+		return false;
+	}
+	used += strlen(out + used);
+	if (!appendJsonf(out, outSize, used, ",\"poll_interval_s\":%lu,", static_cast<unsigned long>(snapshot.pollIntervalSeconds))) {
+		return false;
+	}
 #if RS485_STUB
-		"\"s10_ms\":%lu,"
-		"\"s60_ms\":%lu,"
-		"\"s300_ms\":%lu,"
-		"\"s3600_ms\":%lu,"
-		"\"s86400_ms\":%lu,"
-		"\"su_ms\":%lu,"
+	if (!appendJsonf(out,
+	                 outSize,
+	                 used,
+	                 "\"s10_ms\":%lu,\"s60_ms\":%lu,\"s300_ms\":%lu,\"s3600_ms\":%lu,\"s86400_ms\":%lu,\"su_ms\":%lu,",
+	                 static_cast<unsigned long>(snapshot.schedTenSecLastRunMs),
+	                 static_cast<unsigned long>(snapshot.schedOneMinLastRunMs),
+	                 static_cast<unsigned long>(snapshot.schedFiveMinLastRunMs),
+	                 static_cast<unsigned long>(snapshot.schedOneHourLastRunMs),
+	                 static_cast<unsigned long>(snapshot.schedOneDayLastRunMs),
+	                 static_cast<unsigned long>(snapshot.schedUserLastRunMs))) {
+		return false;
+	}
 #endif
-		"\"last_poll_ms\":%lu,"
-		"\"poll_ok_count\":%lu,"
-		"\"poll_err_count\":%lu,"
-		"%s,"
-		"\"rs485_probe_last_attempt_ms\":%lu,"
-		"\"rs485_probe_backoff_ms\":%lu"
-		"}",
-		rs485Backend,
-		rs485StubMode,
-		static_cast<unsigned long>(snapshot.rs485StubFailRemaining),
-		static_cast<unsigned long>(snapshot.rs485StubWriteCount),
-		static_cast<unsigned>(snapshot.rs485StubLastWriteStartReg),
-		static_cast<unsigned>(snapshot.rs485StubLastWriteRegCount),
-		static_cast<unsigned long>(snapshot.rs485StubLastWriteMs),
-		static_cast<unsigned long>(snapshot.dispatchRequestQueuedMs),
-		snapshot.inverterReady ? "true" : "false",
-		snapshot.essSnapshotOk ? "true" : "false",
-		snapshot.essSnapshotLastOk ? "true" : "false",
-			static_cast<unsigned long>(snapshot.essSnapshotAttempts),
-			static_cast<unsigned long>(snapshot.dispatchLastRunMs),
-			dispatchLastSkipReason,
-			static_cast<unsigned long>(snapshot.pollIntervalSeconds),
-#if RS485_STUB
-			static_cast<unsigned long>(snapshot.schedTenSecLastRunMs),
-			static_cast<unsigned long>(snapshot.schedOneMinLastRunMs),
-			static_cast<unsigned long>(snapshot.schedFiveMinLastRunMs),
-			static_cast<unsigned long>(snapshot.schedOneHourLastRunMs),
-			static_cast<unsigned long>(snapshot.schedOneDayLastRunMs),
-		static_cast<unsigned long>(snapshot.schedUserLastRunMs),
-#endif
-		static_cast<unsigned long>(snapshot.lastPollMs),
-		static_cast<unsigned long>(snapshot.pollOkCount),
-		static_cast<unsigned long>(snapshot.pollErrCount),
-		pollBudget,
-		static_cast<unsigned long>(snapshot.rs485ProbeLastAttemptMs),
-		static_cast<unsigned long>(snapshot.rs485ProbeBackoffMs));
-	if (written < 0 || static_cast<size_t>(written) >= outSize) {
+	if (!appendJsonf(
+		    out,
+		    outSize,
+		    used,
+		    "\"last_poll_ms\":%lu,"
+		    "\"poll_ok_count\":%lu,"
+		    "\"poll_err_count\":%lu,",
+		    static_cast<unsigned long>(snapshot.lastPollMs),
+		    static_cast<unsigned long>(snapshot.pollOkCount),
+		    static_cast<unsigned long>(snapshot.pollErrCount))) {
+		return false;
+	}
+	if (!buildPollBudgetJsonCompact(snapshot, out + used, outSize - used)) {
+		return false;
+	}
+	used += strlen(out + used);
+	if (!appendJsonf(
+		    out,
+		    outSize,
+		    used,
+		    ",\"rs485_probe_last_attempt_ms\":%lu,"
+		    "\"rs485_probe_backoff_ms\":%lu}",
+		    static_cast<unsigned long>(snapshot.rs485ProbeLastAttemptMs),
+		    static_cast<unsigned long>(snapshot.rs485ProbeBackoffMs))) {
 		return false;
 	}
 	return true;
@@ -528,36 +635,36 @@ buildStatusStubJson(const StatusStubSnapshot &snapshot, char *out, size_t outSiz
 	if (!appendEscapedJsonString(failType, sizeof(failType), snapshot.failType)) {
 		return false;
 	}
-	int written = snprintf(
+	int written = A2M_SNPRINTF(
 		out,
 		outSize,
-		"{"
-		"\"stub_reads\":%lu,"
-		"\"stub_writes\":%lu,"
-		"\"stub_unknown_reads\":%lu,"
-		"\"soc_x10\":%u,"
-		"\"last_read_reg\":%u,"
-		"\"last_fn\":%u,"
-		"\"last_fail_reg\":%u,"
-		"\"last_fail_fn\":%u,"
-		"\"last_fail_type\":\"%s\","
-		"\"last_write_fail_reg\":%u,"
-		"\"last_write_fail_fn\":%u,"
-		"\"last_write_fail_type\":\"%s\","
-		"\"fail_reg\":%u,"
-		"\"fail_type\":\"%s\","
-		"\"latency_ms\":%u,"
-		"\"strict_unknown\":%s,"
-		"\"fail_reads\":%s,"
-		"\"fail_writes\":%s,"
-		"\"fail_every_n\":%lu,"
-		"\"fail_for_ms\":%lu,"
-		"\"flap_online_ms\":%lu,"
-		"\"flap_offline_ms\":%lu,"
-		"\"probe_attempts\":%lu,"
-		"\"probe_success_after_n\":%lu,"
-		"\"soc_step_x10_per_snapshot\":%d"
-		"}",
+		A2M_FMT("{"
+		        "\"stub_reads\":%lu,"
+		        "\"stub_writes\":%lu,"
+		        "\"stub_unknown_reads\":%lu,"
+		        "\"soc_x10\":%u,"
+		        "\"last_read_reg\":%u,"
+		        "\"last_fn\":%u,"
+		        "\"last_fail_reg\":%u,"
+		        "\"last_fail_fn\":%u,"
+		        "\"last_fail_type\":\"%s\","
+		        "\"last_write_fail_reg\":%u,"
+		        "\"last_write_fail_fn\":%u,"
+		        "\"last_write_fail_type\":\"%s\","
+		        "\"fail_reg\":%u,"
+		        "\"fail_type\":\"%s\","
+		        "\"latency_ms\":%u,"
+		        "\"strict_unknown\":%s,"
+		        "\"fail_reads\":%s,"
+		        "\"fail_writes\":%s,"
+		        "\"fail_every_n\":%lu,"
+		        "\"fail_for_ms\":%lu,"
+		        "\"flap_online_ms\":%lu,"
+		        "\"flap_offline_ms\":%lu,"
+		        "\"probe_attempts\":%lu,"
+		        "\"probe_success_after_n\":%lu,"
+		        "\"soc_step_x10_per_snapshot\":%d"
+		        "}"),
 		static_cast<unsigned long>(snapshot.stubReads),
 		static_cast<unsigned long>(snapshot.stubWrites),
 		static_cast<unsigned long>(snapshot.stubUnknownReads),
@@ -616,7 +723,7 @@ appendEscapedJsonString(char *dest, size_t destSize, const char *src)
 			if ((writePos + 6) >= destSize) {
 				return false;
 			}
-			const int written = snprintf(dest + writePos, destSize - writePos, "\\u%04x", ch);
+			const int written = A2M_SNPRINTF(dest + writePos, destSize - writePos, A2M_FMT("\\u%04x"), ch);
 			if ((written <= 0) || (static_cast<size_t>(written) >= (destSize - writePos))) {
 				return false;
 			}
@@ -632,6 +739,23 @@ appendEscapedJsonString(char *dest, size_t destSize, const char *src)
 	return true;
 }
 
+static bool
+appendJsonf(char *dest, size_t destSize, size_t &used, const char *fmt, ...)
+{
+	if (dest == nullptr || used >= destSize) {
+		return false;
+	}
+	va_list args;
+	va_start(args, fmt);
+	const int written = A2M_VSNPRINTF(dest + used, destSize - used, fmt, args);
+	va_end(args);
+	if (written < 0 || static_cast<size_t>(written) >= (destSize - used)) {
+		return false;
+	}
+	used += static_cast<size_t>(written);
+	return true;
+}
+
 } // namespace
 
 bool
@@ -644,21 +768,52 @@ buildStatusManualReadJson(const StatusManualReadSnapshot &snapshot, char *out, s
 	if (!appendEscapedJsonString(escapedValue, sizeof(escapedValue), snapshot.value)) {
 		return false;
 	}
-	const int written = snprintf(
+	const int written = A2M_SNPRINTF(
 		out,
 		outSize,
-		"{"
-		"\"seq\":%lu,"
-		"\"ts_ms\":%lu,"
-		"\"requested_reg\":%ld,"
-		"\"observed_reg\":%u,"
-		"\"value\":\"%s\""
-		"}",
+		A2M_FMT("{"
+		        "\"seq\":%lu,"
+		        "\"ts_ms\":%lu,"
+		        "\"requested_reg\":%ld,"
+		        "\"observed_reg\":%u,"
+		        "\"value\":\"%s\""
+		        "}"),
 		static_cast<unsigned long>(snapshot.seq),
 		static_cast<unsigned long>(snapshot.tsMs),
 		static_cast<long>(snapshot.requestedReg),
 		static_cast<unsigned>(snapshot.observedReg),
 		escapedValue);
+	if (written < 0 || static_cast<size_t>(written) >= outSize) {
+		return false;
+	}
+	return true;
+}
+
+bool
+buildStatusBootMemJson(const StatusBootMemSnapshot &snapshot, char *out, size_t outSize)
+{
+	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+	const int written = A2M_SNPRINTF(
+		out,
+		outSize,
+		A2M_FMT("{"
+		        "\"fw_build_ts_ms\":%llu,"
+		        "\"ts_ms\":%lu,"
+		        "\"heap_pre_wifi\":%lu,"
+		        "\"heap_post_wifi\":%lu,"
+		        "\"heap_post_mqtt\":%lu,"
+		        "\"heap_pre_rs485\":%lu,"
+		        "\"heap_post_rs485\":%lu"
+		        "}"),
+		static_cast<unsigned long long>(snapshot.fwBuildTsMs),
+		static_cast<unsigned long>(snapshot.tsMs),
+		static_cast<unsigned long>(snapshot.heapPreWifi),
+		static_cast<unsigned long>(snapshot.heapPostWifi),
+		static_cast<unsigned long>(snapshot.heapPostMqtt),
+		static_cast<unsigned long>(snapshot.heapPreRs485),
+		static_cast<unsigned long>(snapshot.heapPostRs485));
 	if (written < 0 || static_cast<size_t>(written) >= outSize) {
 		return false;
 	}

@@ -297,32 +297,40 @@ TEST_CASE("mqtt entities: retired dispatch controls stay out of public surfaces 
 	const size_t count = mqttEntitiesCount();
 	REQUIRE(count > 0);
 
-	std::vector<mqttState> catalog(count);
-	std::vector<BucketId> buckets(count, BucketId::OneMin);
-	REQUIRE(mqttEntityCopyCatalog(catalog.data(), catalog.size()));
+	std::vector<mqttState> sourceCatalog(count);
+	std::vector<mqttState> compactedCatalog(count);
+	std::vector<BucketId> sourceBuckets(count, BucketId::OneMin);
+	std::vector<BucketId> compactedBuckets(count, BucketId::Disabled);
+	REQUIRE(mqttEntityCopyCatalog(sourceCatalog.data(), sourceCatalog.size()));
 
 	size_t retiredCount = 0;
-	for (const mqttState &entity : catalog) {
+	for (const mqttState &entity : sourceCatalog) {
 		if (!mqttEntityIncludedInPublicSurface(&entity)) {
 			retiredCount++;
 		}
 	}
 	CHECK(retiredCount == 6);
 
-	const size_t publicCount =
-		mqttEntityCompactPublicSurfaceAssignments(catalog.data(), buckets.data(), count);
+	const std::vector<BucketId> sourceBucketsBefore = sourceBuckets;
+	const size_t publicCount = mqttEntityCopyCompactedPublicSurfaceAssignments(
+		sourceCatalog.data(),
+		sourceBuckets.data(),
+		count,
+		compactedCatalog.data(),
+		compactedBuckets.data());
 	CHECK(publicCount == count - retiredCount);
+	CHECK(sourceBuckets == sourceBucketsBefore);
 
 	for (size_t i = 0; i < publicCount; ++i) {
-		CHECK(mqttEntityIncludedInPublicSurface(&catalog[i]));
+		CHECK(mqttEntityIncludedInPublicSurface(&compactedCatalog[i]));
 	}
 
 	bool sawDispatchDuration = false;
 	bool sawDispatchRequestStatus = false;
 	for (size_t i = 0; i < publicCount; ++i) {
-		sawDispatchDuration = sawDispatchDuration || mqttEntityNameEquals(&catalog[i], "Dispatch_Duration");
+		sawDispatchDuration = sawDispatchDuration || mqttEntityNameEquals(&compactedCatalog[i], "Dispatch_Duration");
 		sawDispatchRequestStatus =
-			sawDispatchRequestStatus || mqttEntityNameEquals(&catalog[i], "Dispatch_Request_Status");
+			sawDispatchRequestStatus || mqttEntityNameEquals(&compactedCatalog[i], "Dispatch_Request_Status");
 	}
 	CHECK_FALSE(sawDispatchDuration);
 	CHECK(sawDispatchRequestStatus);

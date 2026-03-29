@@ -499,3 +499,9 @@ dispatchRequestShouldRejectNewRequest(bool pendingRequest, bool inFlight)
 {
 	return pendingRequest || inFlight;
 }
+
+bool
+dispatchRequestStatusShouldPublish(const char *status)
+{
+	return status != nullptr && status[0] != '\0';
+}

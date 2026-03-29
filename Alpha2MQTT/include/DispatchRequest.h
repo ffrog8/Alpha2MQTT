@@ -80,3 +80,4 @@ bool dispatchRequestReadbackMatches(const DispatchRequestPlan &plan,
                                     size_t errorSize);
 DispatchReconnectResetPlan dispatchReconnectResetPlan(bool inFlight);
 bool dispatchRequestShouldRejectNewRequest(bool pendingRequest, bool inFlight);
+bool dispatchRequestStatusShouldPublish(const char *status);

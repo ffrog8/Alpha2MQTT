@@ -82,6 +82,11 @@ TEST_CASE("status net JSON builder includes required keys")
 	StatusNetSnapshot snapshot{};
 	snapshot.uptimeS = 123;
 	snapshot.freeHeap = 45678;
+	snapshot.maxBlock = 32000;
+	snapshot.fragPct = 14;
+	snapshot.minFreeHeap = 4096;
+	snapshot.minMaxBlock = 2048;
+	snapshot.maxFragPct = 35;
 	snapshot.rssiDbm = -55;
 	snapshot.ip = "192.168.1.50";
 	snapshot.ssid = "testwifi";
@@ -96,6 +101,11 @@ TEST_CASE("status net JSON builder includes required keys")
 
 	std::string payload(buffer);
 	CHECK(payload.find("\"uptime_s\":123") != std::string::npos);
+	CHECK(payload.find("\"max_block\":32000") != std::string::npos);
+	CHECK(payload.find("\"frag_pct\":14") != std::string::npos);
+	CHECK(payload.find("\"min_free_heap\":4096") != std::string::npos);
+	CHECK(payload.find("\"min_max_block\":2048") != std::string::npos);
+	CHECK(payload.find("\"max_frag_pct\":35") != std::string::npos);
 	CHECK(payload.find("\"mqtt_reconnects\":2") != std::string::npos);
 	CHECK(payload.find("\"wifi_status\":\"Connected\"") != std::string::npos);
 }
@@ -155,6 +165,12 @@ TEST_CASE("status poll JSON builder includes required keys")
 	snapshot.dispatchRequestQueuedMs = 4000;
 	snapshot.dispatchLastRunMs = 0;
 	snapshot.dispatchLastSkipReason = "ess_snapshot_failed";
+	snapshot.worstPhase = "bucket_publish";
+	snapshot.worstFreeHeapB = 2048;
+	snapshot.worstMaxBlockB = 1024;
+	snapshot.worstFragPct = 41;
+	snapshot.mqttMaxPayloadSeen = 612;
+	snapshot.mqttMaxPayloadKind = "entity";
 	snapshot.pollIntervalSeconds = 30;
 	snapshot.schedTenSecLastRunMs = 0;
 	snapshot.schedOneMinLastRunMs = 0;
@@ -202,6 +218,12 @@ TEST_CASE("status poll JSON builder includes required keys")
 	CHECK(payload.find("\"ess_snapshot_attempts\":3") != std::string::npos);
 	CHECK(payload.find("\"dispatch_last_run_ms\":0") != std::string::npos);
 	CHECK(payload.find("\"dispatch_last_skip_reason\":\"ess_snapshot_failed\"") != std::string::npos);
+	CHECK(payload.find("\"worst_phase\":\"bucket_publish\"") != std::string::npos);
+	CHECK(payload.find("\"worst_free_heap\":2048") != std::string::npos);
+	CHECK(payload.find("\"worst_max_block\":1024") != std::string::npos);
+	CHECK(payload.find("\"worst_frag_pct\":41") != std::string::npos);
+	CHECK(payload.find("\"mqtt_max_payload_seen\":612") != std::string::npos);
+	CHECK(payload.find("\"mqtt_max_payload_kind\":\"entity\"") != std::string::npos);
 	CHECK(payload.find("\"poll_interval_s\":30") != std::string::npos);
 	CHECK(payload.find("\"sched_user_last_run_ms\":0") != std::string::npos);
 	CHECK(payload.find("\"sched_10s_count\":3") != std::string::npos);
@@ -280,6 +302,12 @@ TEST_CASE("status poll compact JSON includes snapshot/dispatch and stub schedule
 	snapshot.essSnapshotAttempts = 42;
 	snapshot.dispatchLastRunMs = 1000;
 	snapshot.dispatchLastSkipReason = "";
+	snapshot.worstPhase = "dispatch_force_publish";
+	snapshot.worstFreeHeapB = 2222;
+	snapshot.worstMaxBlockB = 1111;
+	snapshot.worstFragPct = 37;
+	snapshot.mqttMaxPayloadSeen = 480;
+	snapshot.mqttMaxPayloadKind = "poll";
 	snapshot.pollIntervalSeconds = 30;
 	snapshot.schedTenSecLastRunMs = 10;
 	snapshot.schedOneMinLastRunMs = 60;
@@ -308,6 +336,9 @@ TEST_CASE("status poll compact JSON includes snapshot/dispatch and stub schedule
 	CHECK(payload.find("\"ess_snapshot_ok\":true") != std::string::npos);
 	CHECK(payload.find("\"ess_snapshot_attempts\":42") != std::string::npos);
 	CHECK(payload.find("\"dispatch_last_run_ms\":1000") != std::string::npos);
+	CHECK(payload.find("\"worst_phase\":\"dispatch_force_publish\"") != std::string::npos);
+	CHECK(payload.find("\"mqtt_max_payload_seen\":480") != std::string::npos);
+	CHECK(payload.find("\"mqtt_max_payload_kind\":\"poll\"") != std::string::npos);
 	CHECK(payload.find("\"rs485_stub_last_write_reg_count\":9") != std::string::npos);
 	CHECK(payload.find("\"dispatch_request_queued_ms\":80") != std::string::npos);
 	CHECK(payload.find("\"poll_budget\":{\"x\":false,\"c\":3") != std::string::npos);
@@ -561,4 +592,31 @@ TEST_CASE("status manual read JSON builder includes deterministic correlation fi
 	CHECK(payload.find("\"requested_reg\":2176") != std::string::npos);
 	CHECK(payload.find("\"observed_reg\":2176") != std::string::npos);
 	CHECK(payload.find("\"value\":\"Unknown (\\\"AL\\\")\\\\path\"") != std::string::npos);
+}
+
+TEST_CASE("status boot mem JSON builder includes all boot heap checkpoints")
+{
+	StatusBootMemSnapshot snapshot{};
+	snapshot.fwBuildTsMs = 1774767242887ULL;
+	snapshot.tsMs = 4567;
+	snapshot.heapPreWifi = 19200;
+	snapshot.heapPostWifi = 17864;
+	snapshot.heapPostMqtt = 13248;
+	snapshot.heapPreRs485 = 10688;
+	snapshot.heapPostRs485 = 8480;
+
+	char buffer[256];
+	CHECK(buildStatusBootMemJson(snapshot, buffer, sizeof(buffer)));
+
+	std::string payload(buffer);
+	CHECK(payload.find("\"fw_build_ts_ms\":1774767242887") != std::string::npos);
+	CHECK(payload.find("\"ts_ms\":4567") != std::string::npos);
+	CHECK(payload.find("\"heap_pre_wifi\":19200") != std::string::npos);
+	CHECK(payload.find("\"heap_post_wifi\":17864") != std::string::npos);
+	CHECK(payload.find("\"heap_post_mqtt\":13248") != std::string::npos);
+	CHECK(payload.find("\"heap_pre_rs485\":10688") != std::string::npos);
+	CHECK(payload.find("\"heap_post_rs485\":8480") != std::string::npos);
+
+	char tooSmall[64];
+	CHECK_FALSE(buildStatusBootMemJson(snapshot, tooSmall, sizeof(tooSmall)));
 }

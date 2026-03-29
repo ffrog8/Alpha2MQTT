@@ -42,6 +42,14 @@ First, go and customise options at the top of Definitions.h!
 #include "../include/TimeProvider.h"
 #include "../include/diag.h"
 #include <Arduino.h>
+#if defined(ARDUINO)
+#include <pgmspace.h>
+#define A2M_FMT(str) PSTR(str)
+#define A2M_SNPRINTF snprintf_P
+#else
+#define A2M_FMT(str) str
+#define A2M_SNPRINTF snprintf
+#endif
 #if defined(MP_ESP8266) || defined(ESP8266) || defined(ARDUINO_ARCH_ESP8266)
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
@@ -110,7 +118,7 @@ char deviceName[32];
 char configSetTopic[64];
 char rs485StubControlTopic[96];
 char lastResetReason[64] = "";
-HttpServer httpServer(80);
+static HttpServer *g_httpServer = nullptr;
 bool httpControlPlaneEnabled = false;
 static bool inMqttCallback = false;
 static uint32_t mqttCallbackSequence = 0;
@@ -121,16 +129,36 @@ static bool pendingEntityCommandSet = false;
 static mqttEntityId pendingEntityCommandId = mqttEntityId::entityRegNum;
 static bool pendingDispatchRequestSet = false;
 static char *pendingPollingConfigPayload = nullptr;
+constexpr size_t kPendingDeferredControlPayloadSize = 512;
+constexpr size_t kPendingDispatchPayloadSize = 256;
+constexpr size_t kStatusJsonScratchSize = 1024;
 // Shared deferred-control payload buffer for small MQTT commands. MQTT pumping is
 // blocked while any deferred command is pending, so stub/entity commands never
 // overlap in this storage.
-static char pendingDeferredControlPayload[512] = "";
-static char pendingDispatchPayload[256] = "";
+static char *pendingDeferredControlPayload = nullptr;
+static char *pendingDispatchPayload = nullptr;
 // Status and manual-read JSON publishes are serialized through the single-threaded main loop.
 // Keep one shared scratch buffer instead of reserving multiple independent publish buffers.
-static char g_statusJsonScratch[1024] = "";
+static char *g_statusJsonScratch = nullptr;
 static uint32_t manualRegisterReadSeq = 0;
 constexpr uint8_t kDeferredMqttDrainMaxIterations = 16;
+
+enum class BootMemPublishCheckpoint : uint8_t {
+	PreWifi = 0,
+	PostWifi,
+	PostMqtt,
+	PreRs485,
+	PostRs485,
+};
+
+struct BootMemPublishState {
+	uint32_t heapPreWifi = 0;
+	uint32_t heapPostWifi = 0;
+	uint32_t heapPostMqtt = 0;
+	uint32_t heapPreRs485 = 0;
+	uint32_t heapPostRs485 = 0;
+	uint8_t validMask = 0;
+};
 
 enum PortalStatus : uint8_t {
 	portalStatusIdle = 0,
@@ -200,7 +228,7 @@ static WiFiManagerParameter gPortalPollingLink("<p><a href=\"/config/polling\">P
 // Portal handlers run on a constrained callback stack on ESP8266.
 // Keep only the small bucket assignment array persistent. Large text buffers are
 // allocated on demand so NORMAL-mode runtime does not carry portal/config scratch.
-static BucketId g_portalBucketsScratch[kMqttEntityDescriptorCount];
+static BucketId *g_portalBucketsScratch = nullptr;
 static bool g_portalPollingCacheValid = false;
 static size_t g_portalPollingCacheEntityCount = 0;
 static uint32_t g_portalPollingCacheIntervalSeconds = kPollIntervalDefaultSeconds;
@@ -212,10 +240,12 @@ BootMode bootModeForDiagnostics = BootMode::Normal;
 bool mqttConfigComplete = false;
 bool mqttRuntimeEnabled = false;
 bool bootEventPublished = false;
+bool bootMemEventPublished = false;
 bool inverterReady = false;
 bool inverterSubscriptionsSet = false;
 SubsystemPlan bootPlan = { true, true, true };
 BootMemWorst bootMemWorst = { MemLevel::Ok, BootMemStage::Boot0, { 0, 0, 0 } };
+BootMemPublishState bootMemPublishState{};
 bool bootMemWarningEmitted = false;
 #if defined(MP_ESP8266)
 const int kSafeModePin = 0; // D3 (GPIO0) strap for safe mode.
@@ -256,6 +286,51 @@ struct AtomicDispatchRuntimeState {
 	uint8_t readbackAttempts = 0;
 };
 static AtomicDispatchRuntimeState atomicDispatchState{};
+
+enum class RuntimeDiagPhase : uint8_t {
+	None = 0,
+	PollSnapshot,
+	BucketPublish,
+	StatusPublish,
+	DispatchWrite,
+	DispatchReadback,
+	DispatchForcePublish,
+};
+
+struct RuntimeDiagTracker {
+	bool minimaValid = false;
+	uint32_t minFreeHeap = 0;
+	uint32_t minMaxBlock = 0;
+	uint8_t maxFragPct = 0;
+	bool worstValid = false;
+	RuntimeDiagPhase worstPhase = RuntimeDiagPhase::None;
+	MemSample worstSample{};
+	uint32_t mqttMaxPayloadSeen = 0;
+	const char *mqttMaxPayloadKind = "";
+};
+
+static RuntimeDiagTracker runtimeDiag{};
+static RuntimeDiagPhase currentRuntimeDiagPhase = RuntimeDiagPhase::None;
+static const char *currentRuntimeDiagPayloadKind = "";
+
+struct RuntimeDiagScope {
+	RuntimeDiagPhase previousPhase;
+	const char *previousPayloadKind;
+
+	RuntimeDiagScope(RuntimeDiagPhase phase, const char *payloadKind = "")
+		: previousPhase(currentRuntimeDiagPhase), previousPayloadKind(currentRuntimeDiagPayloadKind)
+	{
+		currentRuntimeDiagPhase = phase;
+		currentRuntimeDiagPayloadKind = (payloadKind != nullptr) ? payloadKind : "";
+	}
+
+	~RuntimeDiagScope()
+	{
+		currentRuntimeDiagPhase = previousPhase;
+		currentRuntimeDiagPayloadKind = previousPayloadKind;
+	}
+};
+
 uint32_t schedTenSecLastRunMs = 0;
 uint32_t schedOneMinLastRunMs = 0;
 uint32_t schedFiveMinLastRunMs = 0;
@@ -598,7 +673,18 @@ static bool includeEntityInPollingPortal(const mqttState &entity);
 static void setDispatchRequestStatus(const char *status);
 static void resetAtomicDispatchState(void);
 static bool publishDispatchRequestStatus(void);
-static bool readDispatchRegisterReadback(DispatchRegisterReadback &readback, char *error, size_t errorSize);
+static const char *runtimeDiagPhaseName(RuntimeDiagPhase phase);
+static bool runtimeDiagSampleIsWorse(const MemSample &candidate, const MemSample &currentWorst);
+static void noteRuntimeMemObservation(const MemSample &sample);
+static void noteRuntimePhaseObservation(RuntimeDiagPhase phase);
+static void noteTrackedMqttPayload(const char *kind, size_t payloadLen);
+static bool publishTrackedTextPayload(const char *topic, const char *payload, bool retain);
+static bool readDispatchRegisterReadback(const DispatchRequestPlan &plan,
+                                         DispatchRegisterReadback &readback,
+                                         char *error,
+                                         size_t errorSize);
+static void recordBootMemPublishCheckpoint(BootMemPublishCheckpoint checkpoint);
+static bool bootMemPublishReady(void);
 static bool forcePublishDispatchMirror(void);
 static bool publishPendingDispatchMirror(void);
 static void processPendingDispatchRequest(void);
@@ -616,6 +702,7 @@ void setStatusLedColor(uint8_t red, uint8_t green, uint8_t blue);
 void updateStatusLed(void);
 void buildDeviceName(void);
 void publishBootEventOncePerBoot(void);
+void publishBootMemEventOncePerBoot(void);
 void setMqttIdentifiersFromSerial(const char *serial);
 void queueStaleInverterDiscoveryClear(const char *deviceId);
 void queueStaleControllerDiscoveryClear(const char *deviceId);
@@ -707,6 +794,72 @@ const char *portalCustomHeadElement(void);
 static inline bool isMqttPumpBlocked(void);
 static bool pumpMqttOnce(void);
 
+static bool
+ensureSharedRuntimeBuffer(char *&buffer, size_t size)
+{
+	if (buffer != nullptr) {
+		return true;
+	}
+	buffer = new (std::nothrow) char[size];
+	if (buffer == nullptr) {
+		return false;
+	}
+	buffer[0] = '\0';
+	return true;
+}
+
+static bool
+ensureStatusJsonScratch(void)
+{
+	return ensureSharedRuntimeBuffer(g_statusJsonScratch, kStatusJsonScratchSize);
+}
+
+static bool
+ensureDeferredControlPayload(void)
+{
+	return ensureSharedRuntimeBuffer(pendingDeferredControlPayload, kPendingDeferredControlPayloadSize);
+}
+
+static bool
+ensureDispatchPayload(void)
+{
+	return ensureSharedRuntimeBuffer(pendingDispatchPayload, kPendingDispatchPayloadSize);
+}
+
+static bool
+ensureNormalRuntimeBuffers(void)
+{
+	return ensureStatusJsonScratch() &&
+	       ensureDeferredControlPayload() &&
+	       ensureDispatchPayload();
+}
+
+static bool
+ensurePortalBucketsScratch(void)
+{
+	if (g_portalBucketsScratch != nullptr) {
+		return true;
+	}
+	g_portalBucketsScratch = new (std::nothrow) BucketId[kMqttEntityDescriptorCount];
+	return g_portalBucketsScratch != nullptr;
+}
+
+static bool
+ensureHttpServer(void)
+{
+	if (g_httpServer != nullptr) {
+		return true;
+	}
+	g_httpServer = new (std::nothrow) HttpServer(80);
+	return g_httpServer != nullptr;
+}
+
+static HttpServer &
+httpServerRef(void)
+{
+	return *g_httpServer;
+}
+
 void
 buildDeviceName(void)
 {
@@ -768,7 +921,9 @@ static void
 resetAtomicDispatchState(void)
 {
 	pendingDispatchRequestSet = false;
-	pendingDispatchPayload[0] = '\0';
+	if (pendingDispatchPayload != nullptr) {
+		pendingDispatchPayload[0] = '\0';
+	}
 	atomicDispatchState = AtomicDispatchRuntimeState{};
 }
 
@@ -784,7 +939,9 @@ handleMqttReconnectDispatchReset(void)
 		pendingDispatchRequestSet = false;
 	}
 	if (resetPlan.clearPendingPayload) {
-		pendingDispatchPayload[0] = '\0';
+		if (pendingDispatchPayload != nullptr) {
+			pendingDispatchPayload[0] = '\0';
+		}
 	}
 	// MQTT reconnects should only clear MQTT-facing request state. Preserving
 	// timedDispatchState and pending mirror replay avoids re-arming
@@ -941,7 +1098,35 @@ publishBootEventOncePerBoot(void)
 	bootEventPublished = bootEventPublishedAfterAttempt(bootEventPublished, published);
 }
 
-#if defined(DEBUG_OVER_SERIAL)
+void
+publishBootMemEventOncePerBoot(void)
+{
+	if (bootMemEventPublished || !_mqtt.connected() || !bootMemPublishReady()) {
+		return;
+	}
+
+	char bootMemTopic[160];
+	char payload[224];
+	StatusBootMemSnapshot snapshot{};
+	snapshot.fwBuildTsMs = BUILD_TS_MS;
+	snapshot.tsMs = millis();
+	snapshot.heapPreWifi = bootMemPublishState.heapPreWifi;
+	snapshot.heapPostWifi = bootMemPublishState.heapPostWifi;
+	snapshot.heapPostMqtt = bootMemPublishState.heapPostMqtt;
+	snapshot.heapPreRs485 = bootMemPublishState.heapPreRs485;
+	snapshot.heapPostRs485 = bootMemPublishState.heapPostRs485;
+
+	if (!buildStatusBootMemJson(snapshot, payload, sizeof(payload))) {
+		return;
+	}
+
+	snprintf(bootMemTopic, sizeof(bootMemTopic), "%s/boot/mem", deviceName);
+	if (publishTrackedTextPayload(bootMemTopic, payload, MQTT_RETAIN)) {
+		bootMemEventPublished = true;
+	}
+}
+
+	#if defined(DEBUG_OVER_SERIAL)
 void
 logHeap(const char *label)
 {
@@ -982,6 +1167,134 @@ readMemSample()
 	sample.fragPct = 0;
 #endif
 	return sample;
+}
+
+static const char *
+runtimeDiagPhaseName(RuntimeDiagPhase phase)
+{
+	switch (phase) {
+	case RuntimeDiagPhase::PollSnapshot:
+		return "poll_snapshot";
+	case RuntimeDiagPhase::BucketPublish:
+		return "bucket_publish";
+	case RuntimeDiagPhase::StatusPublish:
+		return "status_publish";
+	case RuntimeDiagPhase::DispatchWrite:
+		return "dispatch_write";
+	case RuntimeDiagPhase::DispatchReadback:
+		return "dispatch_readback";
+	case RuntimeDiagPhase::DispatchForcePublish:
+		return "dispatch_force_publish";
+	case RuntimeDiagPhase::None:
+	default:
+		return "";
+	}
+}
+
+static bool
+runtimeDiagSampleIsWorse(const MemSample &candidate, const MemSample &currentWorst)
+{
+	const MemLevel candidateLevel = evaluateRuntimeMem(candidate);
+	const MemLevel currentLevel = evaluateRuntimeMem(currentWorst);
+	if (candidateLevel != currentLevel) {
+		return static_cast<uint8_t>(candidateLevel) > static_cast<uint8_t>(currentLevel);
+	}
+	if (candidate.freeB != currentWorst.freeB) {
+		return candidate.freeB < currentWorst.freeB;
+	}
+	if (candidate.maxBlockB != currentWorst.maxBlockB) {
+		return candidate.maxBlockB < currentWorst.maxBlockB;
+	}
+	return candidate.fragPct > currentWorst.fragPct;
+}
+
+static void
+noteRuntimeMemObservation(const MemSample &sample)
+{
+	if (!runtimeDiag.minimaValid) {
+		runtimeDiag.minimaValid = true;
+		runtimeDiag.minFreeHeap = sample.freeB;
+		runtimeDiag.minMaxBlock = sample.maxBlockB;
+		runtimeDiag.maxFragPct = sample.fragPct;
+		return;
+	}
+	if (sample.freeB < runtimeDiag.minFreeHeap) {
+		runtimeDiag.minFreeHeap = sample.freeB;
+	}
+	if (sample.maxBlockB < runtimeDiag.minMaxBlock) {
+		runtimeDiag.minMaxBlock = sample.maxBlockB;
+	}
+	if (sample.fragPct > runtimeDiag.maxFragPct) {
+		runtimeDiag.maxFragPct = sample.fragPct;
+	}
+}
+
+static void
+noteRuntimePhaseObservation(RuntimeDiagPhase phase)
+{
+	if (phase == RuntimeDiagPhase::None) {
+		return;
+	}
+	const MemSample sample = readMemSample();
+	noteRuntimeMemObservation(sample);
+	if (!runtimeDiag.worstValid || runtimeDiagSampleIsWorse(sample, runtimeDiag.worstSample)) {
+		runtimeDiag.worstValid = true;
+		runtimeDiag.worstPhase = phase;
+		runtimeDiag.worstSample = sample;
+	}
+}
+
+static void
+noteTrackedMqttPayload(const char *kind, size_t payloadLen)
+{
+	if (kind == nullptr || kind[0] == '\0') {
+		return;
+	}
+	if (payloadLen > runtimeDiag.mqttMaxPayloadSeen) {
+		runtimeDiag.mqttMaxPayloadSeen = static_cast<uint32_t>(payloadLen);
+		runtimeDiag.mqttMaxPayloadKind = kind;
+	}
+}
+
+static uint8_t
+bootMemPublishCheckpointBit(BootMemPublishCheckpoint checkpoint)
+{
+	return static_cast<uint8_t>(1u << static_cast<uint8_t>(checkpoint));
+}
+
+static void
+recordBootMemPublishCheckpoint(BootMemPublishCheckpoint checkpoint)
+{
+	const MemSample sample = readMemSample();
+	switch (checkpoint) {
+		case BootMemPublishCheckpoint::PreWifi:
+			bootMemPublishState.heapPreWifi = sample.freeB;
+			break;
+		case BootMemPublishCheckpoint::PostWifi:
+			bootMemPublishState.heapPostWifi = sample.freeB;
+			break;
+		case BootMemPublishCheckpoint::PostMqtt:
+			bootMemPublishState.heapPostMqtt = sample.freeB;
+			break;
+		case BootMemPublishCheckpoint::PreRs485:
+			bootMemPublishState.heapPreRs485 = sample.freeB;
+			break;
+		case BootMemPublishCheckpoint::PostRs485:
+			bootMemPublishState.heapPostRs485 = sample.freeB;
+			break;
+	}
+	bootMemPublishState.validMask |= bootMemPublishCheckpointBit(checkpoint);
+}
+
+static bool
+bootMemPublishReady(void)
+{
+	const uint8_t requiredMask = bootMemPublishCheckpointBit(BootMemPublishCheckpoint::PreWifi) |
+	                             bootMemPublishCheckpointBit(BootMemPublishCheckpoint::PostWifi) |
+	                             bootMemPublishCheckpointBit(BootMemPublishCheckpoint::PostMqtt) |
+	                             bootMemPublishCheckpointBit(BootMemPublishCheckpoint::PreRs485) |
+	                             bootMemPublishCheckpointBit(BootMemPublishCheckpoint::PostRs485);
+	return (bootMemPublishState.validMask & requiredMask) == requiredMask;
 }
 
 static void
@@ -1067,7 +1380,9 @@ serviceRs485Hooks(void)
 {
 	pumpMqttOnce();
 	if (httpControlPlaneEnabled) {
-		httpServer.handleClient();
+		if (g_httpServer != nullptr) {
+			httpServerRef().handleClient();
+		}
 	}
 }
 
@@ -1472,7 +1787,7 @@ template <typename EmitFn>
 static bool
 sendHttpHtmlResponse(EmitFn emitPage)
 {
-	WiFiClient client = httpServer.client();
+	WiFiClient client = httpServerRef().client();
 	if (!client.connected()) {
 		return false;
 	}
@@ -1512,13 +1827,16 @@ setupHttpControlPlane(void)
 		return;
 	}
 
-	httpServer.on("/", HTTP_GET, handleHttpRoot);
-	httpServer.on("/restart", HTTP_GET, handleHttpRestartAlias);
-	httpServer.on("/restart/", HTTP_GET, handleHttpRestartAlias);
-	httpServer.on("/reboot/normal", HTTP_POST, handleRebootNormal);
-	httpServer.on("/reboot/ap", HTTP_POST, handleRebootAp);
-	httpServer.on("/reboot/wifi", HTTP_POST, handleRebootWifi);
-	httpServer.begin();
+	if (!ensureHttpServer()) {
+		return;
+	}
+	httpServerRef().on("/", HTTP_GET, handleHttpRoot);
+	httpServerRef().on("/restart", HTTP_GET, handleHttpRestartAlias);
+	httpServerRef().on("/restart/", HTTP_GET, handleHttpRestartAlias);
+	httpServerRef().on("/reboot/normal", HTTP_POST, handleRebootNormal);
+	httpServerRef().on("/reboot/ap", HTTP_POST, handleRebootAp);
+	httpServerRef().on("/reboot/wifi", HTTP_POST, handleRebootWifi);
+	httpServerRef().begin();
 	httpControlPlaneEnabled = true;
 #ifdef DEBUG_OVER_SERIAL
 	Serial.println("HTTP control plane started on port 80.");
@@ -1532,9 +1850,9 @@ handleHttpRoot(void)
 	Serial.println("HTTP GET /");
 #endif
 	if (deferredControlPlaneRebootScheduled) {
-		httpServer.sendHeader("Cache-Control", "no-store");
-		httpServer.sendHeader("Retry-After", "2");
-		httpServer.send(503, "text/plain", "Reboot pending");
+		httpServerRef().sendHeader("Cache-Control", "no-store");
+		httpServerRef().sendHeader("Retry-After", "2");
+		httpServerRef().send(503, "text/plain", "Reboot pending");
 		return;
 	}
 
@@ -1617,9 +1935,9 @@ handleHttpRestartAlias(void)
 #ifdef DEBUG_OVER_SERIAL
 	Serial.println("HTTP GET /restart -> /");
 #endif
-	httpServer.sendHeader("Cache-Control", "no-store");
-	httpServer.sendHeader("Location", "/", true);
-	httpServer.send(302, "text/plain", "");
+	httpServerRef().sendHeader("Cache-Control", "no-store");
+	httpServerRef().sendHeader("Location", "/", true);
+	httpServerRef().send(302, "text/plain", "");
 }
 
 void
@@ -1629,7 +1947,7 @@ handleRebootNormal(void)
 	Serial.println("HTTP POST /reboot/normal");
 	Serial.println("Scheduling deferred reboot -> normal");
 #endif
-	httpServer.send(200, "text/plain", "Rebooting into MODE_NORMAL...");
+	httpServerRef().send(200, "text/plain", "Rebooting into MODE_NORMAL...");
 	scheduleDeferredControlPlaneReboot(BootIntent::Normal);
 }
 
@@ -1640,7 +1958,7 @@ handleRebootAp(void)
 	Serial.println("HTTP POST /reboot/ap");
 	Serial.println("Scheduling deferred reboot -> ap_config");
 #endif
-	httpServer.send(200, "text/plain", "Rebooting into MODE_AP_CONFIG...");
+	httpServerRef().send(200, "text/plain", "Rebooting into MODE_AP_CONFIG...");
 	scheduleDeferredControlPlaneReboot(BootIntent::ApConfig);
 }
 
@@ -1655,7 +1973,7 @@ handleRebootWifi(void)
 	// Serve a small "rebooting" page that polls the same host until the portal comes up.
 	// In STA-only portal mode there is no captive-portal DNS redirect, so this provides
 	// a reasonable browser UX when the mode switch is initiated from the control plane.
-	httpServer.send(200, "text/html",
+	httpServerRef().send(200, "text/html",
 		"<!doctype html><html><head>"
 		"<meta charset='utf-8'>"
 		"<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -3587,6 +3905,7 @@ servicePortalRouteRebindRetries(WiFiManager &wifiManager)
 static void
 ensurePortalPollingRuntimeReady(void)
 {
+	(void)ensurePortalBucketsScratch();
 	if (currentBootMode == BootMode::ApConfig || currentBootMode == BootMode::WifiConfig) {
 		return;
 	}
@@ -3783,6 +4102,9 @@ loadPollingBucketsForPortal(const mqttState *entities,
                             BucketId *outBuckets,
                             uint32_t &outPollIntervalSeconds)
 {
+	if (!ensurePortalBucketsScratch()) {
+		return false;
+	}
 	if (!outBuckets || entityCount == 0 || entityCount > kMqttEntityDescriptorCount) {
 		return false;
 	}
@@ -4970,11 +5292,14 @@ void setup()
 #ifdef DEBUG_OVER_SERIAL
 		logHeapFreeOnly("pre-wifi");
 #endif
+		recordBootMemPublishCheckpoint(BootMemPublishCheckpoint::PreWifi);
 		setupWifi(true);
 		lastWifiConnected = true;
 #ifdef DEBUG_OVER_SERIAL
 		logHeapFreeOnly("after WiFi");
 #endif
+		recordBootMemPublishCheckpoint(BootMemPublishCheckpoint::PostWifi);
+		(void)ensureNormalRuntimeBuffers();
 		recordBootMemStage(BootMemStage::Boot1);
 		setupHttpControlPlane();
 	}
@@ -5015,6 +5340,7 @@ void setup()
 #ifdef DEBUG_OVER_SERIAL
 					logHeapFreeOnly("after MQTT payload");
 #endif
+					recordBootMemPublishCheckpoint(BootMemPublishCheckpoint::PostMqtt);
 					recordBootMemStage(BootMemStage::Boot2);
 					break;
 			} else {
@@ -5044,6 +5370,7 @@ void setup()
 #if defined(DEBUG_OVER_SERIAL)
 		logHeapFreeOnly("before RS485 init");
 #endif
+		recordBootMemPublishCheckpoint(BootMemPublishCheckpoint::PreRs485);
 		_modBus = new RS485Handler;
 #if defined(DEBUG_OVER_SERIAL)
 #if RS485_STUB
@@ -5065,7 +5392,9 @@ void setup()
 #if defined(DEBUG_OVER_SERIAL)
 			logHeapFreeOnly("after RS485 init");
 #endif
+			recordBootMemPublishCheckpoint(BootMemPublishCheckpoint::PostRs485);
 			recordBootMemStage(BootMemStage::Boot3);
+			publishBootMemEventOncePerBoot();
 
 			rs485UartInfo = _modBus->uartInfo();
 
@@ -5660,7 +5989,9 @@ loop()
 	}
 
 	if (httpControlPlaneEnabled) {
-		httpServer.handleClient();
+		if (g_httpServer != nullptr) {
+			httpServerRef().handleClient();
+		}
 	}
 	if (deferredControlPlaneRebootScheduled &&
 	    static_cast<long>(millis() - deferredControlPlaneRebootAt) >= 0) {
@@ -5947,6 +6278,11 @@ void
 loadPollingConfig(void)
 {
 	if (!mqttEntitiesRtAvailable()) {
+		return;
+	}
+	if (!ensurePortalBucketsScratch()) {
+		persistLoadOk = 0;
+		persistLoadErr = 1;
 		return;
 	}
 	Preferences preferences;
@@ -6236,8 +6572,11 @@ publishCountedMqttPayload(const char *topic, bool retain, CountedMqttEmitter emi
 	if (!emit(countPass, context) || !countPass.ok) {
 		return false;
 	}
+	noteTrackedMqttPayload(currentRuntimeDiagPayloadKind, countPass.length);
 	if (countPass.length == 0) {
-		return _mqtt.publish(topic, "", retain);
+		const bool published = _mqtt.publish(topic, "", retain);
+		noteRuntimePhaseObservation(currentRuntimeDiagPhase);
+		return published;
 	}
 	if (!_mqtt.beginPublish(topic, static_cast<unsigned int>(countPass.length), retain)) {
 #ifdef DEBUG_OVER_SERIAL
@@ -6248,6 +6587,7 @@ publishCountedMqttPayload(const char *topic, bool retain, CountedMqttEmitter emi
 			              static_cast<unsigned>(countPass.length));
 		}
 #endif
+		noteRuntimePhaseObservation(currentRuntimeDiagPhase);
 		maybeYield();
 		return false;
 	}
@@ -6267,9 +6607,11 @@ publishCountedMqttPayload(const char *topic, bool retain, CountedMqttEmitter emi
 			              endOk ? 1 : 0);
 		}
 #endif
+		noteRuntimePhaseObservation(currentRuntimeDiagPhase);
 		maybeYield();
 		return false;
 	}
+	noteRuntimePhaseObservation(currentRuntimeDiagPhase);
 	return true;
 }
 
@@ -6348,12 +6690,6 @@ struct PollingConfigInlinePayloadContext {
 	size_t entityCount = 0;
 	const BucketId *buckets = nullptr;
 };
-
-static size_t
-compactPublicPollingConfigAssignments(mqttState *entities, BucketId *buckets, size_t entityCount)
-{
-	return mqttEntityCompactPublicSurfaceAssignments(entities, buckets, entityCount);
-}
 
 static bool
 emitPollingConfigInlinePayload(CountedMqttPayload &payload, void *context)
@@ -6520,9 +6856,21 @@ publishPollingConfig(void)
 #endif
 		return;
 	}
-	const size_t publicEntityCount =
-		compactPublicPollingConfigAssignments(catalog.entities, buckets, entityCount);
-	publishPollingConfigChunked(catalog.entities, publicEntityCount, buckets);
+	BucketId *publicBuckets = new (std::nothrow) BucketId[entityCount];
+	if (publicBuckets == nullptr) {
+#ifdef DEBUG_OVER_SERIAL
+		Serial.println("publishPollingConfig: public bucket scratch alloc failed for chunked fallback");
+#endif
+		return;
+	}
+	const size_t publicEntityCount = mqttEntityCopyCompactedPublicSurfaceAssignments(
+		catalog.entities,
+		buckets,
+		entityCount,
+		catalog.entities,
+		publicBuckets);
+	publishPollingConfigChunked(catalog.entities, publicEntityCount, publicBuckets);
+	delete[] publicBuckets;
 }
 
 static bool
@@ -7931,6 +8279,7 @@ mqttReconnect(void)
 #endif
 			// Publish boot intent early; RS485 init can stall before periodic status messages.
 			publishBootEventOncePerBoot();
+			publishBootMemEventOncePerBoot();
 			publishStatusNow();
 			mqttReconnectCount++;
 			lastMqttConnectMs = millis();
@@ -8738,6 +9087,9 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 	void
 		sendStatus(bool includeEssSnapshot)
 		{
+		if (!ensureStatusJsonScratch()) {
+			return;
+		}
 		StatusCoreSnapshot core{};
 		StatusNetSnapshot net{};
 		StatusPollSnapshot poll{};
@@ -8786,7 +9138,17 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 	core.haUniqueId = inverterReady ? haUniqueId : "A2M-UNKNOWN";
 
 	net.uptimeS = getUptimeSeconds();
-	net.freeHeap = ESP.getFreeHeap();
+	{
+		noteRuntimePhaseObservation(RuntimeDiagPhase::StatusPublish);
+		const MemSample netSample = readMemSample();
+		noteRuntimeMemObservation(netSample);
+		net.freeHeap = netSample.freeB;
+		net.maxBlock = netSample.maxBlockB;
+		net.fragPct = netSample.fragPct;
+		net.minFreeHeap = runtimeDiag.minimaValid ? runtimeDiag.minFreeHeap : netSample.freeB;
+		net.minMaxBlock = runtimeDiag.minimaValid ? runtimeDiag.minMaxBlock : netSample.maxBlockB;
+		net.maxFragPct = runtimeDiag.minimaValid ? runtimeDiag.maxFragPct : netSample.fragPct;
+	}
 	net.rssiDbm = WiFi.RSSI();
 	net.ip = ipBuf;
 	net.ssid = ssidBuf;
@@ -8845,6 +9207,12 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 			poll.dispatchRequestQueuedMs = dispatchRequestQueuedMs;
 			poll.dispatchLastRunMs = dispatchLastRunMs;
 			poll.dispatchLastSkipReason = dispatchLastSkipReason;
+			poll.worstPhase = runtimeDiagPhaseName(runtimeDiag.worstValid ? runtimeDiag.worstPhase : RuntimeDiagPhase::None);
+			poll.worstFreeHeapB = runtimeDiag.worstValid ? runtimeDiag.worstSample.freeB : 0;
+			poll.worstMaxBlockB = runtimeDiag.worstValid ? runtimeDiag.worstSample.maxBlockB : 0;
+			poll.worstFragPct = runtimeDiag.worstValid ? runtimeDiag.worstSample.fragPct : 0;
+			poll.mqttMaxPayloadSeen = runtimeDiag.mqttMaxPayloadSeen;
+			poll.mqttMaxPayloadKind = runtimeDiag.mqttMaxPayloadKind;
 			poll.schedTenSecLastRunMs = schedTenSecLastRunMs;
 			poll.schedOneMinLastRunMs = schedOneMinLastRunMs;
 			poll.schedFiveMinLastRunMs = schedFiveMinLastRunMs;
@@ -8875,7 +9243,7 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 				poll.pollingLastFullCycleAgeMs[bucketIdx] = bucketLastFullCycleAgeMs(budgetState, nowMs);
 			}
 
-			if (!buildStatusCoreJson(core, g_statusJsonScratch, sizeof(g_statusJsonScratch))) {
+			if (!buildStatusCoreJson(core, g_statusJsonScratch, kStatusJsonScratchSize)) {
 				return;
 			}
 	resultAddedToPayload = addToPayload(g_statusJsonScratch);
@@ -8883,31 +9251,36 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 		return;
 	}
 
-	sendMqtt(statusTopic, MQTT_RETAIN);
+	{
+		RuntimeDiagScope diagScope(RuntimeDiagPhase::StatusPublish, "status");
+		sendMqtt(statusTopic, MQTT_RETAIN);
+	}
 	maybeYield();
 	publishControllerInverterSerialState();
 	maybeYield();
 
 	char netTopic[160];
 	snprintf(netTopic, sizeof(netTopic), "%s/net", statusTopic);
-	if (buildStatusNetJson(net, g_statusJsonScratch, sizeof(g_statusJsonScratch))) {
-		_mqtt.publish(netTopic, g_statusJsonScratch, MQTT_RETAIN);
+	if (buildStatusNetJson(net, g_statusJsonScratch, kStatusJsonScratchSize)) {
+		RuntimeDiagScope diagScope(RuntimeDiagPhase::StatusPublish, "net");
+		publishTrackedTextPayload(netTopic, g_statusJsonScratch, MQTT_RETAIN);
 		maybeYield();
 	}
 
 	char pollTopic[160];
 	snprintf(pollTopic, sizeof(pollTopic), "%s/poll", statusTopic);
-	bool pollBuilt = buildStatusPollJson(poll, g_statusJsonScratch, sizeof(g_statusJsonScratch));
+	bool pollBuilt = buildStatusPollJson(poll, g_statusJsonScratch, kStatusJsonScratchSize);
 	bool usedCompactPoll = false;
 	if (!pollBuilt) {
-		pollBuilt = buildStatusPollJsonCompact(poll, g_statusJsonScratch, sizeof(g_statusJsonScratch));
+		pollBuilt = buildStatusPollJsonCompact(poll, g_statusJsonScratch, kStatusJsonScratchSize);
 		usedCompactPoll = pollBuilt;
 	}
 	if (pollBuilt) {
-		bool published = _mqtt.publish(pollTopic, g_statusJsonScratch, MQTT_RETAIN);
+		RuntimeDiagScope diagScope(RuntimeDiagPhase::StatusPublish, "poll");
+		bool published = publishTrackedTextPayload(pollTopic, g_statusJsonScratch, MQTT_RETAIN);
 		if (!published && !usedCompactPoll &&
-		    buildStatusPollJsonCompact(poll, g_statusJsonScratch, sizeof(g_statusJsonScratch))) {
-			published = _mqtt.publish(pollTopic, g_statusJsonScratch, MQTT_RETAIN);
+		    buildStatusPollJsonCompact(poll, g_statusJsonScratch, kStatusJsonScratchSize)) {
+			published = publishTrackedTextPayload(pollTopic, g_statusJsonScratch, MQTT_RETAIN);
 			usedCompactPoll = true;
 		}
 #ifdef DEBUG_OVER_SERIAL
@@ -8948,7 +9321,7 @@ addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *re
 
 		char stubTopic[160];
 		snprintf(stubTopic, sizeof(stubTopic), "%s/stub", statusTopic);
-		if (buildStatusStubJson(stub, g_statusJsonScratch, sizeof(g_statusJsonScratch))) {
+		if (buildStatusStubJson(stub, g_statusJsonScratch, kStatusJsonScratchSize)) {
 			_mqtt.publish(stubTopic, g_statusJsonScratch, MQTT_RETAIN);
 			maybeYield();
 		}
@@ -9005,7 +9378,7 @@ emitEntityDiscoveryPayload(CountedMqttPayload &payload, void *context)
 	                    uniqueId,
 	                    sizeof(uniqueId));
 
-	sprintf(stateAddition, "{");
+	A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT("{"));
 	if (!appendCountedMqttText(payload, stateAddition)) {
 		return false;
 	}
@@ -9013,19 +9386,19 @@ emitEntityDiscoveryPayload(CountedMqttPayload &payload, void *context)
 	switch (singleEntity->haClass) {
 	case homeAssistantClass::haClassBox:
 	case homeAssistantClass::haClassNumber:
-		sprintf(stateAddition, "\"component\": \"number\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT("\"component\": \"number\""));
 		entityType = "number";
 		break;
 	case homeAssistantClass::haClassSelect:
-		sprintf(stateAddition, "\"component\": \"select\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT("\"component\": \"select\""));
 		entityType = "select";
 		break;
 	case homeAssistantClass::haClassBinaryProblem:
-		sprintf(stateAddition, "\"component\": \"binary_sensor\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT("\"component\": \"binary_sensor\""));
 		entityType = "binary_sensor";
 		break;
 	default:
-		sprintf(stateAddition, "\"component\": \"sensor\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT("\"component\": \"sensor\""));
 		entityType = "sensor";
 		break;
 	}
@@ -9041,19 +9414,19 @@ emitEntityDiscoveryPayload(CountedMqttPayload &payload, void *context)
 			payload.ok = false;
 			return false;
 		}
-		snprintf(stateAddition, sizeof(stateAddition),
-		         ", \"device\": {"
-		         " \"name\": \"%s\", \"model\": \"%s\", \"manufacturer\": \"AlphaESS\","
-		         " \"identifiers\": [\"%s\"], \"via_device\": \"%s\"}",
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+		         A2M_FMT(", \"device\": {"
+		                 " \"name\": \"%s\", \"model\": \"%s\", \"manufacturer\": \"AlphaESS\","
+		                 " \"identifiers\": [\"%s\"], \"via_device\": \"%s\"}"),
 		         deviceDisplayName,
 		         (deviceBatteryType[0] != '\0' ? deviceBatteryType : kInverterModelFallback),
 		         deviceId,
 		         controllerIdentifier);
 	} else {
-		snprintf(stateAddition, sizeof(stateAddition),
-		         ", \"device\": {"
-		         " \"name\": \"%s\", \"model\": \"%s\", \"manufacturer\": \"AlphaESS\","
-		         " \"identifiers\": [\"%s\"]}",
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+		         A2M_FMT(", \"device\": {"
+		                 " \"name\": \"%s\", \"model\": \"%s\", \"manufacturer\": \"AlphaESS\","
+		                 " \"identifiers\": [\"%s\"]}"),
 		         deviceName,
 		         kControllerModel,
 		         deviceId);
@@ -9063,7 +9436,7 @@ emitEntityDiscoveryPayload(CountedMqttPayload &payload, void *context)
 	}
 
 	buildEntityDisplayName(singleEntity, scope, prettyName, sizeof(prettyName));
-	snprintf(stateAddition, sizeof(stateAddition), ", \"name\": \"%s\"", prettyName);
+	A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"name\": \"%s\""), prettyName);
 	if (!appendCountedMqttText(payload, stateAddition)) {
 		return false;
 	}
@@ -9081,153 +9454,150 @@ emitEntityDiscoveryPayload(CountedMqttPayload &payload, void *context)
 			payload.ok = false;
 			return false;
 		}
-		snprintf(defaultEntityId, sizeof(defaultEntityId), "%s.alpha_%s_%s",
+		A2M_SNPRINTF(defaultEntityId, sizeof(defaultEntityId), A2M_FMT("%s.alpha_%s_%s"),
 		         entityType,
 		         labelId,
 		         (metricId[0] != '\0' ? metricId : entityKey));
-		snprintf(stateAddition, sizeof(stateAddition),
-		         ", \"default_entity_id\": \"%s\", \"has_entity_name\": true",
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+		         A2M_FMT(", \"default_entity_id\": \"%s\", \"has_entity_name\": true"),
 		         defaultEntityId);
 		if (!appendCountedMqttText(payload, stateAddition)) {
 			return false;
 		}
 	}
 
-	snprintf(stateAddition, sizeof(stateAddition), ", \"unique_id\": \"%s\"", uniqueId);
+	A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"unique_id\": \"%s\""), uniqueId);
 	if (!appendCountedMqttText(payload, stateAddition)) {
 		return false;
 	}
 
 	switch (singleEntity->haClass) {
 	case homeAssistantClass::haClassEnergy:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"device_class\": \"energy\""
-			 ", \"state_class\": \"total_increasing\""
-			 ", \"unit_of_measurement\": \"kWh\""
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			 A2M_FMT(", \"device_class\": \"energy\""
+			         ", \"state_class\": \"total_increasing\""
+			         ", \"unit_of_measurement\": \"kWh\""
 #ifdef MQTT_FORCE_UPDATE
-			 ", \"force_update\": \"true\""
+			         ", \"force_update\": \"true\""
 #endif // MQTT_FORCE_UPDATE
-			);
+			        ));
 		break;
 	case homeAssistantClass::haClassPower:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"device_class\": \"power\""
-			 ", \"state_class\": \"measurement\""
-			 ", \"unit_of_measurement\": \"W\""
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			 A2M_FMT(", \"device_class\": \"power\""
+			         ", \"state_class\": \"measurement\""
+			         ", \"unit_of_measurement\": \"W\""
 #ifdef MQTT_FORCE_UPDATE
-			 ", \"force_update\": \"true\""
+			         ", \"force_update\": \"true\""
 #endif // MQTT_FORCE_UPDATE
-			);
+			        ));
 		break;
 	case homeAssistantClass::haClassFrequency:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"device_class\": \"frequency\""
-			 ", \"state_class\": \"measurement\""
-			 ", \"unit_of_measurement\": \"Hz\""
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			 A2M_FMT(", \"device_class\": \"frequency\""
+			         ", \"state_class\": \"measurement\""
+			         ", \"unit_of_measurement\": \"Hz\""
 #ifdef MQTT_FORCE_UPDATE
-			 ", \"force_update\": \"true\""
+			         ", \"force_update\": \"true\""
 #endif // MQTT_FORCE_UPDATE
-			 ", \"entity_category\": \"diagnostic\"");
+			         ", \"entity_category\": \"diagnostic\""));
 		break;
 	case homeAssistantClass::haClassReactivePower:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"state_class\": \"measurement\""
-			 ", \"unit_of_measurement\": \"var\""
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			 A2M_FMT(", \"state_class\": \"measurement\""
+			         ", \"unit_of_measurement\": \"var\""
 #ifdef MQTT_FORCE_UPDATE
-			 ", \"force_update\": \"true\""
+			         ", \"force_update\": \"true\""
 #endif // MQTT_FORCE_UPDATE
-			 ", \"entity_category\": \"diagnostic\"");
+			         ", \"entity_category\": \"diagnostic\""));
 		break;
 	case homeAssistantClass::haClassApparentPower:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"state_class\": \"measurement\""
-			 ", \"unit_of_measurement\": \"VA\""
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			 A2M_FMT(", \"state_class\": \"measurement\""
+			         ", \"unit_of_measurement\": \"VA\""
 #ifdef MQTT_FORCE_UPDATE
-			 ", \"force_update\": \"true\""
+			         ", \"force_update\": \"true\""
 #endif // MQTT_FORCE_UPDATE
-			 ", \"entity_category\": \"diagnostic\"");
+			         ", \"entity_category\": \"diagnostic\""));
 		break;
 	case homeAssistantClass::haClassPowerFactor:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"state_class\": \"measurement\""
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			 A2M_FMT(", \"state_class\": \"measurement\""
 #ifdef MQTT_FORCE_UPDATE
-			 ", \"force_update\": \"true\""
+			         ", \"force_update\": \"true\""
 #endif // MQTT_FORCE_UPDATE
-			 ", \"entity_category\": \"diagnostic\"");
+			         ", \"entity_category\": \"diagnostic\""));
 		break;
 	case homeAssistantClass::haClassBinaryProblem:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"device_class\": \"problem\""
-			 ", \"payload_on\": \"Problem\""
-			 ", \"payload_off\": \"OK\""
-			 ", \"entity_category\": \"diagnostic\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			 A2M_FMT(", \"device_class\": \"problem\""
+			         ", \"payload_on\": \"Problem\""
+			         ", \"payload_off\": \"OK\""
+			         ", \"entity_category\": \"diagnostic\""));
 		break;
 	case homeAssistantClass::haClassBattery:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"device_class\": \"battery\""
-			 ", \"state_class\": \"measurement\""
-			 ", \"unit_of_measurement\": \"%%\""
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			 A2M_FMT(", \"device_class\": \"battery\""
+			         ", \"state_class\": \"measurement\""
+			         ", \"unit_of_measurement\": \"%%\""
 #ifdef MQTT_FORCE_UPDATE
-			 ", \"force_update\": \"true\""
+			         ", \"force_update\": \"true\""
 #endif // MQTT_FORCE_UPDATE
-			);
+			        ));
 		break;
 	case homeAssistantClass::haClassVoltage:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"device_class\": \"voltage\""
-			 ", \"state_class\": \"measurement\""
-			 ", \"unit_of_measurement\": \"V\""
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			 A2M_FMT(", \"device_class\": \"voltage\""
+			         ", \"state_class\": \"measurement\""
+			         ", \"unit_of_measurement\": \"V\""
 #ifdef MQTT_FORCE_UPDATE
-			 ", \"force_update\": \"true\""
+			         ", \"force_update\": \"true\""
 #endif // MQTT_FORCE_UPDATE
-			);
+			        ));
 		break;
 	case homeAssistantClass::haClassCurrent:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"device_class\": \"current\""
-			 ", \"state_class\": \"measurement\""
-			 ", \"unit_of_measurement\": \"A\""
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			 A2M_FMT(", \"device_class\": \"current\""
+			         ", \"state_class\": \"measurement\""
+			         ", \"unit_of_measurement\": \"A\""
 #ifdef MQTT_FORCE_UPDATE
-			 ", \"force_update\": \"true\""
+			         ", \"force_update\": \"true\""
 #endif // MQTT_FORCE_UPDATE
-			);
+			        ));
 		break;
 	case homeAssistantClass::haClassTemp:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"device_class\": \"temperature\""
-			 ", \"state_class\": \"measurement\""
-			 ", \"unit_of_measurement\": \"°C\""
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			 A2M_FMT(", \"device_class\": \"temperature\""
+			         ", \"state_class\": \"measurement\""
+			         ", \"unit_of_measurement\": \"°C\""
 #ifdef MQTT_FORCE_UPDATE
-//			 ", \"force_update\": \"true\""
+//			         ", \"force_update\": \"true\""
 #endif // MQTT_FORCE_UPDATE
-			 ", \"entity_category\": \"diagnostic\"");
+			         ", \"entity_category\": \"diagnostic\""));
 		break;
 	case homeAssistantClass::haClassDuration:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"device_class\": \"duration\""
-			 ", \"state_class\": \"measurement\""
-			 ", \"unit_of_measurement\": \"s\""
-			 ", \"entity_category\": \"diagnostic\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			 A2M_FMT(", \"device_class\": \"duration\""
+			         ", \"state_class\": \"measurement\""
+			         ", \"unit_of_measurement\": \"s\""
+			         ", \"entity_category\": \"diagnostic\""));
 		break;
 	case homeAssistantClass::haClassBox:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"mode\": \"box\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"mode\": \"box\""));
 		break;
 	case homeAssistantClass::haClassInfo:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"entity_category\": \"diagnostic\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"entity_category\": \"diagnostic\""));
 		break;
 	case homeAssistantClass::haClassSelect:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"device_class\": \"enum\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"device_class\": \"enum\""));
 		break;
 	case homeAssistantClass::haClassNumber:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"entity_category\": \"diagnostic\""
-			 ", \"entity_type\": \"number\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			 A2M_FMT(", \"entity_category\": \"diagnostic\""
+			         ", \"entity_type\": \"number\""));
 		break;
 	default:
-		strcpy(stateAddition, "");
+		stateAddition[0] = '\0';
 		break;
 	}
 	if (strlen(stateAddition) != 0 && !appendCountedMqttText(payload, stateAddition)) {
@@ -9237,133 +9607,132 @@ emitEntityDiscoveryPayload(CountedMqttPayload &payload, void *context)
 	stateAddition[0] = '\0';
 	switch (singleEntity->entityId) {
 	case mqttEntityId::entityRegNum:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"entity_category\": \"diagnostic\""
-			 ", \"icon\": \"mdi:pound\""
-			 ", \"min\": -1, \"max\": 41000");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			 A2M_FMT(", \"entity_category\": \"diagnostic\""
+			         ", \"icon\": \"mdi:pound\""
+			         ", \"min\": -1, \"max\": 41000"));
 		break;
 	case mqttEntityId::entityRegValue:
-		sprintf(stateAddition, ", \"icon\": \"mdi:folder-pound-outline\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"icon\": \"mdi:folder-pound-outline\""));
 		break;
 	case mqttEntityId::entityGridReg:
-		sprintf(stateAddition, ", \"icon\": \"mdi:security\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"icon\": \"mdi:security\""));
 		break;
 	case mqttEntityId::entityInverterMode:
-		sprintf(stateAddition, ", \"icon\": \"mdi:format-list-numbered\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"icon\": \"mdi:format-list-numbered\""));
 		break;
 	case mqttEntityId::entityPvPwr:
-		sprintf(stateAddition, ", \"icon\": \"mdi:solar-power\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"icon\": \"mdi:solar-power\""));
 		break;
 	case mqttEntityId::entityPvEnergy:
-		sprintf(stateAddition, ", \"icon\": \"mdi:solar-power-variant-outline\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"icon\": \"mdi:solar-power-variant-outline\""));
 		break;
 	case mqttEntityId::entityFrequency:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"icon\": \"mdi:sine-wave\""
-			 ", \"suggested_display_precision\": 2");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			 A2M_FMT(", \"icon\": \"mdi:sine-wave\""
+			         ", \"suggested_display_precision\": 2"));
 		break;
 	case mqttEntityId::entityGridPwr:
-		sprintf(stateAddition, ", \"icon\": \"mdi:transmission-tower\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"icon\": \"mdi:transmission-tower\""));
 		break;
 	case mqttEntityId::entityGridEnergyTo:
-		sprintf(stateAddition, ", \"icon\": \"mdi:transmission-tower-export\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"icon\": \"mdi:transmission-tower-export\""));
 		break;
 	case mqttEntityId::entityGridEnergyFrom:
-		sprintf(stateAddition, ", \"icon\": \"mdi:transmission-tower-import\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"icon\": \"mdi:transmission-tower-import\""));
 		break;
 	case mqttEntityId::entityBatPwr:
-		sprintf(stateAddition, ", \"icon\": \"mdi:battery-charging-100\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"icon\": \"mdi:battery-charging-100\""));
 		break;
 	case mqttEntityId::entityBatEnergyCharge:
-		sprintf(stateAddition, ", \"icon\": \"mdi:battery-plus\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"icon\": \"mdi:battery-plus\""));
 		break;
 	case mqttEntityId::entityBatEnergyDischarge:
-		sprintf(stateAddition, ", \"icon\": \"mdi:battery-minus\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"icon\": \"mdi:battery-minus\""));
 		break;
 	case mqttEntityId::entityBatCap:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"device_class\": \"energy\""
-			 ", \"state_class\": \"total_increasing\""
-			 ", \"unit_of_measurement\": \"kWh\""
-			 ", \"icon\": \"mdi:home-battery\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			 A2M_FMT(", \"device_class\": \"energy\""
+			         ", \"state_class\": \"total_increasing\""
+			         ", \"unit_of_measurement\": \"kWh\""
+			         ", \"icon\": \"mdi:home-battery\""));
 		break;
 	case mqttEntityId::entityOpMode:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"options\": [ \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\" ]",
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			 A2M_FMT(", \"options\": [ \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\" ]"),
 			 OP_MODE_DESC_NORMAL, OP_MODE_DESC_LOAD_FOLLOW, OP_MODE_DESC_TARGET, OP_MODE_DESC_PUSH,
 			 OP_MODE_DESC_PV_CHARGE, OP_MODE_DESC_MAX_CHARGE, OP_MODE_DESC_NO_CHARGE);
 		break;
 	case mqttEntityId::entityDispatchDuration:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"device_class\": \"duration\""
-			 ", \"state_class\": \"measurement\""
-			 ", \"unit_of_measurement\": \"s\""
-			 ", \"icon\": \"mdi:timer-cog-outline\""
-			 ", \"min\": 0, \"max\": %lu",
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			 A2M_FMT(", \"device_class\": \"duration\""
+			         ", \"state_class\": \"measurement\""
+			         ", \"unit_of_measurement\": \"s\""
+			         ", \"icon\": \"mdi:timer-cog-outline\""
+			         ", \"min\": 0, \"max\": %lu"),
 			 static_cast<unsigned long>(kDispatchDurationMaxSeconds));
 		break;
 	case mqttEntityId::entityDispatchRemaining:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"device_class\": \"duration\""
-			 ", \"state_class\": \"measurement\""
-			 ", \"unit_of_measurement\": \"s\""
-			 ", \"icon\": \"mdi:timer-sand\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			 A2M_FMT(", \"device_class\": \"duration\""
+			         ", \"state_class\": \"measurement\""
+			         ", \"unit_of_measurement\": \"s\""
+			         ", \"icon\": \"mdi:timer-sand\""));
 		break;
 	case mqttEntityId::entityDispatchRequestStatus:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"icon\": \"mdi:message-alert-outline\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"icon\": \"mdi:message-alert-outline\""));
 		break;
 	case mqttEntityId::entitySocTarget:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"device_class\": \"battery\""
-			 ", \"state_class\": \"measurement\""
-			 ", \"unit_of_measurement\": \"%%\""
-			 ", \"icon\": \"mdi:battery\""
-			 ", \"min\": %d, \"max\": %d",
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			 A2M_FMT(", \"device_class\": \"battery\""
+			         ", \"state_class\": \"measurement\""
+			         ", \"unit_of_measurement\": \"%%\""
+			         ", \"icon\": \"mdi:battery\""
+			         ", \"min\": %d, \"max\": %d"),
 			 SOC_TARGET_MIN, SOC_TARGET_MAX);
 		break;
 	case mqttEntityId::entityChargePwr:
 	case mqttEntityId::entityDischargePwr:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"device_class\": \"power\""
-			 ", \"state_class\": \"measurement\""
-			 ", \"unit_of_measurement\": \"W\""
-			 ", \"icon\": \"mdi:lightning-bolt-circle\""
-			 ", \"min\": %d, \"max\": %d",
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			 A2M_FMT(", \"device_class\": \"power\""
+			         ", \"state_class\": \"measurement\""
+			         ", \"unit_of_measurement\": \"W\""
+			         ", \"icon\": \"mdi:lightning-bolt-circle\""
+			         ", \"min\": %d, \"max\": %d"),
 			 0, INVERTER_POWER_MAX);
 		break;
 	case mqttEntityId::entityPushPwr:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"device_class\": \"power\""
-			 ", \"state_class\": \"measurement\""
-			 ", \"unit_of_measurement\": \"W\""
-			 ", \"icon\": \"mdi:lightning-bolt-circle\""
-			 ", \"min\": %d, \"max\": %d",
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			 A2M_FMT(", \"device_class\": \"power\""
+			         ", \"state_class\": \"measurement\""
+			         ", \"unit_of_measurement\": \"W\""
+			         ", \"icon\": \"mdi:lightning-bolt-circle\""
+			         ", \"min\": %d, \"max\": %d"),
 			 0, INVERTER_POWER_MAX);
 		break;
 	case mqttEntityId::entityMaxFeedinPercent:
-		snprintf(stateAddition, sizeof(stateAddition),
-			 ", \"state_class\": \"measurement\""
-			 ", \"unit_of_measurement\": \"%%\""
-			 ", \"icon\": \"mdi:transmission-tower-export\""
-			 ", \"min\": 0, \"max\": 100");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			 A2M_FMT(", \"state_class\": \"measurement\""
+			         ", \"unit_of_measurement\": \"%%\""
+			         ", \"icon\": \"mdi:transmission-tower-export\""
+			         ", \"min\": 0, \"max\": 100"));
 		break;
 #ifdef A2M_DEBUG_WIFI
 	case mqttEntityId::entityRSSI:
 	case mqttEntityId::entityBSSID:
 	case mqttEntityId::entityTxPower:
 	case mqttEntityId::entityWifiRecon:
-		sprintf(stateAddition, ", \"icon\": \"mdi:wifi\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"icon\": \"mdi:wifi\""));
 		break;
 #endif // A2M_DEBUG_WIFI
 	case mqttEntityId::entityA2MVersion:
 	case mqttEntityId::entityInverterVersion:
 	case mqttEntityId::entityEmsVersion:
-		sprintf(stateAddition, ", \"icon\": \"mdi:numeric\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"icon\": \"mdi:numeric\""));
 		break;
 	case mqttEntityId::entityInverterSn:
 	case mqttEntityId::entityEmsSn:
-		sprintf(stateAddition, ", \"icon\": \"mdi:identifier\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"icon\": \"mdi:identifier\""));
 		break;
 	case mqttEntityId::entityRs485Errors:
 	case mqttEntityId::entityBatFaults:
@@ -9371,7 +9740,7 @@ emitEntityDiscoveryPayload(CountedMqttPayload &payload, void *context)
 	case mqttEntityId::entityInverterFaults:
 	case mqttEntityId::entityInverterWarnings:
 	case mqttEntityId::entitySystemFaults:
-		sprintf(stateAddition, ", \"icon\": \"mdi:alert-decagram-outline\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"icon\": \"mdi:alert-decagram-outline\""));
 		break;
 	case mqttEntityId::entityPollingBudgetExceeded:
 	case mqttEntityId::entityPollingBudgetOverrunCount:
@@ -9405,11 +9774,11 @@ emitEntityDiscoveryPayload(CountedMqttPayload &payload, void *context)
 	case mqttEntityId::entityPollingBacklogCountUser:
 	case mqttEntityId::entityPollingBacklogOldestAgeMsUser:
 	case mqttEntityId::entityPollingLastFullCycleAgeMsUser:
-		sprintf(stateAddition, ", \"icon\": \"mdi:clock-alert-outline\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"icon\": \"mdi:clock-alert-outline\""));
 		break;
 #ifdef DEBUG_FREEMEM
 	case mqttEntityId::entityFreemem:
-		sprintf(stateAddition, ", \"icon\": \"mdi:memory\"");
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"icon\": \"mdi:memory\""));
 		break;
 #endif // DEBUG_FREEMEM
 #ifdef DEBUG_CALLBACKS
@@ -9426,19 +9795,19 @@ emitEntityDiscoveryPayload(CountedMqttPayload &payload, void *context)
 	default:
 		switch (singleEntity->family) {
 		case MqttEntityFamily::Battery:
-			snprintf(stateAddition, sizeof(stateAddition), ", \"icon\": \"mdi:battery-outline\"");
+			A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"icon\": \"mdi:battery-outline\""));
 			break;
 		case MqttEntityFamily::Pv:
-			snprintf(stateAddition, sizeof(stateAddition), ", \"icon\": \"mdi:solar-power\"");
+			A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"icon\": \"mdi:solar-power\""));
 			break;
 		case MqttEntityFamily::Grid:
-			snprintf(stateAddition, sizeof(stateAddition), ", \"icon\": \"mdi:transmission-tower\"");
+			A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"icon\": \"mdi:transmission-tower\""));
 			break;
 		case MqttEntityFamily::Backup:
-			snprintf(stateAddition, sizeof(stateAddition), ", \"icon\": \"mdi:power-plug-battery\"");
+			A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"icon\": \"mdi:power-plug-battery\""));
 			break;
 		case MqttEntityFamily::Inverter:
-			snprintf(stateAddition, sizeof(stateAddition), ", \"icon\": \"mdi:flash\"");
+			A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"icon\": \"mdi:flash\""));
 			break;
 		case MqttEntityFamily::System:
 		case MqttEntityFamily::Controller:
@@ -9455,13 +9824,13 @@ emitEntityDiscoveryPayload(CountedMqttPayload &payload, void *context)
 	if (singleEntity->subscribe) {
 #ifdef HA_IS_OP_MODE_AUTHORITY
 		if (singleEntity->retain) {
-			sprintf(stateAddition, ", \"retain\": \"true\"");
+			A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"retain\": \"true\""));
 			if (!appendCountedMqttText(payload, stateAddition)) {
 				return false;
 			}
 		}
 #endif // HA_IS_OP_MODE_AUTHORITY
-		sprintf(stateAddition, ", \"qos\": %d", MQTT_SUBSCRIBE_QOS);
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"qos\": %d"), MQTT_SUBSCRIBE_QOS);
 		if (!appendCountedMqttText(payload, stateAddition)) {
 			return false;
 		}
@@ -9473,38 +9842,38 @@ emitEntityDiscoveryPayload(CountedMqttPayload &payload, void *context)
 	case mqttEntityId::entityInverterFaults:
 	case mqttEntityId::entityInverterWarnings:
 	case mqttEntityId::entitySystemFaults:
-		snprintf(stateAddition, sizeof(stateAddition),
-			", \"state_topic\": \"%s/state\""
-			", \"value_template\": \"{{ \\\"OK\\\" if value_json.numEvents == 0 else \\\"Problem\\\" }}\""
-			", \"json_attributes_topic\": \"%s/state\"",
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			A2M_FMT(", \"state_topic\": \"%s/state\""
+			        ", \"value_template\": \"{{ \\\"OK\\\" if value_json.numEvents == 0 else \\\"Problem\\\" }}\""
+			        ", \"json_attributes_topic\": \"%s/state\""),
 			topicBase,
 			topicBase);
 		break;
 	case mqttEntityId::entityFrequency:
-		snprintf(stateAddition, sizeof(stateAddition),
-			", \"state_topic\": \"%s/state\""
-			", \"value_template\": \"{{ value_json[\\\"Use Frequency\\\"] | default(\\\"\\\") }}\""
-			", \"json_attributes_topic\": \"%s/state\"",
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			A2M_FMT(", \"state_topic\": \"%s/state\""
+			        ", \"value_template\": \"{{ value_json[\\\"Use Frequency\\\"] | default(\\\"\\\") }}\""
+			        ", \"json_attributes_topic\": \"%s/state\""),
 			topicBase,
 			topicBase);
 		break;
 	case mqttEntityId::entityRs485Avail:
-		snprintf(stateAddition, sizeof(stateAddition),
-			", \"state_topic\": \"%s\""
-			", \"value_template\": \"{{ value_json.rs485Status | default(\\\"\\\") }}\""
-			", \"json_attributes_topic\": \"%s\"",
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			A2M_FMT(", \"state_topic\": \"%s\""
+			        ", \"value_template\": \"{{ value_json.rs485Status | default(\\\"\\\") }}\""
+			        ", \"json_attributes_topic\": \"%s\""),
 			statusTopic, statusTopic);
 		break;
 	case mqttEntityId::entityGridAvail:
-		snprintf(stateAddition, sizeof(stateAddition),
-			", \"state_topic\": \"%s\""
-			", \"value_template\": \"{{ value_json.gridStatus | default(\\\"\\\") }}\""
-			", \"json_attributes_topic\": \"%s\"",
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			A2M_FMT(", \"state_topic\": \"%s\""
+			        ", \"value_template\": \"{{ value_json.gridStatus | default(\\\"\\\") }}\""
+			        ", \"json_attributes_topic\": \"%s\""),
 			statusTopic, statusTopic);
 		break;
 	default:
-		snprintf(stateAddition, sizeof(stateAddition),
-			", \"state_topic\": \"%s/state\"",
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			A2M_FMT(", \"state_topic\": \"%s/state\""),
 			topicBase);
 		break;
 	}
@@ -9513,32 +9882,32 @@ emitEntityDiscoveryPayload(CountedMqttPayload &payload, void *context)
 	}
 
 	if (singleEntity->subscribe) {
-		snprintf(stateAddition, sizeof(stateAddition), ", \"command_topic\": \"%s/command\"", topicBase);
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition), A2M_FMT(", \"command_topic\": \"%s/command\""), topicBase);
 		if (!appendCountedMqttText(payload, stateAddition)) {
 			return false;
 		}
 	}
 
 	if (singleEntity->entityId == entityGridAvail) {
-		snprintf(stateAddition, sizeof(stateAddition),
-			", \"availability_template\": \"{{ \\\"online\\\" if value_json.a2mStatus == \\\"online\\\" and value_json.rs485Status == \\\"OK\\\" and value_json.gridStatus in ( \\\"OK\\\", \\\"Problem\\\" ) else \\\"offline\\\" }}\""
-			", \"availability_topic\": \"%s\"", statusTopic);
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			A2M_FMT(", \"availability_template\": \"{{ \\\"online\\\" if value_json.a2mStatus == \\\"online\\\" and value_json.rs485Status == \\\"OK\\\" and value_json.gridStatus in ( \\\"OK\\\", \\\"Problem\\\" ) else \\\"offline\\\" }}\""
+			        ", \"availability_topic\": \"%s\""), statusTopic);
 	} else if (singleEntity->scope == MqttEntityScope::Controller ||
 	           singleEntity->readKind == MqttEntityReadKind::Control ||
 	           singleEntity->readKind == MqttEntityReadKind::Identity ||
 	           singleEntity->entityId == entityBatCap ||
 	           singleEntity->entityId == entityGridReg) {
-		snprintf(stateAddition, sizeof(stateAddition),
-			", \"availability_template\": \"{{ value_json.a2mStatus | default(\\\"\\\") }}\""
-			", \"availability_topic\": \"%s\"", statusTopic);
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			A2M_FMT(", \"availability_template\": \"{{ value_json.a2mStatus | default(\\\"\\\") }}\""
+			        ", \"availability_topic\": \"%s\""), statusTopic);
 	} else if (singleEntity->family == MqttEntityFamily::Grid) {
-		snprintf(stateAddition, sizeof(stateAddition),
-			", \"availability_template\": \"{{ \\\"online\\\" if value_json.a2mStatus == \\\"online\\\" and value_json.rs485Status == \\\"OK\\\" and value_json.gridStatus == \\\"OK\\\" else \\\"offline\\\" }}\""
-			", \"availability_topic\": \"%s\"", statusTopic);
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			A2M_FMT(", \"availability_template\": \"{{ \\\"online\\\" if value_json.a2mStatus == \\\"online\\\" and value_json.rs485Status == \\\"OK\\\" and value_json.gridStatus == \\\"OK\\\" else \\\"offline\\\" }}\""
+			        ", \"availability_topic\": \"%s\""), statusTopic);
 	} else {
-		snprintf(stateAddition, sizeof(stateAddition),
-			", \"availability_template\": \"{{ \\\"online\\\" if value_json.a2mStatus == \\\"online\\\" and value_json.rs485Status == \\\"OK\\\" else \\\"offline\\\" }}\""
-			", \"availability_topic\": \"%s\"", statusTopic);
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			A2M_FMT(", \"availability_template\": \"{{ \\\"online\\\" if value_json.a2mStatus == \\\"online\\\" and value_json.rs485Status == \\\"OK\\\" else \\\"offline\\\" }}\""
+			        ", \"availability_topic\": \"%s\""), statusTopic);
 	}
 	if (!appendCountedMqttText(payload, stateAddition)) {
 		return false;
@@ -9626,6 +9995,12 @@ refreshEssSnapshot(void)
 	int gotError = 0;
 	uint32_t pollStartMs = millis();
 	bool rs485TimedOut = false;
+	struct SnapshotDiagGuard {
+		~SnapshotDiagGuard()
+		{
+			noteRuntimePhaseObservation(RuntimeDiagPhase::PollSnapshot);
+		}
+	} snapshotDiagGuard;
 	diag_rs485_poll_begin(pollStartMs);
 	essSnapshotAttemptCount++;
 
@@ -10194,6 +10569,7 @@ sendData()
 		const size_t startCursor = normalizeDeferredCursor(*cursorPtr, bucketPlan.transactionCount);
 		size_t processed = 0;
 		bool truncated = false;
+		RuntimeDiagScope diagScope(RuntimeDiagPhase::BucketPublish, "entity");
 
 		while (processed < bucketPlan.transactionCount) {
 			const size_t txnIndex = (startCursor + processed) % bucketPlan.transactionCount;
@@ -10438,6 +10814,9 @@ publishManualRegisterValueState(const mqttState *valueEntity,
 static void
 publishManualRegisterReadStatus(int32_t requestedReg, const modbusRequestAndResponse &response)
 {
+	if (!ensureStatusJsonScratch()) {
+		return;
+	}
 	char manualReadTopic[160];
 	StatusManualReadSnapshot snapshot{};
 	snapshot.seq = ++manualRegisterReadSeq;
@@ -10450,7 +10829,7 @@ publishManualRegisterReadStatus(int32_t requestedReg, const modbusRequestAndResp
 #endif
 	snapshot.value = response.dataValueFormatted;
 	snprintf(manualReadTopic, sizeof(manualReadTopic), "%s/manual_read", statusTopic);
-	if (buildStatusManualReadJson(snapshot, g_statusJsonScratch, sizeof(g_statusJsonScratch))) {
+	if (buildStatusManualReadJson(snapshot, g_statusJsonScratch, kStatusJsonScratchSize)) {
 		_mqtt.publish(manualReadTopic, g_statusJsonScratch, true);
 		maybeYield();
 	}
@@ -10521,6 +10900,11 @@ static void
 processPendingEntityCommand(void)
 {
 	if (!pendingEntityCommandSet) {
+		return;
+	}
+	if (pendingDeferredControlPayload == nullptr) {
+		pendingEntityCommandSet = false;
+		pendingEntityCommandId = mqttEntityId::entityRegNum;
 		return;
 	}
 
@@ -10792,8 +11176,10 @@ serviceDeferredMqttWork(void)
 		}
 		if (pendingRs485StubControlSet) {
 			pendingRs485StubControlSet = false;
-			applyRs485StubControlPayload(pendingDeferredControlPayload);
-			pendingDeferredControlPayload[0] = '\0';
+			if (pendingDeferredControlPayload != nullptr) {
+				applyRs485StubControlPayload(pendingDeferredControlPayload);
+				pendingDeferredControlPayload[0] = '\0';
+			}
 			didWork = true;
 		}
 		if (pendingEntityCommandSet) {
@@ -11161,10 +11547,11 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 			// Runtime RS485 stub control is intentionally deferred out of callback context.
 			// The stub JSON parser + state application can be large enough to trigger ESP8266
 			// watchdog resets if it runs while PubSubClient is inside loop().
-			if (!copyLengthDelimitedString(reinterpret_cast<const char *>(message),
-			                               length,
-			                               pendingDeferredControlPayload,
-			                               sizeof(pendingDeferredControlPayload))) {
+			if (!ensureDeferredControlPayload() ||
+			    !copyLengthDelimitedString(reinterpret_cast<const char *>(message),
+			                              length,
+			                              pendingDeferredControlPayload,
+			                              kPendingDeferredControlPayloadSize)) {
 #ifdef DEBUG_CALLBACKS
 				badCallbacks++;
 #endif // DEBUG_CALLBACKS
@@ -11197,10 +11584,11 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 					setDispatchRequestStatus("dispatch request already in progress");
 					return;
 				}
-				if (!copyLengthDelimitedString(reinterpret_cast<const char *>(message),
-				                               length,
-				                               pendingDispatchPayload,
-				                               sizeof(pendingDispatchPayload))) {
+				if (!ensureDispatchPayload() ||
+				    !copyLengthDelimitedString(reinterpret_cast<const char *>(message),
+				                              length,
+				                              pendingDispatchPayload,
+				                              kPendingDispatchPayloadSize)) {
 #ifdef DEBUG_CALLBACKS
 					badCallbacks++;
 #endif // DEBUG_CALLBACKS
@@ -11302,14 +11690,15 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 
 		// Defer command application out of callback context to avoid deep call chains while PubSubClient
 		// is executing loop() and to keep RS485 writes on the main loop path.
-		if (strlen(mqttIncomingPayload) >= sizeof(pendingDeferredControlPayload)) {
+		if (!ensureDeferredControlPayload() ||
+		    strlen(mqttIncomingPayload) >= kPendingDeferredControlPayloadSize) {
 	#ifdef DEBUG_CALLBACKS
 			badCallbacks++;
 	#endif // DEBUG_CALLBACKS
 			return;
 		}
 		pendingEntityCommandId = mqttEntity.entityId;
-		strlcpy(pendingDeferredControlPayload, mqttIncomingPayload, sizeof(pendingDeferredControlPayload));
+		strlcpy(pendingDeferredControlPayload, mqttIncomingPayload, kPendingDeferredControlPayloadSize);
 		pendingEntityCommandSet = true;
 		return;
 	}
@@ -11321,11 +11710,43 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
  *
  * Sends whatever is in the modular level payload to the specified topic.
  */
+static bool
+publishTrackedTextPayload(const char *topic, const char *payload, bool retain)
+{
+	static unsigned long lastFailureLogMs = 0;
+	const unsigned long nowMs = millis();
+	const size_t payloadLen = (payload != nullptr) ? strlen(payload) : 0;
+
+	noteTrackedMqttPayload(currentRuntimeDiagPayloadKind, payloadLen);
+
+	if (!_mqtt.publish(topic, (payload != nullptr) ? payload : "", retain)) {
+#ifdef DEBUG_OVER_SERIAL
+		if ((nowMs - lastFailureLogMs) >= 3000) {
+			const size_t previewLen = (payloadLen < 96) ? payloadLen : 96;
+			lastFailureLogMs = nowMs;
+			Serial.printf("MQTT publish failed: topic=%s bytes=%u preview=%.*s\r\n",
+			              topic,
+			              static_cast<unsigned>(payloadLen),
+			              static_cast<int>(previewLen),
+			              payload != nullptr ? payload : "");
+		}
+#endif
+		noteRuntimePhaseObservation(currentRuntimeDiagPhase);
+		maybeYield();
+		return false;
+	}
+
+	noteRuntimePhaseObservation(currentRuntimeDiagPhase);
+	return true;
+}
+
 bool sendMqtt(const char *topic, bool retain)
 {
 	static unsigned long lastFailureLogMs = 0;
 	const unsigned long nowMs = millis();
 	const size_t payloadLen = _mqttPayload ? strlen(_mqttPayload) : 0;
+
+	noteTrackedMqttPayload(currentRuntimeDiagPayloadKind, payloadLen);
 
 	// Avoid expensive publish attempts and large serial writes while disconnected.
 	if (!_mqtt.connected()) {
@@ -11355,6 +11776,7 @@ bool sendMqtt(const char *topic, bool retain)
 				      _mqttPayload ? _mqttPayload : "");
 		}
 #endif
+		noteRuntimePhaseObservation(currentRuntimeDiagPhase);
 		maybeYield();
 		emptyPayload();
 		return false;
@@ -11366,6 +11788,7 @@ bool sendMqtt(const char *topic, bool retain)
 	}
 
 	// Empty payload for next use.
+	noteRuntimePhaseObservation(currentRuntimeDiagPhase);
 	emptyPayload();
 	return true;
 }
@@ -11544,6 +11967,10 @@ publishDispatchRequestStatus(void)
 	if (!dispatchRequestStatusDirty || !mqttSubsystemEnabled()) {
 		return !dispatchRequestStatusDirty;
 	}
+	if (!dispatchRequestStatusShouldPublish(dispatchRequestStatus)) {
+		dispatchRequestStatusDirty = false;
+		return true;
+	}
 	if (!inverterReady || !inverterSerialKnown()) {
 		return false;
 	}
@@ -11551,6 +11978,7 @@ publishDispatchRequestStatus(void)
 	if (!lookupEntity(mqttEntityId::entityDispatchRequestStatus, &entity)) {
 		return false;
 	}
+	RuntimeDiagScope diagScope(RuntimeDiagPhase::StatusPublish, "req");
 	if (!sendDataFromMqttState(&entity, false, nullptr, true)) {
 		return false;
 	}
@@ -11561,6 +11989,7 @@ publishDispatchRequestStatus(void)
 static bool
 forcePublishDispatchMirror(void)
 {
+	RuntimeDiagScope diagScope(RuntimeDiagPhase::DispatchForcePublish, "mirror");
 	const mqttEntityId mirrorIds[] = {
 		mqttEntityId::entityDispatchStart,
 		mqttEntityId::entityDispatchMode,
@@ -11589,6 +12018,7 @@ publishPendingDispatchMirror(void)
 	if (!inverterReady || !inverterSerialKnown()) {
 		return false;
 	}
+	RuntimeDiagScope diagScope(RuntimeDiagPhase::DispatchForcePublish, "mirror");
 	if (!forcePublishDispatchMirror()) {
 		return false;
 	}
@@ -11714,6 +12144,11 @@ processPendingDispatchRequest(void)
 	if (!pendingDispatchRequestSet) {
 		return;
 	}
+	if (pendingDispatchPayload == nullptr) {
+		pendingDispatchRequestSet = false;
+		setDispatchRequestStatus("dispatch request buffer unavailable");
+		return;
+	}
 
 	struct PendingDispatchGuard {
 		~PendingDispatchGuard()
@@ -11747,6 +12182,7 @@ processPendingDispatchRequest(void)
 		                                                        &response)
 		             : modbusRequestAndResponseStatusValues::preProcessing;
 	}
+	noteRuntimePhaseObservation(RuntimeDiagPhase::DispatchWrite);
 	dispatchLastRunMs = millis();
 	if (result != modbusRequestAndResponseStatusValues::writeDataRegisterSuccess) {
 		rs485Errors++;
@@ -11783,6 +12219,7 @@ serviceAtomicDispatchRequest(void)
 	DispatchRegisterReadback readback{};
 	atomicDispatchState.readbackAttempts++;
 	if (!readDispatchRegisterReadback(atomicDispatchState.plan, readback, error, sizeof(error))) {
+		noteRuntimePhaseObservation(RuntimeDiagPhase::DispatchReadback);
 		const uint32_t retryDecisionMs = millis();
 		if ((retryDecisionMs - atomicDispatchState.readbackStartedMs) >= kDispatchReadbackTimeoutMs) {
 			setDispatchRequestStatus(error[0] != '\0' ? error : "readback timeout");
@@ -11792,6 +12229,7 @@ serviceAtomicDispatchRequest(void)
 		}
 		return;
 	}
+	noteRuntimePhaseObservation(RuntimeDiagPhase::DispatchReadback);
 
 	if (!dispatchRequestReadbackMatches(atomicDispatchState.plan, readback, error, sizeof(error))) {
 		const uint32_t retryDecisionMs = millis();
