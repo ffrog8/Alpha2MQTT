@@ -222,7 +222,7 @@ TEST_CASE("portal config: polling estimate collapses snapshot and shared registe
 		makeEntity("Battery_Temp", MqttEntityFamily::Battery),
 		makeEntity("Max_Cell_Temp", MqttEntityFamily::Battery),
 		makeEntity("Load_Power", MqttEntityFamily::System),
-		makeEntity("Op_Mode", MqttEntityFamily::Inverter),
+		makeEntity("Manual_Control", MqttEntityFamily::Inverter),
 	};
 	entities[0].needsEssSnapshot = true;
 	entities[1].needsEssSnapshot = true;

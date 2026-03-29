@@ -203,3 +203,28 @@ TEST_CASE("dispatch request ignores nested metadata keys and uses top-level fiel
 	CHECK(plan.dispatchSocRaw == 50);
 	CHECK(plan.dispatchTimeRaw == 1800);
 }
+
+TEST_CASE("dispatch reconnect reset preserves in-flight confirmations but clears idle request state")
+{
+	DispatchReconnectResetPlan idleReset = dispatchReconnectResetPlan(false);
+	CHECK(idleReset.clearStatus);
+	CHECK(idleReset.clearPendingRequest);
+	CHECK(idleReset.clearPendingPayload);
+	CHECK(idleReset.clearInFlightState);
+	CHECK(idleReset.clearQueuedTimestamp);
+
+	DispatchReconnectResetPlan inFlightReset = dispatchReconnectResetPlan(true);
+	CHECK(inFlightReset.clearStatus);
+	CHECK(inFlightReset.clearPendingRequest);
+	CHECK(inFlightReset.clearPendingPayload);
+	CHECK_FALSE(inFlightReset.clearInFlightState);
+	CHECK_FALSE(inFlightReset.clearQueuedTimestamp);
+}
+
+TEST_CASE("dispatch request rejects a new command when one is pending or in flight")
+{
+	CHECK_FALSE(dispatchRequestShouldRejectNewRequest(false, false));
+	CHECK(dispatchRequestShouldRejectNewRequest(true, false));
+	CHECK(dispatchRequestShouldRejectNewRequest(false, true));
+	CHECK(dispatchRequestShouldRejectNewRequest(true, true));
+}

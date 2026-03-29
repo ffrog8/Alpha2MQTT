@@ -42,7 +42,7 @@ TEST_CASE("status core JSON builder includes required keys")
 	snapshot.httpControlPlaneEnabled = true;
 	snapshot.haUniqueId = "A2M-TEST";
 
-	char buffer[1024];
+	char buffer[2048];
 	CHECK(buildStatusCoreJson(snapshot, buffer, sizeof(buffer)));
 
 	std::string payload(buffer);
@@ -68,7 +68,7 @@ TEST_CASE("status core JSON builder allows masked inverter identity before live 
 	snapshot.httpControlPlaneEnabled = true;
 	snapshot.haUniqueId = "A2M-UNKNOWN";
 
-	char buffer[1024];
+	char buffer[4096];
 	CHECK(buildStatusCoreJson(snapshot, buffer, sizeof(buffer)));
 
 	std::string payload(buffer);
@@ -91,7 +91,7 @@ TEST_CASE("status net JSON builder includes required keys")
 	snapshot.wifiStatusCode = 3;
 	snapshot.wifiReconnects = 1;
 
-	char buffer[1024];
+	char buffer[4096];
 	CHECK(buildStatusNetJson(snapshot, buffer, sizeof(buffer)));
 
 	std::string payload(buffer);
@@ -240,6 +240,27 @@ TEST_CASE("status poll JSON builder escapes string fields")
 	std::string payload(buffer);
 	CHECK(payload.find("\"rs485_backend\":\"st\\\\\\\"ub\"") != std::string::npos);
 	CHECK(payload.find("\"dispatch_last_skip_reason\":\"bad\\\\\\\"skip\"") != std::string::npos);
+}
+
+TEST_CASE("status poll JSON builder keeps stub dispatch timing key names stable")
+{
+	StatusPollSnapshot snapshot{};
+	snapshot.rs485Backend = "stub";
+	snapshot.rs485StubMode = "online";
+	snapshot.dispatchLastSkipReason = "";
+	snapshot.rs485StubLastWriteStartReg = 4096;
+	snapshot.rs485StubLastWriteRegCount = 9;
+	snapshot.rs485StubLastWriteMs = 111;
+	snapshot.dispatchRequestQueuedMs = 80;
+
+	char buffer[4096];
+	CHECK(buildStatusPollJson(snapshot, buffer, sizeof(buffer)));
+
+	std::string payload(buffer);
+	CHECK(payload.find("\"rs485_stub_last_write_reg\":4096") != std::string::npos);
+	CHECK(payload.find("\"rs485_stub_last_write_reg_count\":9") != std::string::npos);
+	CHECK(payload.find("\"rs485_stub_last_write_ms\":111") != std::string::npos);
+	CHECK(payload.find("\"dispatch_request_queued_ms\":80") != std::string::npos);
 }
 
 TEST_CASE("status poll compact JSON includes snapshot/dispatch and stub scheduler keys conditionally")

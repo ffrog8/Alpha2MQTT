@@ -740,25 +740,9 @@ discoveryDeviceIdForScope(DiscoveryDeviceScope scope)
 }
 
 static bool
-isRetiredLegacyDispatchControlEntity(mqttEntityId entityId)
-{
-	switch (entityId) {
-	case mqttEntityId::entityOpMode:
-	case mqttEntityId::entitySocTarget:
-	case mqttEntityId::entityChargePwr:
-	case mqttEntityId::entityDischargePwr:
-	case mqttEntityId::entityPushPwr:
-	case mqttEntityId::entityDispatchDuration:
-		return true;
-	default:
-		return false;
-	}
-}
-
-static bool
 includeEntityInPublicSurfaces(const mqttState &entity)
 {
-	return !isRetiredLegacyDispatchControlEntity(entity.entityId);
+	return mqttEntityIncludedInPublicSurface(&entity);
 }
 
 static bool
@@ -791,16 +775,26 @@ resetAtomicDispatchState(void)
 static void
 handleMqttReconnectDispatchReset(void)
 {
-	setDispatchRequestStatus("");
-	pendingDispatchRequestSet = false;
-	pendingDispatchPayload[0] = '\0';
+	const DispatchReconnectResetPlan resetPlan =
+		dispatchReconnectResetPlan(atomicDispatchState.inFlight);
+	if (resetPlan.clearStatus) {
+		setDispatchRequestStatus("");
+	}
+	if (resetPlan.clearPendingRequest) {
+		pendingDispatchRequestSet = false;
+	}
+	if (resetPlan.clearPendingPayload) {
+		pendingDispatchPayload[0] = '\0';
+	}
 	// MQTT reconnects should only clear MQTT-facing request state. Preserving
 	// timedDispatchState and pending mirror replay avoids re-arming
 	// bootStopPending mid-run and lets disabled Dispatch_* mirrors republish
 	// after a transient broker disconnect. Preserve an in-flight atomic
 	// dispatch confirmation window for the same reason.
-	if (!atomicDispatchState.inFlight) {
+	if (resetPlan.clearInFlightState) {
 		atomicDispatchState = AtomicDispatchRuntimeState{};
+	}
+	if (resetPlan.clearQueuedTimestamp) {
 		dispatchRequestQueuedMs = 0;
 	}
 }
@@ -6355,6 +6349,12 @@ struct PollingConfigInlinePayloadContext {
 	const BucketId *buckets = nullptr;
 };
 
+static size_t
+compactPublicPollingConfigAssignments(mqttState *entities, BucketId *buckets, size_t entityCount)
+{
+	return mqttEntityCompactPublicSurfaceAssignments(entities, buckets, entityCount);
+}
+
 static bool
 emitPollingConfigInlinePayload(CountedMqttPayload &payload, void *context)
 {
@@ -6373,6 +6373,9 @@ emitPollingConfigInlinePayload(CountedMqttPayload &payload, void *context)
 		mqttState entity{};
 		if (!mqttEntityCopyByIndex(i, &entity)) {
 			return false;
+		}
+		if (!mqttEntityIncludedInPublicSurface(&entity)) {
+			continue;
 		}
 		char entityName[64];
 		mqttEntityNameCopy(&entity, entityName, sizeof(entityName));
@@ -6517,8 +6520,9 @@ publishPollingConfig(void)
 #endif
 		return;
 	}
-	const mqttState *entities = catalog.entities;
-	publishPollingConfigChunked(entities, entityCount, buckets);
+	const size_t publicEntityCount =
+		compactPublicPollingConfigAssignments(catalog.entities, buckets, entityCount);
+	publishPollingConfigChunked(catalog.entities, publicEntityCount, buckets);
 }
 
 static bool
@@ -11188,7 +11192,8 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 #endif
 					return;
 				}
-				if (pendingDispatchRequestSet || atomicDispatchState.inFlight) {
+				if (dispatchRequestShouldRejectNewRequest(pendingDispatchRequestSet,
+				                                        atomicDispatchState.inFlight)) {
 					setDispatchRequestStatus("dispatch request already in progress");
 					return;
 				}

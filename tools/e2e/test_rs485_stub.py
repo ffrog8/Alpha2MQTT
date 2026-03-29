@@ -94,7 +94,9 @@ CASE_ORDER: tuple[str, ...] = (
     "strict_unknown_register_reads",
     "bucket_snapshot_skip_only",
     "dispatch_write_via_commands",
+    "dispatch_legacy_command_topic_ignored",
     "dispatch_invalid_payload_no_write",
+    "dispatch_invalid_numeric_payloads_no_write",
     "dispatch_write_feedback",
     "dispatch_write_under_100ms",
     "dispatch_timed_restart_expire",
@@ -109,6 +111,7 @@ CASE_ORDER: tuple[str, ...] = (
     "identity_reboot_unknown",
     "fail_writes_only",
     "dispatch_readback_window",
+    "dispatch_readback_timeout_status",
     "fail_for_ms",
     "soc_drift_backend_ready",
     "stub_soc_drift_applies",
@@ -1365,6 +1368,13 @@ def _fetch_latest_text(mqtt: MqttClient, topic: str, label: str) -> str:
 
     return _mqtt_retry(mqtt, f"fetch_latest_text({label})", inner)
 
+
+def _fetch_cached_or_latest_text(mqtt: MqttClient, topic: str, label: str) -> str:
+    cached = mqtt.latest_payload(topic)
+    if cached is not None:
+        return cached
+    return _fetch_latest_text(mqtt, topic, label=label)
+
 def _wait_for_topic_change(mqtt: MqttClient, topic: str, prev: str, timeout_s: int, label: str) -> str:
     def inner() -> str:
         mqtt.subscribe(topic, force=True)
@@ -2195,6 +2205,7 @@ def main() -> int:
 
         payload_text = json.dumps(payload, separators=(",", ":"))
         last_status = ""
+        baseline_status = ""
         baseline_queued_ms = int(_fetch_poll(mqtt, poll_topic).get("dispatch_request_queued_ms", 0))
 
         for attempt in range(3):
@@ -2206,9 +2217,9 @@ def main() -> int:
                 current_poll = _fetch_poll(mqtt, poll_topic)
 
             try:
-                _fetch_latest_text(mqtt, status_topic, label="dispatch_status_baseline")
+                baseline_status = _fetch_latest_text(mqtt, status_topic, label="dispatch_status_baseline").strip()
             except E2EError:
-                pass
+                baseline_status = ""
 
             mqtt.publish(_dispatch_set_topic(inverter_device_id), payload_text, retain=False)
 
@@ -2216,10 +2227,23 @@ def main() -> int:
             saw_status = False
             last_status = ""
             while time.time() < deadline:
+                if expected_status is not None and not require_queue_advance:
+                    try:
+                        current_status = _fetch_latest_text(
+                            mqtt,
+                            status_topic,
+                            label="dispatch_status_current",
+                        ).strip()
+                    except E2EError:
+                        current_status = ""
+                    if current_status == expected_status and (
+                        current_status != baseline_status or expected_status == "ok"
+                    ):
+                        return current_status
                 if (
                     saw_status
-                    and expected_status == "ok"
                     and require_queue_advance
+                    and expected_status is not None
                     and last_status == expected_status
                     and request_was_queued_after(baseline_queued_ms)
                 ):
@@ -2239,17 +2263,23 @@ def main() -> int:
                 saw_status = True
                 last_status = status_payload.strip()
                 if expected_status is None or last_status == expected_status:
-                    if expected_status == "ok" and require_queue_advance and not request_was_queued_after(baseline_queued_ms):
-                        # A stale retained/cached "ok" from an earlier request is not
+                    if require_queue_advance and not request_was_queued_after(baseline_queued_ms):
+                        # A stale retained/cached status from an earlier request is not
                         # enough; the current request must advance queued_ms before we
-                        # treat the status as success.
+                        # treat the status as authoritative.
                         continue
                     return last_status
+                if not require_queue_advance:
+                    # Non-queued validation failures can race with retained or
+                    # cached status updates from the previous request. Keep
+                    # waiting for the expected terminal status instead of
+                    # treating the first mismatched publish as authoritative.
+                    continue
                 break
 
             current_queued_ms = int(_fetch_poll(mqtt, poll_topic).get("dispatch_request_queued_ms", 0))
             request_never_queued = current_queued_ms <= baseline_queued_ms
-            if attempt < 2 and request_never_queued and (last_status == "" or (expected_status == "ok" and require_queue_advance)):
+            if attempt < 2 and request_never_queued and (last_status == "" or require_queue_advance):
                 stub_mode = str(current_poll.get("rs485_stub_mode", "")).strip()
                 inverter_ready = bool(current_poll.get("inverter_ready", False))
                 if stub_mode != "online" or not inverter_ready:
@@ -2270,6 +2300,73 @@ def main() -> int:
 
         raise E2EError(
             f"dispatch request did not queue or publish status after retry: payload={payload_text}"
+        )
+
+    def publish_dispatch_request_no_wait(inverter_device_id: str, payload: dict[str, Any]) -> None:
+        mqtt.publish(
+            _dispatch_set_topic(inverter_device_id),
+            json.dumps(payload, separators=(",", ":")),
+            retain=False,
+        )
+
+    def wait_for_dispatch_status_value(
+        inverter_device_id: str,
+        expected_status: str,
+        *,
+        timeout_s: int = 10,
+        label: str = "dispatch_status",
+    ) -> str:
+        status_topic = _dispatch_status_topic(inverter_device_id)
+        mqtt.subscribe(status_topic, force=True)
+
+        def status_pred() -> Tuple[bool, str]:
+            try:
+                status = _fetch_cached_or_latest_text(mqtt, status_topic, label=label).strip()
+            except E2EError as e:
+                return False, f"err={e}"
+            return status == expected_status, f"status={status!r}"
+
+        _assert_eventually(
+            f"{label} reached {expected_status!r}",
+            status_pred,
+            timeout_s=timeout_s,
+            poll_s=0.5,
+        )
+        return _fetch_cached_or_latest_text(mqtt, status_topic, label=label).strip()
+
+    def wait_for_dispatch_status(
+        inverter_device_id: str,
+        expected_status: str,
+        *,
+        timeout_s: int = 25,
+    ) -> str:
+        status_topic = _dispatch_status_topic(inverter_device_id)
+        mqtt.subscribe(status_topic, force=True)
+        try:
+            _fetch_latest_text(mqtt, status_topic, label="dispatch_status_baseline")
+        except E2EError:
+            pass
+
+        deadline = time.time() + timeout_s
+        last_status = ""
+        while time.time() < deadline:
+            try:
+                got_topic, status_payload = mqtt.wait_for_publish(
+                    timeout_s=min(5.0, max(0.5, deadline - time.time()))
+                )
+            except E2EError as e:
+                if "Timeout waiting for MQTT publish" in str(e):
+                    continue
+                raise
+            if got_topic != status_topic:
+                continue
+            last_status = status_payload.strip()
+            if last_status == expected_status:
+                return last_status
+
+        raise E2EError(
+            f"Timeout waiting for dispatch status {expected_status!r} on {status_topic}; "
+            f"last_status={last_status!r}"
         )
 
     def ensure_dispatch_write(
@@ -2810,17 +2907,44 @@ def main() -> int:
         )
         return
 
+    def case_dispatch_legacy_command_topics_ignored() -> None:
+        print("[e2e] case: retired dispatch control command topics are ignored")
+        ha_unique = _ensure_online_inverter_identity("dispatch legacy command baseline")
+        before = _fetch_poll(mqtt, poll_topic)
+        queued_before = int(before.get("dispatch_request_queued_ms", 0))
+        writes_before = int(before.get("rs485_stub_writes", 0))
+
+        mqtt.publish(_command_topic(ha_unique, "Dispatch_Duration"), "60", retain=False)
+        mqtt.publish(_command_topic(ha_unique, "Op_Mode"), "No Charge", retain=False)
+        _sleep_with_mqtt(mqtt, 2.0)
+
+        after = _fetch_poll(mqtt, poll_topic)
+        queued_after = int(after.get("dispatch_request_queued_ms", 0))
+        writes_after = int(after.get("rs485_stub_writes", 0))
+        if queued_after != queued_before:
+            raise E2EError(
+                f"retired command topic should not queue atomic dispatch requests: "
+                f"queued_ms {queued_before}->{queued_after}"
+            )
+        if writes_after != writes_before:
+            raise E2EError(
+                f"retired command topic should not write RS485 dispatch registers: "
+                f"writes {writes_before}->{writes_after}"
+            )
+
     def case_dispatch_invalid_payload_no_write() -> None:
         print("[e2e] case: invalid atomic dispatch payload reports an error without writing RS485")
         ha_unique = _ensure_online_inverter_identity("dispatch invalid baseline")
+        mqtt.subscribe(_dispatch_status_topic(ha_unique), force=True)
         before = _fetch_poll(mqtt, poll_topic)
         writes_before = int(before.get("rs485_stub_writes", 0))
 
-        publish_dispatch_request_and_wait_status(
+        publish_dispatch_request_no_wait(ha_unique, {"mode": "not_a_real_mode"})
+        wait_for_dispatch_status_value(
             ha_unique,
-            {"mode": "not_a_real_mode"},
-            expected_status="invalid mode",
+            "invalid mode",
             timeout_s=10,
+            label="dispatch_invalid_mode_status",
         )
 
         after = _fetch_poll(mqtt, poll_topic)
@@ -2830,6 +2954,34 @@ def main() -> int:
                 f"invalid dispatch payload should not touch RS485 writes: "
                 f"{writes_before}->{writes_after}"
             )
+
+    def case_dispatch_invalid_numeric_payloads_no_write() -> None:
+        print("[e2e] case: invalid numeric atomic dispatch payloads report errors without writing RS485")
+        ha_unique = _ensure_online_inverter_identity("dispatch invalid numeric baseline")
+        mqtt.subscribe(_dispatch_status_topic(ha_unique), force=True)
+        invalid_payloads = (
+            (_default_dispatch_request(mode="battery_only_charges_from_pv", power_w=500, duration_s=60), "invalid power"),
+            (_default_dispatch_request(mode="state_of_charge_control", power_w=-1000, soc_percent=101, duration_s=60), "invalid soc"),
+            (_default_dispatch_request(mode="state_of_charge_control", power_w=-1000, soc_percent=20, duration_s=4294968), "invalid duration"),
+        )
+
+        for payload, expected_status in invalid_payloads:
+            before = _fetch_poll(mqtt, poll_topic)
+            writes_before = int(before.get("rs485_stub_writes", 0))
+            publish_dispatch_request_no_wait(ha_unique, payload)
+            wait_for_dispatch_status_value(
+                ha_unique,
+                expected_status,
+                timeout_s=10,
+                label=f"dispatch_{expected_status.replace(' ', '_')}_status",
+            )
+            after = _fetch_poll(mqtt, poll_topic)
+            writes_after = int(after.get("rs485_stub_writes", 0))
+            if writes_after != writes_before:
+                raise E2EError(
+                    f"{expected_status} payload should not touch RS485 writes: "
+                    f"{writes_before}->{writes_after}"
+                )
 
     def case_dispatch_write_feedback_via_register_value() -> None:
         print("[e2e] case: atomic dispatch write feedback (Register_Value reflects new dispatch state)")
@@ -3615,6 +3767,54 @@ def main() -> int:
             timeout_s=35,
         )
 
+    def case_dispatch_readback_timeout_status() -> None:
+        print("[e2e] case: atomic dispatch reports readback timeout after a successful write")
+        reg_dispatch_start = _discover_register_value("REG_DISPATCH_RW_DISPATCH_START")
+        set_mode_and_wait(
+            f'{{"mode":"online","reg":{reg_dispatch_start},"fail_for_ms":4000,"fail_reads":1,"fail_writes":0,"fail_type":0,'
+            '"soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0,'
+            '"dispatch_start":0,"dispatch_mode":0,"dispatch_soc":0,"dispatch_time":0}',
+            ("online",),
+        )
+        ha_unique = _wait_for_inverter_identity()
+        status_topic = _dispatch_status_topic(ha_unique)
+        mqtt.subscribe(status_topic, force=True)
+        publish_dispatch_request_no_wait(
+            ha_unique,
+            _default_dispatch_request(duration_s=60),
+        )
+
+        def timeout_status_pred() -> Tuple[bool, str]:
+            try:
+                status = _fetch_latest_text(mqtt, status_topic, label="dispatch_timeout_status").strip()
+            except E2EError as e:
+                return False, f"err={e}"
+            return status == "readback timeout", f"status={status!r}"
+
+        _assert_eventually(
+            "atomic dispatch reports readback timeout",
+            timeout_status_pred,
+            timeout_s=20,
+            poll_s=0.5,
+        )
+
+        after = _fetch_poll(mqtt, poll_topic)
+        queued_ms = int(after.get("dispatch_request_queued_ms", 0))
+        last_reg = int(after.get("rs485_stub_last_write_reg", 0))
+        last_reg_count = int(after.get("rs485_stub_last_write_reg_count", 0))
+        last_write_ms = int(after.get("rs485_stub_last_write_ms", 0))
+        if (
+            queued_ms <= 0
+            or last_reg != reg_dispatch_start
+            or last_reg_count != 9
+            or last_write_ms < queued_ms
+        ):
+            raise E2EError(
+                f"readback timeout should still come after one dispatch block write: "
+                f"queued_ms={queued_ms} last_write_ms={last_write_ms} "
+                f"last_reg={last_reg} last_reg_count={last_reg_count}"
+            )
+
     def case_fail_for_ms_then_recover() -> None:
         print("[e2e] case: fail for N ms then recover")
         set_mode_and_wait('{"mode":"online","fail_for_ms":5000}', ("online",))
@@ -4239,7 +4439,9 @@ def main() -> int:
         ("strict_unknown_register_reads", case_strict_unknown_register_reads),
         ("bucket_snapshot_skip_only", case_bucket_snapshot_skip_only),
         ("dispatch_write_via_commands", case_dispatch_write_via_commands),
+        ("dispatch_legacy_command_topic_ignored", case_dispatch_legacy_command_topics_ignored),
         ("dispatch_invalid_payload_no_write", case_dispatch_invalid_payload_no_write),
+        ("dispatch_invalid_numeric_payloads_no_write", case_dispatch_invalid_numeric_payloads_no_write),
         ("dispatch_write_feedback", case_dispatch_write_feedback_via_register_value),
         ("dispatch_write_under_100ms", case_dispatch_write_under_100ms),
         ("dispatch_timed_restart_expire", case_dispatch_timed_restart_and_expire),
@@ -4254,6 +4456,7 @@ def main() -> int:
         ("identity_reboot_unknown", case_identity_reboot_unknown_after_offline_reboot),
         ("fail_writes_only", case_fail_writes_only_dispatch_write_fails),
         ("dispatch_readback_window", case_dispatch_readback_window_tolerates_transient_read_failures),
+        ("dispatch_readback_timeout_status", case_dispatch_readback_timeout_status),
         ("fail_for_ms", case_fail_for_ms_then_recover),
         ("soc_drift_backend_ready", case_soc_drift_backend_ready),
         ("stub_soc_drift_applies", case_stub_soc_drift_applies),

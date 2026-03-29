@@ -256,6 +256,7 @@ TEST_CASE("mqtt entities: legacy-compatible direct readbacks are exposed as regi
 	CHECK(dispatchDuration->haClass == homeAssistantClass::haClassNumber);
 	CHECK(dispatchDuration->readKind == MqttEntityReadKind::Control);
 	CHECK(dispatchDuration->subscribe);
+	CHECK_FALSE(mqttEntityIncludedInPublicSurface(dispatchDuration));
 
 	const mqttState *dispatchRemaining = mqttEntityById(mqttEntityId::entityDispatchRemaining);
 	REQUIRE(dispatchRemaining != nullptr);
@@ -289,6 +290,42 @@ TEST_CASE("mqtt entities: controller diagnostics include runtime polling signals
 	REQUIRE(budgetUsed1m != nullptr);
 	CHECK(budgetUsed1m->updateFreq == mqttUpdateFreq::freqDisabled);
 	CHECK(budgetUsed1m->family == MqttEntityFamily::Controller);
+}
+
+TEST_CASE("mqtt entities: retired dispatch controls stay out of public surfaces and config compaction")
+{
+	const size_t count = mqttEntitiesCount();
+	REQUIRE(count > 0);
+
+	std::vector<mqttState> catalog(count);
+	std::vector<BucketId> buckets(count, BucketId::OneMin);
+	REQUIRE(mqttEntityCopyCatalog(catalog.data(), catalog.size()));
+
+	size_t retiredCount = 0;
+	for (const mqttState &entity : catalog) {
+		if (!mqttEntityIncludedInPublicSurface(&entity)) {
+			retiredCount++;
+		}
+	}
+	CHECK(retiredCount == 6);
+
+	const size_t publicCount =
+		mqttEntityCompactPublicSurfaceAssignments(catalog.data(), buckets.data(), count);
+	CHECK(publicCount == count - retiredCount);
+
+	for (size_t i = 0; i < publicCount; ++i) {
+		CHECK(mqttEntityIncludedInPublicSurface(&catalog[i]));
+	}
+
+	bool sawDispatchDuration = false;
+	bool sawDispatchRequestStatus = false;
+	for (size_t i = 0; i < publicCount; ++i) {
+		sawDispatchDuration = sawDispatchDuration || mqttEntityNameEquals(&catalog[i], "Dispatch_Duration");
+		sawDispatchRequestStatus =
+			sawDispatchRequestStatus || mqttEntityNameEquals(&catalog[i], "Dispatch_Request_Status");
+	}
+	CHECK_FALSE(sawDispatchDuration);
+	CHECK(sawDispatchRequestStatus);
 }
 
 TEST_CASE("mqtt entities: freqNever defaults stay discoverable without joining poll buckets")
