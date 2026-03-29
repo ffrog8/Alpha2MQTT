@@ -23,6 +23,7 @@ add_executable(host_tests
     tests/test_wifi_guard.cpp
     tests/test_wifi_recovery_policy.cpp
     tests/test_memory_health.cpp
+    tests/test_status_led_policy.cpp
     tests/test_discovery_model.cpp
     tests/test_dispatch_timing.cpp
     tests/test_dispatch_request.cpp
@@ -39,6 +40,7 @@ add_executable(host_tests
     Alpha2MQTT/src/PortalConfig.cpp
     Alpha2MQTT/src/StatusReporting.cpp
     Alpha2MQTT/src/MemoryHealth.cpp
+    Alpha2MQTT/src/StatusLedPolicy.cpp
     Alpha2MQTT/src/RebootRequest.cpp
     Alpha2MQTT/src/ModbusCodec.cpp
     Alpha2MQTT/src/DiscoveryModel.cpp

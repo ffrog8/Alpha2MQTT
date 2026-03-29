@@ -47,6 +47,11 @@ struct StatusCoreSnapshot {
 struct StatusNetSnapshot {
 	uint32_t uptimeS;
 	uint32_t freeHeap;
+	uint32_t maxBlock;
+	uint8_t fragPct;
+	uint32_t minFreeHeap;
+	uint32_t minMaxBlock;
+	uint8_t maxFragPct;
 	int rssiDbm;
 	const char *ssid;
 	const char *ip;
@@ -92,6 +97,12 @@ struct StatusPollSnapshot {
 	uint32_t dispatchRequestQueuedMs;
 	uint32_t dispatchLastRunMs;
 	const char *dispatchLastSkipReason;
+	const char *worstPhase;
+	uint32_t worstFreeHeapB;
+	uint32_t worstMaxBlockB;
+	uint8_t worstFragPct;
+	uint32_t mqttMaxPayloadSeen;
+	const char *mqttMaxPayloadKind;
 	uint32_t pollIntervalSeconds;
 	uint32_t schedTenSecLastRunMs;
 	uint32_t schedOneMinLastRunMs;
@@ -155,9 +166,20 @@ struct StatusManualReadSnapshot {
 	const char *value;
 };
 
+struct StatusBootMemSnapshot {
+	uint64_t fwBuildTsMs;
+	uint32_t tsMs;
+	uint32_t heapPreWifi;
+	uint32_t heapPostWifi;
+	uint32_t heapPostMqtt;
+	uint32_t heapPreRs485;
+	uint32_t heapPostRs485;
+};
+
 bool buildStatusCoreJson(const StatusCoreSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusNetJson(const StatusNetSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusPollJsonCompact(const StatusPollSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusStubJson(const StatusStubSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusManualReadJson(const StatusManualReadSnapshot &snapshot, char *out, size_t outSize);
+bool buildStatusBootMemJson(const StatusBootMemSnapshot &snapshot, char *out, size_t outSize);

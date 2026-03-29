@@ -256,6 +256,7 @@ TEST_CASE("mqtt entities: legacy-compatible direct readbacks are exposed as regi
 	CHECK(dispatchDuration->haClass == homeAssistantClass::haClassNumber);
 	CHECK(dispatchDuration->readKind == MqttEntityReadKind::Control);
 	CHECK(dispatchDuration->subscribe);
+	CHECK_FALSE(mqttEntityIncludedInPublicSurface(dispatchDuration));
 
 	const mqttState *dispatchRemaining = mqttEntityById(mqttEntityId::entityDispatchRemaining);
 	REQUIRE(dispatchRemaining != nullptr);
@@ -289,6 +290,50 @@ TEST_CASE("mqtt entities: controller diagnostics include runtime polling signals
 	REQUIRE(budgetUsed1m != nullptr);
 	CHECK(budgetUsed1m->updateFreq == mqttUpdateFreq::freqDisabled);
 	CHECK(budgetUsed1m->family == MqttEntityFamily::Controller);
+}
+
+TEST_CASE("mqtt entities: retired dispatch controls stay out of public surfaces and config compaction")
+{
+	const size_t count = mqttEntitiesCount();
+	REQUIRE(count > 0);
+
+	std::vector<mqttState> sourceCatalog(count);
+	std::vector<mqttState> compactedCatalog(count);
+	std::vector<BucketId> sourceBuckets(count, BucketId::OneMin);
+	std::vector<BucketId> compactedBuckets(count, BucketId::Disabled);
+	REQUIRE(mqttEntityCopyCatalog(sourceCatalog.data(), sourceCatalog.size()));
+
+	size_t retiredCount = 0;
+	for (const mqttState &entity : sourceCatalog) {
+		if (!mqttEntityIncludedInPublicSurface(&entity)) {
+			retiredCount++;
+		}
+	}
+	CHECK(retiredCount == 6);
+
+	const std::vector<BucketId> sourceBucketsBefore = sourceBuckets;
+	const size_t publicCount = mqttEntityCopyCompactedPublicSurfaceAssignments(
+		sourceCatalog.data(),
+		sourceBuckets.data(),
+		count,
+		compactedCatalog.data(),
+		compactedBuckets.data());
+	CHECK(publicCount == count - retiredCount);
+	CHECK(sourceBuckets == sourceBucketsBefore);
+
+	for (size_t i = 0; i < publicCount; ++i) {
+		CHECK(mqttEntityIncludedInPublicSurface(&compactedCatalog[i]));
+	}
+
+	bool sawDispatchDuration = false;
+	bool sawDispatchRequestStatus = false;
+	for (size_t i = 0; i < publicCount; ++i) {
+		sawDispatchDuration = sawDispatchDuration || mqttEntityNameEquals(&compactedCatalog[i], "Dispatch_Duration");
+		sawDispatchRequestStatus =
+			sawDispatchRequestStatus || mqttEntityNameEquals(&compactedCatalog[i], "Dispatch_Request_Status");
+	}
+	CHECK_FALSE(sawDispatchDuration);
+	CHECK(sawDispatchRequestStatus);
 }
 
 TEST_CASE("mqtt entities: freqNever defaults stay discoverable without joining poll buckets")

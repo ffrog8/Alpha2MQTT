@@ -54,6 +54,14 @@ struct DispatchRegisterReadback {
 	uint32_t dispatchTimeRaw = 0;
 };
 
+struct DispatchReconnectResetPlan {
+	bool clearStatus = true;
+	bool clearPendingRequest = true;
+	bool clearPendingPayload = true;
+	bool clearInFlightState = false;
+	bool clearQueuedTimestamp = false;
+};
+
 const char *dispatchRequestModeApiName(DispatchRequestMode mode);
 bool lookupDispatchRequestMode(const char *name, DispatchRequestMode &mode);
 bool parseDispatchRequestPayload(const char *payload,
@@ -70,3 +78,6 @@ bool dispatchRequestReadbackMatches(const DispatchRequestPlan &plan,
                                     const DispatchRegisterReadback &readback,
                                     char *error,
                                     size_t errorSize);
+DispatchReconnectResetPlan dispatchReconnectResetPlan(bool inFlight);
+bool dispatchRequestShouldRejectNewRequest(bool pendingRequest, bool inFlight);
+bool dispatchRequestStatusShouldPublish(const char *status);

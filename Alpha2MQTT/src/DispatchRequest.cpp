@@ -484,3 +484,24 @@ dispatchRequestReadbackMatches(const DispatchRequestPlan &plan,
 	}
 	return true;
 }
+
+DispatchReconnectResetPlan
+dispatchReconnectResetPlan(bool inFlight)
+{
+	DispatchReconnectResetPlan plan{};
+	plan.clearInFlightState = !inFlight;
+	plan.clearQueuedTimestamp = !inFlight;
+	return plan;
+}
+
+bool
+dispatchRequestShouldRejectNewRequest(bool pendingRequest, bool inFlight)
+{
+	return pendingRequest || inFlight;
+}
+
+bool
+dispatchRequestStatusShouldPublish(const char *status)
+{
+	return status != nullptr && status[0] != '\0';
+}

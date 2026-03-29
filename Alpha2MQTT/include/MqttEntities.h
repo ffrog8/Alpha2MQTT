@@ -75,6 +75,13 @@ mqttUpdateFreq mqttEntityEffectiveFreqByIndex(size_t idx);
 bool mqttEntityCopyBuckets(BucketId *outBuckets, size_t entityCount);
 bool mqttEntityCanApplyBuckets(const BucketId *buckets, size_t entityCount);
 bool mqttEntityApplyBuckets(const BucketId *buckets, size_t entityCount);
+bool mqttEntityIncludedInPublicSurface(const mqttState *entity);
+size_t mqttEntityCompactPublicSurfaceAssignments(mqttState *entities, BucketId *buckets, size_t entityCount);
+size_t mqttEntityCopyCompactedPublicSurfaceAssignments(const mqttState *srcEntities,
+                                                       const BucketId *srcBuckets,
+                                                       size_t entityCount,
+                                                       mqttState *outEntities,
+                                                       BucketId *outBuckets);
 
 const MqttEntityActivePlan *mqttActivePlan();
 

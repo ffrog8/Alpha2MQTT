@@ -137,6 +137,17 @@ TEST_CASE("portal config: reboot-to-normal html includes runtime redirect probe"
 	CHECK(strstr(html, "Alpha2MQTT Control") != nullptr);
 }
 
+TEST_CASE("portal config: reboot-to-ap confirmation warns about network loss and auto-return")
+{
+	char html[640];
+	REQUIRE(buildPortalRebootToApConfirmHtml(html, sizeof(html)));
+	CHECK(strstr(html, "Reboot into AP config?") != nullptr);
+	CHECK(strstr(html, "remove the device from your network for at least 5 minutes") != nullptr);
+	CHECK(strstr(html, "auto-reboot back to normal after about 5 minutes") != nullptr);
+	CHECK(strstr(html, "Yes, reboot AP Config") != nullptr);
+	CHECK(strstr(html, "action='/reboot/ap'") != nullptr);
+}
+
 TEST_CASE("portal config: strict uint16 parser rejects malformed and overflowing values")
 {
 	CHECK(portalParseU16Strict(nullptr, 7) == 7);
@@ -222,7 +233,7 @@ TEST_CASE("portal config: polling estimate collapses snapshot and shared registe
 		makeEntity("Battery_Temp", MqttEntityFamily::Battery),
 		makeEntity("Max_Cell_Temp", MqttEntityFamily::Battery),
 		makeEntity("Load_Power", MqttEntityFamily::System),
-		makeEntity("Op_Mode", MqttEntityFamily::Inverter),
+		makeEntity("Manual_Control", MqttEntityFamily::Inverter),
 	};
 	entities[0].needsEssSnapshot = true;
 	entities[1].needsEssSnapshot = true;

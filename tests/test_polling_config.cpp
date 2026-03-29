@@ -159,14 +159,14 @@ TEST_CASE("mutable config entry visitor tokenizes large bucket_map values in pla
 
 TEST_CASE("config entry visitors accept numeric poll_interval_s values")
 {
-	const char *payload = "{\"poll_interval_s\":45,\"bucket_map\":\"Op_Mode=one_min;\"}";
+	const char *payload = "{\"poll_interval_s\":45,\"bucket_map\":\"Dispatch_Mode=one_min;\"}";
 	char scratch[256];
 	VisitCapture capture{};
 
 	CHECK(visitPollingConfigEntries(payload, scratch, sizeof(scratch), captureConfigEntry, &capture));
 	CHECK(capture.visited == 2);
 	CHECK(capture.pollIntervalValue == "45");
-	CHECK(capture.bucketMapValue == "Op_Mode=one_min;");
+	CHECK(capture.bucketMapValue == "Dispatch_Mode=one_min;");
 
 	std::vector<char> mutablePayload(payload, payload + std::strlen(payload));
 	mutablePayload.push_back('\0');
@@ -175,28 +175,28 @@ TEST_CASE("config entry visitors accept numeric poll_interval_s values")
 	CHECK(visitMutablePollingConfigEntries(mutablePayload.data(), captureMutableConfigEntry, &mutableCapture));
 	CHECK(mutableCapture.visited == 2);
 	CHECK(mutableCapture.pollIntervalValue == "45");
-	CHECK(mutableCapture.bucketMapValue == "Op_Mode=one_min;");
+	CHECK(mutableCapture.bucketMapValue == "Dispatch_Mode=one_min;");
 }
 
 TEST_CASE("config entry validation rejects truncated payloads before apply")
 {
 	char scratch[256];
-	CHECK(validatePollingConfigEntries("{\"poll_interval_s\":\"45\",\"bucket_map\":\"Op_Mode=one_min;\"}", scratch, sizeof(scratch)));
-	CHECK_FALSE(validatePollingConfigEntries("{\"poll_interval_s\":\"45\",\"bucket_map\":\"Op_Mode=one_min;\"", scratch, sizeof(scratch)));
+	CHECK(validatePollingConfigEntries("{\"poll_interval_s\":\"45\",\"bucket_map\":\"Dispatch_Mode=one_min;\"}", scratch, sizeof(scratch)));
+	CHECK_FALSE(validatePollingConfigEntries("{\"poll_interval_s\":\"45\",\"bucket_map\":\"Dispatch_Mode=one_min;\"", scratch, sizeof(scratch)));
 }
 
 TEST_CASE("polling-set payload builder emits complete/partial JSON")
 {
 	char out[256];
 
-	CHECK(buildPollingConfigSetPayload("45", "Op_Mode=one_min;", out, sizeof(out)));
-	CHECK(std::string(out) == "{\"poll_interval_s\":\"45\",\"bucket_map\":\"Op_Mode=one_min;\"}");
+	CHECK(buildPollingConfigSetPayload("45", "Dispatch_Mode=one_min;", out, sizeof(out)));
+	CHECK(std::string(out) == "{\"poll_interval_s\":\"45\",\"bucket_map\":\"Dispatch_Mode=one_min;\"}");
 
 	CHECK(buildPollingConfigSetPayload("45", "", out, sizeof(out)));
 	CHECK(std::string(out) == "{\"poll_interval_s\":\"45\"}");
 
-	CHECK(buildPollingConfigSetPayload("", "Op_Mode=one_min;", out, sizeof(out)));
-	CHECK(std::string(out) == "{\"bucket_map\":\"Op_Mode=one_min;\"}");
+	CHECK(buildPollingConfigSetPayload("", "Dispatch_Mode=one_min;", out, sizeof(out)));
+	CHECK(std::string(out) == "{\"bucket_map\":\"Dispatch_Mode=one_min;\"}");
 }
 
 TEST_CASE("polling-set payload builder handles no-op values")
@@ -211,7 +211,7 @@ TEST_CASE("polling-set payload builder handles no-op values")
 TEST_CASE("config entry visit aborts staged apply when bucket_map parsing fails")
 {
 	mqttState entities[1]{};
-	entities[0] = makeEntity(mqttEntityId::entityOpMode, "Op_Mode", mqttUpdateFreq::freqTenSec, homeAssistantClass::haClassSelect);
+	entities[0] = makeEntity(mqttEntityId::entityDispatchMode, "Dispatch_Mode", mqttUpdateFreq::freqTenSec, homeAssistantClass::haClassSelect);
 
 	struct Context {
 		const mqttState *entities = nullptr;
@@ -229,9 +229,9 @@ TEST_CASE("config entry visit aborts staged apply when bucket_map parsing fails"
 	char scratch[256];
 	Context ctx{ entities, stagedBuckets, &stagedInterval };
 
-	CHECK(validatePollingConfigEntries("{\"poll_interval_s\":\"45\",\"bucket_map\":\"Op_Mode\"}", scratch, sizeof(scratch)));
+	CHECK(validatePollingConfigEntries("{\"poll_interval_s\":\"45\",\"bucket_map\":\"Dispatch_Mode\"}", scratch, sizeof(scratch)));
 	const bool ok = visitPollingConfigEntries(
-		"{\"poll_interval_s\":\"45\",\"bucket_map\":\"Op_Mode\"}",
+		"{\"poll_interval_s\":\"45\",\"bucket_map\":\"Dispatch_Mode\"}",
 		scratch,
 		sizeof(scratch),
 		[](const char *key, const char *value, void *context) -> bool {

@@ -58,6 +58,22 @@ copyEntityFromCatalog(size_t idx, mqttState *out)
 	return true;
 }
 
+static bool
+isRetiredLegacyDispatchControlEntity(mqttEntityId entityId)
+{
+	switch (entityId) {
+	case mqttEntityId::entityOpMode:
+	case mqttEntityId::entitySocTarget:
+	case mqttEntityId::entityChargePwr:
+	case mqttEntityId::entityDischargePwr:
+	case mqttEntityId::entityPushPwr:
+	case mqttEntityId::entityDispatchDuration:
+		return true;
+	default:
+		return false;
+	}
+}
+
 struct RuntimeState {
 	bool initialized = false;
 	bool planDirty = true;
@@ -674,6 +690,56 @@ mqttEntityCanApplyBuckets(const BucketId *buckets, size_t entityCount)
 	resetActivePlan(nextPlan);
 	delete[] nextOverrides;
 	return ok;
+}
+
+bool
+mqttEntityIncludedInPublicSurface(const mqttState *entity)
+{
+	return entity != nullptr && !isRetiredLegacyDispatchControlEntity(entity->entityId);
+}
+
+size_t
+mqttEntityCompactPublicSurfaceAssignments(mqttState *entities, BucketId *buckets, size_t entityCount)
+{
+	if (entities == nullptr || buckets == nullptr) {
+		return 0;
+	}
+
+	size_t writeIdx = 0;
+	for (size_t readIdx = 0; readIdx < entityCount; ++readIdx) {
+		if (!mqttEntityIncludedInPublicSurface(&entities[readIdx])) {
+			continue;
+		}
+		if (writeIdx != readIdx) {
+			entities[writeIdx] = entities[readIdx];
+			buckets[writeIdx] = buckets[readIdx];
+		}
+		writeIdx++;
+	}
+	return writeIdx;
+}
+
+size_t
+mqttEntityCopyCompactedPublicSurfaceAssignments(const mqttState *srcEntities,
+                                                const BucketId *srcBuckets,
+                                                size_t entityCount,
+                                                mqttState *outEntities,
+                                                BucketId *outBuckets)
+{
+	if (srcEntities == nullptr || srcBuckets == nullptr || outEntities == nullptr || outBuckets == nullptr) {
+		return 0;
+	}
+
+	size_t writeIdx = 0;
+	for (size_t readIdx = 0; readIdx < entityCount; ++readIdx) {
+		if (!mqttEntityIncludedInPublicSurface(&srcEntities[readIdx])) {
+			continue;
+		}
+		outEntities[writeIdx] = srcEntities[readIdx];
+		outBuckets[writeIdx] = srcBuckets[readIdx];
+		writeIdx++;
+	}
+	return writeIdx;
 }
 
 const MqttEntityActivePlan *

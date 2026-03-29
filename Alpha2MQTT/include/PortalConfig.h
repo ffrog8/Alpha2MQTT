@@ -67,6 +67,7 @@ bool portalWifiSaveAllowsBlankPassword(const char *savedSsid,
 const char *portalMenuPollingHtml(void);
 const char *portalMenuStaHtml(void);
 const char *portalRebootToNormalHtml(void);
+bool buildPortalRebootToApConfirmHtml(char *buffer, size_t bufferSize);
 uint16_t portalParseU16Strict(const char *text, uint16_t defaultValue);
 
 struct PortalMenu {
