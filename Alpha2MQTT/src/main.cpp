@@ -123,6 +123,7 @@ static HttpServer *g_httpServer = nullptr;
 bool httpControlPlaneEnabled = false;
 static bool inMqttCallback = false;
 static uint32_t mqttCallbackSequence = 0;
+static uint32_t loopSequence = 0;
 static bool pendingPollingConfigSet = false;
 static bool pollingConfigLoadedFromStorage = false;
 static bool pendingRs485StubControlSet = false;
@@ -272,6 +273,10 @@ static char dispatchRequestStatus[96] = "";
 static bool dispatchRequestStatusDirty = false;
 static bool dispatchMirrorPublishPending = false;
 static uint32_t dispatchRequestQueuedMs = 0;
+static uint32_t dispatchRequestStatusPublishEarliestLoop = 0;
+static uint32_t dispatchMirrorPublishEarliestLoop = 0;
+static DispatchRegisterReadback dispatchMirrorPublishReadback{};
+static bool dispatchMirrorPublishReadbackValid = false;
 // Readback-confirmed acceptance is what arms timed dispatch lifecycle tracking.
 // Give the inverter/RS485 path a bounded settle window instead of assuming the
 // registers will reflect within a handful of 25 ms retries.
@@ -909,6 +914,12 @@ includeEntityInPollingPortal(const mqttState &entity)
 	return includeEntityInPublicSurfaces(entity);
 }
 
+static inline bool
+loopSequenceReached(uint32_t earliestLoop)
+{
+	return static_cast<int32_t>(loopSequence - earliestLoop) >= 0;
+}
+
 static bool
 legacyDispatchControlSurfaceEnabled(void)
 {
@@ -920,6 +931,7 @@ setDispatchRequestStatus(const char *status)
 {
 	strlcpy(dispatchRequestStatus, (status != nullptr) ? status : "", sizeof(dispatchRequestStatus));
 	dispatchRequestStatusDirty = true;
+	dispatchRequestStatusPublishEarliestLoop = loopSequence + 1;
 }
 
 static void
@@ -5971,6 +5983,7 @@ loop()
 #endif // BUTTON_PIN
 
 	const uint32_t loopNowMs = millis();
+	loopSequence++;
 	diag_loop_tick(loopNowMs);
 	diag_wifi_status(static_cast<int16_t>(WiFi.status()), loopNowMs);
 
@@ -11201,10 +11214,10 @@ serviceDeferredMqttWork(void)
 	for (uint8_t iteration = 0; iteration < kDeferredMqttDrainMaxIterations; ++iteration) {
 		bool didWork = false;
 
-		if (dispatchRequestStatusDirty && publishDispatchRequestStatus()) {
+		if (dispatchMirrorPublishPending && publishPendingDispatchMirror()) {
 			didWork = true;
 		}
-		if (dispatchMirrorPublishPending && publishPendingDispatchMirror()) {
+		if (dispatchRequestStatusDirty && publishDispatchRequestStatus()) {
 			didWork = true;
 		}
 		if (pendingPollingConfigSet) {
@@ -12021,6 +12034,9 @@ publishDispatchRequestStatus(void)
 	if (!dispatchRequestStatusDirty || !mqttSubsystemEnabled()) {
 		return !dispatchRequestStatusDirty;
 	}
+	if (!loopSequenceReached(dispatchRequestStatusPublishEarliestLoop)) {
+		return false;
+	}
 	if (!dispatchRequestStatusShouldPublish(dispatchRequestStatus)) {
 		dispatchRequestStatusDirty = false;
 		return true;
@@ -12041,8 +12057,126 @@ publishDispatchRequestStatus(void)
 }
 
 static bool
-forcePublishDispatchMirror(void)
+formatDispatchStartValue(char *dest, size_t destSize, uint16_t dispatchStart)
 {
+	switch (dispatchStart) {
+	case DISPATCH_START_START:
+		strlcpy(dest, DISPATCH_START_START_DESC, destSize);
+		return true;
+	case DISPATCH_START_STOP:
+		strlcpy(dest, DISPATCH_START_STOP_DESC, destSize);
+		return true;
+	default:
+		strlcpy(dest, "Unknown", destSize);
+		return true;
+	}
+}
+
+static bool
+formatDispatchModeValue(char *dest, size_t destSize, uint16_t dispatchMode)
+{
+	switch (dispatchMode) {
+	case DISPATCH_MODE_BATTERY_ONLY_CHARGED_VIA_PV:
+		strlcpy(dest, DISPATCH_MODE_BATTERY_ONLY_CHARGED_VIA_PV_DESC, destSize);
+		return true;
+	case DISPATCH_MODE_STATE_OF_CHARGE_CONTROL:
+		strlcpy(dest, DISPATCH_MODE_STATE_OF_CHARGE_CONTROL_DESC, destSize);
+		return true;
+	case DISPATCH_MODE_LOAD_FOLLOWING:
+		strlcpy(dest, DISPATCH_MODE_LOAD_FOLLOWING_DESC, destSize);
+		return true;
+	case DISPATCH_MODE_MAXIMISE_OUTPUT:
+		strlcpy(dest, DISPATCH_MODE_MAXIMISE_OUTPUT_DESC, destSize);
+		return true;
+	case DISPATCH_MODE_NORMAL_MODE:
+		strlcpy(dest, DISPATCH_MODE_NORMAL_MODE_DESC, destSize);
+		return true;
+	case DISPATCH_MODE_OPTIMISE_CONSUMPTION:
+		strlcpy(dest, DISPATCH_MODE_OPTIMISE_CONSUMPTION_DESC, destSize);
+		return true;
+	case DISPATCH_MODE_MAXIMISE_CONSUMPTION:
+		strlcpy(dest, DISPATCH_MODE_MAXIMISE_CONSUMPTION_DESC, destSize);
+		return true;
+	case DISPATCH_MODE_ECO_MODE:
+		strlcpy(dest, DISPATCH_MODE_ECO_MODE_DESC, destSize);
+		return true;
+	case DISPATCH_MODE_FCAS_MODE:
+		strlcpy(dest, DISPATCH_MODE_FCAS_MODE_DESC, destSize);
+		return true;
+	case DISPATCH_MODE_PV_POWER_SETTING:
+		strlcpy(dest, DISPATCH_MODE_PV_POWER_SETTING_DESC, destSize);
+		return true;
+	case DISPATCH_MODE_NO_BATTERY_CHARGE:
+		strlcpy(dest, DISPATCH_MODE_NO_BATTERY_CHARGE_DESC, destSize);
+		return true;
+	case DISPATCH_MODE_BURNIN_MODE:
+		strlcpy(dest, DISPATCH_MODE_BURNIN_MODE_DESC, destSize);
+		return true;
+	default:
+		strlcpy(dest, "Unknown", destSize);
+		return true;
+	}
+}
+
+static bool
+prepareDispatchMirrorResponse(mqttEntityId entityId,
+                              const DispatchRegisterReadback &readback,
+                              modbusRequestAndResponse &response)
+{
+	response = modbusRequestAndResponse{};
+	switch (entityId) {
+	case mqttEntityId::entityDispatchStart:
+		response.unsignedShortValue = readback.dispatchStart;
+		return formatDispatchStartValue(response.dataValueFormatted,
+		                                sizeof(response.dataValueFormatted),
+		                                readback.dispatchStart);
+	case mqttEntityId::entityDispatchMode:
+		response.unsignedShortValue = readback.dispatchMode;
+		return formatDispatchModeValue(response.dataValueFormatted,
+		                               sizeof(response.dataValueFormatted),
+		                               readback.dispatchMode);
+	case mqttEntityId::entityDispatchPower:
+		response.signedIntValue = readback.dispatchActivePower;
+		snprintf(response.dataValueFormatted,
+		         sizeof(response.dataValueFormatted),
+		         "%ld",
+		         static_cast<long>(readback.dispatchActivePower));
+		return true;
+	case mqttEntityId::entityDispatchSoc:
+		response.unsignedShortValue = readback.dispatchSocRaw;
+		snprintf(response.dataValueFormatted,
+		         sizeof(response.dataValueFormatted),
+		         "%0.02f",
+		         readback.dispatchSocRaw * DISPATCH_SOC_MULTIPLIER);
+		return true;
+	case mqttEntityId::entityDispatchTime:
+		response.unsignedIntValue = readback.dispatchTimeRaw;
+		snprintf(response.dataValueFormatted,
+		         sizeof(response.dataValueFormatted),
+		         "%lu",
+		         static_cast<unsigned long>(readback.dispatchTimeRaw));
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool
+publishPendingDispatchMirror(void)
+{
+	if (!dispatchMirrorPublishPending || !mqttSubsystemEnabled()) {
+		return !dispatchMirrorPublishPending;
+	}
+	if (!loopSequenceReached(dispatchMirrorPublishEarliestLoop)) {
+		return false;
+	}
+	if (!inverterReady || !inverterSerialKnown()) {
+		return false;
+	}
+	if (!dispatchMirrorPublishReadbackValid) {
+		dispatchMirrorPublishPending = false;
+		return true;
+	}
 	RuntimeDiagScope diagScope(RuntimeDiagPhase::DispatchForcePublish, "mirror");
 	const mqttEntityId mirrorIds[] = {
 		mqttEntityId::entityDispatchStart,
@@ -12053,35 +12187,22 @@ forcePublishDispatchMirror(void)
 	};
 	for (mqttEntityId entityId : mirrorIds) {
 		mqttState entity{};
+		modbusRequestAndResponse prepared{};
 		if (!lookupEntity(entityId, &entity)) {
 			return false;
 		}
-		if (!sendDataFromMqttState(&entity, false, nullptr, true)) {
+		if (!prepareDispatchMirrorResponse(entityId, dispatchMirrorPublishReadback, prepared)) {
+			return false;
+		}
+		if (!sendDataFromMqttState(&entity, false, &prepared, true)) {
 			return false;
 		}
 	}
-	return true;
-}
-
-static bool
-publishPendingDispatchMirror(void)
-{
-	if (!dispatchMirrorPublishPending || !mqttSubsystemEnabled()) {
-		return !dispatchMirrorPublishPending;
-	}
-	if (!inverterReady || !inverterSerialKnown()) {
-		return false;
-	}
-	RuntimeDiagScope diagScope(RuntimeDiagPhase::DispatchForcePublish, "mirror");
-	if (!forcePublishDispatchMirror()) {
-		return false;
-	}
-	// Dispatch_Remaining is derived from timed runtime state rather than the raw
-	// register mirror. Refresh it alongside the forced mirror replay when MQTT
-	// recovers so HA sees the accepted dispatch window without waiting for the
-	// next countdown tick.
-	publishDispatchAuxiliaryStates(true);
+	// Dispatch_Remaining is controller-derived rather than part of the inverter
+	// register readback snapshot, so it still needs a normal derived publish.
+	publishDispatchStateEntity(mqttEntityId::entityDispatchRemaining);
 	dispatchMirrorPublishPending = false;
+	dispatchMirrorPublishReadbackValid = false;
 	return true;
 }
 
@@ -12312,8 +12433,10 @@ serviceAtomicDispatchRequest(void)
 	// A disconnected MQTT session must not orphan an accepted timed dispatch.
 	// Readback-confirmed lifecycle state is updated first; mirror publish is
 	// best-effort and can replay later once MQTT recovers.
+	dispatchMirrorPublishReadback = readback;
+	dispatchMirrorPublishReadbackValid = true;
 	dispatchMirrorPublishPending = true;
-	(void)publishPendingDispatchMirror();
+	dispatchMirrorPublishEarliestLoop = loopSequence + 1;
 
 	setDispatchRequestStatus("ok");
 	atomicDispatchState = AtomicDispatchRuntimeState{};
