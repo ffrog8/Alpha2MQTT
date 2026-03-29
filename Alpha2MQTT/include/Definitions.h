@@ -685,6 +685,18 @@ Customise these options as per README.txt.  Please read README.txt before contin
 
 #define DISPATCH_ACTIVE_POWER_OFFSET 32000
 
+static inline int32_t
+dispatchActivePowerRawToWatts(int32_t rawValue)
+{
+	return rawValue - DISPATCH_ACTIVE_POWER_OFFSET;
+}
+
+static inline int32_t
+dispatchActivePowerWattsToRaw(int32_t powerW)
+{
+	return DISPATCH_ACTIVE_POWER_OFFSET + powerW;
+}
+
 
 // Note1 - BATTERY STATUS LOOKUP
 #define BATTERY_STATUS_CHARGE0_DISCHARGE0 0

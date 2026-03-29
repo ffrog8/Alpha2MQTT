@@ -52,6 +52,15 @@ TEST_CASE("dispatch request preserves legacy full-charge SOC encoding")
 	CHECK(plan.dispatchSocRaw == 252);
 }
 
+TEST_CASE("dispatch active power helper maps raw register values to signed watts")
+{
+	CHECK(dispatchActivePowerRawToWatts(DISPATCH_ACTIVE_POWER_OFFSET) == 0);
+	CHECK(dispatchActivePowerRawToWatts(DISPATCH_ACTIVE_POWER_OFFSET - 1200) == -1200);
+	CHECK(dispatchActivePowerRawToWatts(DISPATCH_ACTIVE_POWER_OFFSET + 1500) == 1500);
+	CHECK(dispatchActivePowerWattsToRaw(-1200) == DISPATCH_ACTIVE_POWER_OFFSET - 1200);
+	CHECK(dispatchActivePowerWattsToRaw(1500) == DISPATCH_ACTIVE_POWER_OFFSET + 1500);
+}
+
 TEST_CASE("dispatch request rejects invalid or missing required fields")
 {
 	DispatchRequestPayload payload{};

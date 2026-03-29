@@ -3027,8 +3027,11 @@ def main() -> int:
         print("[e2e] case: atomic dispatch write feedback (Register_Value reflects new dispatch state)")
         ha_unique = _ensure_online_inverter_identity("dispatch feedback baseline")
         reg_dispatch_start, dispatch_start_start = ensure_dispatch_write(ha_unique, label_prefix="dispatch feedback")
+        reg_dispatch_power = _discover_register_value("REG_DISPATCH_RW_ACTIVE_POWER_1")
         dispatch_start_stop = _discover_define_value("DISPATCH_START_STOP")
         dispatch_start_topic = _state_topic(ha_unique, "Dispatch_Start")
+        dispatch_power_topic = _state_topic(ha_unique, "Dispatch_Power")
+        expected_dispatch_power = str(_default_dispatch_request().get("power_w", -1200))
         current_config = _fetch_config(mqtt, config_topic)
         current_poll_interval = int(current_config.get("poll_interval_s", 4) or 4)
         wait_polling_config_applied(
@@ -3039,6 +3042,7 @@ def main() -> int:
             },
         )
         mqtt.subscribe(dispatch_start_topic, force=True)
+        mqtt.subscribe(dispatch_power_topic, force=True)
 
         def dispatch_started_pred() -> Tuple[bool, str]:
             start_state = _fetch_latest_text(mqtt, dispatch_start_topic, label="dispatch_start_state")
@@ -3049,6 +3053,17 @@ def main() -> int:
         _assert_eventually(
             "dispatch start state published before manual read",
             dispatch_started_pred,
+            timeout_s=20,
+            poll_s=1.0,
+        )
+
+        def dispatch_power_pred() -> Tuple[bool, str]:
+            power_state = _fetch_latest_text(mqtt, dispatch_power_topic, label="dispatch_power_state").strip()
+            return power_state == expected_dispatch_power, f"last={power_state!r}"
+
+        _assert_eventually(
+            "dispatch power state published as signed watts",
+            dispatch_power_pred,
             timeout_s=20,
             poll_s=1.0,
         )
@@ -3070,6 +3085,21 @@ def main() -> int:
             raise E2EError(
                 f"manual_read did not reflect dispatch_start change; expected 'Start' (or {dispatch_start_start}) "
                 f"but got last={last_val!r}"
+            )
+
+        manual_power = _select_register_and_wait_manual_read(
+            mqtt,
+            _command_topic(ha_unique, "Register_Number"),
+            _manual_read_topic(),
+            _state_topic(ha_unique, "Register_Number"),
+            reg_dispatch_power,
+            label="dispatch_power_after",
+        )
+        power_val = str(manual_power.get("value", "")).strip()
+        if power_val != expected_dispatch_power:
+            raise E2EError(
+                f"manual_read did not reflect dispatch power in signed watts; "
+                f"expected {expected_dispatch_power!r} but got {power_val!r}"
             )
 
         publish_dispatch_request_and_wait_status(

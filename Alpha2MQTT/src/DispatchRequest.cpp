@@ -311,7 +311,7 @@ socPercentToRaw(uint32_t socPercent)
 static int32_t
 powerWToRaw(int32_t powerW)
 {
-	return DISPATCH_ACTIVE_POWER_OFFSET + powerW;
+	return dispatchActivePowerWattsToRaw(powerW);
 }
 
 } // namespace

@@ -4027,8 +4027,9 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 		{
 			// Type: Integer
 			// 1W/bit Offset: 32000 load<32000
-
-			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted,
+			        "%ld",
+			        static_cast<long>(dispatchActivePowerRawToWatts(rs->signedIntValue)));
 
 			break;
 		}
@@ -4038,7 +4039,9 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 			// Type: Integer
 			// 1Var/bit Offset: 32000 load<32000
 
-			sprintf(rs->dataValueFormatted, "%ld", rs->signedIntValue);
+			sprintf(rs->dataValueFormatted,
+			        "%ld",
+			        static_cast<long>(dispatchActivePowerRawToWatts(rs->signedIntValue)));
 			break;
 		}
 

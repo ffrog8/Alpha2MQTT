@@ -12136,11 +12136,11 @@ prepareDispatchMirrorResponse(mqttEntityId entityId,
 		                               sizeof(response.dataValueFormatted),
 		                               readback.dispatchMode);
 	case mqttEntityId::entityDispatchPower:
-		response.signedIntValue = readback.dispatchActivePower;
+		response.signedIntValue = dispatchActivePowerRawToWatts(readback.dispatchActivePower);
 		snprintf(response.dataValueFormatted,
 		         sizeof(response.dataValueFormatted),
 		         "%ld",
-		         static_cast<long>(readback.dispatchActivePower));
+		         static_cast<long>(response.signedIntValue));
 		return true;
 	case mqttEntityId::entityDispatchSoc:
 		response.unsignedShortValue = readback.dispatchSocRaw;
