@@ -113,6 +113,7 @@ CASE_ORDER: tuple[str, ...] = (
     "fail_writes_only",
     "dispatch_readback_window",
     "dispatch_readback_timeout_status",
+    "max_feedin_percent_write",
     "fail_for_ms",
     "soc_drift_backend_ready",
     "stub_soc_drift_applies",
@@ -3895,6 +3896,81 @@ def main() -> int:
                 f"last_reg={last_reg} last_reg_count={last_reg_count}"
             )
 
+    def case_max_feedin_percent_write() -> None:
+        print("[e2e] case: Max_Feedin_Percent writes only when enabled and confirms readback")
+        ha_unique = _ensure_online_inverter_identity("max feedin baseline")
+        current_config = _fetch_config(mqtt, config_topic)
+        current_poll_interval = int(current_config.get("poll_interval_s", 4) or 4)
+        reg_max_feedin = _discover_register_value("REG_SYSTEM_CONFIG_RW_MAX_FEED_INTO_GRID_PERCENT")
+        command_topic = _command_topic(ha_unique, "Max_Feedin_Percent")
+        state_topic = _state_topic(ha_unique, "Max_Feedin_Percent")
+
+        before_disabled = _fetch_poll(mqtt, poll_topic)
+        writes_before_disabled = int(before_disabled.get("rs485_stub_writes", 0))
+        mqtt.publish(command_topic, "35", retain=False)
+        _sleep_with_mqtt(mqtt, 2.0)
+        after_disabled = _fetch_poll(mqtt, poll_topic)
+        writes_after_disabled = int(after_disabled.get("rs485_stub_writes", 0))
+        if writes_after_disabled != writes_before_disabled:
+            raise E2EError(
+                f"disabled Max_Feedin_Percent should ignore command writes: "
+                f"{writes_before_disabled}->{writes_after_disabled}"
+            )
+
+        wait_polling_config_applied(
+            current_poll_interval,
+            {"Max_Feedin_Percent": "one_min"},
+        )
+        mqtt.subscribe(state_topic, force=True)
+
+        before_enabled = _fetch_poll(mqtt, poll_topic)
+        writes_before_enabled = int(before_enabled.get("rs485_stub_writes", 0))
+        mqtt.publish(command_topic, "35", retain=False)
+
+        _assert_eventually(
+            "Max_Feedin_Percent state publishes confirmed value",
+            lambda: (
+                _fetch_latest_text(mqtt, state_topic, label="max_feedin_state").strip() == "35",
+                f"last={_fetch_latest_text(mqtt, state_topic, label='max_feedin_state').strip()!r}",
+            ),
+            timeout_s=20,
+            poll_s=1.0,
+        )
+
+        def write_pred() -> Tuple[bool, str]:
+            cur = _fetch_poll(mqtt, poll_topic)
+            writes = int(cur.get("rs485_stub_writes", 0))
+            last_reg = int(cur.get("rs485_stub_last_write_reg", 0))
+            last_reg_count = int(cur.get("rs485_stub_last_write_reg_count", 0))
+            detail = (
+                f"writes={writes} last_reg={last_reg} last_reg_count={last_reg_count} "
+                f"baseline_writes={writes_before_enabled}"
+            )
+            return (
+                writes > writes_before_enabled
+                and last_reg == reg_max_feedin
+                and last_reg_count == 1
+            ), detail
+
+        _assert_eventually(
+            "Max_Feedin_Percent uses single-register write",
+            write_pred,
+            timeout_s=20,
+            poll_s=1.0,
+        )
+
+        before_invalid = _fetch_poll(mqtt, poll_topic)
+        writes_before_invalid = int(before_invalid.get("rs485_stub_writes", 0))
+        mqtt.publish(command_topic, "101", retain=False)
+        _sleep_with_mqtt(mqtt, 2.0)
+        after_invalid = _fetch_poll(mqtt, poll_topic)
+        writes_after_invalid = int(after_invalid.get("rs485_stub_writes", 0))
+        if writes_after_invalid != writes_before_invalid:
+            raise E2EError(
+                f"out-of-range Max_Feedin_Percent should not write RS485: "
+                f"{writes_before_invalid}->{writes_after_invalid}"
+            )
+
     def case_fail_for_ms_then_recover() -> None:
         print("[e2e] case: fail for N ms then recover")
         set_mode_and_wait('{"mode":"online","fail_for_ms":5000}', ("online",))
@@ -4656,6 +4732,7 @@ def main() -> int:
         ("fail_writes_only", case_fail_writes_only_dispatch_write_fails),
         ("dispatch_readback_window", case_dispatch_readback_window_tolerates_transient_read_failures),
         ("dispatch_readback_timeout_status", case_dispatch_readback_timeout_status),
+        ("max_feedin_percent_write", case_max_feedin_percent_write),
         ("fail_for_ms", case_fail_for_ms_then_recover),
         ("soc_drift_backend_ready", case_soc_drift_backend_ready),
         ("stub_soc_drift_applies", case_stub_soc_drift_applies),

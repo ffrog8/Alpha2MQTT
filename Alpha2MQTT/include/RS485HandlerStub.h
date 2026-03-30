@@ -59,6 +59,7 @@ class RS485Handler
 			int32_t pvPowerW[6] = { 0, 0, 0, 0, 0, 0 };
 
 			uint16_t inverterWorkingMode = INVERTER_OPERATION_MODE_UPS_MODE;
+			uint16_t maxFeedinPercent = 100;
 		};
 
 		void (*_serviceHook)() = nullptr;
@@ -231,6 +232,11 @@ class RS485Handler
 
 			if (reg == REG_INVERTER_HOME_R_WORKING_MODE) {
 				*outWord = _state.inverterWorkingMode;
+				return true;
+			}
+			if (reg == REG_SYSTEM_CONFIG_RW_MAX_FEED_INTO_GRID_PERCENT ||
+			    reg == REG_SYSTEM_INFO_RW_FEED_INTO_GRID_PERCENT) {
+				*outWord = _state.maxFeedinPercent;
 				return true;
 			}
 
@@ -531,7 +537,8 @@ class RS485Handler
 				if (fn == MODBUS_FN_READDATAREGISTER && !_cfg.failReads) {
 					shouldFail = false;
 				}
-				if (fn == MODBUS_FN_WRITEDATAREGISTER && !_cfg.failWrites) {
+				if ((fn == MODBUS_FN_WRITEDATAREGISTER || fn == MODBUS_FN_WRITESINGLEREGISTER) &&
+				    !_cfg.failWrites) {
 					shouldFail = false;
 				}
 			}
@@ -564,7 +571,7 @@ class RS485Handler
 				_lastFailStartReg = startRegister;
 				_lastFailFn = fn;
 				_lastFailType = _cfg.failType;
-				if (fn == MODBUS_FN_WRITEDATAREGISTER) {
+				if (fn == MODBUS_FN_WRITEDATAREGISTER || fn == MODBUS_FN_WRITESINGLEREGISTER) {
 					_lastWriteFailStartReg = startRegister;
 					_lastWriteFailFn = fn;
 					_lastWriteFailType = _cfg.failType;
@@ -608,6 +615,44 @@ class RS485Handler
 					}
 					resp->data[i * 2] = static_cast<uint8_t>((word >> 8) & 0xFF);
 					resp->data[i * 2 + 1] = static_cast<uint8_t>(word & 0xFF);
+				}
+
+				if (wordsToWrite > 0) {
+					const uint16_t firstWord =
+						static_cast<uint16_t>((resp->data[0] << 8) | resp->data[1]);
+					switch (resp->returnDataType) {
+					case modbusReturnDataType::unsignedShort:
+						resp->unsignedShortValue = firstWord;
+						snprintf(resp->dataValueFormatted, sizeof(resp->dataValueFormatted), "%u", resp->unsignedShortValue);
+						break;
+					case modbusReturnDataType::signedShort:
+						resp->signedShortValue = static_cast<int16_t>(firstWord);
+						snprintf(resp->dataValueFormatted, sizeof(resp->dataValueFormatted), "%d", resp->signedShortValue);
+						break;
+					case modbusReturnDataType::unsignedInt:
+						if (wordsToWrite >= 2) {
+							resp->unsignedIntValue = (static_cast<uint32_t>(firstWord) << 16) |
+							                         static_cast<uint32_t>((resp->data[2] << 8) | resp->data[3]);
+							snprintf(resp->dataValueFormatted,
+							         sizeof(resp->dataValueFormatted),
+							         "%lu",
+							         static_cast<unsigned long>(resp->unsignedIntValue));
+						}
+						break;
+					case modbusReturnDataType::signedInt:
+						if (wordsToWrite >= 2) {
+							const uint32_t raw = (static_cast<uint32_t>(firstWord) << 16) |
+							                     static_cast<uint32_t>((resp->data[2] << 8) | resp->data[3]);
+							resp->signedIntValue = static_cast<int32_t>(raw);
+							snprintf(resp->dataValueFormatted,
+							         sizeof(resp->dataValueFormatted),
+							         "%ld",
+							         static_cast<long>(resp->signedIntValue));
+						}
+						break;
+					default:
+						break;
+					}
 				}
 
 				strcpy(resp->statusMqttMessage, MODBUS_REQUEST_AND_RESPONSE_READ_DATA_REGISTER_SUCCESS_MQTT_DESC);
@@ -654,6 +699,23 @@ class RS485Handler
 				strcpy(resp->statusMqttMessage, MODBUS_REQUEST_AND_RESPONSE_WRITE_DATA_REGISTER_SUCCESS_MQTT_DESC);
 				strcpy(resp->displayMessage, MODBUS_REQUEST_AND_RESPONSE_WRITE_DATA_REGISTER_SUCCESS_DISPLAY_DESC);
 				return modbusRequestAndResponseStatusValues::writeDataRegisterSuccess;
+			}
+
+			if (fn == MODBUS_FN_WRITESINGLEREGISTER) {
+				_writeCount++;
+				_lastWriteStartReg = startRegister;
+				_lastWriteRegCount = 1;
+				_lastWriteMs = millis();
+
+				const uint16_t value = static_cast<uint16_t>((frame[4] << 8) | frame[5]);
+				if (startRegister == REG_SYSTEM_CONFIG_RW_MAX_FEED_INTO_GRID_PERCENT) {
+					_state.maxFeedinPercent = value;
+				}
+
+				resp->dataSize = 0;
+				strcpy(resp->statusMqttMessage, MODBUS_REQUEST_AND_RESPONSE_WRITE_SINGLE_REGISTER_SUCCESS_MQTT_DESC);
+				strcpy(resp->displayMessage, MODBUS_REQUEST_AND_RESPONSE_WRITE_SINGLE_REGISTER_SUCCESS_DISPLAY_DESC);
+				return modbusRequestAndResponseStatusValues::writeSingleRegisterSuccess;
 			}
 
 			strcpy(resp->statusMqttMessage, MODBUS_REQUEST_AND_RESPONSE_INVALID_FRAME_MQTT_DESC);

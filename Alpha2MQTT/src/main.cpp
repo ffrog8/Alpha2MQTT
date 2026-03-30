@@ -732,6 +732,8 @@ void publishEvent(MqttEventCode code, const char *detail);
 MqttEventCode eventCodeFromResult(modbusRequestAndResponseStatusValues result);
 void noteRs485Error(modbusRequestAndResponseStatusValues result, const char *detail);
 static void processPendingEntityCommand(void);
+static bool entityCommandEnabled(mqttEntityId entityId);
+static bool applyMaxFeedinPercentCommand(const mqttState *entity, int32_t requestedPercent);
 static void applyRs485StubControlPayload(const char *payload);
 static void publishManualRegisterReadState(int32_t requestedReg);
 void setBootIntentAndReboot(BootIntent intent, bool persistIntent = true);
@@ -9923,8 +9925,7 @@ emitEntityDiscoveryPayload(CountedMqttPayload &payload, void *context)
 		break;
 	case mqttEntityId::entityMaxFeedinPercent:
 		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
-			 A2M_FMT(", \"state_class\": \"measurement\""
-			         ", \"unit_of_measurement\": \"%%\""
+			 A2M_FMT(", \"unit_of_measurement\": \"%%\""
 			         ", \"icon\": \"mdi:transmission-tower-export\""
 			         ", \"min\": 0, \"max\": 100"));
 		break;
@@ -11256,6 +11257,7 @@ processPendingEntityCommand(void)
 	bool valueProcessingError = false;
 	bool dispatchRelevantChange = false;
 	bool timedGenerationRequested = false;
+	bool handledOwnStatePublish = false;
 
 	// First, process value.
 	switch (mqttEntity.entityId) {
@@ -11264,7 +11266,9 @@ processPendingEntityCommand(void)
 	case mqttEntityId::entityDischargePwr:
 	case mqttEntityId::entityPushPwr:
 	case mqttEntityId::entityDispatchDuration:
+	case mqttEntityId::entityMaxFeedinPercent:
 	case mqttEntityId::entityRegNum:
+		errno = 0;
 		singleInt32 = strtol(mqttIncomingPayload, &endPtr, 10);
 		if ((endPtr == mqttIncomingPayload) || ((singleInt32 == 0) && (errno != 0))) {
 			valueProcessingError = true;
@@ -11388,6 +11392,20 @@ processPendingEntityCommand(void)
 			timedGenerationRequested = dispatchDurationIsTimed(timedDispatchState.configuredDurationSeconds);
 		}
 		break;
+	case mqttEntityId::entityMaxFeedinPercent:
+		if ((singleInt32 < 0) || (singleInt32 > 100)) {
+#ifdef DEBUG_OVER_SERIAL
+			sprintf(_debugOutput, "HA sent invalid Max_Feedin_Percent! %ld", singleInt32);
+			Serial.println(_debugOutput);
+#endif
+#ifdef DEBUG_CALLBACKS
+			badCallbacks++;
+#endif // DEBUG_CALLBACKS
+		} else {
+			handledOwnStatePublish = true;
+			applyMaxFeedinPercentCommand(&mqttEntity, singleInt32);
+		}
+		break;
 	case mqttEntityId::entityRegNum:
 #ifdef DEBUG_OVER_SERIAL
 		snprintf(_debugOutput,
@@ -11470,7 +11488,9 @@ processPendingEntityCommand(void)
 		Serial.println(_debugOutput);
 	}
 #endif
-	sendDataFromMqttState(&mqttEntity, false, nullptr, true);
+	if (!handledOwnStatePublish) {
+		sendDataFromMqttState(&mqttEntity, false, nullptr, true);
+	}
 #ifdef DEBUG_OVER_SERIAL
 	if (mqttEntity.entityId == mqttEntityId::entityRegNum) {
 		snprintf(_debugOutput,
@@ -11483,6 +11503,70 @@ processPendingEntityCommand(void)
 		Serial.println(_debugOutput);
 	}
 #endif
+}
+
+static bool
+entityCommandEnabled(mqttEntityId entityId)
+{
+	size_t idx = 0;
+	if (!lookupEntityIndex(entityId, &idx)) {
+		return false;
+	}
+	const mqttUpdateFreq effectiveFreq = mqttEntityEffectiveFreqByIndex(idx);
+	return effectiveFreq != mqttUpdateFreq::freqNever && effectiveFreq != mqttUpdateFreq::freqDisabled;
+}
+
+static bool
+applyMaxFeedinPercentCommand(const mqttState *entity, int32_t requestedPercent)
+{
+	if (entity == nullptr || _registerHandler == nullptr) {
+		return false;
+	}
+	if (!entityCommandEnabled(entity->entityId)) {
+#ifdef DEBUG_OVER_SERIAL
+		Serial.println(F("Ignoring Max_Feedin_Percent command while entity is disabled"));
+#endif
+		return false;
+	}
+
+	modbusRequestAndResponse writeResponse{};
+	const modbusRequestAndResponseStatusValues writeResult =
+		_registerHandler->writeRawSingleRegister(
+			REG_SYSTEM_CONFIG_RW_MAX_FEED_INTO_GRID_PERCENT,
+			static_cast<uint16_t>(requestedPercent),
+			&writeResponse);
+	if (writeResult != modbusRequestAndResponseStatusValues::writeSingleRegisterSuccess) {
+		rs485Errors++;
+		noteRs485Error(writeResult, writeResponse.statusMqttMessage);
+		return false;
+	}
+
+	modbusRequestAndResponse readResponse{};
+	readResponse.functionCode = MODBUS_FN_READDATAREGISTER;
+	readResponse.registerCount = 1;
+	readResponse.returnDataType = modbusReturnDataType::unsignedShort;
+	strlcpy(readResponse.returnDataTypeDesc,
+	        MODBUS_RETURN_DATA_TYPE_UNSIGNED_SHORT_DESC,
+	        sizeof(readResponse.returnDataTypeDesc));
+	const modbusRequestAndResponseStatusValues readResult =
+		_registerHandler->readRawRegister(REG_SYSTEM_CONFIG_RW_MAX_FEED_INTO_GRID_PERCENT, &readResponse);
+	if (readResult != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
+		rs485Errors++;
+		noteRs485Error(readResult, readResponse.statusMqttMessage);
+		return false;
+	}
+	if (readResponse.unsignedShortValue != static_cast<uint16_t>(requestedPercent)) {
+#ifdef DEBUG_OVER_SERIAL
+		snprintf(_debugOutput,
+		         sizeof(_debugOutput),
+		         "Max_Feedin_Percent readback mismatch requested=%ld readback=%u",
+		         static_cast<long>(requestedPercent),
+		         static_cast<unsigned>(readResponse.unsignedShortValue));
+		Serial.println(_debugOutput);
+#endif
+		return false;
+	}
+	return sendDataFromMqttState(entity, false, &readResponse, true);
 }
 
 static void
