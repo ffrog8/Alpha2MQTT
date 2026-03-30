@@ -18,6 +18,13 @@ uint32_t resetScheduleBaseline(uint32_t now)
 	return now;
 }
 
+bool shouldBootstrapPublishEntity(mqttUpdateFreq freq)
+{
+	return freq != mqttUpdateFreq::freqTenSec &&
+	       freq != mqttUpdateFreq::freqNever &&
+	       freq != mqttUpdateFreq::freqDisabled;
+}
+
 size_t normalizeDeferredCursor(size_t cursor, size_t totalCount)
 {
 	if (totalCount == 0) {

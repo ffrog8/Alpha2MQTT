@@ -160,6 +160,12 @@ shouldReloadPollingConfigFromStorage(bool pendingConfigSet, bool configLoaded)
 }
 
 bool
+shouldResetPersistedPollingConfig(PollingLoadFailureKind failureKind)
+{
+	return failureKind == PollingLoadFailureKind::PersistedBucketMapCorrupt;
+}
+
+bool
 parseStrictUint32(const char *text, uint32_t maxValue, uint32_t &outValue)
 {
 	if (text == nullptr || text[0] == '\0') {

@@ -44,6 +44,7 @@ TRACE_HTTP = False
 TRACE_SSH = False
 CASE_ORDER: tuple[str, ...] = (
     "wifi_only",
+    "ap_bad_wifi_retains_saved_ssid",
     "wifi_plus_mqtt",
     "normal_to_wifi_portal_set_mqtt",
     "normal_to_wifi_portal_bad_wifi_recovery_cycle",
@@ -1018,7 +1019,7 @@ def _assert_contains_any(text: str, needles: list[str], context: str) -> None:
 
 
 def _assert_portal_root_menu(body: str, context: str) -> None:
-    for needle in ("/0wifi", "/config/mqtt", "/config/polling", "/config/update", "/status", "/config/reboot-normal"):
+    for needle in ("/0wifi", "/config/mqtt", "/config/polling", "/config/polling/reset", "/config/update", "/status", "/config/reboot-normal"):
         _assert_contains(body, needle, context)
 
 
@@ -1267,7 +1268,15 @@ def _wait_for_sta_portal(ssh: PiSsh, base_url: str, *, timeout_s: int) -> str:
             continue
         status = int(resp.get("status", 0))
         last = str(resp.get("body", ""))
-        if status == 200 and all(token in last for token in ("/config/mqtt", "/config/polling", "/config/reboot-normal")):
+        if status == 200 and all(
+            token in last
+            for token in (
+                "/config/mqtt",
+                "/config/polling",
+                "/config/reboot-normal",
+                'meta name="a2m-mode" content="wifi"',
+            )
+        ):
             return last
         time.sleep(2.0)
     raise PortalTestError(f"Timed out waiting for STA portal root menu. Last={last[:300]!r}")
@@ -1308,7 +1317,7 @@ def probe_url(url: str):
     try:
         with urllib.request.urlopen(url, timeout=1.5) as resp:
             body = resp.read().decode('utf-8', errors='replace')
-            if int(resp.getcode()) == 200 and '/config/mqtt' in body and '/config/polling' in body and '/config/reboot-normal' in body:
+            if int(resp.getcode()) == 200 and '/config/mqtt' in body and '/config/polling' in body and '/config/reboot-normal' in body and 'meta name="a2m-mode" content="wifi"' in body:
                 return {{"url": url[:-1], "body": body}}
     except Exception:
         return None
@@ -1759,6 +1768,58 @@ def _run_wifi_only_case(
     return base_url
 
 
+def _run_ap_bad_wifi_retains_saved_ssid_case(
+    ssh: "PiSsh",
+    mqtt: "MqttClient",
+    *,
+    iface: str,
+    fw_path: Path,
+    serial_port: str,
+    flash_baud: str,
+    wifi_ssid: str,
+    wifi_pwd: str,
+) -> None:
+    _announce("case: fresh blank flash -> AP save bad wifi -> AP wifi page retains submitted ssid")
+    _erase_and_flash_real_firmware(fw_path, serial_port=serial_port, baud=flash_baud)
+    time.sleep(8)
+
+    _ap_ssid, wifi_action, wifi_body = _join_ap_and_load_wifi_page(ssh, mqtt, iface=iface)
+    csrf = _extract_input_value(wifi_body, "csrf")
+    bad_ssid = f"{wifi_ssid}-bad-{int(time.time())}"
+    save_wifi = _pi_http_request(
+        ssh,
+        method="POST",
+        url=urllib.parse.urljoin("http://192.168.4.1/0wifi", wifi_action),
+        form={"s": bad_ssid, "p": wifi_pwd, "csrf": csrf},
+        timeout_s=20,
+    )
+    save_wifi_status = int(save_wifi.get("status", 0))
+    if save_wifi_status not in (0, 200, 302):
+        raise PortalTestError(f"Portal POST /wifisave returned {save_wifi_status}")
+
+    deadline = time.time() + 45
+    last_wifi_body = ""
+    while time.time() < deadline:
+        wifi_resp = _pi_http_request(ssh, method="GET", url="http://192.168.4.1/0wifi", timeout_s=10)
+        if int(wifi_resp.get("status", 0)) != 200:
+            time.sleep(1.0)
+            continue
+        last_wifi_body = str(wifi_resp.get("body", ""))
+        try:
+            saved_ssid = _extract_input_value(last_wifi_body, "s")
+        except PortalTestError:
+            time.sleep(1.0)
+            continue
+        if saved_ssid == bad_ssid:
+            _assert_button_theme(last_wifi_body, "ap", "ap wifi page after bad wifi save")
+            return
+        time.sleep(1.0)
+
+    raise PortalTestError(
+        f"AP wifi page did not retain submitted SSID {bad_ssid!r}; last body={last_wifi_body[:300]!r}"
+    )
+
+
 def _run_wifi_plus_mqtt_case(
     ssh: "PiSsh",
     mqtt: "MqttClient",
@@ -2173,6 +2234,19 @@ def main() -> int:
             (
                 "wifi_only",
                 lambda: _run_wifi_only_case(
+                    ssh,
+                    mqtt,
+                    iface=args.pi_wifi_iface,
+                    fw_path=fw_path,
+                    serial_port=args.serial_port,
+                    flash_baud=args.flash_baud,
+                    wifi_ssid=wifi_ssid,
+                    wifi_pwd=wifi_pwd,
+                ),
+            ),
+            (
+                "ap_bad_wifi_retains_saved_ssid",
+                lambda: _run_ap_bad_wifi_retains_saved_ssid_case(
                     ssh,
                     mqtt,
                     iface=args.pi_wifi_iface,

@@ -43,6 +43,13 @@ shouldRebootApOnRuntimeWifiFailure(BootMode currentMode,
 }
 
 bool
+shouldRebootApAfterStaPortalConnectFailure(bool hasStoredWifiCredentials,
+                                           WifiFailureClass failureClass)
+{
+	return hasStoredWifiCredentials && failureClass == WifiFailureClass::InvalidConfig;
+}
+
+bool
 shouldRebootNormalAfterApIdle(bool hasStoredWifiCredentials, uint32_t idleMs)
 {
 	const WifiRecoveryTiming timing = wifiRecoveryTiming();

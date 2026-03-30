@@ -120,6 +120,7 @@ CASE_ORDER: tuple[str, ...] = (
     "soc_drift_e2e",
     "load_power_formula",
     "polling_config",
+    "runtime_polling_reset_without_page",
     "portal_polling_ui",
     "reboot_ap_confirmation",
     "portal_wifi_save_reboot_only",
@@ -804,7 +805,7 @@ def _ensure_runtime_http_from_portal(base: str, timeout_s: int = 45) -> None:
 
     _assert_eventually("portal returns to normal runtime", runtime_ready, timeout_s=timeout_s, poll_s=2.0)
 
-def _assert_portal_root_menu(base: str, timeout_s: int = 20) -> str:
+def _assert_portal_root_menu(base: str, timeout_s: int = 20, required_mode: Optional[str] = None) -> str:
     deadline = time.time() + timeout_s
     last_html = ""
     while time.time() < deadline:
@@ -812,8 +813,17 @@ def _assert_portal_root_menu(base: str, timeout_s: int = 20) -> str:
         if status == 200:
             html = body.decode("utf-8", errors="replace")
             last_html = html
-            required = ("/0wifi", "/config/mqtt", "/config/polling", "/config/update", "/status", "/config/reboot-normal")
-            if all(token in html for token in required):
+            required = (
+                "/0wifi",
+                "/config/mqtt",
+                "/config/polling",
+                "/config/polling/reset",
+                "/config/update",
+                "/status",
+                "/config/reboot-normal",
+            )
+            mode_ok = True if required_mode is None else f'meta name="a2m-mode" content="{required_mode}"' in html
+            if all(token in html for token in required) and mode_ok:
                 return html
         time.sleep(1.0)
     raise E2EError(f"portal root missing actionable menu entries: {last_html[:400]!r}")
@@ -4148,6 +4158,82 @@ def main() -> int:
             republish_every_s=5.0,
         )
 
+    def case_runtime_polling_reset_without_page() -> None:
+        print("[e2e] case: runtime root resets polling defaults without loading polling page")
+        ensure_stub_online_backend(
+            '{"mode":"online","fail_n":0,"fail_reads":0,"fail_writes":0,'
+            '"fail_type":0,"fail_every_n":0,"fail_for_ms":0,'
+            '"flap_online_ms":0,"flap_offline_ms":0,'
+            '"probe_success_after_n":0,"strict_unknown":0,"strict":0}',
+            label="runtime polling reset baseline",
+        )
+        base = _resolve_device_http_base(mqtt, device_root)
+        config_before = _fetch_config(mqtt, config_topic)
+        intervals_before = config_before.get("entity_intervals", {})
+        if not isinstance(intervals_before, dict):
+            raise E2EError(f"config entity_intervals missing or invalid before reset case: {config_before}")
+
+        target = "State_of_Charge"
+        default_bucket = _load_entity_default_buckets().get(target, "")
+        if not default_bucket:
+            raise E2EError(f"missing default bucket for {target}")
+
+        current_bucket = _effective_bucket(intervals_before, target)
+        desired_bucket = "ten_sec" if default_bucket != "ten_sec" else "user"
+        if current_bucket == desired_bucket:
+            desired_bucket = "one_min" if default_bucket != "one_min" else "five_min"
+        if current_bucket == desired_bucket:
+            raise E2EError(f"unable to select non-default bucket for {target} (current={current_bucket!r})")
+
+        wait_polling_config_applied(
+            9,
+            {target: desired_bucket},
+            timeout_s=60,
+            republish_every_s=5.0,
+        )
+
+        root_status, _root_body = _http_request_full("GET", base + "/", headers={}, body=b"", timeout_s=20)
+        if root_status != 200:
+            raise E2EError(f"runtime root returned unexpected status={root_status}")
+
+        reset_status = _http_post_simple(base + "/config/polling/reset", timeout_s=20)
+        if reset_status not in (200, 303):
+            raise E2EError(f"runtime polling reset returned unexpected status={reset_status}")
+
+        reset_root_status, reset_root_body = _http_request_full(
+            "GET",
+            base + "/?polling_reset=1",
+            headers={},
+            body=b"",
+            timeout_s=20,
+        )
+        if reset_root_status != 200:
+            raise E2EError(f"runtime root after polling reset returned unexpected status={reset_root_status}")
+        if "Polling reset to defaults." not in reset_root_body.decode("utf-8", errors="replace"):
+            raise E2EError("runtime root did not show polling reset confirmation")
+
+        def reset_pred() -> Tuple[bool, str]:
+            cfg = _fetch_config(mqtt, config_topic)
+            poll = _fetch_poll(mqtt, poll_topic)
+            intervals = cfg.get("entity_intervals", {})
+            if not isinstance(intervals, dict):
+                return False, f"entity_intervals invalid: {cfg!r}"
+            cfg_interval = int(cfg.get("poll_interval_s", 0) or 0)
+            runtime_interval = int(poll.get("poll_interval_s", 0) or 0)
+            actual_bucket = _effective_bucket(intervals, target)
+            detail = (
+                f"cfg_poll_interval_s={cfg_interval} runtime_poll_interval_s={runtime_interval} "
+                f"{target}={actual_bucket!r}"
+            )
+            return (cfg_interval == 60 and runtime_interval == 60 and actual_bucket == default_bucket), detail
+
+        _assert_eventually(
+            "runtime polling reset restores default interval and bucket",
+            reset_pred,
+            timeout_s=60,
+            poll_s=3.0,
+        )
+
     def case_portal_polling_ui() -> None:
         print("[e2e] case: portal UI updates polling schedule (lightweight paged portal)")
         portal_stub_baseline = (
@@ -4176,13 +4262,15 @@ def main() -> int:
         # Portal is STA-only and should come back on the same IP, but runtime
         # can still answer briefly during the deferred reboot window. Wait for
         # the actual portal menu, not just any 200 on `/`.
-        _assert_portal_root_menu(base, timeout_s=40)
+        _assert_portal_root_menu(base, timeout_s=40, required_mode="wifi")
 
         polling_path, html = _load_polling_page_via_menu(base)
         if not polling_path.startswith("/config/polling"):
             raise E2EError(f"unexpected polling menu path: {polling_path!r}")
         if "poll_interval_s" not in html or "/config/polling/save" not in html:
             raise E2EError("portal polling page HTML missing expected form fields")
+        if "/config/polling/reset" not in html or "Reset Polling Defaults" not in html:
+            raise E2EError("portal polling page missing reset-to-defaults action")
         if "/config/polling/clear" not in html or "Disable All Entities" not in html:
             raise E2EError("portal polling page missing clear-all action")
         if "<h2>Polling schedule</h2>" not in html or "/config/reboot-normal" not in html:
@@ -4330,7 +4418,7 @@ def main() -> int:
         # Re-enter portal and verify values are restored in the UI after reboot.
         print(f"[e2e] rebooting into wifi portal via {reboot_url} (persistence check)")
         _http_post_simple(reboot_url, timeout_s=10)
-        _assert_portal_root_menu(base, timeout_s=40)
+        _assert_portal_root_menu(base, timeout_s=40, required_mode="wifi")
 
         polling_path2, html2 = _load_polling_page_via_menu(base)
         if not polling_path2.startswith("/config/polling"):
@@ -4481,7 +4569,7 @@ def main() -> int:
         print(f"[e2e] rebooting into wifi portal via {reboot_url} (wifi save-only check)")
         _http_post_simple(base + reboot_url, timeout_s=10)
         _wait_for_http_ok(base + "/", timeout_s=40)
-        _assert_portal_root_menu(base, timeout_s=20)
+        _assert_portal_root_menu(base, timeout_s=20, required_mode="wifi")
 
         wifi_action, wifi_html = _load_wifi_page(base)
         ssid = _extract_input_value(wifi_html, "s")
@@ -4575,6 +4663,7 @@ def main() -> int:
         ("soc_drift_e2e", case_soc_drift_e2e),
         ("load_power_formula", case_load_power_snapshot_formula),
         ("polling_config", case_polling_config_persistence),
+        ("runtime_polling_reset_without_page", case_runtime_polling_reset_without_page),
         ("portal_polling_ui", case_portal_polling_ui),
         ("reboot_ap_confirmation", case_reboot_ap_confirmation),
         ("portal_wifi_save_reboot_only", case_portal_wifi_save_reboot_only),

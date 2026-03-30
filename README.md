@@ -87,6 +87,7 @@ Typical flow:
 - After you save WiFi/MQTT settings, the device reboots and comes up in `normal`.
 - A configured device can be moved into `wifi_config` from the normal runtime page whenever you want to change settings or perform an OTA update.
 - If saved WiFi later becomes invalid because the SSID disappears or the password is wrong, the controller treats that as a recovery condition.  It retries in normal mode for a bounded window, then falls back to `ap_config`.  If the AP portal is left idle for 5 minutes it reboots back to normal and tries again.  That gives you a repeatable recovery window without leaving the device stranded in setup mode after a transient outage.
+- If you explicitly reboot into `wifi_config`, the firmware now keeps retrying the saved STA connection on ordinary timeouts instead of dropping straight into the AP portal.  It only falls back to `ap_config` there when the saved WiFi looks genuinely invalid.
 
 There are two main ways to enter the configuration portal:
 - Button press.  This is the preferred path when a hardware button is defined.  (At the moment that mainly means the XIAO ESP32C6 `BOOT` button.)
@@ -150,6 +151,7 @@ There are two ways to change the polling config:
 - Portal
   - In `wifi_config` or `ap_config`, open `Polling`.
   - Change bucket assignments there and save them.
+  - The portal menu and the polling page also provide `Reset Polling Defaults`, which clears bad or unwanted polling state without needing the normal runtime page first.
   - The portal also supports direct import through the hidden `bucket_map_full` field if you want to post a whole assignment map at once.
   - After saving in the portal, reboot back to normal mode and the new polling plan will be active.
 
@@ -179,6 +181,8 @@ timeout 3600 /home/coder/git/Alpha2MQTT/scripts/e2e_captive_portal.sh
 This test should be run periodically and whenever WiFi, captive portal, boot-mode, or onboarding changes are made.
 
 If you enable more telemetry than the selected polling cadence can comfortably sustain, the firmware stays bounded rather than trying to catch up forever. Some values may go stale for a while, and the controller publishes diagnostics so that this is visible instead of silent.
+
+When the controller restarts, reconnects to MQTT, or needs to resend state, it does not immediately flood every slow bucket.  Instead it forces the normal 10-second status pass and then refreshes a few additional enabled entity states per loop.  This keeps ESP8266 reconnect behavior stable while still letting slow identity and diagnostic entities catch up much sooner than their natural one-hour or one-day cadence.
 
 - **Config topic (retained):** `DEVICE_NAME/config`
 - **Config update topic (non-retained):** `DEVICE_NAME/config/set`
