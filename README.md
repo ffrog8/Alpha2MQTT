@@ -3,19 +3,31 @@
 
 _**Credit!** This project is entirely derived from <https://github.com/dxoverdy/Alpha2MQTT>, which is a really great bit of work. My hardware includes some tweaks and modernizations on that project's hardware. My software has changed a lot from that project, but at its core, this project is derived from that project and would not exist without that project. So huge credit and thanks._
 
-**What is this?** This project is a controller (a small hardware device) that connects Home Assistant to an AlphaESS system via RS485 and uses MQTT discovery to set up a ready to go integration.  This is local control with NO cloud dependancy.  Once you plug-in and turn on this A2M hardware, your ESS will appear as a unique HA/MQTT device with HA entities ready to monitor and [control](#controlling-your-ess) your AlphaESS system.  No HA configuration is needed.  The HA device and HA entities are ready to be used with all units, classes, icons, unique IDs, and more and provides up-to-date availability status of each entity.   Entities are ready to be used by the Energy dashboard and can be included in other [dashboards](#dashboard-example) and [automations](#automation-examples).  The firmware also provides a direct MQTT dispatch request interface so that ESS control can be done with one compact payload rather than a series of loosely-related control writes.
+**What is this?** This project is a controller (a small hardware device) that connects Home Assistant to an AlphaESS system via RS485 and uses MQTT discovery to set up a ready to go integration.  This is local control with NO cloud dependancy.  Once you plug-in and turn on this A2M hardware, your ESS will appear as an inverter-focused HA/MQTT device with HA entities ready to monitor and [control](#controlling-your-ess) your AlphaESS system, and the controller may also expose a small companion diagnostic device for WiFi/MQTT/RS485 health.  No HA configuration is needed.  The HA device and HA entities are ready to be used with all units, classes, icons, unique IDs, and more and provides up-to-date availability status of each entity.   Entities are ready to be used by the Energy dashboard and can be included in other [dashboards](#dashboard-example) and [automations](#automation-examples).  The firmware also provides a direct MQTT dispatch request interface so that ESS control can be done with one compact payload rather than a series of loosely-related control writes.
 
 **What's Different?** The big change is that rather than being a general purpose interface between MQTT and the raw AlphaESS system data, this project is a controller specifically designed to work as a Home Assistant integration for your AlphaESS system.  It uses MQTT discovery to be plug-and-play so that no HA configuration is needed.  And it adds some "smart", real-time capabilities in the controller so that HA automation control is simplified.  This also incorporates several newer versions of the [AlphaESS specs](#alphaess-specs), and has enhancements/tweaks/fixes to WiFi and RS485 functionality.
 
-The configuration (WiFi and MQTT settings) of this hardware itself is now done via a captive portal web interface.  It no longer requires hard coding these values in `Definitions.h`.  The web configurations only needs to be done once, and then the values are saved in flash.  See the [configuration](#configuring-wifi-and-mqtt) section for details.
+The configuration (WiFi and MQTT settings) of this hardware itself is now done through built-in web portals.  It no longer requires hard coding these values in `Definitions.h`.  On first boot or recovery the device can create its own captive AP portal; once it is on your LAN it can also serve the same configuration pages through a WiFi portal.  The configuration only needs to be done once, and then the values are saved in flash.  See the [configuration](#configuring-wifi-and-mqtt) section for details.
 
 ![Alpha2MQTT](Pics/Normal.jpg)
 
+## Features
+- Home Assistant MQTT discovery with inverter-focused entities ready to use as soon as the controller joins WiFi and MQTT.
+- Two MQTT/HA devices with distinct roles: the main inverter-focused device carries ESS telemetry and control, while a small controller-side diagnostic device exposes WiFi, MQTT, RS485, and polling health so controller problems are visible without cluttering the inverter entity surface.
+- A direct atomic dispatch request API (`alpha2mqtt_inv_<serial>/dispatch/set`) for ESS control, plus `Dispatch *` readback entities that show what the inverter is actually doing.
+- Three operating modes with distinct purposes:
+  - `normal` runtime for MQTT, RS485 polling, ESS control, and the lightweight HTTP status/control page.
+  - `wifi_config` for configuration and OTA updates over your normal LAN when saved WiFi credentials already exist.
+  - `ap_config` for first-time setup and recovery through a captive AP portal hosted by the controller itself.
+- OTA firmware updates from either configuration portal, with automatic reboot back into normal runtime after a successful update.
+- Persistent polling buckets so you can choose which entities are active, how often they are refreshed, and whether they should appear in Home Assistant at all.
+- Runtime diagnostics over MQTT and on the display so WiFi, MQTT, polling pressure, and dispatch status are visible instead of silent.
+
 ### Supported AlphaESS devices are:
-- I have only tested this on a SMILE-SPB system.
+- I have only tested this on a SMILE5 system.
 
 - The original upstream project reported testing on these systems, which _should_ work, but I really can't say until someone tests them.
-  - SMILE5,
+  - SMILE-SPB,
   - SMILE-B3,
   - SMILE-T10,
   - Storion T30,
@@ -23,14 +35,14 @@ The configuration (WiFi and MQTT settings) of this hardware itself is now done v
   - *Others are likely to work too.
 
 ## Steps to get running.
-- Build the hardware.  (See [HARDWARE](#hardware) below)
-- Configure, build and load the software. Follow the current repository instructions and `Definitions.h` comments for setup and compilation. Few, if any, changes are now needed in `Definitions.h`. Only a small number of hardware details *may* need to be changed in the top section of `Definitions.h`.
-- Enable MQTT discovery in Home Assistant (if this isn't on already).
-- Plug in RS485 and power (USB).  Then [configure WiFi and MQTT](#configuring-wifi-and-mqtt).
-- At this point your device/entities will appear under the MQTT integration as "A2M-ALXXXXXXXXXXXXX".)  You can now see and monitor your ESS in HA.
-- (optional) Configure the HA Energy dashboard to use these new entities.  All the necessary entities are provided for grid, solar, and battery.
+- Build the hardware.  (See [Hardware](#hardware) below.)
+- Build and flash the firmware.  Follow the current repository build instructions and the comments at the top of `Definitions.h`.  Few, if any, changes are now needed in `Definitions.h`; usually only the small hardware-specific section at the top needs attention.
+- Enable MQTT discovery in Home Assistant if it is not already enabled.
+- Plug in RS485 and power (USB), then [configure WiFi and MQTT](#configuring-wifi-and-mqtt).
+- Once the controller has joined your WiFi and connected to MQTT, Home Assistant will discover the Alpha2MQTT device and its entities automatically.  You can then monitor your ESS from the MQTT integration/device page.
+- (optional) Configure the HA Energy dashboard to use the new grid, solar, and battery entities.
 - (optional) Create an ESS dashboard.  (See [Dashboard Example](#dashboard-example) below.)
-- (optional) Create ESS automations to control the ESS.  (See [Automations Example](#automation-examples) below.)
+- (optional) Create ESS automations to control the ESS.  (See [Automation Examples](#automation-examples) below.)
 
 ## More Details
 ### CI build check
@@ -51,9 +63,51 @@ Host-based unit tests validate scheduling, Modbus CRC/frame generation, config s
 GitHub Actions also runs these tests via the `Host Tests` workflow alongside an ESP8266 smoke compile.
 
 ### Configuring WiFi and MQTT
-Before this device can do anything, it must be given basic configuration.  It needs to know your WiFi SSID and password, and your MQTT server details (IP, port, username, and password).  These details used to be hardcoded in `Definitions.h` but are now configured via a captive portal web interface and saved in flash.  There are two ways to start the configuration portal:  Button press or "as needed".  The button press is preferred as it is more secure, but this is only available when a button is defined.  (A button is currently only defined for the XIAO ESP32C6 which uses the "BOOT" button.)  Simply press the button to enter config mode, and you can re-configure any time by pressing it again.  When no button is defined, the "as needed" method is used and it simply starts the portal at bootup if the configuration is incomplete.  Once configuration mode starts the hardware will create its own WiFi network (SSID="Alpha2MQTT" and no password).  Join that network and you will be taken to the captive web portal where you can enter the configuration details.  Once you are done, the hardware will reboot and should join your WiFi network and talk to your MQTT server.
-If you define WiFi/MQTT values via `Secrets.h` (or a `secrets.txt` workflow that generates it), those values are used as defaults for the captive portal fields and as initial settings when no stored configuration exists.
-If saved WiFi later becomes invalid because the SSID disappears or the password is wrong, the controller now treats that as a recovery condition instead of retrying in normal mode forever.  It retries in normal mode for a bounded window, reboots into the AP portal, and if the AP portal is left idle for 5 minutes it reboots back to normal and tries again.  This gives you a repeatable AP recovery window without leaving the device stranded in setup mode after a transient outage.
+Before this device can do anything useful it needs WiFi and MQTT settings.  It needs to know your WiFi SSID and password, and your MQTT server details (IP, port, username, and password).  These values are now configured through the built-in web UI and saved in flash.
+
+The easiest way to understand the firmware is to treat the web UI as three distinct experiences:
+
+- `normal`
+  - This is the real runtime mode.
+  - MQTT discovery/state publishing, ESS polling, dispatch control, and the lightweight HTTP control page all run here.
+  - The normal HTTP page is the one that shows `Alpha2MQTT Control` and gives you the reboot actions for moving into the config portals.
+
+- `wifi_config`
+  - This is the configuration portal served over your normal LAN using the saved WiFi credentials.
+  - Use this when the device is already reachable on your network and you want to change WiFi/MQTT settings, polling settings, or upload new firmware without joining the device AP.
+  - You normally get here by using `Reboot WiFi Config` from the runtime HTTP page.
+
+- `ap_config`
+  - This is the captive portal AP mode.
+  - The controller creates its own WiFi network (`Alpha2MQTT`, no password by default) and serves the same configuration pages directly from that network.
+  - Use this for first-time setup, recovery from broken WiFi credentials, or when you want a local direct setup path without relying on your normal LAN.
+
+Typical flow:
+- First boot with no saved config usually lands in `ap_config`.
+- After you save WiFi/MQTT settings, the device reboots and comes up in `normal`.
+- A configured device can be moved into `wifi_config` from the normal runtime page whenever you want to change settings or perform an OTA update.
+- If saved WiFi later becomes invalid because the SSID disappears or the password is wrong, the controller treats that as a recovery condition.  It retries in normal mode for a bounded window, then falls back to `ap_config`.  If the AP portal is left idle for 5 minutes it reboots back to normal and tries again.  That gives you a repeatable recovery window without leaving the device stranded in setup mode after a transient outage.
+
+There are two main ways to enter the configuration portal:
+- Button press.  This is the preferred path when a hardware button is defined.  (At the moment that mainly means the XIAO ESP32C6 `BOOT` button.)
+- "As needed".  When no button is defined, the portal starts automatically when configuration is incomplete or recovery is required.
+
+If you define WiFi/MQTT values via `Secrets.h` (or a `secrets.txt` workflow that generates it), those values are used as defaults for the portal fields and as the initial settings when no stored configuration exists.
+
+### OTA Firmware Updates
+Firmware updates are done through the configuration portals, not through the normal runtime page.
+
+- In either `wifi_config` or `ap_config`, open the portal menu and go to `Update`.
+- Upload the firmware binary there.
+- After a successful update, the firmware now reboots automatically back into `normal` runtime.
+
+That means the usual update flow is:
+- reboot into `wifi_config` if the device is already on your LAN and reachable
+- open the portal `Update` page
+- upload the new firmware
+- wait for the device to reboot back into normal runtime
+
+If you are doing first-time setup or recovery through the device AP, the same `Update` page is also available in `ap_config`.
 
 ### Inverter identity and discovery
 The controller no longer reuses a cached inverter serial across reboot. Inverter identity is considered unknown until the firmware reads a live serial from RS485.
@@ -65,10 +119,44 @@ Practical effect:
 
 If a device upgrades while the inverter is unavailable, old retained inverter discovery topics may remain in Home Assistant until the controller later reads a live serial again or the retained topics are purged manually.
 
-### Configuring polling intervals via MQTT
-Alpha2MQTT can store per-entity polling intervals that persist across restarts and show up in Home Assistant via MQTT discovery. The authoritative config is a retained payload published to `DEVICE_NAME/config`, with delta updates sent to `DEVICE_NAME/config/set`. The firmware now supports a broad catalog of optional telemetry, and many of those entities are disabled by default. This lets you choose the small set of values you actually care about instead of polling everything all the time.
+### Configuring polling buckets
+Alpha2MQTT can store per-entity polling buckets that persist across restarts and show up in Home Assistant via MQTT discovery.  The authoritative config is a retained payload published to `DEVICE_NAME/config`, with delta updates sent to `DEVICE_NAME/config/set`.  The firmware now supports a broad catalog of optional telemetry, and many of those entities are disabled by default.  This lets you choose the small set of values you actually care about instead of polling everything all the time.
 
-When you set an entity to `freqDisabled`, the device stops polling and removes that entity's discovery configuration in HA until it is re-enabled. `freqNever` is reserved for legacy defaults and is not user-settable.
+The supported bucket names are:
+- `ten_sec`
+- `one_min`
+- `five_min`
+- `one_hour`
+- `one_day`
+- `user`
+- `disabled`
+
+`user` uses the global `poll_interval_s` value.
+
+How buckets behave:
+- Every entity is assigned to one bucket.
+- That bucket decides how often the entity is polled.
+- If you set an entity to `disabled`, the device stops polling it and removes that entity's discovery configuration in HA until it is re-enabled.
+- `freqNever` is reserved for legacy defaults and is not user-settable.
+
+There are two ways to change the polling config:
+
+- MQTT
+  - Read the current retained config from `DEVICE_NAME/config`.
+  - Send updates to `DEVICE_NAME/config/set`.
+  - You can update `poll_interval_s`, individual `entity_intervals`, or a bucket-map payload.
+  - These MQTT updates apply live in normal runtime and are persisted by the firmware.
+
+- Portal
+  - In `wifi_config` or `ap_config`, open `Polling`.
+  - Change bucket assignments there and save them.
+  - The portal also supports direct import through the hidden `bucket_map_full` field if you want to post a whole assignment map at once.
+  - After saving in the portal, reboot back to normal mode and the new polling plan will be active.
+
+In practice:
+- If you want to automate or version-control bucket changes, use MQTT.
+- If you want to browse and adjust them interactively, use the portal.
+- Both paths update the same underlying stored polling plan.
 
 The WiFi/config portal also supports direct polling-config import via the `bucket_map_full` form field on `POST /config/polling/save`. The value is a semicolon-delimited assignment list like `Grid_Power=ten_sec;Battery_Temp=one_min;`. This merges onto the current config and persists the result; omitted entities keep their current bucket. If you want to explicitly remove an entity from polling and HA discovery, assign it `disabled`, for example `Battery_Temp=disabled;`.
 
@@ -100,9 +188,9 @@ When boot mode is `normal`, the firmware exposes a lightweight HTTP page for req
 
 - **GET /**: status page (boot mode, boot intent, reset reason)
 - **POST /reboot/normal**: set boot_mode=normal, boot_intent=normal, reboot
+- **GET /reboot/ap**: confirmation page before entering AP config
 - **POST /reboot/ap**: set boot_mode=ap_config, boot_intent=ap_config, reboot
 - **POST /reboot/wifi**: set boot_mode=wifi_config, boot_intent=wifi_config, reboot
-- **Example update payload:** `{ "Grid_Power": "freqOneMin", "Battery_Temp": "freqDisabled" }`
 - **HA discovery:** a diagnostic sensor named **MQTT Config** exposes `last_change` as its state and the full JSON as attributes.
 
 ### MQTT status, boot, and events
@@ -157,6 +245,8 @@ The currently supported mode names are:
 
 Not every mode uses every field.  For example, `normal_mode` is a stop/release request and ignores the other fields.  The firmware validates the payload, writes the AlphaESS dispatch registers as one atomic block, reads back the resulting dispatch values, and then force-publishes the inverter's dispatch state to MQTT/HA.
 
+The atomic dispatch API is intentionally modeled as a timed lease on inverter-native dispatch state.  Each request sets the full dispatch intent, including its expiry (`duration_s`), in one transaction, and success is confirmed by inverter readback.  This is safer and simpler than exposing separate writable HA entities such as `Op Mode`, `SOC Target`, `Charge Power`, `Discharge Power`, and `Push Power`: if Home Assistant, MQTT, or the controller stops refreshing the request, the inverter itself will exit dispatch and return to `normal_mode` when the lease expires.  Clients should therefore treat non-zero `duration_s` requests as renewable leases and republish before expiry if they want dispatch to continue.  For example, a client that wants dispatch to remain active continuously might request a 5 minute lease (`duration_s = 300`) and refresh it every 2.5 minutes.  (`duration_s = 0` is effectively indefinite and does not provide this lease-based safety property.)
+
 To see whether the request worked, use:
 - `Dispatch Request Status`: `ok` on success, otherwise a short human-readable error message such as `invalid mode`, `invalid power`, `modbus write failed`, or a readback mismatch description
 - `Dispatch Start`
@@ -177,11 +267,6 @@ Alpha2MQTT honours 1.28 AlphaESS Modbus documentation.  The latest register list
 ### Hardware
 To build this hardware, use the current wiring notes below together with the upstream project page for historical background if needed. I originally started with an ESP8266, then switched to an ESP32 for better WiFi and have only tested with the ESP32 for a while. (However, the ESP8266 _should_ still work.) I also went to a larger display. This is not necessary, but it did help with debugging. I used a different MAX3485 part because I liked the form factor better. If you use this, be sure to connect the EN pin. Finally I switched from a "generic" ESP32 to the Seeed XIAO ESP32C6, which is very small, has much better WiFi (including WiFi 6), and is quite cheap. The XIAO ESP32C6 supports both internal and external antennas (selectable via software). I found the XIAO ESP32C6 internal antenna gave me a stronger signal than my older ESP32 boards with an external antenna. (Select which antenna you are using in `Definitions.h`)
 
-Here are links to the parts I used.
-- XIAO ESP32C6 - [Seeed](https://www.seeedstudio.com/XIAO-Main-ESP32C6-2354.html), [amazon](https://www.amazon.com/gp/product/B0D2NKVB34)
-  - or generic ESP 32 - [amazon](https://www.amazon.com/gp/product/B0CL5VGC8J)
-- Display - [amazon](https://www.amazon.com/gp/product/B09C5K91H7)
-- MAX3485 - [amazon](https://www.amazon.com/gp/product/B09SYZ98KF)
 
 Device wiring:
 - Display GND -> XIAO ESP32C6 GND (Pin 13)
@@ -202,22 +287,6 @@ Device wiring:
 - Here is the same dashboard when the ESS is in a different dispatch state.  Note: The middle column has more entities showing in that state.
 - The "Electricity Tariff" and "NWS Alerts" are the two entities on this page that don't come from Alpha2MQTT.  I include them here because my automations use these to help control the ESS.
 - You will also note that this dashboard also has views for an "Energy" (almost identical to HA's builtin Energy Dashboard) and "Power".  I won't bore you with pics, but the yaml has all the details.
-### Automation Examples
-- ESS control - First off, I **highly** recommend that you have only ONE system controlling your ESS.  Alpha2MQTT can be used to simply monitor your ESS.  However, if you are using Alpha2MQTT to control your ESS, then be sure no other system is controlling it.  I allow the Alpha cloud to monitor my system, but it does NO control.
-  - This control is a little complex, but not too bad.  In Home Assistant I now shape that control around one dispatch request payload plus the `Dispatch *` readback entities.  Let me try to explain all the parts.
-    - My peak electricity price hours are 4pm to 9pm.  My mid-peak is 3pm to 4pm and 9pm to midnight.  Off-peak is midnight to 3pm.  My tarrif allows me to sell power that I push to the grid for the same price that I would pay for it.
-    - I try to ONLY use battery or solar during peak and mid-peak.
-    - I try to push some saved battery power back to the grid during peak, but only if the SOC is high enough and only when there are no storm alerts. I check, and adjust, each hour during peak.
-    - Even though it costs the same, I prefer to charge using solar rather than using the grid, except when there are storms, and then I charge as soon as the rates are cheap.  A bit before rates get expensive, I fill the battery from the grid in case it isn't full. (It is _almost_ always already full.)
-  - This is all in a single automation named "ESS".
-- Other Device control
-  - You can also use the ESS state to control other devices in Home Assistant.  For example, if Alpha2MQTT detects that the grid has become unavailable, then it turns off my EVSE (car "charger").
-  - I'd love to hear what you are controlling...
-
-### Tips/Hints/Suggestions
-- The AlphaESS battery still benefits from occasionally being brought all the way up so it can balance properly.  Most of the time I run other dispatch modes, but every so often I still make sure the pack reaches full charge.
-- There are several Faults and Warnings entities for each of the system components, and each of them monitors multiple AlphaESS registers.  These entities are simple numbers, but they also have an attribute which provides more detail. Click on the entity, then click Attributes, and you will see which registers are monitored and which bits are set.
-- There is one entity ("**Register Number**") that allows you to view the actual AlphaESS register values.  Enter a register number (in decimal, not hex) in this entity, and you will then see the (formatted) register value displayed in "**Register Value**".  This is only intended for debugging.
 
 ### Other Changes and Enhancements
 - Quite a few new registers have been added.  (See [Specs](#alphaess-specs) above.)
