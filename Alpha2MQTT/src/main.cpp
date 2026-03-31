@@ -4332,10 +4332,11 @@ loadPollingBucketsForPortal(const mqttState *entities,
 				    reason, outBuckets, entityCount, outPollIntervalSeconds, failureKind)) {
 				return false;
 			}
-			g_portalPollingCacheValid = true;
-			g_portalPollingCacheEntityCount = entityCount;
+			const bool trustRecovered = shouldTrustRecoveredPortalPollingConfig(failureKind);
+			g_portalPollingCacheValid = trustRecovered;
+			g_portalPollingCacheEntityCount = trustRecovered ? entityCount : 0;
 			g_portalPollingCacheIntervalSeconds = outPollIntervalSeconds;
-			if (outBuckets != g_portalBucketsScratch) {
+			if (trustRecovered && outBuckets != g_portalBucketsScratch) {
 				memcpy(g_portalBucketsScratch, outBuckets, entityCount * sizeof(BucketId));
 			}
 			return true;

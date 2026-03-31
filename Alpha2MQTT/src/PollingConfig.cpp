@@ -166,6 +166,15 @@ shouldResetPersistedPollingConfig(PollingLoadFailureKind failureKind)
 }
 
 bool
+shouldTrustRecoveredPortalPollingConfig(PollingLoadFailureKind failureKind)
+{
+	// Portal save/clear can only trust recovered defaults after a proven-corrupt
+	// persisted map was replaced. Transient read/heap failures must keep the
+	// cache invalid so the next save cannot overwrite a still-valid Bucket_Map.
+	return shouldResetPersistedPollingConfig(failureKind);
+}
+
+bool
 parseStrictUint32(const char *text, uint32_t maxValue, uint32_t &outValue)
 {
 	if (text == nullptr || text[0] == '\0') {
