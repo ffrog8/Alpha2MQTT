@@ -10593,9 +10593,13 @@ serviceBootstrapPublishPass(void)
 			continue;
 		}
 
-		sendDataFromMqttState(&entity, false, nullptr);
-		attempted++;
-	}
+			// Bootstrap refresh is a bounded best-effort pass. If an entity is still
+			// unreadable here, fall back to its normal bucket cadence instead of
+			// retrying it on every idle loop while MQTT remains connected.
+			sendDataFromMqttState(&entity, false, nullptr);
+			markBootstrapEntityPublished(idx);
+			attempted++;
+		}
 
 	if (scanned >= entityCount) {
 		if (bootstrapPublishComplete(entityCount)) {

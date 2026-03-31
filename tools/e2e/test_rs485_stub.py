@@ -3751,6 +3751,24 @@ def main() -> int:
         if str(core.get("ha_unique_id", "")) == f"A2M-{serial}":
             raise E2EError("device reused prior live serial after offline reboot")
 
+        _assert_eventually(
+            "offline reboot reaches probe backoff window",
+            lambda: (
+                int(_fetch_poll(mqtt, poll_topic).get("rs485_probe_backoff_ms", 0)) >= 5000,
+                f"probe_backoff_ms={_fetch_poll(mqtt, poll_topic).get('rs485_probe_backoff_ms')}",
+            ),
+            timeout_s=60,
+            poll_s=2.0,
+        )
+        reads_before_idle = int(_fetch_stub(mqtt, stub_topic).get("stub_reads", 0))
+        time.sleep(2.0)
+        reads_after_idle = int(_fetch_stub(mqtt, stub_topic).get("stub_reads", 0))
+        if reads_after_idle != reads_before_idle:
+            raise E2EError(
+                f"offline reboot should not keep adding idle bootstrap reads once probe backoff is active: "
+                f"{reads_before_idle}->{reads_after_idle}"
+            )
+
         ensure_stub_online_backend('{"mode":"online"}', label="identity reboot cleanup")
 
     def case_fail_writes_only_dispatch_write_fails() -> None:
