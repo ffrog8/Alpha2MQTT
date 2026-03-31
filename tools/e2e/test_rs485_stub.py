@@ -4243,6 +4243,7 @@ def main() -> int:
             '"probe_success_after_n":0,"strict_unknown":0,"strict":0}',
             label="runtime polling reset baseline",
         )
+        inverter_device_id = _wait_for_inverter_identity()
         base = _resolve_device_http_base(mqtt, device_root)
         config_before = _fetch_config(mqtt, config_topic)
         intervals_before = config_before.get("entity_intervals", {})
@@ -4250,9 +4251,16 @@ def main() -> int:
             raise E2EError(f"config entity_intervals missing or invalid before reset case: {config_before}")
 
         target = "State_of_Charge"
+        hidden_target = "Max_Feedin_Percent"
         default_bucket = _load_entity_default_buckets().get(target, "")
         if not default_bucket:
             raise E2EError(f"missing default bucket for {target}")
+        hidden_default_bucket = _load_entity_default_buckets().get(hidden_target, "")
+        if hidden_default_bucket != "disabled":
+            raise E2EError(
+                f"{hidden_target} expected disabled default, got {hidden_default_bucket!r}"
+            )
+        discovery_topic = f"homeassistant/number/{inverter_device_id}/{hidden_target}/config"
 
         current_bucket = _effective_bucket(intervals_before, target)
         desired_bucket = "ten_sec" if default_bucket != "ten_sec" else "user"
@@ -4263,10 +4271,17 @@ def main() -> int:
 
         wait_polling_config_applied(
             9,
-            {target: desired_bucket},
+            {target: desired_bucket, hidden_target: "one_min"},
             timeout_s=60,
             republish_every_s=5.0,
         )
+        discovery_payload = _fetch_latest_text(
+            mqtt,
+            discovery_topic,
+            label="runtime_polling_reset_discovery_before",
+        )
+        if not discovery_payload.strip():
+            raise E2EError(f"{hidden_target} discovery did not publish after enable")
 
         root_status, _root_body = _http_request_full("GET", base + "/", headers={}, body=b"", timeout_s=20)
         if root_status != 200:
@@ -4308,6 +4323,17 @@ def main() -> int:
             reset_pred,
             timeout_s=60,
             poll_s=3.0,
+        )
+
+        def discovery_clear_pred() -> Tuple[bool, str]:
+            payload = mqtt.latest_payload(discovery_topic)
+            return payload == "", f"payload={payload!r}"
+
+        _assert_eventually(
+            "runtime polling reset clears disabled discovery",
+            discovery_clear_pred,
+            timeout_s=30,
+            poll_s=1.0,
         )
 
     def case_portal_polling_ui() -> None:

@@ -2646,6 +2646,8 @@ resetPollingConfigToDefaults(void)
 	}
 
 	updatePollingLastChange();
+	requestHaDataResend();
+	resendAllData = true;
 	publishPollingConfig();
 	return true;
 }
