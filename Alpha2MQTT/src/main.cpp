@@ -4091,11 +4091,10 @@ static void
 ensurePortalPollingRuntimeReady(void)
 {
 	(void)ensurePortalBucketsScratch();
-	if (currentBootMode == BootMode::ApConfig || currentBootMode == BootMode::WifiConfig) {
-		return;
-	}
 	initMqttEntitiesRtIfNeeded(true);
-	loadPollingConfig();
+	if (currentBootMode != BootMode::ApConfig && currentBootMode != BootMode::WifiConfig) {
+		loadPollingConfig();
+	}
 }
 
 static void
@@ -4999,6 +4998,7 @@ handlePortalPollingReset(WiFiManager &wifiManager)
 		wifiManager.server->send(403, "text/plain", "invalid csrf");
 		return;
 	}
+	ensurePortalPollingRuntimeReady();
 	if (!resetPollingConfigToDefaults()) {
 		wifiManager.server->sendHeader("Location", "/?polling_reset=err");
 		wifiManager.server->send(302, "text/plain", "");
