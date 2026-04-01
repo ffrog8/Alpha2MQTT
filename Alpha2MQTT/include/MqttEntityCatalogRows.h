@@ -153,7 +153,7 @@ MQTT_ENTITY_ROW(entityMaxFeedinPercent, "Max_Feedin_Percent", freqDisabled, true
 
 // Append controller diagnostics after the stable register catalog so legacy
 // compact Bucket_Map indices continue to refer to the long-lived entity set.
-MQTT_ENTITY_ROW(entityRs485Errors, "A2M_RS485_Errors", freqOneMin, false, false, haClassInfo, MqttEntityFamily::Controller, MqttEntityScope::Controller, MqttEntityReadKind::Derived, 0, false)
+MQTT_ENTITY_ROW(entityRs485Errors, "A2M_RS485_Errors", freqOneMin, false, false, haClassCounter, MqttEntityFamily::Controller, MqttEntityScope::Controller, MqttEntityReadKind::Derived, 0, false)
 MQTT_ENTITY_ROW(entityPollingBudgetExceeded, "Polling_Budget_Exceeded", freqTenSec, false, false, haClassBinaryProblem, MqttEntityFamily::Controller, MqttEntityScope::Controller, MqttEntityReadKind::Derived, 0, false)
 MQTT_ENTITY_ROW(entityPollingBudgetOverrunCount, "Polling_Budget_Overrun_Count", freqOneMin, false, false, haClassInfo, MqttEntityFamily::Controller, MqttEntityScope::Controller, MqttEntityReadKind::Derived, 0, false)
 MQTT_ENTITY_ROW(entityPollingBudgetUsedMs10s, "Polling_Budget_Used_ms_10s", freqDisabled, false, false, haClassInfo, MqttEntityFamily::Controller, MqttEntityScope::Controller, MqttEntityReadKind::Derived, 0, false)

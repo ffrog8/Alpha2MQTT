@@ -2608,14 +2608,15 @@ recoverPollingConfigLoadToDefaults(const char *context,
 		return false;
 	}
 	const bool resetPersisted = shouldResetPersistedPollingConfig(failureKind);
-	const bool persisted = !resetPersisted || persistUserPollingConfig(kPollIntervalDefaultSeconds, "");
+	const bool persistedResetOk =
+		!resetPersisted || persistUserPollingConfig(kPollIntervalDefaultSeconds, "");
 #ifdef DEBUG_OVER_SERIAL
 	Serial.printf("%s: recovered polling prefs to defaults reset_persisted=%u persisted=%u\r\n",
 	              (context != nullptr) ? context : "polling load",
 	              resetPersisted ? 1U : 0U,
-	              persisted ? 1U : 0U);
+	              persistedResetOk ? 1U : 0U);
 #endif
-	return true;
+	return shouldAcceptRecoveredPollingConfig(failureKind, persistedResetOk);
 }
 
 static bool
@@ -6521,7 +6522,7 @@ loadPollingConfig(void)
 			return;
 		}
 		recomputeBucketCounts();
-		pollingConfigLoadedFromStorage = true;
+		pollingConfigLoadedFromStorage = shouldMarkRecoveredPollingConfigLoaded(failureKind);
 	};
 	const bool storedBucketMapPresent = preferences.isKey(kPreferenceBucketMap);
 	const size_t bucketMapBufferSize = storedBucketMapPresent
@@ -9796,6 +9797,12 @@ emitEntityDiscoveryPayload(CountedMqttPayload &payload, void *context)
 			 A2M_FMT(", \"device_class\": \"duration\""
 			         ", \"state_class\": \"measurement\""
 			         ", \"unit_of_measurement\": \"s\""
+			         ", \"entity_category\": \"diagnostic\""));
+		break;
+	case homeAssistantClass::haClassCounter:
+		A2M_SNPRINTF(stateAddition, sizeof(stateAddition),
+			 A2M_FMT(", \"state_class\": \"total_increasing\""
+			         ", \"unit_of_measurement\": \"errors\""
 			         ", \"entity_category\": \"diagnostic\""));
 		break;
 	case homeAssistantClass::haClassBox:

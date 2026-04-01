@@ -116,6 +116,14 @@ TEST_CASE("only corrupt persisted bucket maps trigger destructive polling recove
 {
 	CHECK_FALSE(shouldResetPersistedPollingConfig(PollingLoadFailureKind::Transient));
 	CHECK(shouldResetPersistedPollingConfig(PollingLoadFailureKind::PersistedBucketMapCorrupt));
+	CHECK_FALSE(shouldMarkRecoveredPollingConfigLoaded(PollingLoadFailureKind::Transient));
+	CHECK(shouldMarkRecoveredPollingConfigLoaded(PollingLoadFailureKind::PersistedBucketMapCorrupt));
+	CHECK(shouldAcceptRecoveredPollingConfig(PollingLoadFailureKind::Transient, false));
+	CHECK(shouldAcceptRecoveredPollingConfig(PollingLoadFailureKind::Transient, true));
+	CHECK_FALSE(
+		shouldAcceptRecoveredPollingConfig(PollingLoadFailureKind::PersistedBucketMapCorrupt, false));
+	CHECK(
+		shouldAcceptRecoveredPollingConfig(PollingLoadFailureKind::PersistedBucketMapCorrupt, true));
 	CHECK_FALSE(shouldTrustRecoveredPortalPollingConfig(PollingLoadFailureKind::Transient));
 	CHECK(shouldTrustRecoveredPortalPollingConfig(PollingLoadFailureKind::PersistedBucketMapCorrupt));
 }

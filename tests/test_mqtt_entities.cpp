@@ -276,6 +276,7 @@ TEST_CASE("mqtt entities: controller diagnostics include runtime polling signals
 {
 	const mqttState *rs485Err = mqttEntityById(mqttEntityId::entityRs485Errors);
 	REQUIRE(rs485Err != nullptr);
+	CHECK(rs485Err->haClass == homeAssistantClass::haClassCounter);
 	CHECK(rs485Err->family == MqttEntityFamily::Controller);
 	CHECK(rs485Err->scope == MqttEntityScope::Controller);
 	CHECK(rs485Err->updateFreq == mqttUpdateFreq::freqOneMin);

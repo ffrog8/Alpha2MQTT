@@ -166,12 +166,27 @@ shouldResetPersistedPollingConfig(PollingLoadFailureKind failureKind)
 }
 
 bool
+shouldMarkRecoveredPollingConfigLoaded(PollingLoadFailureKind failureKind)
+{
+	// Transient load failures should keep the "loaded" latch clear so later
+	// reconnect/probe paths can retry reading the persisted schedule.
+	return shouldResetPersistedPollingConfig(failureKind);
+}
+
+bool
+shouldAcceptRecoveredPollingConfig(PollingLoadFailureKind failureKind,
+                                   bool persistedResetOk)
+{
+	return !shouldResetPersistedPollingConfig(failureKind) || persistedResetOk;
+}
+
+bool
 shouldTrustRecoveredPortalPollingConfig(PollingLoadFailureKind failureKind)
 {
 	// Portal save/clear can only trust recovered defaults after a proven-corrupt
 	// persisted map was replaced. Transient read/heap failures must keep the
 	// cache invalid so the next save cannot overwrite a still-valid Bucket_Map.
-	return shouldResetPersistedPollingConfig(failureKind);
+	return shouldMarkRecoveredPollingConfigLoaded(failureKind);
 }
 
 bool

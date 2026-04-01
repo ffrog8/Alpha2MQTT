@@ -1345,6 +1345,7 @@ enum homeAssistantClass : uint8_t {
 	haClassPowerFactor,
 	haClassTemp,
 	haClassDuration,
+	haClassCounter,
 	haClassInfo,
 	haClassSelect,
 	haClassBox,
