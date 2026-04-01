@@ -73,6 +73,15 @@ TEST_CASE("portal config: blank wifi passwords require explicit open-network int
 	CHECK_FALSE(portalWifiSaveAllowsBlankPassword("home", "guest", "", false));
 }
 
+TEST_CASE("portal config: ap submit persists safe wifi credentials before connect attempts")
+{
+	CHECK(portalApWifiSaveShouldPersistOnSubmit("", "guest", "secret"));
+	CHECK(portalApWifiSaveShouldPersistOnSubmit("", "guest", ""));
+	CHECK(portalApWifiSaveShouldPersistOnSubmit("home", "home", ""));
+	CHECK_FALSE(portalApWifiSaveShouldPersistOnSubmit("home", "guest", ""));
+	CHECK_FALSE(portalApWifiSaveShouldPersistOnSubmit("", "", "secret"));
+}
+
 TEST_CASE("portal config: menu includes update and no exit")
 {
 	PortalMenu menu = portalMenuDefault();

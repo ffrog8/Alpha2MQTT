@@ -64,6 +64,9 @@ bool portalWifiSaveAllowsBlankPassword(const char *savedSsid,
                                        const char *requestedSsid,
                                        const char *submittedPass,
                                        bool openNetworkRequested);
+bool portalApWifiSaveShouldPersistOnSubmit(const char *savedSsid,
+                                           const char *requestedSsid,
+                                           const char *submittedPass);
 const char *portalMenuPollingHtml(void);
 const char *portalMenuStaHtml(void);
 const char *portalRebootToNormalHtml(void);

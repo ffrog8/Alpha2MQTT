@@ -113,6 +113,7 @@ CASE_ORDER: tuple[str, ...] = (
     "fail_writes_only",
     "dispatch_readback_window",
     "dispatch_readback_timeout_status",
+    "max_feedin_percent_write",
     "fail_for_ms",
     "soc_drift_backend_ready",
     "stub_soc_drift_applies",
@@ -120,6 +121,7 @@ CASE_ORDER: tuple[str, ...] = (
     "soc_drift_e2e",
     "load_power_formula",
     "polling_config",
+    "runtime_polling_reset_without_page",
     "portal_polling_ui",
     "reboot_ap_confirmation",
     "portal_wifi_save_reboot_only",
@@ -804,7 +806,7 @@ def _ensure_runtime_http_from_portal(base: str, timeout_s: int = 45) -> None:
 
     _assert_eventually("portal returns to normal runtime", runtime_ready, timeout_s=timeout_s, poll_s=2.0)
 
-def _assert_portal_root_menu(base: str, timeout_s: int = 20) -> str:
+def _assert_portal_root_menu(base: str, timeout_s: int = 20, required_mode: Optional[str] = None) -> str:
     deadline = time.time() + timeout_s
     last_html = ""
     while time.time() < deadline:
@@ -812,8 +814,17 @@ def _assert_portal_root_menu(base: str, timeout_s: int = 20) -> str:
         if status == 200:
             html = body.decode("utf-8", errors="replace")
             last_html = html
-            required = ("/0wifi", "/config/mqtt", "/config/polling", "/config/update", "/status", "/config/reboot-normal")
-            if all(token in html for token in required):
+            required = (
+                "/0wifi",
+                "/config/mqtt",
+                "/config/polling",
+                "/config/polling/reset",
+                "/config/update",
+                "/status",
+                "/config/reboot-normal",
+            )
+            mode_ok = True if required_mode is None else f'meta name="a2m-mode" content="{required_mode}"' in html
+            if all(token in html for token in required) and mode_ok:
                 return html
         time.sleep(1.0)
     raise E2EError(f"portal root missing actionable menu entries: {last_html[:400]!r}")
@@ -3740,6 +3751,24 @@ def main() -> int:
         if str(core.get("ha_unique_id", "")) == f"A2M-{serial}":
             raise E2EError("device reused prior live serial after offline reboot")
 
+        _assert_eventually(
+            "offline reboot reaches probe backoff window",
+            lambda: (
+                int(_fetch_poll(mqtt, poll_topic).get("rs485_probe_backoff_ms", 0)) >= 5000,
+                f"probe_backoff_ms={_fetch_poll(mqtt, poll_topic).get('rs485_probe_backoff_ms')}",
+            ),
+            timeout_s=60,
+            poll_s=2.0,
+        )
+        reads_before_idle = int(_fetch_stub(mqtt, stub_topic).get("stub_reads", 0))
+        time.sleep(2.0)
+        reads_after_idle = int(_fetch_stub(mqtt, stub_topic).get("stub_reads", 0))
+        if reads_after_idle != reads_before_idle:
+            raise E2EError(
+                f"offline reboot should not keep adding idle bootstrap reads once probe backoff is active: "
+                f"{reads_before_idle}->{reads_after_idle}"
+            )
+
         ensure_stub_online_backend('{"mode":"online"}', label="identity reboot cleanup")
 
     def case_fail_writes_only_dispatch_write_fails() -> None:
@@ -3883,6 +3912,81 @@ def main() -> int:
                 f"readback timeout should still come after one dispatch block write: "
                 f"queued_ms={queued_ms} last_write_ms={last_write_ms} "
                 f"last_reg={last_reg} last_reg_count={last_reg_count}"
+            )
+
+    def case_max_feedin_percent_write() -> None:
+        print("[e2e] case: Max_Feedin_Percent writes only when enabled and confirms readback")
+        ha_unique = _ensure_online_inverter_identity("max feedin baseline")
+        current_config = _fetch_config(mqtt, config_topic)
+        current_poll_interval = int(current_config.get("poll_interval_s", 4) or 4)
+        reg_max_feedin = _discover_register_value("REG_SYSTEM_CONFIG_RW_MAX_FEED_INTO_GRID_PERCENT")
+        command_topic = _command_topic(ha_unique, "Max_Feedin_Percent")
+        state_topic = _state_topic(ha_unique, "Max_Feedin_Percent")
+
+        before_disabled = _fetch_poll(mqtt, poll_topic)
+        writes_before_disabled = int(before_disabled.get("rs485_stub_writes", 0))
+        mqtt.publish(command_topic, "35", retain=False)
+        _sleep_with_mqtt(mqtt, 2.0)
+        after_disabled = _fetch_poll(mqtt, poll_topic)
+        writes_after_disabled = int(after_disabled.get("rs485_stub_writes", 0))
+        if writes_after_disabled != writes_before_disabled:
+            raise E2EError(
+                f"disabled Max_Feedin_Percent should ignore command writes: "
+                f"{writes_before_disabled}->{writes_after_disabled}"
+            )
+
+        wait_polling_config_applied(
+            current_poll_interval,
+            {"Max_Feedin_Percent": "one_min"},
+        )
+        mqtt.subscribe(state_topic, force=True)
+
+        before_enabled = _fetch_poll(mqtt, poll_topic)
+        writes_before_enabled = int(before_enabled.get("rs485_stub_writes", 0))
+        mqtt.publish(command_topic, "35", retain=False)
+
+        _assert_eventually(
+            "Max_Feedin_Percent state publishes confirmed value",
+            lambda: (
+                _fetch_latest_text(mqtt, state_topic, label="max_feedin_state").strip() == "35",
+                f"last={_fetch_latest_text(mqtt, state_topic, label='max_feedin_state').strip()!r}",
+            ),
+            timeout_s=20,
+            poll_s=1.0,
+        )
+
+        def write_pred() -> Tuple[bool, str]:
+            cur = _fetch_poll(mqtt, poll_topic)
+            writes = int(cur.get("rs485_stub_writes", 0))
+            last_reg = int(cur.get("rs485_stub_last_write_reg", 0))
+            last_reg_count = int(cur.get("rs485_stub_last_write_reg_count", 0))
+            detail = (
+                f"writes={writes} last_reg={last_reg} last_reg_count={last_reg_count} "
+                f"baseline_writes={writes_before_enabled}"
+            )
+            return (
+                writes > writes_before_enabled
+                and last_reg == reg_max_feedin
+                and last_reg_count == 1
+            ), detail
+
+        _assert_eventually(
+            "Max_Feedin_Percent uses single-register write",
+            write_pred,
+            timeout_s=20,
+            poll_s=1.0,
+        )
+
+        before_invalid = _fetch_poll(mqtt, poll_topic)
+        writes_before_invalid = int(before_invalid.get("rs485_stub_writes", 0))
+        mqtt.publish(command_topic, "101", retain=False)
+        _sleep_with_mqtt(mqtt, 2.0)
+        after_invalid = _fetch_poll(mqtt, poll_topic)
+        writes_after_invalid = int(after_invalid.get("rs485_stub_writes", 0))
+        if writes_after_invalid != writes_before_invalid:
+            raise E2EError(
+                f"out-of-range Max_Feedin_Percent should not write RS485: "
+                f"{writes_before_invalid}->{writes_after_invalid}"
             )
 
     def case_fail_for_ms_then_recover() -> None:
@@ -4148,6 +4252,108 @@ def main() -> int:
             republish_every_s=5.0,
         )
 
+    def case_runtime_polling_reset_without_page() -> None:
+        print("[e2e] case: runtime root resets polling defaults without loading polling page")
+        ensure_stub_online_backend(
+            '{"mode":"online","fail_n":0,"fail_reads":0,"fail_writes":0,'
+            '"fail_type":0,"fail_every_n":0,"fail_for_ms":0,'
+            '"flap_online_ms":0,"flap_offline_ms":0,'
+            '"probe_success_after_n":0,"strict_unknown":0,"strict":0}',
+            label="runtime polling reset baseline",
+        )
+        inverter_device_id = _wait_for_inverter_identity()
+        base = _resolve_device_http_base(mqtt, device_root)
+        config_before = _fetch_config(mqtt, config_topic)
+        intervals_before = config_before.get("entity_intervals", {})
+        if not isinstance(intervals_before, dict):
+            raise E2EError(f"config entity_intervals missing or invalid before reset case: {config_before}")
+
+        target = "State_of_Charge"
+        hidden_target = "Max_Feedin_Percent"
+        default_bucket = _load_entity_default_buckets().get(target, "")
+        if not default_bucket:
+            raise E2EError(f"missing default bucket for {target}")
+        hidden_default_bucket = _load_entity_default_buckets().get(hidden_target, "")
+        if hidden_default_bucket != "disabled":
+            raise E2EError(
+                f"{hidden_target} expected disabled default, got {hidden_default_bucket!r}"
+            )
+        discovery_topic = f"homeassistant/number/{inverter_device_id}/{hidden_target}/config"
+
+        current_bucket = _effective_bucket(intervals_before, target)
+        desired_bucket = "ten_sec" if default_bucket != "ten_sec" else "user"
+        if current_bucket == desired_bucket:
+            desired_bucket = "one_min" if default_bucket != "one_min" else "five_min"
+        if current_bucket == desired_bucket:
+            raise E2EError(f"unable to select non-default bucket for {target} (current={current_bucket!r})")
+
+        wait_polling_config_applied(
+            9,
+            {target: desired_bucket, hidden_target: "one_min"},
+            timeout_s=60,
+            republish_every_s=5.0,
+        )
+        discovery_payload = _fetch_latest_text(
+            mqtt,
+            discovery_topic,
+            label="runtime_polling_reset_discovery_before",
+        )
+        if not discovery_payload.strip():
+            raise E2EError(f"{hidden_target} discovery did not publish after enable")
+
+        root_status, _root_body = _http_request_full("GET", base + "/", headers={}, body=b"", timeout_s=20)
+        if root_status != 200:
+            raise E2EError(f"runtime root returned unexpected status={root_status}")
+
+        reset_status = _http_post_simple(base + "/config/polling/reset", timeout_s=20)
+        if reset_status not in (200, 303):
+            raise E2EError(f"runtime polling reset returned unexpected status={reset_status}")
+
+        reset_root_status, reset_root_body = _http_request_full(
+            "GET",
+            base + "/?polling_reset=1",
+            headers={},
+            body=b"",
+            timeout_s=20,
+        )
+        if reset_root_status != 200:
+            raise E2EError(f"runtime root after polling reset returned unexpected status={reset_root_status}")
+        if "Polling reset to defaults." not in reset_root_body.decode("utf-8", errors="replace"):
+            raise E2EError("runtime root did not show polling reset confirmation")
+
+        def reset_pred() -> Tuple[bool, str]:
+            cfg = _fetch_config(mqtt, config_topic)
+            poll = _fetch_poll(mqtt, poll_topic)
+            intervals = cfg.get("entity_intervals", {})
+            if not isinstance(intervals, dict):
+                return False, f"entity_intervals invalid: {cfg!r}"
+            cfg_interval = int(cfg.get("poll_interval_s", 0) or 0)
+            runtime_interval = int(poll.get("poll_interval_s", 0) or 0)
+            actual_bucket = _effective_bucket(intervals, target)
+            detail = (
+                f"cfg_poll_interval_s={cfg_interval} runtime_poll_interval_s={runtime_interval} "
+                f"{target}={actual_bucket!r}"
+            )
+            return (cfg_interval == 60 and runtime_interval == 60 and actual_bucket == default_bucket), detail
+
+        _assert_eventually(
+            "runtime polling reset restores default interval and bucket",
+            reset_pred,
+            timeout_s=60,
+            poll_s=3.0,
+        )
+
+        def discovery_clear_pred() -> Tuple[bool, str]:
+            payload = mqtt.latest_payload(discovery_topic)
+            return payload == "", f"payload={payload!r}"
+
+        _assert_eventually(
+            "runtime polling reset clears disabled discovery",
+            discovery_clear_pred,
+            timeout_s=30,
+            poll_s=1.0,
+        )
+
     def case_portal_polling_ui() -> None:
         print("[e2e] case: portal UI updates polling schedule (lightweight paged portal)")
         portal_stub_baseline = (
@@ -4176,13 +4382,15 @@ def main() -> int:
         # Portal is STA-only and should come back on the same IP, but runtime
         # can still answer briefly during the deferred reboot window. Wait for
         # the actual portal menu, not just any 200 on `/`.
-        _assert_portal_root_menu(base, timeout_s=40)
+        _assert_portal_root_menu(base, timeout_s=40, required_mode="wifi")
 
         polling_path, html = _load_polling_page_via_menu(base)
         if not polling_path.startswith("/config/polling"):
             raise E2EError(f"unexpected polling menu path: {polling_path!r}")
         if "poll_interval_s" not in html or "/config/polling/save" not in html:
             raise E2EError("portal polling page HTML missing expected form fields")
+        if "/config/polling/reset" not in html or "Reset Polling Defaults" not in html:
+            raise E2EError("portal polling page missing reset-to-defaults action")
         if "/config/polling/clear" not in html or "Disable All Entities" not in html:
             raise E2EError("portal polling page missing clear-all action")
         if "<h2>Polling schedule</h2>" not in html or "/config/reboot-normal" not in html:
@@ -4330,7 +4538,7 @@ def main() -> int:
         # Re-enter portal and verify values are restored in the UI after reboot.
         print(f"[e2e] rebooting into wifi portal via {reboot_url} (persistence check)")
         _http_post_simple(reboot_url, timeout_s=10)
-        _assert_portal_root_menu(base, timeout_s=40)
+        _assert_portal_root_menu(base, timeout_s=40, required_mode="wifi")
 
         polling_path2, html2 = _load_polling_page_via_menu(base)
         if not polling_path2.startswith("/config/polling"):
@@ -4481,7 +4689,7 @@ def main() -> int:
         print(f"[e2e] rebooting into wifi portal via {reboot_url} (wifi save-only check)")
         _http_post_simple(base + reboot_url, timeout_s=10)
         _wait_for_http_ok(base + "/", timeout_s=40)
-        _assert_portal_root_menu(base, timeout_s=20)
+        _assert_portal_root_menu(base, timeout_s=20, required_mode="wifi")
 
         wifi_action, wifi_html = _load_wifi_page(base)
         ssid = _extract_input_value(wifi_html, "s")
@@ -4568,6 +4776,7 @@ def main() -> int:
         ("fail_writes_only", case_fail_writes_only_dispatch_write_fails),
         ("dispatch_readback_window", case_dispatch_readback_window_tolerates_transient_read_failures),
         ("dispatch_readback_timeout_status", case_dispatch_readback_timeout_status),
+        ("max_feedin_percent_write", case_max_feedin_percent_write),
         ("fail_for_ms", case_fail_for_ms_then_recover),
         ("soc_drift_backend_ready", case_soc_drift_backend_ready),
         ("stub_soc_drift_applies", case_stub_soc_drift_applies),
@@ -4575,6 +4784,7 @@ def main() -> int:
         ("soc_drift_e2e", case_soc_drift_e2e),
         ("load_power_formula", case_load_power_snapshot_formula),
         ("polling_config", case_polling_config_persistence),
+        ("runtime_polling_reset_without_page", case_runtime_polling_reset_without_page),
         ("portal_polling_ui", case_portal_polling_ui),
         ("reboot_ap_confirmation", case_reboot_ap_confirmation),
         ("portal_wifi_save_reboot_only", case_portal_wifi_save_reboot_only),

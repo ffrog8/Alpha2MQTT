@@ -238,6 +238,26 @@ portalWifiSaveAllowsBlankPassword(const char *savedSsid,
 	return portalWifiSaveKeepsExistingPassword(savedSsid, requestedSsid, submittedPass, openNetworkRequested);
 }
 
+bool
+portalApWifiSaveShouldPersistOnSubmit(const char *savedSsid,
+                                      const char *requestedSsid,
+                                      const char *submittedPass)
+{
+	if (requestedSsid == nullptr || requestedSsid[0] == '\0') {
+		return false;
+	}
+	if (submittedPass != nullptr && submittedPass[0] != '\0') {
+		return true;
+	}
+	if (savedSsid == nullptr || savedSsid[0] == '\0') {
+		return true;
+	}
+	// AP mode does not expose the STA portal's explicit "open network" toggle.
+	// Persist blank passwords immediately only when there is no saved WiFi yet,
+	// or when a same-SSID blank submit means "keep the existing password".
+	return portalWifiSaveKeepsExistingPassword(savedSsid, requestedSsid, submittedPass, false);
+}
+
 const char *
 portalMenuPollingHtml(void)
 {

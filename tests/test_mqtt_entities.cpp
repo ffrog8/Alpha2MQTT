@@ -269,12 +269,14 @@ TEST_CASE("mqtt entities: legacy-compatible direct readbacks are exposed as regi
 	CHECK(mqttEntityNameEquals(maxFeedin, "Max_Feedin_Percent"));
 	CHECK(maxFeedin->haClass == homeAssistantClass::haClassNumber);
 	CHECK(maxFeedin->readKey == REG_SYSTEM_CONFIG_RW_MAX_FEED_INTO_GRID_PERCENT);
+	CHECK(maxFeedin->subscribe);
 }
 
 TEST_CASE("mqtt entities: controller diagnostics include runtime polling signals")
 {
 	const mqttState *rs485Err = mqttEntityById(mqttEntityId::entityRs485Errors);
 	REQUIRE(rs485Err != nullptr);
+	CHECK(rs485Err->haClass == homeAssistantClass::haClassCounter);
 	CHECK(rs485Err->family == MqttEntityFamily::Controller);
 	CHECK(rs485Err->scope == MqttEntityScope::Controller);
 	CHECK(rs485Err->updateFreq == mqttUpdateFreq::freqOneMin);
@@ -348,6 +350,30 @@ TEST_CASE("mqtt entities: freqNever defaults stay discoverable without joining p
 
 	CHECK(mqttEntityBucketByIndex(idx) == BucketId::Disabled);
 	CHECK(mqttEntityEffectiveFreqByIndex(idx) == mqttUpdateFreq::freqNever);
+}
+
+TEST_CASE("mqtt entities: Max_Feedin_Percent stays disabled until bucket-enabled")
+{
+	initMqttEntitiesRtIfNeeded(true);
+	BucketId buckets[kMqttEntityDescriptorCount]{};
+	REQUIRE(mqttEntityCopyBuckets(buckets, kMqttEntityDescriptorCount));
+
+	const mqttState *maxFeedin = mqttEntityById(mqttEntityId::entityMaxFeedinPercent);
+	REQUIRE(maxFeedin != nullptr);
+
+	const size_t idx = static_cast<size_t>(maxFeedin - mqttEntitiesDesc());
+	REQUIRE(idx < kMqttEntityDescriptorCount);
+
+	CHECK(mqttEntityBucketByIndex(idx) == BucketId::Disabled);
+	CHECK(mqttEntityEffectiveFreqByIndex(idx) == mqttUpdateFreq::freqDisabled);
+
+	buckets[idx] = BucketId::OneMin;
+	REQUIRE(mqttEntityApplyBuckets(buckets, kMqttEntityDescriptorCount));
+	CHECK(mqttEntityEffectiveFreqByIndex(idx) == mqttUpdateFreq::freqOneMin);
+
+	buckets[idx] = BucketId::Disabled;
+	REQUIRE(mqttEntityApplyBuckets(buckets, kMqttEntityDescriptorCount));
+	CHECK(mqttEntityEffectiveFreqByIndex(idx) == mqttUpdateFreq::freqDisabled);
 }
 
 TEST_CASE("mqtt entities: freqNever defaults can still be overridden into a real poll bucket")

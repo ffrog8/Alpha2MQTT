@@ -112,6 +112,22 @@ TEST_CASE("reconnect path reloads persisted polling config only until runtime is
 	CHECK_FALSE(shouldReloadPollingConfigFromStorage(true, true));
 }
 
+TEST_CASE("only corrupt persisted bucket maps trigger destructive polling recovery")
+{
+	CHECK_FALSE(shouldResetPersistedPollingConfig(PollingLoadFailureKind::Transient));
+	CHECK(shouldResetPersistedPollingConfig(PollingLoadFailureKind::PersistedBucketMapCorrupt));
+	CHECK_FALSE(shouldMarkRecoveredPollingConfigLoaded(PollingLoadFailureKind::Transient));
+	CHECK(shouldMarkRecoveredPollingConfigLoaded(PollingLoadFailureKind::PersistedBucketMapCorrupt));
+	CHECK(shouldAcceptRecoveredPollingConfig(PollingLoadFailureKind::Transient, false));
+	CHECK(shouldAcceptRecoveredPollingConfig(PollingLoadFailureKind::Transient, true));
+	CHECK_FALSE(
+		shouldAcceptRecoveredPollingConfig(PollingLoadFailureKind::PersistedBucketMapCorrupt, false));
+	CHECK(
+		shouldAcceptRecoveredPollingConfig(PollingLoadFailureKind::PersistedBucketMapCorrupt, true));
+	CHECK_FALSE(shouldTrustRecoveredPortalPollingConfig(PollingLoadFailureKind::Transient));
+	CHECK(shouldTrustRecoveredPortalPollingConfig(PollingLoadFailureKind::PersistedBucketMapCorrupt));
+}
+
 TEST_CASE("strict uint32 parser rejects blank and signed polling intervals")
 {
 	uint32_t value = 0;

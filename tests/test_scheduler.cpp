@@ -29,6 +29,18 @@ TEST_CASE("scheduler pause and resume resets baseline")
 	CHECK(shouldRun(550u, last, interval));
 }
 
+TEST_CASE("scheduler bootstrap publish eligibility skips immediate and disabled buckets")
+{
+	CHECK_FALSE(shouldBootstrapPublishEntity(mqttUpdateFreq::freqTenSec));
+	CHECK(shouldBootstrapPublishEntity(mqttUpdateFreq::freqOneMin));
+	CHECK(shouldBootstrapPublishEntity(mqttUpdateFreq::freqFiveMin));
+	CHECK(shouldBootstrapPublishEntity(mqttUpdateFreq::freqOneHour));
+	CHECK(shouldBootstrapPublishEntity(mqttUpdateFreq::freqOneDay));
+	CHECK(shouldBootstrapPublishEntity(mqttUpdateFreq::freqUser));
+	CHECK_FALSE(shouldBootstrapPublishEntity(mqttUpdateFreq::freqNever));
+	CHECK_FALSE(shouldBootstrapPublishEntity(mqttUpdateFreq::freqDisabled));
+}
+
 TEST_CASE("scheduler timedOut uses wraparound")
 {
 	uint32_t start = 0xFFFFFF00u;

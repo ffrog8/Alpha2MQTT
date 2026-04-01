@@ -10,10 +10,20 @@
 #include "BucketScheduler.h"
 #include "MqttEntities.h"
 
+enum class PollingLoadFailureKind {
+	Transient,
+	PersistedBucketMapCorrupt,
+};
+
 BucketId bucketIdFromLegacyFreq(int storedValue);
 bool isValidMqttUpdateFreq(int value);
 bool bucketMapUsesDescriptorIndices(const char *map);
 bool shouldReloadPollingConfigFromStorage(bool pendingConfigSet, bool configLoaded);
+bool shouldResetPersistedPollingConfig(PollingLoadFailureKind failureKind);
+bool shouldMarkRecoveredPollingConfigLoaded(PollingLoadFailureKind failureKind);
+bool shouldAcceptRecoveredPollingConfig(PollingLoadFailureKind failureKind,
+                                        bool persistedResetOk);
+bool shouldTrustRecoveredPortalPollingConfig(PollingLoadFailureKind failureKind);
 bool parseStrictUint32(const char *text, uint32_t maxValue, uint32_t &outValue);
 bool isDisableAllBucketMap(const char *map);
 bool copyDisableAllBucketMap(char *out, size_t outSize);

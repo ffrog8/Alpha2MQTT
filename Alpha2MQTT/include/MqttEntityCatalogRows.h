@@ -149,11 +149,11 @@ MQTT_ENTITY_ROW(entityDispatchMode, "Dispatch_Mode", freqDisabled, false, true, 
 MQTT_ENTITY_ROW(entityDispatchPower, "Dispatch_Power", freqDisabled, false, true, haClassPower, MqttEntityFamily::System, MqttEntityScope::Inverter, MqttEntityReadKind::Register, REG_DISPATCH_RW_ACTIVE_POWER_1, false)
 MQTT_ENTITY_ROW(entityDispatchSoc, "Dispatch_SOC", freqDisabled, false, true, haClassBattery, MqttEntityFamily::System, MqttEntityScope::Inverter, MqttEntityReadKind::Register, REG_DISPATCH_RW_DISPATCH_SOC, false)
 MQTT_ENTITY_ROW(entityDispatchTime, "Dispatch_Time", freqDisabled, false, true, haClassDuration, MqttEntityFamily::System, MqttEntityScope::Inverter, MqttEntityReadKind::Register, REG_DISPATCH_RW_DISPATCH_TIME_1, false)
-MQTT_ENTITY_ROW(entityMaxFeedinPercent, "Max_Feedin_Percent", freqDisabled, false, true, haClassNumber, MqttEntityFamily::System, MqttEntityScope::Inverter, MqttEntityReadKind::Register, REG_SYSTEM_CONFIG_RW_MAX_FEED_INTO_GRID_PERCENT, false)
+MQTT_ENTITY_ROW(entityMaxFeedinPercent, "Max_Feedin_Percent", freqDisabled, true, true, haClassNumber, MqttEntityFamily::System, MqttEntityScope::Inverter, MqttEntityReadKind::Register, REG_SYSTEM_CONFIG_RW_MAX_FEED_INTO_GRID_PERCENT, false)
 
 // Append controller diagnostics after the stable register catalog so legacy
 // compact Bucket_Map indices continue to refer to the long-lived entity set.
-MQTT_ENTITY_ROW(entityRs485Errors, "A2M_RS485_Errors", freqOneMin, false, false, haClassInfo, MqttEntityFamily::Controller, MqttEntityScope::Controller, MqttEntityReadKind::Derived, 0, false)
+MQTT_ENTITY_ROW(entityRs485Errors, "A2M_RS485_Errors", freqOneMin, false, false, haClassCounter, MqttEntityFamily::Controller, MqttEntityScope::Controller, MqttEntityReadKind::Derived, 0, false)
 MQTT_ENTITY_ROW(entityPollingBudgetExceeded, "Polling_Budget_Exceeded", freqTenSec, false, false, haClassBinaryProblem, MqttEntityFamily::Controller, MqttEntityScope::Controller, MqttEntityReadKind::Derived, 0, false)
 MQTT_ENTITY_ROW(entityPollingBudgetOverrunCount, "Polling_Budget_Overrun_Count", freqOneMin, false, false, haClassInfo, MqttEntityFamily::Controller, MqttEntityScope::Controller, MqttEntityReadKind::Derived, 0, false)
 MQTT_ENTITY_ROW(entityPollingBudgetUsedMs10s, "Polling_Budget_Used_ms_10s", freqDisabled, false, false, haClassInfo, MqttEntityFamily::Controller, MqttEntityScope::Controller, MqttEntityReadKind::Derived, 0, false)

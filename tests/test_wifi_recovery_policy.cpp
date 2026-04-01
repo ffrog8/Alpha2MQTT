@@ -52,6 +52,13 @@ TEST_CASE("runtime invalid wifi failure only escalates normal mode with stored c
 		BootMode::Normal, true, WifiFailureClass::Unknown));
 }
 
+TEST_CASE("sta portal only falls back to AP on invalid saved wifi")
+{
+	CHECK(shouldRebootApAfterStaPortalConnectFailure(true, WifiFailureClass::InvalidConfig));
+	CHECK_FALSE(shouldRebootApAfterStaPortalConnectFailure(true, WifiFailureClass::Unknown));
+	CHECK_FALSE(shouldRebootApAfterStaPortalConnectFailure(false, WifiFailureClass::InvalidConfig));
+}
+
 TEST_CASE("AP idle timeout only reboots to normal when wifi exists")
 {
 	const WifiRecoveryTiming timing = wifiRecoveryTiming();

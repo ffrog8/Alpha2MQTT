@@ -34,4 +34,6 @@ bool shouldRebootApOnInitialWifiFailure(BootMode currentMode, WifiFailureClass f
 bool shouldRebootApOnRuntimeWifiFailure(BootMode currentMode,
                                         bool hasStoredWifiCredentials,
                                         WifiFailureClass failureClass);
+bool shouldRebootApAfterStaPortalConnectFailure(bool hasStoredWifiCredentials,
+                                                WifiFailureClass failureClass);
 bool shouldRebootNormalAfterApIdle(bool hasStoredWifiCredentials, uint32_t idleMs);
