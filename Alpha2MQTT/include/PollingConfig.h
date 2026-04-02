@@ -69,6 +69,24 @@ bool validatePollingConfigEntries(const char *payload,
                                   char *valueScratch,
                                   size_t valueScratchSize);
 
+// Build a compact polling-profile payload suitable for portal export/import.
+// The payload is intentionally small enough to fit within the existing
+// polling-config request envelope on ESP8266.
+bool buildPollingProfilePayload(const char *pollIntervalS,
+                                const char *bucketMap,
+                                char *out,
+                                size_t outSize);
+
+// Parse and validate a polling-profile payload. Unknown keys are ignored so
+// future profile exports can remain backward-compatible.
+bool parsePollingProfilePayload(const char *payload,
+                                char *valueScratch,
+                                size_t valueScratchSize,
+                                char *pollIntervalOut,
+                                size_t pollIntervalOutSize,
+                                char *bucketMapOut,
+                                size_t bucketMapOutSize);
+
 // Build a JSON payload compatible with MQTT/config/set from optional polling
 // parameters submitted by portal handlers.
 bool buildPollingConfigSetPayload(const char *pollIntervalS,

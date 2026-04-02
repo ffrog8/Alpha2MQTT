@@ -2,6 +2,7 @@
 // Responsibilities: Parse stored bucket mappings, normalize override strings,
 // and keep the persisted representation compact as the catalog grows.
 #include "../include/PollingConfig.h"
+#include "../include/ConfigCodec.h"
 
 #include <cerrno>
 #include <cctype>
@@ -499,6 +500,132 @@ validatePollingConfigEntries(const char *payload, char *valueScratch, size_t val
 	                                 valueScratchSize,
 	                                 validatePollingConfigEntry,
 	                                 nullptr);
+}
+
+bool
+buildPollingProfilePayload(const char *pollIntervalS,
+                           const char *bucketMap,
+                           char *out,
+                           size_t outSize)
+{
+	if (out == nullptr || outSize == 0 || pollIntervalS == nullptr || pollIntervalS[0] == '\0') {
+		return false;
+	}
+
+	const char *mapValue = (bucketMap != nullptr) ? bucketMap : "";
+	const int written = snprintf(out,
+	                             outSize,
+	                             "{\"schema\":1,\"kind\":\"polling_profile\",\"poll_interval_s\":\"%s\",\"bucket_map\":\"%s\"}",
+	                             pollIntervalS,
+	                             mapValue);
+	if (written < 0) {
+		return false;
+	}
+	return static_cast<size_t>(written) < outSize;
+}
+
+namespace {
+struct PollingProfileParseContext {
+	char *pollIntervalOut = nullptr;
+	size_t pollIntervalOutSize = 0;
+	char *bucketMapOut = nullptr;
+	size_t bucketMapOutSize = 0;
+	bool sawSchema = false;
+	bool sawKind = false;
+	bool sawPollInterval = false;
+	uint32_t parsedSchema = 0;
+};
+
+static bool
+capturePollingProfileEntry(const char *key, const char *value, void *context)
+{
+	auto &ctx = *static_cast<PollingProfileParseContext *>(context);
+	if (key == nullptr || value == nullptr) {
+		return false;
+	}
+
+	if (strcmp(key, "schema") == 0) {
+		uint32_t schema = 0;
+		if (!parseStrictUint32(value, 255, schema)) {
+			return false;
+		}
+		ctx.sawSchema = true;
+		ctx.parsedSchema = schema;
+		return true;
+	}
+
+	if (strcmp(key, "kind") == 0) {
+		if (strcmp(value, "polling_profile") != 0) {
+			return false;
+		}
+		ctx.sawKind = true;
+		return true;
+	}
+
+	if (strcmp(key, "poll_interval_s") == 0) {
+		uint32_t parsedInterval = 0;
+		if (!parseStrictUint32(value, kPollIntervalMaxSeconds, parsedInterval)) {
+			return false;
+		}
+		if (ctx.pollIntervalOut == nullptr || ctx.pollIntervalOutSize == 0 ||
+		    !copyLengthDelimitedString(value, strlen(value), ctx.pollIntervalOut, ctx.pollIntervalOutSize)) {
+			return false;
+		}
+		ctx.sawPollInterval = true;
+		return true;
+	}
+
+	if (strcmp(key, "bucket_map") == 0) {
+		if (ctx.bucketMapOut == nullptr || ctx.bucketMapOutSize == 0) {
+			return false;
+		}
+		if (value[0] == '\0') {
+			ctx.bucketMapOut[0] = '\0';
+			return true;
+		}
+		if (!copyLengthDelimitedString(value, strlen(value), ctx.bucketMapOut, ctx.bucketMapOutSize)) {
+			return false;
+		}
+		return true;
+	}
+
+	return true;
+}
+} // namespace
+
+bool
+parsePollingProfilePayload(const char *payload,
+                           char *valueScratch,
+                           size_t valueScratchSize,
+                           char *pollIntervalOut,
+                           size_t pollIntervalOutSize,
+                           char *bucketMapOut,
+                           size_t bucketMapOutSize)
+{
+	if (payload == nullptr || valueScratch == nullptr || valueScratchSize == 0 ||
+	    pollIntervalOut == nullptr || pollIntervalOutSize == 0 ||
+	    bucketMapOut == nullptr || bucketMapOutSize == 0) {
+		return false;
+	}
+
+	pollIntervalOut[0] = '\0';
+	bucketMapOut[0] = '\0';
+
+	PollingProfileParseContext ctx{};
+	ctx.pollIntervalOut = pollIntervalOut;
+	ctx.pollIntervalOutSize = pollIntervalOutSize;
+	ctx.bucketMapOut = bucketMapOut;
+	ctx.bucketMapOutSize = bucketMapOutSize;
+
+	if (!visitPollingConfigEntries(payload,
+	                               valueScratch,
+	                               valueScratchSize,
+	                               capturePollingProfileEntry,
+	                               &ctx)) {
+		return false;
+	}
+
+	return ctx.sawSchema && ctx.parsedSchema == 1 && ctx.sawKind && ctx.sawPollInterval;
 }
 
 bool

@@ -215,6 +215,93 @@ TEST_CASE("polling-set payload builder emits complete/partial JSON")
 	CHECK(std::string(out) == "{\"bucket_map\":\"Dispatch_Mode=one_min;\"}");
 }
 
+TEST_CASE("polling profile payload round-trips compact polling config")
+{
+	char profile[256];
+	char scratch[256];
+	char pollInterval[16];
+	char bucketMap[128];
+
+	CHECK(buildPollingProfilePayload("45", "Dispatch_Mode=one_min;", profile, sizeof(profile)));
+	CHECK(std::string(profile) ==
+	      "{\"schema\":1,\"kind\":\"polling_profile\",\"poll_interval_s\":\"45\",\"bucket_map\":\"Dispatch_Mode=one_min;\"}");
+	CHECK(parsePollingProfilePayload(profile,
+	                                scratch,
+	                                sizeof(scratch),
+	                                pollInterval,
+	                                sizeof(pollInterval),
+	                                bucketMap,
+	                                sizeof(bucketMap)));
+	CHECK(std::string(pollInterval) == "45");
+	CHECK(std::string(bucketMap) == "Dispatch_Mode=one_min;");
+}
+
+TEST_CASE("polling profile payload allows empty bucket map")
+{
+	char profile[128];
+	char scratch[128];
+	char pollInterval[16];
+	char bucketMap[16];
+
+	CHECK(buildPollingProfilePayload("60", "", profile, sizeof(profile)));
+	CHECK(parsePollingProfilePayload(profile,
+	                                scratch,
+	                                sizeof(scratch),
+	                                pollInterval,
+	                                sizeof(pollInterval),
+	                                bucketMap,
+	                                sizeof(bucketMap)));
+	CHECK(std::string(pollInterval) == "60");
+	CHECK(std::string(bucketMap).empty());
+}
+
+TEST_CASE("polling profile payload ignores unknown keys")
+{
+	char scratch[256];
+	char pollInterval[16];
+	char bucketMap[128];
+
+	CHECK(parsePollingProfilePayload(
+		"{\"schema\":1,\"kind\":\"polling_profile\",\"poll_interval_s\":\"30\",\"bucket_map\":\"Load_Power=user;\",\"extra\":\"ignored\"}",
+		scratch,
+		sizeof(scratch),
+		pollInterval,
+		sizeof(pollInterval),
+		bucketMap,
+		sizeof(bucketMap)));
+	CHECK(std::string(pollInterval) == "30");
+	CHECK(std::string(bucketMap) == "Load_Power=user;");
+}
+
+TEST_CASE("polling profile payload rejects wrong schema kind and interval")
+{
+	char scratch[256];
+	char pollInterval[16];
+	char bucketMap[128];
+
+	CHECK_FALSE(parsePollingProfilePayload("{\"schema\":2,\"kind\":\"polling_profile\",\"poll_interval_s\":\"45\"}",
+	                                      scratch,
+	                                      sizeof(scratch),
+	                                      pollInterval,
+	                                      sizeof(pollInterval),
+	                                      bucketMap,
+	                                      sizeof(bucketMap)));
+	CHECK_FALSE(parsePollingProfilePayload("{\"schema\":1,\"kind\":\"wrong\",\"poll_interval_s\":\"45\"}",
+	                                      scratch,
+	                                      sizeof(scratch),
+	                                      pollInterval,
+	                                      sizeof(pollInterval),
+	                                      bucketMap,
+	                                      sizeof(bucketMap)));
+	CHECK_FALSE(parsePollingProfilePayload("{\"schema\":1,\"kind\":\"polling_profile\",\"poll_interval_s\":\"999\"}",
+	                                      scratch,
+	                                      sizeof(scratch),
+	                                      pollInterval,
+	                                      sizeof(pollInterval),
+	                                      bucketMap,
+	                                      sizeof(bucketMap)));
+}
+
 TEST_CASE("polling-set payload builder handles no-op values")
 {
 	char out[32];
