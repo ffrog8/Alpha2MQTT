@@ -1295,7 +1295,18 @@ def _fetch_live_json(mqtt: MqttClient, topic: str, label: str, *, timeout_s: int
 def _fetch_poll(mqtt: MqttClient, topic: str) -> dict[str, Any]:
     return _fetch_latest_json(mqtt, topic, label="poll")
 
+
 def _parse_bucket_map_assignments(raw: str) -> dict[str, str]:
+    alias_map = {
+        "10s": "ten_sec",
+        "1m": "one_min",
+        "5m": "five_min",
+        "1h": "one_hour",
+        "1d": "one_day",
+        "usr": "user",
+        "off": "disabled",
+    }
+    id_to_name = _load_entity_id_to_name()
     intervals: dict[str, str] = {}
     for token in raw.split(";"):
         token = token.strip()
@@ -1303,12 +1314,55 @@ def _parse_bucket_map_assignments(raw: str) -> dict[str, str]:
             continue
         key, value = token.split("=", 1)
         key = key.strip()
-        value = value.strip()
+        if key.startswith("@"):
+            key = id_to_name.get(key[1:], key)
+        value = alias_map.get(value.strip(), value.strip())
         if key and value:
             intervals[key] = value
     return intervals
 
 _ENTITY_DEFAULT_BUCKETS_CACHE: Optional[dict[str, str]] = None
+_ENTITY_ID_TO_NAME_CACHE: Optional[dict[str, str]] = None
+
+
+def _load_entity_id_to_name() -> dict[str, str]:
+    global _ENTITY_ID_TO_NAME_CACHE
+    if _ENTITY_ID_TO_NAME_CACHE is not None:
+        return _ENTITY_ID_TO_NAME_CACHE
+
+    rows_path = _repo_root() / "Alpha2MQTT" / "include" / "MqttEntityCatalogRows.h"
+    text = rows_path.read_text(encoding="utf-8")
+    row_re = re.compile(
+        r'MQTT_ENTITY_ROW\([^,]+,\s*"([^"]+)",\s*([A-Za-z0-9_]+),',
+        flags=re.MULTILINE,
+    )
+    active_stack = [True]
+    entity_id = 0
+    id_to_name: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("#ifdef "):
+            active_stack.append(False)
+            continue
+        if line.startswith("#ifndef "):
+            active_stack.append(True)
+            continue
+        if line.startswith("#endif"):
+            if len(active_stack) > 1:
+                active_stack.pop()
+            continue
+        if not all(active_stack):
+            continue
+        match = row_re.match(line)
+        if not match:
+            continue
+        entity_name, _freq_name = match.groups()
+        id_to_name[str(entity_id)] = entity_name
+        entity_id += 1
+
+    _ENTITY_ID_TO_NAME_CACHE = id_to_name
+    return id_to_name
+
 
 def _load_entity_default_buckets() -> dict[str, str]:
     global _ENTITY_DEFAULT_BUCKETS_CACHE
@@ -4989,6 +5043,7 @@ def main() -> int:
             raise E2EError(f"baseline polling profile export metadata invalid: {baseline_export}")
         original_interval = int(baseline_export.get("poll_interval_s", 0) or 0)
         original_export_map = str(baseline_export.get("bucket_map", ""))
+        original_export_intervals = _parse_bucket_map_assignments(original_export_map)
         if int(config_before.get("poll_interval_s", 0) or 0) != original_interval:
             raise E2EError(f"baseline polling profile export poll interval drifted: {baseline_export}")
 
@@ -5026,6 +5081,10 @@ def main() -> int:
         original_clear = _effective_bucket(intervals_before, target_clear)
         original_register_number = _effective_bucket(intervals_before, "Register_Number")
         original_register_value = _effective_bucket(intervals_before, "Register_Value")
+        if original_export_intervals.get(target_keep) != original_keep:
+            raise E2EError(f"baseline polling profile export missing full {target_keep} assignment: {baseline_export}")
+        if original_export_intervals.get(target_clear) != original_clear:
+            raise E2EError(f"baseline polling profile export missing full {target_clear} assignment: {baseline_export}")
 
         def pick_alt_bucket(*excluded: str) -> str:
             for candidate in ("user", "ten_sec", "five_min", "one_hour", "one_day", "disabled"):
@@ -5075,10 +5134,15 @@ def main() -> int:
         if exported_profile.get("schema") != 1 or exported_profile.get("kind") != "polling_profile":
             raise E2EError(f"polling profile export metadata invalid: {exported_profile}")
         exported_map = str(exported_profile.get("bucket_map", ""))
-        if f"{target_keep}={keep_override};" not in exported_map:
+        exported_intervals = _parse_bucket_map_assignments(exported_map)
+        if exported_intervals.get(target_keep) != keep_override:
             raise E2EError(f"exported profile missing {target_keep} override: {exported_profile}")
-        if f"{target_clear}={clear_override};" not in exported_map:
+        if exported_intervals.get(target_clear) != clear_override:
             raise E2EError(f"exported profile missing {target_clear} override: {exported_profile}")
+        if exported_intervals.get("Register_Number") != original_register_number:
+            raise E2EError(f"exported profile missing full Register_Number assignment: {exported_profile}")
+        if exported_intervals.get("Register_Value") != original_register_value:
+            raise E2EError(f"exported profile missing full Register_Value assignment: {exported_profile}")
 
         import_status, import_body = _http_request_full(
             "GET",
@@ -5212,10 +5276,11 @@ def main() -> int:
         if str(exported_modified.get("poll_interval_s", "")) != str(modified_interval):
             raise E2EError(f"polling profile export did not update poll_interval_s: {exported_modified}")
         exported_modified_map = str(exported_modified.get("bucket_map", ""))
-        if f"{target_keep}={modified_override};" not in exported_modified_map:
+        exported_modified_intervals = _parse_bucket_map_assignments(exported_modified_map)
+        if exported_modified_intervals.get(target_keep) != modified_override:
             raise E2EError(f"polling profile export did not replace bucket map: {exported_modified}")
-        if f"{target_clear}={clear_override};" in exported_modified_map:
-            raise E2EError(f"polling profile export retained cleared override: {exported_modified}")
+        if exported_modified_intervals.get(target_clear) != target_clear_default:
+            raise E2EError(f"polling profile export did not include restored default assignment: {exported_modified}")
 
         reboot_status, reboot_body = _http_request("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
         if reboot_status != 200:

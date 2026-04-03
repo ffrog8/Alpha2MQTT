@@ -776,6 +776,7 @@ static void handlePortalUpdatePage(WiFiManager &wifiManager);
 static void handlePortalUpdateUpload(WiFiManager &wifiManager);
 static void handlePortalUpdatePost(WiFiManager &wifiManager);
 static void clearPendingPollingConfigPayload(void);
+static bool portalFormatProfileEntityToken(mqttEntityId entityId, char *out, size_t outSize);
 static bool portalResolveEntityToken(const char *token, size_t entityCount, size_t &resolvedIndex);
 static bool portalApplyBucketMapString(const char *map,
                                        size_t entityCount,
@@ -791,6 +792,15 @@ static bool portalEstimatePersistedBucketMap(const BucketId *buckets,
                                              size_t &used,
                                              size_t &appliedCount);
 static bool portalBuildPersistedBucketMap(const BucketId *buckets,
+                                          size_t entityCount,
+                                          char *out,
+                                          size_t outSize,
+                                          size_t &appliedCount);
+static bool portalEstimateEffectiveBucketMap(const BucketId *buckets,
+                                             size_t entityCount,
+                                             size_t &used,
+                                             size_t &appliedCount);
+static bool portalBuildEffectiveBucketMap(const BucketId *buckets,
                                           size_t entityCount,
                                           char *out,
                                           size_t outSize,
@@ -3232,23 +3242,23 @@ buildPortalCurrentPollingProfile(char *out, size_t outSize)
 		return false;
 	}
 
-	size_t persistedOverrideCount = 0;
-	size_t persistedMapLen = 0;
-	if (!portalEstimatePersistedBucketMap(g_portalBucketsScratch,
+	size_t exportedEntryCount = 0;
+	size_t exportedMapLen = 0;
+	if (!portalEstimateEffectiveBucketMap(g_portalBucketsScratch,
 	                                      entityCount,
-	                                      persistedMapLen,
-	                                      persistedOverrideCount)) {
+	                                      exportedMapLen,
+	                                      exportedEntryCount)) {
 		return false;
 	}
-	ScopedCharBuffer canonicalMapBuffer((persistedMapLen == 0 ? 0 : persistedMapLen) + 1);
+	ScopedCharBuffer canonicalMapBuffer((exportedMapLen == 0 ? 0 : exportedMapLen) + 1);
 	if (!canonicalMapBuffer.ok()) {
 		return false;
 	}
-	if (!portalBuildPersistedBucketMap(g_portalBucketsScratch,
+	if (!portalBuildEffectiveBucketMap(g_portalBucketsScratch,
 	                                   entityCount,
 	                                   canonicalMapBuffer.data,
 	                                   canonicalMapBuffer.size,
-	                                   persistedOverrideCount)) {
+	                                   exportedEntryCount)) {
 		return false;
 	}
 
@@ -3396,9 +3406,9 @@ renderPortalPollingImportPage(WiFiManager &wifiManager,
 	static const char kErrorMessageClose[] PROGMEM = "</strong></p>";
 	static const char kIntro[] PROGMEM =
 		"<p>Paste a polling profile exported from another Alpha2MQTT device. "
-		"The profile replaces the current poll interval and bucket overrides only. "
+		"The profile replaces the current poll interval and full visible polling schedule. "
 		"After importing, use Reboot Normal to apply it to runtime and Home Assistant.</p>";
-	static const char kFormOpen[] PROGMEM = "<form method=\"post\" action=\"/config/polling/import\">";
+		static const char kFormOpen[] PROGMEM = "<form id=\"polling-profile-form\" method=\"post\" action=\"/config/polling/import\">";
 	static const char kCsrfOpen[] PROGMEM = "<input type=\"hidden\" name=\"csrf\" value=\"";
 	static const char kValueClose[] PROGMEM = "\">";
 	static const char kLabel[] PROGMEM = "<label for=\"profile\">Polling profile JSON</label><br>";
@@ -3408,7 +3418,7 @@ renderPortalPollingImportPage(WiFiManager &wifiManager,
 	static const char kTextareaClose[] PROGMEM = "</textarea>";
 	static const char kHint[] PROGMEM =
 		"<p class=\"hint\">This input is bounded by the existing ESP8266 polling-config request limit.</p>";
-	static const char kSubmit[] PROGMEM = "<p><button type=\"submit\">Apply Profile</button></p></form>";
+		static const char kSubmit[] PROGMEM = "<p><button type=\"submit\">Apply Profile</button></p></form>";
 	refreshPortalUpdateCsrfToken();
 
 	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
@@ -3434,9 +3444,9 @@ renderPortalPollingImportPage(WiFiManager &wifiManager,
 				return false;
 			}
 		}
-		if (!writer.writeP(kIntro) ||
-		    !writer.writeP(kFormOpen) ||
-		    !writer.writeP(kCsrfOpen) ||
+			if (!writer.writeP(kIntro) ||
+			    !writer.writeP(kFormOpen) ||
+			    !writer.writeP(kCsrfOpen) ||
 		    !writer.write(portalUpdateCsrfToken) ||
 		    !writer.writeP(kValueClose) ||
 		    !writer.writeP(kLabel) ||
@@ -3444,11 +3454,11 @@ renderPortalPollingImportPage(WiFiManager &wifiManager,
 		    !writer.write(limitBuf) ||
 		    !writer.writeP(kTextareaValueOpen) ||
 		    !writePortalHtmlEscaped(writer, prefill) ||
-		    !writer.writeP(kTextareaClose) ||
-		    !writer.writeP(kHint) ||
-		    !writer.writeP(kSubmit)) {
-			return false;
-		}
+			    !writer.writeP(kTextareaClose) ||
+			    !writer.writeP(kHint) ||
+			    !writer.writeP(kSubmit)) {
+				return false;
+			}
 		return writer.writeP(kUiPageTail);
 	};
 
@@ -5043,6 +5053,40 @@ portalEstimatePersistedBucketMap(const BucketId *buckets,
 }
 
 static bool
+portalEstimateEffectiveBucketMap(const BucketId *buckets,
+                                 size_t entityCount,
+                                 size_t &used,
+                                 size_t &appliedCount)
+{
+	if (buckets == nullptr || entityCount == 0 || entityCount > kMqttEntityDescriptorCount) {
+		return false;
+	}
+
+	used = 0;
+	appliedCount = 0;
+	for (size_t idx = 0; idx < entityCount; ++idx) {
+		const BucketId bucket = buckets[idx];
+		if (bucket == BucketId::Unknown) {
+			continue;
+		}
+		mqttState entity{};
+		if (!mqttEntityCopyByIndex(idx, &entity)) {
+			return false;
+		}
+		if (!includeEntityInPollingPortal(entity)) {
+			continue;
+		}
+		char token[16];
+		if (!portalFormatProfileEntityToken(entity.entityId, token, sizeof(token))) {
+			return false;
+		}
+		used += strlen(token) + 1 + strlen(bucketIdToProfileString(bucket)) + 1;
+		appliedCount++;
+	}
+	return true;
+}
+
+static bool
 portalBuildPersistedBucketMap(const BucketId *buckets,
                               size_t entityCount,
                               char *out,
@@ -5071,10 +5115,78 @@ portalBuildPersistedBucketMap(const BucketId *buckets,
 }
 
 static bool
+portalBuildEffectiveBucketMap(const BucketId *buckets,
+                              size_t entityCount,
+                              char *out,
+                              size_t outSize,
+                              size_t &appliedCount)
+{
+	if (buckets == nullptr || out == nullptr || outSize == 0 || entityCount == 0 ||
+	    entityCount > kMqttEntityDescriptorCount) {
+		return false;
+	}
+
+	out[0] = '\0';
+	size_t used = 0;
+	appliedCount = 0;
+	for (size_t idx = 0; idx < entityCount; ++idx) {
+		const BucketId bucket = buckets[idx];
+		if (bucket == BucketId::Unknown) {
+			continue;
+		}
+		mqttState entity{};
+		if (!mqttEntityCopyByIndex(idx, &entity)) {
+			return false;
+		}
+		if (!includeEntityInPollingPortal(entity)) {
+			continue;
+		}
+		char token[16];
+		if (!portalFormatProfileEntityToken(entity.entityId, token, sizeof(token))) {
+			return false;
+		}
+		const char *bucketStr = bucketIdToProfileString(bucket);
+		if (bucketStr == nullptr || !strcmp(bucketStr, "unknown")) {
+			return false;
+		}
+		const int needed = snprintf(out + used, outSize - used, "%s=%s;", token, bucketStr);
+		if (needed < 0 || static_cast<size_t>(needed) >= (outSize - used)) {
+			return false;
+		}
+		used += static_cast<size_t>(needed);
+		appliedCount++;
+	}
+	return true;
+}
+
+static bool
+portalFormatProfileEntityToken(mqttEntityId entityId, char *out, size_t outSize)
+{
+	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+	// Polling-profile exports use stable entity ids so a full visible schedule
+	// still fits within the tested ESP8266 portal form limits.
+	const int written =
+		snprintf(out, outSize, "@%u", static_cast<unsigned>(static_cast<uint16_t>(entityId)));
+	return written > 0 && static_cast<size_t>(written) < outSize;
+}
+
+static bool
 portalResolveEntityToken(const char *token, size_t entityCount, size_t &resolvedIndex)
 {
 	if (token == nullptr || token[0] == '\0' || entityCount == 0 || entityCount > kMqttEntityDescriptorCount) {
 		return false;
+	}
+	if (token[0] == '@') {
+		char *endPtr = nullptr;
+		errno = 0;
+		unsigned long parsed = strtoul(token + 1, &endPtr, 10);
+		if (errno != 0 || endPtr == token + 1 || *endPtr != '\0' || parsed > UINT16_MAX) {
+			return false;
+		}
+		return mqttEntityIndexById(static_cast<mqttEntityId>(parsed), &resolvedIndex) &&
+		       resolvedIndex < entityCount;
 	}
 	if (token[0] == '#') {
 		char *endPtr = nullptr;
@@ -5486,14 +5598,14 @@ handlePortalPollingImport(WiFiManager &wifiManager)
 	String profileArg;
 	if (hasProfileArg) {
 		profileArg = wifiManager.server->arg("profile");
-		if (profileArg.length() >= kPollingConfigSetPayloadMaxLen) {
-			renderPortalPollingImportPage(
-				wifiManager,
-				profileArg.c_str(),
-				"Polling profile exceeds the tested portal request limit.",
-				true);
-			return;
-		}
+	}
+	if (profileArg.length() >= kPollingConfigSetPayloadMaxLen) {
+		renderPortalPollingImportPage(
+			wifiManager,
+			profileArg.c_str(),
+			"Polling profile exceeds the tested portal request limit.",
+			true);
+		return;
 	}
 	if (!portalUpdateRequestHasValidToken(&wifiManager)) {
 		wifiManager.server->send(403, "text/plain", "invalid csrf");

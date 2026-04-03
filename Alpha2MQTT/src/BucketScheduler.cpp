@@ -12,25 +12,69 @@ bucketIdFromString(const char *value)
 	if (!strcmp(value, "ten_sec") || !strcmp(value, "freqTenSec")) {
 		return BucketId::TenSec;
 	}
+	if (!strcmp(value, "10s")) {
+		return BucketId::TenSec;
+	}
 	if (!strcmp(value, "one_min") || !strcmp(value, "freqOneMin")) {
+		return BucketId::OneMin;
+	}
+	if (!strcmp(value, "1m")) {
 		return BucketId::OneMin;
 	}
 	if (!strcmp(value, "five_min") || !strcmp(value, "freqFiveMin")) {
 		return BucketId::FiveMin;
 	}
+	if (!strcmp(value, "5m")) {
+		return BucketId::FiveMin;
+	}
 	if (!strcmp(value, "one_hour") || !strcmp(value, "freqOneHour")) {
+		return BucketId::OneHour;
+	}
+	if (!strcmp(value, "1h")) {
 		return BucketId::OneHour;
 	}
 	if (!strcmp(value, "one_day") || !strcmp(value, "freqOneDay")) {
 		return BucketId::OneDay;
 	}
+	if (!strcmp(value, "1d")) {
+		return BucketId::OneDay;
+	}
 	if (!strcmp(value, "user") || !strcmp(value, "freqUser")) {
+		return BucketId::User;
+	}
+	if (!strcmp(value, "usr")) {
 		return BucketId::User;
 	}
 	if (!strcmp(value, "disabled") || !strcmp(value, "freqDisabled")) {
 		return BucketId::Disabled;
 	}
+	if (!strcmp(value, "off")) {
+		return BucketId::Disabled;
+	}
 	return BucketId::Unknown;
+}
+
+const char *
+bucketIdToProfileString(BucketId bucket)
+{
+	switch (bucket) {
+	case BucketId::TenSec:
+		return "10s";
+	case BucketId::OneMin:
+		return "1m";
+	case BucketId::FiveMin:
+		return "5m";
+	case BucketId::OneHour:
+		return "1h";
+	case BucketId::OneDay:
+		return "1d";
+	case BucketId::User:
+		return "usr";
+	case BucketId::Disabled:
+		return "off";
+	default:
+		return "unknown";
+	}
 }
 
 const char *
