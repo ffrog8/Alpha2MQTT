@@ -1189,6 +1189,18 @@ def _assert_portal_root_menu(body: str, context: str) -> None:
         _assert_contains(body, needle, context)
 
 
+def _assert_wifi_portal_root_contract(body: str, context: str) -> None:
+    _assert_portal_root_menu(body, context)
+    _assert_button_theme(body, "wifi", context)
+
+
+def _assert_normal_runtime_root_contract(body: str, context: str) -> None:
+    _assert_contains(body, "Alpha2MQTT Control", context)
+    _assert_contains(body, "Boot mode: normal", context)
+    _assert_contains(body, "/reboot/wifi", context)
+    _assert_button_theme(body, "normal", context)
+
+
 def _assert_button_theme(body: str, mode: str, context: str) -> None:
     accents = {
         "ap": "#1c6bcf",
@@ -2110,11 +2122,9 @@ def _run_wifi_only_case(
             hostname=ap_ssid,
             timeout_s=180,
         )
-        _assert_contains(root_page, "Boot mode: normal", "runtime root (wifi-only direct-normal path)")
-        _assert_button_theme(root_page, "normal", "runtime root (wifi-only direct-normal path)")
+        _assert_normal_runtime_root_contract(root_page, "runtime root (wifi-only direct-normal path)")
         return base_url
-    _assert_portal_root_menu(portal_root_body, "sta portal root (wifi-only case)")
-    _assert_button_theme(portal_root_body, "wifi", "sta portal root (wifi-only case)")
+    _assert_wifi_portal_root_contract(portal_root_body, "sta portal root (wifi-only case)")
     portal_runtime_ip = urllib.parse.urlparse(portal_base_url).hostname or portal_runtime_ip
 
     _reboot_normal_and_tolerate_disconnect(
@@ -2129,8 +2139,7 @@ def _run_wifi_only_case(
         hostname=ap_ssid,
         timeout_s=180,
     )
-    _assert_contains(root_page, "Boot mode: normal", "runtime root (wifi-only case)")
-    _assert_button_theme(root_page, "normal", "runtime root (wifi-only case)")
+    _assert_normal_runtime_root_contract(root_page, "runtime root (wifi-only case)")
     return base_url
 
 
@@ -2256,14 +2265,12 @@ def _run_wifi_plus_mqtt_case(
             timeout_s=180,
         )
         _announce(f"wifi+mqtt: fell straight into runtime at {base_url}")
-        _assert_contains(root_page, "Boot mode: normal", "runtime root (wifi+mqtt default path)")
+        _assert_normal_runtime_root_contract(root_page, "runtime root (wifi+mqtt default path)")
         root_page = _wait_for_runtime_root_contains(ssh, base_url, "MQTT connected: 1", timeout_s=180)
-        _assert_contains(root_page, "Boot mode: normal", "runtime root (wifi+mqtt default path)")
-        _assert_button_theme(root_page, "normal", "runtime root (wifi+mqtt default path)")
+        _assert_normal_runtime_root_contract(root_page, "runtime root (wifi+mqtt default path)")
         return base_url
     portal_root_body = _wait_for_page_contains(ssh, url=portal_base_url + "/", needle="/config/mqtt", timeout_s=20)
-    _assert_portal_root_menu(portal_root_body, "sta portal root (wifi+mqtt case)")
-    _assert_button_theme(portal_root_body, "wifi", "sta portal root (wifi+mqtt case)")
+    _assert_wifi_portal_root_contract(portal_root_body, "sta portal root (wifi+mqtt case)")
     literal_portal_ip = _literal_ip_from_base_url(portal_base_url)
     if literal_portal_ip:
         portal_runtime_ip = literal_portal_ip

@@ -851,6 +851,29 @@ def _ensure_runtime_http_from_portal(base: str, timeout_s: int = 45) -> None:
 
     _assert_eventually("portal returns to normal runtime", runtime_ready, timeout_s=timeout_s, poll_s=2.0)
 
+
+def _root_surface_mode_from_html(html: str) -> str:
+    if "Alpha2MQTT Control" in html and "/reboot/wifi" in html and 'meta name="a2m-mode" content="normal"' in html:
+        return "normal"
+    if "Alpha2MQTT Setup" in html and "/config/reboot-normal" in html:
+        if 'meta name="a2m-mode" content="wifi"' in html:
+            return "wifi"
+        if 'meta name="a2m-mode" content="ap"' in html:
+            return "ap"
+        return "portal"
+    return ""
+
+
+def _root_surface_state(base: str) -> tuple[bool, str]:
+    try:
+        status_root, body_root = _http_request_full("GET", base + "/", headers={}, body=b"", timeout_s=10)
+    except Exception as exc:
+        return False, f"err={exc}"
+    root_html = body_root.decode("utf-8", errors="replace")
+    mode = _root_surface_mode_from_html(root_html)
+    return status_root == 200, f"status={status_root} mode={mode or 'unknown'}"
+
+
 def _assert_portal_root_menu(base: str, timeout_s: int = 20, required_mode: Optional[str] = None) -> str:
     deadline = time.time() + timeout_s
     last_html = ""
@@ -1125,6 +1148,15 @@ def _sleep_with_mqtt(mqtt: MqttClient, seconds: float) -> None:
 def _is_socket_closed_error(e: Exception) -> bool:
     return "MQTT socket closed" in str(e)
 
+def _is_mqtt_transport_retryable(e: Exception) -> bool:
+    if _is_socket_closed_error(e):
+        return True
+    if isinstance(e, BrokenPipeError):
+        return True
+    if isinstance(e, OSError):
+        return e.errno in (9, 32, 54, 104)
+    return False
+
 def _is_expected_portal_transport_error(e: Exception) -> bool:
     detail = str(e).lower()
     return (
@@ -1143,13 +1175,22 @@ def _mqtt_retry(mqtt: MqttClient, name: str, fn: Callable[[], Any]) -> Any:
         try:
             return fn()
         except E2EError as e:
-            if not _is_socket_closed_error(e) or attempt == 4:
+            if not _is_mqtt_transport_retryable(e) or attempt == 4:
                 raise
             print(f"[e2e] mqtt socket closed during {name}; reconnecting...")
             mqtt.close()
             time.sleep(0.5)
             mqtt.connect()
             # Broker-side subscription state is lost on reconnect.
+            mqtt._subscriptions = set()
+            mqtt._pending_publishes = []
+        except (BrokenPipeError, OSError) as e:
+            if not _is_mqtt_transport_retryable(e) or attempt == 4:
+                raise
+            print(f"[e2e] mqtt transport error during {name}: {e}; reconnecting...")
+            mqtt.close()
+            time.sleep(0.5)
+            mqtt.connect()
             mqtt._subscriptions = set()
             mqtt._pending_publishes = []
 
@@ -1353,38 +1394,41 @@ def _wait_for_boot_fw_build_ts_ms(
       so a single fetch is not sufficient to verify the new firmware.
     - This helper waits for a changed publish that carries the expected build id.
     """
-    mqtt.subscribe(boot_topic, force=True)
-    deadline = time.time() + timeout_s
-    last_observed = ""
-    while time.time() < deadline:
-        try:
-            got_topic, payload = mqtt.wait_for_publish(timeout_s=12.0)
-        except E2EError as e:
-            if "Timeout waiting for MQTT publish" in str(e):
+    def inner() -> dict[str, Any]:
+        mqtt.subscribe(boot_topic, force=True)
+        deadline = time.time() + timeout_s
+        last_observed = ""
+        while time.time() < deadline:
+            try:
+                got_topic, payload = mqtt.wait_for_publish(timeout_s=12.0)
+            except E2EError as e:
+                if "Timeout waiting for MQTT publish" in str(e):
+                    continue
+                if _is_socket_closed_error(e):
+                    print("[e2e] mqtt socket closed while waiting for boot topic; reconnecting...")
+                    mqtt.close()
+                    time.sleep(0.5)
+                    mqtt.connect()
+                    mqtt._subscriptions = set()
+                    mqtt._pending_publishes = []
+                    mqtt.subscribe(boot_topic, force=True)
+                    continue
+                raise
+            last_observed = f"topic={got_topic} payload={payload!r}"
+            if got_topic != boot_topic:
                 continue
-            if _is_socket_closed_error(e):
-                print("[e2e] mqtt socket closed while waiting for boot topic; reconnecting...")
-                mqtt.close()
-                time.sleep(0.5)
-                mqtt.connect()
-                mqtt._subscriptions = set()
-                mqtt._pending_publishes = []
-                mqtt.subscribe(boot_topic, force=True)
+            try:
+                parsed = _parse_json(payload)
+            except Exception:
                 continue
-            raise
-        last_observed = f"topic={got_topic} payload={payload!r}"
-        if got_topic != boot_topic:
-            continue
-        try:
-            parsed = _parse_json(payload)
-        except Exception:
-            continue
-        fw_ts = parsed.get("fw_build_ts_ms")
-        if fw_ts == expected_build_ts_ms:
-            return parsed
-    raise E2EError(
-        f"Timeout waiting for boot fw_build_ts_ms={expected_build_ts_ms} on {boot_topic}. Last observed: {last_observed}"
-    )
+            fw_ts = parsed.get("fw_build_ts_ms")
+            if fw_ts == expected_build_ts_ms:
+                return parsed
+        raise E2EError(
+            f"Timeout waiting for boot fw_build_ts_ms={expected_build_ts_ms} on {boot_topic}. Last observed: {last_observed}"
+        )
+
+    return _mqtt_retry(mqtt, "wait_for_boot_fw_build_ts_ms", inner)
 
 def _fetch_stub(mqtt: MqttClient, topic: str) -> dict[str, Any]:
     return _fetch_latest_json(mqtt, topic, label="stub")
@@ -1737,23 +1781,47 @@ def _ensure_latest_stub_via_ota(
     reboot_path = os.environ.get("DEVICE_REBOOT_WIFI_PATH") or _discover_reboot_wifi_path_from_code()
     if not reboot_path:
         raise E2EError("Could not discover reboot-to-wifi-config path; set DEVICE_REBOOT_WIFI_PATH")
+
+    def root_ready_for_stub_ota() -> Tuple[bool, str]:
+        ok, detail = _root_surface_state(http_base.rstrip("/"))
+        if not ok:
+            return False, detail
+        return ("mode=normal" in detail or "mode=wifi" in detail), detail
+
+    _assert_eventually("root reachable in normal runtime or WiFi portal before OTA", root_ready_for_stub_ota, timeout_s=45, poll_s=2.0)
+    _, root_detail = _root_surface_state(http_base.rstrip("/"))
     reboot_url = http_base.rstrip("/") + reboot_path
 
-    print(f"[e2e] POST {reboot_path} (reboot into Wi-Fi config portal)")
-    try:
-        status = _http_post_simple(reboot_url, timeout_s=10)
-    except (TimeoutError, OSError) as e:
-        raise E2EError(
-            f"HTTP request to device failed ({e}). "
-            "Check DEVICE_HTTP_BASE is reachable from this host and the device is on the LAN."
-        )
-    print(f"[e2e] reboot HTTP status={status}")
-    if status == 404:
-        print("[e2e] reboot endpoint not found (old firmware or not in NORMAL); continuing with direct upload")
+    if "mode=normal" in root_detail:
+        print(f"[e2e] POST {reboot_path} (reboot into Wi-Fi config portal)")
+        status = 0
+        for attempt in range(5):
+            try:
+                status = _http_post_simple(reboot_url, timeout_s=10)
+                break
+            except (TimeoutError, OSError) as e:
+                if attempt >= 4:
+                    raise E2EError(
+                        f"HTTP request to device failed ({e}). "
+                        "Check DEVICE_HTTP_BASE is reachable from this host and the device is on the LAN."
+                    )
+                _sleep_with_mqtt(mqtt, 5)
+                refreshed_base = _resolve_device_http_base(mqtt, device_root)
+                if refreshed_base.rstrip("/") != http_base.rstrip("/"):
+                    print(f"[e2e] retrying reboot via refreshed base {refreshed_base}")
+                http_base = refreshed_base
+                reboot_url = http_base.rstrip("/") + reboot_path
+        print(f"[e2e] reboot HTTP status={status}")
+        if status == 404:
+            print("[e2e] reboot endpoint not found (old firmware or not in NORMAL); continuing with direct upload")
 
-    # MODE_WIFI_CONFIG waits for STA reconnect before the portal is actually served.
-    # The firmware's connect timeout is 20s, so 8s is not long enough to make /u reliable.
-    _sleep_with_mqtt(mqtt, 25)
+        # MODE_WIFI_CONFIG waits for STA reconnect before the portal is actually served.
+        # The firmware's connect timeout is 20s, so 8s is not long enough to make /u reliable.
+        _sleep_with_mqtt(mqtt, 25)
+    else:
+        print("[e2e] Wi-Fi portal already active; OTA upload can proceed without another reboot")
+
+    _assert_portal_root_menu(http_base.rstrip("/"), timeout_s=90, required_mode="wifi")
 
     upload_path = os.environ.get("DEVICE_OTA_UPLOAD_PATH", "").strip()
     upload_mode = os.environ.get("DEVICE_OTA_UPLOAD_MODE", "").strip().lower()
@@ -5041,7 +5109,68 @@ def main() -> int:
             raise E2EError("invalid polling profile import did not show an error banner")
         csrf = _extract_input_value(invalid_html, "csrf")
 
-        modified_profile = build_profile(modified_interval, {target_keep: modified_override})
+        oversize_rejected_with_banner = False
+        try:
+            oversize_status, oversize_body = _http_post_form_full(
+                base + "/config/polling/import",
+                {
+                    "csrf": csrf,
+                    "profile": "x" * 5200,
+                },
+                timeout_s=20,
+            )
+            if oversize_status not in (200, 403):
+                raise E2EError(
+                    f"oversize polling profile import returned unexpected status={oversize_status}"
+                )
+            if oversize_status == 200:
+                oversize_html = oversize_body.decode("utf-8", errors="replace")
+                oversize_rejected_with_banner = (
+                    "Polling profile exceeds the tested portal request limit." in oversize_html
+                )
+        except Exception as exc:
+            if not _is_expected_portal_transport_error(exc):
+                raise
+
+        _assert_portal_root_menu(base, timeout_s=40, required_mode="wifi")
+        oversize_export_status, oversize_export_body = _http_request_full(
+            "GET",
+            base + "/config/polling/export",
+            headers={},
+            body=b"",
+            timeout_s=20,
+        )
+        if oversize_export_status != 200:
+            raise E2EError(
+                f"polling profile export after oversize import returned unexpected status={oversize_export_status}"
+            )
+        oversize_exported_profile = json.loads(oversize_export_body.decode("utf-8", errors="strict"))
+        if oversize_exported_profile != exported_profile:
+            raise E2EError(
+                f"oversize polling profile import changed persisted state: {oversize_exported_profile}"
+            )
+        if not oversize_rejected_with_banner:
+            print("[e2e] oversize import rejected before banner; portal remained healthy and state stayed unchanged")
+
+        import_status, import_body = _http_request_full(
+            "GET",
+            base + "/config/polling/import",
+            headers={},
+            body=b"",
+            timeout_s=20,
+        )
+        if import_status != 200:
+            raise E2EError(f"polling profile import page after oversize returned unexpected status={import_status}")
+        import_html = import_body.decode("utf-8", errors="replace")
+        csrf = _extract_input_value(import_html, "csrf")
+
+        modified_profile = build_profile(
+            modified_interval,
+            {
+                target_keep: modified_override,
+                "Unknown_Profile_Entity": "one_min",
+            },
+        )
         apply_status = _http_post_form(
             base + "/config/polling/import",
             {
@@ -5055,15 +5184,18 @@ def main() -> int:
 
         imported_polling_status, imported_polling_body = _http_request_full(
             "GET",
-            base + "/config/polling?imported=1",
+            base + "/config/polling?imported=1&unknown=1",
             headers={},
             body=b"",
             timeout_s=20,
         )
         if imported_polling_status != 200:
             raise E2EError(f"polling page after import returned unexpected status={imported_polling_status}")
-        if "Polling profile imported." not in imported_polling_body.decode("utf-8", errors="replace"):
-            raise E2EError("polling page did not show import confirmation")
+        imported_polling_html = imported_polling_body.decode("utf-8", errors="replace")
+        if "Polling profile imported. Reboot Normal to apply it to runtime and Home Assistant." not in imported_polling_html:
+            raise E2EError("polling page did not show the import confirmation guidance")
+        if "Ignored 1 unknown entities from the imported profile." not in imported_polling_html:
+            raise E2EError("polling page did not show the unknown-entity warning")
 
         exported_modified_status, exported_modified_body = _http_request_full(
             "GET",
