@@ -191,6 +191,15 @@ shouldTrustRecoveredPortalPollingConfig(PollingLoadFailureKind failureKind)
 }
 
 bool
+shouldTrustPortalPollingRuntimeCache(bool pollingConfigLoaded)
+{
+	// Portal-mode pages may render from the already-loaded runtime schedule, but
+	// save/reset/import must only trust that cache when startup proved it came
+	// from persisted state or an explicitly trusted recovery path.
+	return pollingConfigLoaded;
+}
+
+bool
 parseStrictUint32(const char *text, uint32_t maxValue, uint32_t &outValue)
 {
 	if (text == nullptr || text[0] == '\0') {

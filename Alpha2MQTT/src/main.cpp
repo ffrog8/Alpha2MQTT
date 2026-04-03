@@ -4712,11 +4712,15 @@ loadPollingBucketsForPortal(const mqttState *entities,
 		// - wifi_config already loaded the saved schedule during startup
 		// - fresh AP onboarding only needs the current live defaults until the user saves
 		// - request handlers must not touch Preferences again here
+		// - transient startup recovery must keep the cache fail-closed so later
+		//   portal save/clear/import paths cannot overwrite a still-valid
+		//   persisted Bucket_Map with recovered defaults
 		if (!mqttEntityCopyBuckets(outBuckets, entityCount)) {
 			return false;
 		}
-		g_portalPollingCacheValid = true;
-		g_portalPollingCacheEntityCount = entityCount;
+		const bool trustRuntimeCache = shouldTrustPortalPollingRuntimeCache(pollingConfigLoadedFromStorage);
+		g_portalPollingCacheValid = trustRuntimeCache;
+		g_portalPollingCacheEntityCount = trustRuntimeCache ? entityCount : 0;
 		g_portalPollingCacheIntervalSeconds = outPollIntervalSeconds;
 		if (outBuckets != g_portalBucketsScratch) {
 			memcpy(g_portalBucketsScratch, outBuckets, entityCount * sizeof(BucketId));

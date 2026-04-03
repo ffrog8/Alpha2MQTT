@@ -126,6 +126,8 @@ TEST_CASE("only corrupt persisted bucket maps trigger destructive polling recove
 		shouldAcceptRecoveredPollingConfig(PollingLoadFailureKind::PersistedBucketMapCorrupt, true));
 	CHECK_FALSE(shouldTrustRecoveredPortalPollingConfig(PollingLoadFailureKind::Transient));
 	CHECK(shouldTrustRecoveredPortalPollingConfig(PollingLoadFailureKind::PersistedBucketMapCorrupt));
+	CHECK_FALSE(shouldTrustPortalPollingRuntimeCache(false));
+	CHECK(shouldTrustPortalPollingRuntimeCache(true));
 }
 
 TEST_CASE("strict uint32 parser rejects blank and signed polling intervals")

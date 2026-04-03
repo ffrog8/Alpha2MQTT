@@ -24,6 +24,7 @@ bool shouldMarkRecoveredPollingConfigLoaded(PollingLoadFailureKind failureKind);
 bool shouldAcceptRecoveredPollingConfig(PollingLoadFailureKind failureKind,
                                         bool persistedResetOk);
 bool shouldTrustRecoveredPortalPollingConfig(PollingLoadFailureKind failureKind);
+bool shouldTrustPortalPollingRuntimeCache(bool pollingConfigLoaded);
 bool parseStrictUint32(const char *text, uint32_t maxValue, uint32_t &outValue);
 bool isDisableAllBucketMap(const char *map);
 bool copyDisableAllBucketMap(char *out, size_t outSize);
