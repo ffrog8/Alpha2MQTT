@@ -24,6 +24,7 @@ bool shouldMarkRecoveredPollingConfigLoaded(PollingLoadFailureKind failureKind);
 bool shouldAcceptRecoveredPollingConfig(PollingLoadFailureKind failureKind,
                                         bool persistedResetOk);
 bool shouldTrustRecoveredPortalPollingConfig(PollingLoadFailureKind failureKind);
+bool shouldTrustPortalPollingRuntimeCache(bool pollingConfigLoaded);
 bool parseStrictUint32(const char *text, uint32_t maxValue, uint32_t &outValue);
 bool isDisableAllBucketMap(const char *map);
 bool copyDisableAllBucketMap(char *out, size_t outSize);
@@ -68,6 +69,43 @@ bool visitMutablePollingConfigEntries(char *payload,
 bool validatePollingConfigEntries(const char *payload,
                                   char *valueScratch,
                                   size_t valueScratchSize);
+
+enum class PollingProfileLineKind : uint8_t {
+	Ignore = 0,
+	Header,
+	PollInterval,
+	Assignment,
+};
+
+struct PollingProfileLine {
+	PollingProfileLineKind kind = PollingProfileLineKind::Ignore;
+	uint32_t pollIntervalSeconds = 0;
+	BucketId bucketId = BucketId::Unknown;
+	char entityName[64]{};
+};
+
+// Build a line-oriented polling-profile payload that can be exported one line
+// at a time and later parsed incrementally by the portal upload path.
+bool buildPollingProfilePayload(const char *pollIntervalS,
+                                const char *bucketMap,
+                                char *out,
+                                size_t outSize);
+
+// Parse and validate a complete line-oriented polling-profile payload. The
+// output bucket map is normalized back to the canonical semicolon form used by
+// existing persistence helpers.
+bool parsePollingProfilePayload(const char *payload,
+                                char *valueScratch,
+                                size_t valueScratchSize,
+                                char *pollIntervalOut,
+                                size_t pollIntervalOutSize,
+                                char *bucketMapOut,
+                                size_t bucketMapOutSize);
+
+// Parse one line from the line-oriented polling-profile format. Blank lines and
+// comments return Ignore so streaming upload handlers can skip them without
+// holding the full file in memory.
+bool parsePollingProfileLine(const char *line, PollingProfileLine &out);
 
 // Build a JSON payload compatible with MQTT/config/set from optional polling
 // parameters submitted by portal handlers.

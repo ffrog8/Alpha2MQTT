@@ -10,6 +10,7 @@
 
 BucketId bucketIdFromString(const char *value);
 const char *bucketIdToString(BucketId bucket);
+const char *bucketIdToProfileString(BucketId bucket);
 BucketId bucketIdFromFreq(mqttUpdateFreq freq);
 mqttUpdateFreq bucketIdToFreq(BucketId bucket);
 uint32_t bucketIntervalMs(BucketId bucket, uint32_t userIntervalMs);

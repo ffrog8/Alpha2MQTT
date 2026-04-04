@@ -1,4 +1,5 @@
 #include <array>
+#include <string>
 
 #include <doctest/doctest.h>
 
@@ -187,4 +188,26 @@ TEST_CASE("bucket helpers provide stable ordinals for runtime cursor arrays")
 	CHECK(bucketOrdinal(BucketId::OneDay) == 4);
 	CHECK(bucketOrdinal(BucketId::User) == 5);
 	CHECK(bucketOrdinal(BucketId::Disabled) == -1);
+}
+
+TEST_CASE("bucket helpers accept compact polling profile aliases")
+{
+	CHECK(bucketIdFromString("10s") == BucketId::TenSec);
+	CHECK(bucketIdFromString("1m") == BucketId::OneMin);
+	CHECK(bucketIdFromString("5m") == BucketId::FiveMin);
+	CHECK(bucketIdFromString("1h") == BucketId::OneHour);
+	CHECK(bucketIdFromString("1d") == BucketId::OneDay);
+	CHECK(bucketIdFromString("usr") == BucketId::User);
+	CHECK(bucketIdFromString("off") == BucketId::Disabled);
+}
+
+TEST_CASE("bucket helpers expose compact polling profile strings")
+{
+	CHECK(std::string(bucketIdToProfileString(BucketId::TenSec)) == "10s");
+	CHECK(std::string(bucketIdToProfileString(BucketId::OneMin)) == "1m");
+	CHECK(std::string(bucketIdToProfileString(BucketId::FiveMin)) == "5m");
+	CHECK(std::string(bucketIdToProfileString(BucketId::OneHour)) == "1h");
+	CHECK(std::string(bucketIdToProfileString(BucketId::OneDay)) == "1d");
+	CHECK(std::string(bucketIdToProfileString(BucketId::User)) == "usr");
+	CHECK(std::string(bucketIdToProfileString(BucketId::Disabled)) == "off");
 }

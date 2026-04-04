@@ -175,12 +175,32 @@ char portalSubmittedPass[64] = "";
 char portalStatusIp[20] = "";
 char portalUpdateCsrfToken[33] = "";
 bool portalUpdateUploadStarted = false;
+constexpr size_t kPollingProfileLineMaxLen = 96;
+constexpr size_t kPollingProfileUploadErrorMaxLen = 72;
+struct PortalPollingProfileUploadState {
+	bool started = false;
+	bool finished = false;
+	bool ok = false;
+	bool sawHeader = false;
+	bool sawPollInterval = false;
+	uint16_t unknownCount = 0;
+	uint16_t lineNumber = 0;
+	uint32_t stagedIntervalSeconds = 0;
+	uint16_t entityCount = 0;
+	uint16_t lineLen = 0;
+	BucketId *stagedBuckets = nullptr;
+	uint8_t *seenEntities = nullptr;
+	char *lineBuf = nullptr;
+	char *error = nullptr;
+};
+static PortalPollingProfileUploadState portalPollingProfileUpload;
 int portalLastDisconnectReason = -1;
 char portalLastDisconnectLabel[32] = "";
 unsigned long portalConnectStart = 0;
 bool portalNeedsMqttConfig = false;
 bool portalMqttSaved = false;
 bool portalRebootScheduled = false;
+BootIntent portalRebootIntent = BootIntent::Normal;
 unsigned long portalRebootAt = 0;
 bool portalWifiCredentialsChanged = false;
 uint8_t portalRouteRebindRetriesRemaining = 0;
@@ -725,6 +745,7 @@ void publishBootMemEventOncePerBoot(void);
 void setMqttIdentifiersFromSerial(const char *serial);
 void queueStaleInverterDiscoveryClear(const char *deviceId);
 void queueStaleControllerDiscoveryClear(const char *deviceId);
+static void queueCurrentHaDiscoveryClears(void);
 bool inverterSerialKnown(void);
 const char *discoveryDeviceIdForScope(DiscoveryDeviceScope scope);
 void publishStatusNow(void);
@@ -738,6 +759,7 @@ static void applyRs485StubControlPayload(const char *payload);
 static void publishManualRegisterReadState(int32_t requestedReg);
 void setBootIntentAndReboot(BootIntent intent, bool persistIntent = true);
 static void scheduleDeferredControlPlaneReboot(BootIntent intent, unsigned long delayMs = 1500);
+static void schedulePortalReboot(BootIntent intent, unsigned long delayMs = 1500);
 static void persistUserBootIntent(BootIntent intent);
 static void persistUserBootMode(BootMode mode);
 static void persistUserMqttConfig(const char *server, int port, const char *user, const char *pass);
@@ -759,6 +781,10 @@ static bool recoverPollingConfigLoadToDefaults(const char *context,
                                                uint32_t &outIntervalSeconds);
 static void handlePortalMenuPage(WiFiManager &wifiManager);
 static void handlePortalPollingPage(WiFiManager &wifiManager);
+static void handlePortalPollingExport(WiFiManager &wifiManager);
+static void handlePortalPollingImportPage(WiFiManager &wifiManager);
+static void handlePortalPollingImport(WiFiManager &wifiManager);
+static void handlePortalPollingImportUpload(WiFiManager &wifiManager);
 static void handlePortalPollingReset(WiFiManager &wifiManager);
 static void handlePortalPollingSave(WiFiManager &wifiManager);
 static void handlePortalPollingClear(WiFiManager &wifiManager);
@@ -777,8 +803,21 @@ static bool portalApplyBucketMapString(const char *map,
                                        uint32_t &unknownEntityCount,
                                        uint32_t &invalidBucketCount,
                                        uint32_t &duplicateEntityCount);
+static void ensurePortalPollingRuntimeReady(void);
+static void preparePortalPollingRuntime(void);
+static void primePortalPollingCache(void);
+static bool portalEstimatePersistedBucketMap(const BucketId *buckets,
+                                             size_t entityCount,
+                                             size_t &used,
+                                             size_t &appliedCount);
+static bool portalBuildPersistedBucketMap(const BucketId *buckets,
+                                          size_t entityCount,
+                                          char *out,
+                                          size_t outSize,
+                                          size_t &appliedCount);
 static void refreshPortalUpdateCsrfToken(void);
 static bool portalUpdateRequestHasValidToken(WiFiManager *wifiManager);
+static void resetPortalPollingProfileUploadState(void);
 static void refreshPortalCustomParameters(void);
 static bool isWifiConfigComplete(void);
 static bool isMqttConfigComplete(void);
@@ -1420,7 +1459,12 @@ void
 serviceRs485Hooks(void)
 {
 	pumpMqttOnce();
-	if (httpControlPlaneEnabled) {
+	// Serving the normal runtime control page from inside an RS485 transaction
+	// can re-enter the ESP8266 web stack while SoftwareSerial is sitting in its
+	// timing loop, which trips __yield assertions under repeated HTTP load. Keep
+	// portal modes responsive here, but let normal runtime HTTP wait until the
+	// main loop regains control.
+	if (httpControlPlaneEnabled && currentBootMode != BootMode::Normal) {
 		if (g_httpServer != nullptr) {
 			httpServerRef().handleClient();
 		}
@@ -1727,134 +1771,6 @@ portalUiAccentDarkHex(PortalUiMode mode)
 	}
 }
 
-struct HttpResponseWriter {
-	WiFiClient *client = nullptr;
-
-	bool
-	writeBytes(const uint8_t *data, size_t len)
-	{
-		if (data == nullptr || client == nullptr) {
-			return false;
-		}
-
-		size_t written = 0;
-		uint8_t idleSpins = 0;
-		while (written < len) {
-			if (!client->connected()) {
-				return false;
-			}
-			const size_t chunkWritten = client->write(data + written, len - written);
-			if (chunkWritten == 0) {
-				if (++idleSpins >= 8) {
-					return false;
-				}
-				delay(1);
-#if defined(MP_ESP8266)
-				ESP.wdtFeed();
-#endif
-				continue;
-			}
-			written += chunkWritten;
-			idleSpins = 0;
-			delay(0);
-#if defined(MP_ESP8266)
-			ESP.wdtFeed();
-#endif
-		}
-		return true;
-	}
-
-	bool
-	write(const char *content)
-	{
-		if (content == nullptr) {
-			return false;
-		}
-		return writeBytes(reinterpret_cast<const uint8_t *>(content), strlen(content));
-	}
-
-	bool
-	writeP(PGM_P content)
-	{
-		if (content == nullptr) {
-			return false;
-		}
-		char scratch[256];
-		size_t remaining = strlen_P(content);
-		size_t offset = 0;
-		while (remaining > 0) {
-			const size_t chunk = (remaining < (sizeof(scratch) - 1)) ? remaining : (sizeof(scratch) - 1);
-			memcpy_P(scratch, content + offset, chunk);
-			scratch[chunk] = '\0';
-			if (!writeBytes(reinterpret_cast<const uint8_t *>(scratch), chunk)) {
-				return false;
-			}
-			offset += chunk;
-			remaining -= chunk;
-		}
-		return true;
-	}
-};
-
-static bool
-writeHttpUiPageStart(HttpResponseWriter &writer,
-                     const char *title,
-                     const char *heading,
-                     PortalUiMode mode,
-                     PGM_P extraHead = nullptr)
-{
-	return writer.writeP(kUiPageHeadOpen) &&
-	       writer.write(portalUiModeToken(mode)) &&
-	       writer.writeP(kUiPageHeadAccentOpen) &&
-	       writer.write(portalUiAccentHex(mode)) &&
-	       writer.writeP(kUiPageHeadVarsOpen) &&
-	       writer.write(portalUiAccentHex(mode)) &&
-	       writer.writeP(kUiPageHeadVarsMid) &&
-	       writer.write(portalUiAccentDarkHex(mode)) &&
-	       writer.writeP(kUiPageHeadVarsClose) &&
-	       (extraHead == nullptr || writer.writeP(extraHead)) &&
-	       writer.writeP(kUiSharedStyle) &&
-	       writer.writeP(kUiPageTitleOpen) &&
-	       writer.write(title != nullptr ? title : "Alpha2MQTT") &&
-	       writer.writeP(kUiPageTitleClose) &&
-	       writer.writeP(kUiPageBodyOpen) &&
-	       writer.write(portalUiModeToken(mode)) &&
-	       writer.writeP(kUiPageHeadingOpen) &&
-	       writer.write(heading != nullptr ? heading : "Alpha2MQTT") &&
-	       writer.writeP(kUiPageHeadingClose);
-}
-
-template <typename EmitFn>
-static bool
-sendHttpHtmlResponse(EmitFn emitPage)
-{
-	WiFiClient client = httpServerRef().client();
-	if (!client.connected()) {
-		return false;
-	}
-
-	HttpResponseWriter writer;
-	writer.client = &client;
-	char header[192];
-	const int headerLen = snprintf(header,
-	                               sizeof(header),
-	                               "HTTP/1.1 200 OK\r\n"
-	                               "Content-Type: text/html\r\n"
-	                               "Cache-Control: no-store\r\n"
-	                               "Connection: close\r\n"
-	                               "\r\n");
-	if (headerLen <= 0 || static_cast<size_t>(headerLen) >= sizeof(header) || !writer.write(header)) {
-		client.stop();
-		return false;
-	}
-	if (!emitPage(writer)) {
-		client.stop();
-		return false;
-	}
-	client.flush();
-	return true;
-}
-
 } // namespace
 
 void
@@ -1884,107 +1800,6 @@ setupHttpControlPlane(void)
 #ifdef DEBUG_OVER_SERIAL
 	Serial.println("HTTP control plane started on port 80.");
 #endif
-}
-
-void
-handleHttpRoot(void)
-{
-#ifdef DEBUG_OVER_SERIAL
-	Serial.println("HTTP GET /");
-#endif
-	if (deferredControlPlaneRebootScheduled) {
-		httpServerRef().sendHeader("Cache-Control", "no-store");
-		httpServerRef().sendHeader("Retry-After", "2");
-		httpServerRef().send(503, "text/plain", "Reboot pending");
-		return;
-	}
-
-	const IPAddress ip = WiFi.localIP();
-	const wl_status_t wifiStatus = WiFi.status();
-	const unsigned long rs485ErrorCount = static_cast<unsigned long>(rs485Errors);
-	const bool pollingResetApplied = httpServerRef().hasArg("polling_reset") &&
-	                                 httpServerRef().arg("polling_reset") == "1";
-	const bool pollingResetFailed = httpServerRef().hasArg("polling_reset") &&
-	                                httpServerRef().arg("polling_reset") == "err";
-#if RS485_STUB
-	const char *rs485Backend = "stub";
-#else
-	const char *rs485Backend = "real";
-#endif
-	char buf[384];
-	auto emitPage = [&](HttpResponseWriter &writer) -> bool {
-		if (!writeHttpUiPageStart(writer, "Alpha2MQTT Control", "Alpha2MQTT Control", PortalUiMode::Normal)) {
-			return false;
-		}
-		snprintf(buf, sizeof(buf), "<p>Boot mode: %s<br>Boot intent: %s<br>Reset reason: %s</p>",
-		         bootModeToString(currentBootMode),
-		         bootIntentToString(currentBootIntent),
-		         lastResetReason);
-		if (!writer.write(buf)) {
-			return false;
-		}
-		if (pollingResetApplied &&
-		    !writer.write("<p>Polling reset to defaults.</p>")) {
-			return false;
-		}
-		if (pollingResetFailed &&
-		    !writer.write("<p>Polling reset failed.</p>")) {
-			return false;
-		}
-		if (
-		    !writer.write("<form method='POST' action='/reboot/normal'><button>Reboot Normal</button></form>") ||
-		    !writer.write("<form method='GET' action='/reboot/ap'><button>Reboot AP Config</button></form>") ||
-		    !writer.write("<form method='POST' action='/reboot/wifi'><button>Reboot WiFi Config</button></form>") ||
-		    !writer.write("<h4>Status</h4><p>")) {
-			return false;
-		}
-		snprintf(buf, sizeof(buf),
-		         "Firmware version: %s<br>RS485 backend: %s<br>"
-		         "Uptime (ms): %lu<br>WiFi status: %d<br>RSSI (dBm): %d<br>IP: %u.%u.%u.%u",
-		         _version,
-		         rs485Backend,
-		         static_cast<unsigned long>(millis()),
-		         static_cast<int>(wifiStatus),
-		         WiFi.RSSI(),
-		         ip[0], ip[1], ip[2], ip[3]);
-		if (!writer.write(buf)) {
-			return false;
-		}
-		snprintf(buf, sizeof(buf),
-		         "<br>MQTT connected: %u<br>MQTT reconnects: %lu"
-		         "<br>Inverter ready: %u<br>RS485 state: %u<br>RS485 errors: %lu",
-		         _mqtt.connected() ? 1U : 0U,
-		         static_cast<unsigned long>(mqttReconnectCount),
-		         inverterReady ? 1U : 0U,
-		         static_cast<unsigned>(rs485ConnectState),
-		         rs485ErrorCount);
-		if (!writer.write(buf)) {
-			return false;
-		}
-		snprintf(buf, sizeof(buf),
-		         "<br>Poll ok: %lu<br>Poll err: %lu<br>Last poll ms: %lu"
-		         "<br>ESS snapshot ok: %u<br>ESS snapshot attempts: %lu<br>poll_interval_s: %lu",
-		         static_cast<unsigned long>(pollOkCount),
-		         static_cast<unsigned long>(pollErrCount),
-		         static_cast<unsigned long>(lastPollMs),
-		         essSnapshotLastOk ? 1U : 0U,
-		         static_cast<unsigned long>(essSnapshotAttemptCount),
-		         static_cast<unsigned long>(pollIntervalSeconds));
-		if (!writer.write(buf)) {
-			return false;
-		}
-#if defined(MP_ESP8266)
-		snprintf(buf, sizeof(buf),
-		         "<br>Heap free/max/frag: %u/%u/%u",
-		         ESP.getFreeHeap(),
-		         ESP.getMaxFreeBlockSize(),
-		         ESP.getHeapFragmentation());
-#else
-		snprintf(buf, sizeof(buf), "<br>Heap free: %u", ESP.getFreeHeap());
-#endif
-		return writer.write(buf) && writer.writeP(kUiPageTail);
-	};
-	(void)sendHttpHtmlResponse(emitPage);
 }
 
 void
@@ -2622,6 +2437,9 @@ recoverPollingConfigLoadToDefaults(const char *context,
 static bool
 resetPollingConfigToDefaults(void)
 {
+	// Runtime reset contract:
+	// - unlike portal save/import, this path runs against the live runtime
+	// - defaults must apply immediately and trigger HA rediscovery/state resend
 	if (!mqttEntitiesRtAvailable()) {
 		return false;
 	}
@@ -2647,6 +2465,10 @@ resetPollingConfigToDefaults(void)
 	}
 
 	updatePollingLastChange();
+	// A runtime reset can move entities back to freqDisabled. Clear the current
+	// retained HA discovery surface first so resend only republishes entities that
+	// remain enabled under the default schedule.
+	queueCurrentHaDiscoveryClears();
 	requestHaDataResend();
 	resendAllData = true;
 	publishPollingConfig();
@@ -2697,6 +2519,14 @@ scheduleDeferredControlPlaneReboot(BootIntent intent, unsigned long delayMs)
 	              delayMs,
 	              deferredControlPlaneRebootAt);
 #endif
+}
+
+static void
+schedulePortalReboot(BootIntent intent, unsigned long delayMs)
+{
+	portalRebootIntent = intent;
+	portalRebootAt = millis() + delayMs;
+	portalRebootScheduled = true;
 }
 
 #if defined(MP_ESP8266)
@@ -2943,6 +2773,7 @@ htmlEscapeInto(const char *src, char *dest, size_t destSize)
 struct PortalResponseWriter {
 	HttpServer *server = nullptr;
 	size_t bytes = 0;
+	bool allowYield = true;
 	static constexpr size_t kMaxWriteChunkBytes = 128;
 
 	bool
@@ -2964,7 +2795,9 @@ struct PortalResponseWriter {
 			const size_t chunkLen = (remaining < kMaxWriteChunkBytes) ? remaining : kMaxWriteChunkBytes;
 			server->sendContent(reinterpret_cast<const char *>(data + written), chunkLen);
 			written += chunkLen;
-			diagYield();
+			if (allowYield) {
+				diagYield();
+			}
 #if defined(MP_ESP8266)
 			ESP.wdtFeed();
 #endif
@@ -3007,7 +2840,9 @@ struct PortalResponseWriter {
 				server->sendContent_P(content + offset, chunk);
 				offset += chunk;
 				remaining -= chunk;
-				diagYield();
+				if (allowYield) {
+					diagYield();
+				}
 			}
 			bytes += totalLen;
 			return true;
@@ -3042,9 +2877,37 @@ writePortalUiPageStart(PortalResponseWriter &writer,
 	       writer.writeP(kUiPageHeadingClose);
 }
 
+static bool
+writePortalUiPageStartP(PortalResponseWriter &writer,
+                        PGM_P title,
+                        PGM_P heading,
+                        PortalUiMode mode,
+                        PGM_P extraHead = nullptr)
+{
+	return writer.writeP(kUiPageHeadOpen) &&
+	       writer.write(portalUiModeToken(mode)) &&
+	       writer.writeP(kUiPageHeadAccentOpen) &&
+	       writer.write(portalUiAccentHex(mode)) &&
+	       writer.writeP(kUiPageHeadVarsOpen) &&
+	       writer.write(portalUiAccentHex(mode)) &&
+	       writer.writeP(kUiPageHeadVarsMid) &&
+	       writer.write(portalUiAccentDarkHex(mode)) &&
+	       writer.writeP(kUiPageHeadVarsClose) &&
+	       (extraHead == nullptr || writer.writeP(extraHead)) &&
+	       writer.writeP(kUiSharedStyle) &&
+	       writer.writeP(kUiPageTitleOpen) &&
+	       writer.writeP(title != nullptr ? title : PSTR("Alpha2MQTT")) &&
+	       writer.writeP(kUiPageTitleClose) &&
+	       writer.writeP(kUiPageBodyOpen) &&
+	       writer.write(portalUiModeToken(mode)) &&
+	       writer.writeP(kUiPageHeadingOpen) &&
+	       writer.writeP(heading != nullptr ? heading : PSTR("Alpha2MQTT")) &&
+	       writer.writeP(kUiPageHeadingClose);
+}
+
 template <typename EmitFn>
 static bool
-sendPortalHtmlResponse(HttpServer *server, EmitFn emitPage, const char *fallbackError)
+sendPortalHtmlResponse(HttpServer *server, EmitFn emitPage, const char *fallbackError, bool allowYield = true)
 {
 	if (server == nullptr) {
 		return false;
@@ -3067,6 +2930,7 @@ sendPortalHtmlResponse(HttpServer *server, EmitFn emitPage, const char *fallback
 		// portal stays reachable instead of returning a 500 on simple pages.
 		PortalResponseWriter countWriter;
 		countWriter.server = nullptr;
+		countWriter.allowYield = allowYield;
 		if (!emitPage(countWriter) || countWriter.bytes == 0) {
 #ifdef DEBUG_OVER_SERIAL
 			portalLog("portal html response: chunked start and count fallback failed free=%u max=%u frag=%u",
@@ -3088,6 +2952,7 @@ sendPortalHtmlResponse(HttpServer *server, EmitFn emitPage, const char *fallback
 		server->send(200, "text/html", "");
 		PortalResponseWriter bodyWriter;
 		bodyWriter.server = server;
+		bodyWriter.allowYield = allowYield;
 		if (!emitPage(bodyWriter)) {
 #ifdef DEBUG_OVER_SERIAL
 			portalLog("portal html response: fixed-length body write failed free=%u max=%u frag=%u",
@@ -3102,6 +2967,7 @@ sendPortalHtmlResponse(HttpServer *server, EmitFn emitPage, const char *fallback
 
 	PortalResponseWriter writer;
 	writer.server = server;
+	writer.allowYield = allowYield;
 	if (!emitPage(writer)) {
 #ifdef DEBUG_OVER_SERIAL
 		portalLog("portal html response: body write failed free=%u max=%u frag=%u",
@@ -3117,6 +2983,165 @@ sendPortalHtmlResponse(HttpServer *server, EmitFn emitPage, const char *fallback
 }
 
 static bool
+appendHttpHtmlText(char *out, size_t outSize, size_t &used, const char *text)
+{
+	if (out == nullptr || outSize == 0 || text == nullptr || used >= outSize) {
+		return false;
+	}
+	const size_t remaining = outSize - used;
+	const size_t len = strlen(text);
+	if (len >= remaining) {
+		return false;
+	}
+	memcpy(out + used, text, len + 1);
+	used += len;
+	return true;
+}
+
+static bool
+appendHttpHtmlTextP(char *out, size_t outSize, size_t &used, PGM_P text)
+{
+	if (out == nullptr || outSize == 0 || text == nullptr || used >= outSize) {
+		return false;
+	}
+	const size_t remaining = outSize - used;
+	const size_t len = strlen_P(text);
+	if (len >= remaining) {
+		return false;
+	}
+	memcpy_P(out + used, text, len);
+	used += len;
+	out[used] = '\0';
+	return true;
+}
+
+static bool
+appendHttpHtmlFmt(char *out, size_t outSize, size_t &used, const char *fmt, ...)
+{
+	if (out == nullptr || outSize == 0 || fmt == nullptr || used >= outSize) {
+		return false;
+	}
+	va_list args;
+	va_start(args, fmt);
+	const int written = vsnprintf(out + used, outSize - used, fmt, args);
+	va_end(args);
+	if (written < 0 || static_cast<size_t>(written) >= (outSize - used)) {
+		return false;
+	}
+	used += static_cast<size_t>(written);
+	return true;
+}
+
+static bool
+writePortalFmt(PortalResponseWriter &writer, const char *fmt, ...)
+{
+	if (fmt == nullptr) {
+		return false;
+	}
+	char buf[256];
+	va_list args;
+	va_start(args, fmt);
+	const int written = vsnprintf(buf, sizeof(buf), fmt, args);
+	va_end(args);
+	if (written < 0 || static_cast<size_t>(written) >= sizeof(buf)) {
+		return false;
+	}
+	return writer.write(buf);
+}
+
+void
+handleHttpRoot(void)
+{
+#ifdef DEBUG_OVER_SERIAL
+	Serial.println("HTTP GET /");
+#endif
+	if (deferredControlPlaneRebootScheduled) {
+		httpServerRef().sendHeader("Cache-Control", "no-store");
+		httpServerRef().sendHeader("Retry-After", "2");
+		httpServerRef().send(503, "text/plain", "Reboot pending");
+		return;
+	}
+
+	const IPAddress ip = WiFi.localIP();
+	const wl_status_t wifiStatus = WiFi.status();
+	const unsigned long rs485ErrorCount = static_cast<unsigned long>(rs485Errors);
+	const bool pollingResetApplied = httpServerRef().hasArg("polling_reset") &&
+	                                 httpServerRef().arg("polling_reset") == "1";
+	const bool pollingResetFailed = httpServerRef().hasArg("polling_reset") &&
+	                                httpServerRef().arg("polling_reset") == "err";
+#if RS485_STUB
+	const char *rs485Backend = "stub";
+#else
+	const char *rs485Backend = "real";
+#endif
+	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
+		if (!writePortalUiPageStartP(writer,
+		                             PSTR("Alpha2MQTT Control"),
+		                             PSTR("Alpha2MQTT Control"),
+		                             PortalUiMode::Normal) ||
+		    !writePortalFmt(writer,
+		                    "<p>Boot mode: %s<br>Boot intent: %s<br>Reset reason: %s</p>",
+		                    bootModeToString(currentBootMode),
+		                    bootIntentToString(currentBootIntent),
+		                    lastResetReason)) {
+			return false;
+		}
+		if (pollingResetApplied && !writer.writeP(PSTR("<p>Polling reset to defaults.</p>"))) {
+			return false;
+		}
+		if (pollingResetFailed && !writer.writeP(PSTR("<p>Polling reset failed.</p>"))) {
+			return false;
+		}
+		if (!writer.writeP(PSTR("<form method='POST' action='/reboot/normal'><button>Reboot Normal</button></form>"
+		                        "<form method='GET' action='/reboot/ap'><button>Reboot AP Config</button></form>"
+		                        "<form method='POST' action='/reboot/wifi'><button>Reboot WiFi Config</button></form>"
+		                        "<h4>Status</h4><p>")) ||
+		    !writePortalFmt(writer,
+		                    "Firmware version: %s<br>RS485 backend: %s<br>"
+		                    "Uptime (ms): %lu<br>WiFi status: %d<br>RSSI (dBm): %d<br>IP: %u.%u.%u.%u",
+		                    _version,
+		                    rs485Backend,
+		                    static_cast<unsigned long>(millis()),
+		                    static_cast<int>(wifiStatus),
+		                    WiFi.RSSI(),
+		                    ip[0], ip[1], ip[2], ip[3]) ||
+		    !writePortalFmt(writer,
+		                    "<br>MQTT connected: %u<br>MQTT reconnects: %lu"
+		                    "<br>Inverter ready: %u<br>RS485 state: %u<br>RS485 errors: %lu",
+		                    _mqtt.connected() ? 1U : 0U,
+		                    static_cast<unsigned long>(mqttReconnectCount),
+		                    inverterReady ? 1U : 0U,
+		                    static_cast<unsigned>(rs485ConnectState),
+		                    rs485ErrorCount) ||
+		    !writePortalFmt(writer,
+		                    "<br>Poll ok: %lu<br>Poll err: %lu<br>Last poll ms: %lu"
+		                    "<br>ESS snapshot ok: %u<br>ESS snapshot attempts: %lu<br>poll_interval_s: %lu",
+		                    static_cast<unsigned long>(pollOkCount),
+		                    static_cast<unsigned long>(pollErrCount),
+		                    static_cast<unsigned long>(lastPollMs),
+		                    essSnapshotLastOk ? 1U : 0U,
+		                    static_cast<unsigned long>(essSnapshotAttemptCount),
+		                    static_cast<unsigned long>(pollIntervalSeconds))) {
+			return false;
+		}
+#if defined(MP_ESP8266)
+		if (!writePortalFmt(writer,
+		                    "<br>Heap free/max/frag: %u/%u/%u",
+		                    ESP.getFreeHeap(),
+		                    ESP.getMaxFreeBlockSize(),
+		                    ESP.getHeapFragmentation())) {
+#else
+		if (!writePortalFmt(writer, "<br>Heap free: %u", ESP.getFreeHeap())) {
+#endif
+			return false;
+		}
+		return writer.writeP(PSTR("</p>")) && writer.writeP(kUiPageTail);
+	};
+
+	sendPortalHtmlResponse(&httpServerRef(), emitPage, "control page unavailable");
+}
+
+static bool
 writePortalMenuButton(PortalResponseWriter &writer, const char *action, const char *label, const char *method)
 {
 	return writer.write("<form action=\"") &&
@@ -3126,6 +3151,435 @@ writePortalMenuButton(PortalResponseWriter &writer, const char *action, const ch
 	       writer.write("\"><button type=\"submit\">") &&
 	       writer.write(label != nullptr ? label : "Open") &&
 	       writer.write("</button></form>");
+}
+
+static bool
+writePortalMenuButtonP(PortalResponseWriter &writer, PGM_P action, PGM_P label, PGM_P method)
+{
+	return writer.writeP(PSTR("<form action=\"")) &&
+	       writer.writeP(action != nullptr ? action : PSTR("/")) &&
+	       writer.writeP(PSTR("\" method=\"")) &&
+	       writer.writeP(method != nullptr ? method : PSTR("get")) &&
+	       writer.writeP(PSTR("\"><button type=\"submit\">")) &&
+	       writer.writeP(label != nullptr ? label : PSTR("Open")) &&
+	       writer.writeP(PSTR("</button></form>"));
+}
+
+static bool
+writePortalHtmlEscaped(PortalResponseWriter &writer, const char *src)
+{
+	if (src == nullptr) {
+		return true;
+	}
+
+	char chunk[64];
+	size_t used = 0;
+	auto flush = [&]() -> bool {
+		if (used == 0) {
+			return true;
+		}
+		chunk[used] = '\0';
+		const bool ok = writer.write(chunk);
+		used = 0;
+		return ok;
+	};
+	auto append = [&](const char *text) -> bool {
+		if (text == nullptr) {
+			return false;
+		}
+		const size_t textLen = strlen(text);
+		if (textLen >= sizeof(chunk)) {
+			return flush() && writer.write(text);
+		}
+		if (used + textLen >= sizeof(chunk)) {
+			if (!flush()) {
+				return false;
+			}
+		}
+		memcpy(chunk + used, text, textLen);
+		used += textLen;
+		return true;
+	};
+
+	for (const char *p = src; *p != '\0'; ++p) {
+		const char *replacement = nullptr;
+		switch (*p) {
+		case '&':
+			replacement = "&amp;";
+			break;
+		case '<':
+			replacement = "&lt;";
+			break;
+		case '>':
+			replacement = "&gt;";
+			break;
+		case '"':
+			replacement = "&quot;";
+			break;
+		case '\'':
+			replacement = "&#39;";
+			break;
+		default:
+			char single[2] = { *p, '\0' };
+			if (!append(single)) {
+				return false;
+			}
+			continue;
+		}
+
+		if (!append(replacement)) {
+			return false;
+		}
+	}
+	return flush();
+}
+
+struct PortalPollingProfileApplyResult {
+	bool ok = false;
+	uint32_t unknownCount = 0;
+};
+
+static bool
+writePortalCurrentPollingProfile(PortalResponseWriter &writer)
+{
+	ensurePortalPollingRuntimeReady();
+	const size_t entityCount = mqttEntitiesCount();
+	if (entityCount == 0 || entityCount > kMqttEntityDescriptorCount) {
+		return false;
+	}
+	if (!g_portalPollingCacheValid || g_portalPollingCacheEntityCount != entityCount) {
+		primePortalPollingCache();
+	}
+	if (!g_portalPollingCacheValid || g_portalPollingCacheEntityCount != entityCount) {
+		return false;
+	}
+
+	char line[96];
+	const int intervalWritten = snprintf(line,
+	                                     sizeof(line),
+	                                     "poll_interval_s=%lu\n",
+	                                     static_cast<unsigned long>(g_portalPollingCacheIntervalSeconds));
+	if (!writer.write("A2M_POLLING_PROFILE 1\n") || intervalWritten <= 0 ||
+	    static_cast<size_t>(intervalWritten) >= sizeof(line) || !writer.write(line)) {
+		return false;
+	}
+
+	for (size_t idx = 0; idx < entityCount; ++idx) {
+		const BucketId bucket = g_portalBucketsScratch[idx];
+		if (bucket == BucketId::Unknown || bucket == BucketId::Disabled) {
+			continue;
+		}
+		mqttState entity{};
+		if (!mqttEntityCopyByIndex(idx, &entity)) {
+			return false;
+		}
+		if (!includeEntityInPollingPortal(entity)) {
+			continue;
+		}
+		char entityName[64];
+		mqttEntityNameCopy(&entity, entityName, sizeof(entityName));
+		const char *bucketName = bucketIdToString(bucket);
+		const int written = snprintf(line, sizeof(line), "%s=%s\n", entityName, bucketName);
+		if (written <= 0 || static_cast<size_t>(written) >= sizeof(line) || !writer.write(line)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool
+initializePortalPollingProfileBuckets(BucketId *buckets, size_t entityCount)
+{
+	if (buckets == nullptr || !resetBucketsToCatalogDefaults(buckets, entityCount)) {
+		return false;
+	}
+	for (size_t idx = 0; idx < entityCount; ++idx) {
+		mqttState entity{};
+		if (!mqttEntityCopyByIndex(idx, &entity)) {
+			return false;
+		}
+		if (includeEntityInPollingPortal(entity)) {
+			buckets[idx] = BucketId::Disabled;
+		}
+	}
+	return true;
+}
+
+static PortalPollingProfileApplyResult
+applyPortalPollingProfileState(uint32_t stagedIntervalSeconds,
+                               const BucketId *stagedBuckets,
+                               size_t entityCount,
+                               uint32_t unknownCount)
+{
+	// Import contract:
+	// - portal import fully replaces the visible polling schedule
+	// - entities omitted from the file are disabled before apply
+	// - runtime and HA observe the imported schedule after Reboot Normal
+	PortalPollingProfileApplyResult result{};
+	if (stagedBuckets == nullptr || entityCount == 0 || entityCount > kMqttEntityDescriptorCount) {
+		return result;
+	}
+	if (!ensurePortalBucketsScratch()) {
+		return result;
+	}
+
+	const uint32_t storedIntervalSeconds = clampPollInterval(stagedIntervalSeconds);
+	size_t persistedOverrideCount = 0;
+	size_t persistedMapLen = 0;
+	if (!portalEstimatePersistedBucketMap(stagedBuckets,
+	                                      entityCount,
+	                                      persistedMapLen,
+	                                      persistedOverrideCount)) {
+		return result;
+	}
+	ScopedCharBuffer canonicalMapBuffer((persistedMapLen == 0 ? 0 : persistedMapLen) + 1);
+	if (!canonicalMapBuffer.ok()) {
+		return result;
+	}
+	if (!portalBuildPersistedBucketMap(stagedBuckets,
+	                                   entityCount,
+	                                   canonicalMapBuffer.data,
+	                                   canonicalMapBuffer.size,
+	                                   persistedOverrideCount)) {
+		return result;
+	}
+	if (mqttEntitiesRtAvailable() && !mqttEntityCanApplyBuckets(stagedBuckets, entityCount)) {
+		return result;
+	}
+	if (!persistUserPollingConfig(storedIntervalSeconds, canonicalMapBuffer.data)) {
+		return result;
+	}
+
+	memcpy(g_portalBucketsScratch, stagedBuckets, entityCount * sizeof(BucketId));
+	pollIntervalSeconds = storedIntervalSeconds;
+	g_portalPollingCacheValid = true;
+	g_portalPollingCacheEntityCount = entityCount;
+	g_portalPollingCacheIntervalSeconds = storedIntervalSeconds;
+	updatePollingLastChange();
+	pollingConfigLoadedFromStorage = true;
+	portalRebootScheduled = false;
+	portalRebootIntent = BootIntent::Normal;
+	portalMqttSaved = false;
+	result.ok = true;
+	result.unknownCount = unknownCount;
+	return result;
+}
+
+static void
+resetPortalPollingProfileUploadState(void)
+{
+	delete[] portalPollingProfileUpload.lineBuf;
+	delete[] portalPollingProfileUpload.error;
+	delete[] portalPollingProfileUpload.stagedBuckets;
+	delete[] portalPollingProfileUpload.seenEntities;
+	portalPollingProfileUpload = PortalPollingProfileUploadState{};
+}
+
+static void
+copyPortalPollingProfileUploadErrorP(PGM_P message)
+{
+	if (message == nullptr || portalPollingProfileUpload.error == nullptr) {
+		return;
+	}
+	const size_t srcLen = strlen_P(message);
+	const size_t copyLen =
+		(srcLen < (kPollingProfileUploadErrorMaxLen - 1)) ? srcLen : (kPollingProfileUploadErrorMaxLen - 1);
+	memcpy_P(portalPollingProfileUpload.error, message, copyLen);
+	portalPollingProfileUpload.error[copyLen] = '\0';
+}
+
+static void
+setPortalPollingProfileUploadError(const char *message)
+{
+	portalPollingProfileUpload.ok = false;
+	if (message != nullptr && message[0] != '\0' && portalPollingProfileUpload.error != nullptr &&
+	    portalPollingProfileUpload.error[0] == '\0') {
+		strlcpy(portalPollingProfileUpload.error, message, kPollingProfileUploadErrorMaxLen);
+	}
+}
+
+static bool
+processPortalPollingProfileUploadLine(const char *line)
+{
+	static const char kInvalidLineFmt[] PROGMEM = "Invalid polling profile line %u.";
+	static const char kHeaderOrderErr[] PROGMEM = "Profile header must appear once at the top.";
+	static const char kIntervalOrderErr[] PROGMEM = "Profile must define poll_interval_s after the header.";
+	static const char kAssignmentOrderErr[] PROGMEM =
+		"Assignments must follow the header and poll_interval_s.";
+	static const char kEntityLookupErr[] PROGMEM = "Profile entity lookup failed.";
+	static const char kDuplicateEntityFmt[] PROGMEM = "Duplicate entity '%s' in polling profile.";
+	portalPollingProfileUpload.lineNumber++;
+	PollingProfileLine parsed{};
+	if (!parsePollingProfileLine(line, parsed)) {
+		if (portalPollingProfileUpload.error != nullptr) {
+			snprintf_P(portalPollingProfileUpload.error,
+			           kPollingProfileUploadErrorMaxLen,
+			           kInvalidLineFmt,
+			           static_cast<unsigned>(portalPollingProfileUpload.lineNumber));
+		}
+		portalPollingProfileUpload.ok = false;
+		return false;
+	}
+
+	switch (parsed.kind) {
+	case PollingProfileLineKind::Ignore:
+		return true;
+	case PollingProfileLineKind::Header:
+		if (portalPollingProfileUpload.sawHeader || portalPollingProfileUpload.sawPollInterval) {
+			copyPortalPollingProfileUploadErrorP(kHeaderOrderErr);
+			portalPollingProfileUpload.ok = false;
+			return false;
+		}
+		portalPollingProfileUpload.sawHeader = true;
+		return true;
+	case PollingProfileLineKind::PollInterval:
+		if (!portalPollingProfileUpload.sawHeader || portalPollingProfileUpload.sawPollInterval) {
+			copyPortalPollingProfileUploadErrorP(kIntervalOrderErr);
+			portalPollingProfileUpload.ok = false;
+			return false;
+		}
+		portalPollingProfileUpload.sawPollInterval = true;
+		portalPollingProfileUpload.stagedIntervalSeconds = parsed.pollIntervalSeconds;
+		return true;
+	case PollingProfileLineKind::Assignment:
+		if (!portalPollingProfileUpload.sawHeader || !portalPollingProfileUpload.sawPollInterval) {
+			copyPortalPollingProfileUploadErrorP(kAssignmentOrderErr);
+			portalPollingProfileUpload.ok = false;
+			return false;
+		}
+		break;
+	}
+
+	size_t idx = 0;
+	if (!mqttEntityIndexByName(parsed.entityName, &idx) || idx >= portalPollingProfileUpload.entityCount) {
+		portalPollingProfileUpload.unknownCount++;
+		return true;
+	}
+	mqttState entity{};
+	if (!mqttEntityCopyByIndex(idx, &entity)) {
+		copyPortalPollingProfileUploadErrorP(kEntityLookupErr);
+		portalPollingProfileUpload.ok = false;
+		return false;
+	}
+	if (!includeEntityInPollingPortal(entity)) {
+		portalPollingProfileUpload.unknownCount++;
+		return true;
+	}
+	if (portalPollingProfileUpload.seenEntities[idx] != 0) {
+		if (portalPollingProfileUpload.error != nullptr) {
+			snprintf_P(portalPollingProfileUpload.error,
+			           kPollingProfileUploadErrorMaxLen,
+			           kDuplicateEntityFmt,
+			           parsed.entityName);
+		}
+		portalPollingProfileUpload.ok = false;
+		return false;
+	}
+	portalPollingProfileUpload.seenEntities[idx] = 1;
+	portalPollingProfileUpload.stagedBuckets[idx] = parsed.bucketId;
+	return true;
+}
+
+static bool
+appendPortalPollingProfileUploadBytes(const uint8_t *data, size_t len)
+{
+	static const char kLineTooLongErr[] PROGMEM = "Polling profile line exceeds the portal limit.";
+	if (data == nullptr || len == 0) {
+		return true;
+	}
+	if (portalPollingProfileUpload.lineBuf == nullptr) {
+		setPortalPollingProfileUploadError("Polling profile upload buffer is unavailable.");
+		return false;
+	}
+	for (size_t i = 0; i < len; ++i) {
+		const char ch = static_cast<char>(data[i]);
+		if (ch == '\r') {
+			continue;
+		}
+		if (ch == '\n') {
+			portalPollingProfileUpload.lineBuf[portalPollingProfileUpload.lineLen] = '\0';
+			if (!processPortalPollingProfileUploadLine(portalPollingProfileUpload.lineBuf)) {
+				return false;
+			}
+			portalPollingProfileUpload.lineLen = 0;
+			continue;
+		}
+		if (portalPollingProfileUpload.lineLen + 1 >= kPollingProfileLineMaxLen) {
+			copyPortalPollingProfileUploadErrorP(kLineTooLongErr);
+			portalPollingProfileUpload.ok = false;
+			return false;
+		}
+		portalPollingProfileUpload.lineBuf[portalPollingProfileUpload.lineLen++] = ch;
+	}
+	return true;
+}
+
+static void
+renderPortalPollingImportPage(WiFiManager &wifiManager,
+                              const char *message,
+                              bool isError)
+{
+	if (!wifiManager.server) {
+		return;
+	}
+
+	static const char kTitle[] PROGMEM = "Restore Polling Profile";
+	static const char kHeading[] PROGMEM = "Restore polling profile";
+	static const char kNav[] PROGMEM = "<p><a href=\"/\">Menu</a> | <a href=\"/config/polling\">Polling</a></p>";
+	static const char kMessageOpen[] PROGMEM = "<p>";
+	static const char kErrorMessageOpen[] PROGMEM = "<p><strong>";
+	static const char kMessageClose[] PROGMEM = "</p>";
+	static const char kErrorMessageClose[] PROGMEM = "</strong></p>";
+	static const char kIntro[] PROGMEM =
+		"<p>Upload a polling profile exported from another Alpha2MQTT device. "
+		"Restore replaces the current polling config, and any polling entities omitted from the file will be disabled. "
+		"After importing, use Reboot Normal to apply it to runtime and Home Assistant.</p>";
+	static const char kFormOpenFmt[] PROGMEM =
+		"<form id=\"polling-profile-form\" method=\"post\" enctype=\"multipart/form-data\" action=\"/config/polling/import?csrf=%s\">";
+	static const char kLabel[] PROGMEM = "<label for=\"profile\">Polling profile file</label><br>";
+	static const char kFileInput[] PROGMEM =
+		"<input id=\"profile\" name=\"profile\" type=\"file\" accept=\".txt,.cfg,.profile,text/plain\">";
+	static const char kHint[] PROGMEM =
+		"<p class=\"hint\">Import streams one line at a time so stable entity names can be restored without buffering the whole file in RAM.</p>";
+	static const char kSubmit[] PROGMEM = "<p><button type=\"submit\">Apply Profile</button></p></form>";
+	refreshPortalUpdateCsrfToken();
+
+	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
+		const PortalUiMode uiMode =
+			(currentBootMode == BootMode::WifiConfig) ? PortalUiMode::Wifi : PortalUiMode::Ap;
+		if (!writePortalUiPageStartP(writer, kTitle, kHeading, uiMode) ||
+		    !writer.writeP(kNav) ||
+		    !writePortalMenuButtonP(writer,
+		                            PSTR("/config/polling/export"),
+		                            PSTR("Download Current Polling Profile"),
+		                            PSTR("get")) ||
+		    !writePortalMenuButtonP(
+			    writer, PSTR("/config/reboot-normal"), PSTR("Reboot Normal"), PSTR("post"))) {
+			return false;
+		}
+		if (message != nullptr && message[0] != '\0') {
+			if (!writer.writeP(isError ? kErrorMessageOpen : kMessageOpen) ||
+			    !writer.write(message) ||
+			    !writer.writeP(isError ? kErrorMessageClose : kMessageClose)) {
+				return false;
+			}
+		}
+		char formOpen[192];
+		const int formOpenLen =
+			snprintf_P(formOpen, sizeof(formOpen), kFormOpenFmt, portalUpdateCsrfToken);
+		if (formOpenLen <= 0 || static_cast<size_t>(formOpenLen) >= sizeof(formOpen) ||
+		    !writer.writeP(kIntro) ||
+		    !writer.write(formOpen) ||
+		    !writer.writeP(kLabel) ||
+		    !writer.writeP(kFileInput) ||
+		    !writer.writeP(kHint) ||
+		    !writer.writeP(kSubmit)) {
+			return false;
+		}
+		return writer.writeP(kUiPageTail);
+	};
+
+	(void)sendPortalHtmlResponse(wifiManager.server.get(), emitPage, "polling profile unavailable");
 }
 
 static void
@@ -3150,7 +3604,7 @@ handlePortalMenuPage(WiFiManager& wifiManager)
 	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
 		const PortalUiMode uiMode =
 			(currentBootMode == BootMode::WifiConfig) ? PortalUiMode::Wifi : PortalUiMode::Ap;
-		if (!writePortalUiPageStart(writer, "Alpha2MQTT Setup", "Alpha2MQTT Setup", uiMode)) {
+		if (!writePortalUiPageStartP(writer, PSTR("Alpha2MQTT Setup"), PSTR("Alpha2MQTT Setup"), uiMode)) {
 			return false;
 		}
 		refreshPortalUpdateCsrfToken();
@@ -3174,22 +3628,27 @@ handlePortalMenuPage(WiFiManager& wifiManager)
 		if (written <= 0 || static_cast<size_t>(written) >= sizeof(buf) || !writer.write(buf)) {
 			return false;
 		}
-		if (pollingResetApplied && !writer.write("<p><strong>Polling reset to defaults.</strong></p>")) {
+		if (pollingResetApplied && !writer.writeP(PSTR("<p><strong>Polling reset to defaults.</strong></p>"))) {
 			return false;
 		}
-		if (pollingResetFailed && !writer.write("<p><strong>Polling reset failed.</strong></p>")) {
+		if (pollingResetFailed && !writer.writeP(PSTR("<p><strong>Polling reset failed.</strong></p>"))) {
 			return false;
 		}
-		if (!writePortalMenuButton(writer, "/0wifi", "WiFi Setup", "get") ||
-		    !writePortalMenuButton(writer, "/config/mqtt", "MQTT Setup", "get") ||
-		    !writePortalMenuButton(writer, "/config/polling", "Polling", "get") ||
-		    !writer.write("<form method=\"post\" action=\"/config/polling/reset\">"
-		                  "<input type=\"hidden\" name=\"csrf\" value=\"") ||
+		if (!writePortalMenuButtonP(writer, PSTR("/0wifi"), PSTR("WiFi Setup"), PSTR("get")) ||
+		    !writePortalMenuButtonP(writer, PSTR("/config/mqtt"), PSTR("MQTT Setup"), PSTR("get")) ||
+		    !writePortalMenuButtonP(writer, PSTR("/config/polling"), PSTR("Polling"), PSTR("get")) ||
+		    !writePortalMenuButtonP(
+			    writer, PSTR("/config/polling/export"), PSTR("Download Polling Profile"), PSTR("get")) ||
+		    !writePortalMenuButtonP(
+			    writer, PSTR("/config/polling/import"), PSTR("Restore Polling Profile"), PSTR("get")) ||
+		    !writer.writeP(PSTR("<form method=\"post\" action=\"/config/polling/reset\">"
+		                       "<input type=\"hidden\" name=\"csrf\" value=\"")) ||
 		    !writer.write(portalUpdateCsrfToken) ||
-		    !writer.write("\"><button type=\"submit\">Reset Polling Defaults</button></form>") ||
-		    !writePortalMenuButton(writer, "/config/update", "Update", "get") ||
-		    !writePortalMenuButton(writer, "/status", "Status", "get") ||
-		    !writePortalMenuButton(writer, "/config/reboot-normal", "Reboot Normal", "post")) {
+		    !writer.writeP(PSTR("\"><button type=\"submit\">Reset Polling Defaults</button></form>")) ||
+		    !writePortalMenuButtonP(writer, PSTR("/config/update"), PSTR("Update"), PSTR("get")) ||
+		    !writePortalMenuButtonP(writer, PSTR("/status"), PSTR("Status"), PSTR("get")) ||
+		    !writePortalMenuButtonP(
+			    writer, PSTR("/config/reboot-normal"), PSTR("Reboot Normal"), PSTR("post"))) {
 			return false;
 		}
 		return writer.writeP(kUiPageTail);
@@ -3213,7 +3672,7 @@ handlePortalWifiPage(WiFiManager& wifiManager)
 	static const char kWifiConfigIntro[] PROGMEM =
 		"<p>WiFi changes are saved now and applied on the next reboot.</p>";
 	static const char kApConfigIntro[] PROGMEM =
-		"<p>Saving WiFi here tests the connection immediately and continues onboarding if it succeeds.</p>";
+		"<p>Saving WiFi here reboots into the next onboarding step using the saved credentials.</p>";
 	static const char kSaved[] PROGMEM =
 		"<p><strong>Saved.</strong> The current WiFi session stays active until reboot.</p>";
 	static const char kErrSsid[] PROGMEM =
@@ -3230,12 +3689,14 @@ handlePortalWifiPage(WiFiManager& wifiManager)
 		"<p><button type=\"submit\">Save WiFi</button></p>"
 		"</form></body></html>";
 	refreshPortalUpdateCsrfToken();
-	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
-		const PortalUiMode uiMode =
-			(currentBootMode == BootMode::WifiConfig) ? PortalUiMode::Wifi : PortalUiMode::Ap;
-		if (!writePortalUiPageStart(writer, "Alpha2MQTT WiFi Setup", "WiFi Setup", uiMode)) {
-			return false;
-		}
+		auto emitPage = [&](PortalResponseWriter &writer) -> bool {
+			const PortalUiMode uiMode =
+				(currentBootMode == BootMode::WifiConfig) ? PortalUiMode::Wifi : PortalUiMode::Ap;
+			const char *wifiSaveAction =
+				(currentBootMode == BootMode::WifiConfig) ? "/wifisave" : "/config/wifi/save";
+			if (!writePortalUiPageStartP(writer, PSTR("Alpha2MQTT WiFi Setup"), PSTR("WiFi Setup"), uiMode)) {
+				return false;
+			}
 		if (currentBootMode == BootMode::WifiConfig) {
 			if (!writer.writeP(kWifiConfigIntro)) {
 				return false;
@@ -3254,30 +3715,33 @@ handlePortalWifiPage(WiFiManager& wifiManager)
 		if (errPass && !writer.writeP(kErrPass)) {
 			return false;
 		}
-		if (!writePortalMenuButton(writer, "/", "Menu", "get") ||
-		    !writePortalMenuButton(writer, "/config/mqtt", "MQTT Setup", "get") ||
-		    !writePortalMenuButton(writer, "/config/polling", "Polling", "get") ||
-		    !writePortalMenuButton(writer, "/config/reboot-normal", "Reboot Normal", "post") ||
-		    !writer.write("<form method=\"POST\" action=\"/wifisave\">") ||
-		    !writer.write("<input type=\"hidden\" name=\"csrf\" value=\"") ||
-		    !writer.write(portalUpdateCsrfToken) ||
-		    !writer.write("\">")) {
-			return false;
-		}
+			if (!writePortalMenuButtonP(writer, PSTR("/"), PSTR("Menu"), PSTR("get")) ||
+			    !writePortalMenuButtonP(writer, PSTR("/config/mqtt"), PSTR("MQTT Setup"), PSTR("get")) ||
+			    !writePortalMenuButtonP(writer, PSTR("/config/polling"), PSTR("Polling"), PSTR("get")) ||
+			    !writePortalMenuButtonP(
+				    writer, PSTR("/config/reboot-normal"), PSTR("Reboot Normal"), PSTR("post")) ||
+			    !writer.writeP(PSTR("<form method=\"POST\" action=\"")) ||
+			    !writer.write(wifiSaveAction) ||
+			    !writer.writeP(PSTR("\">")) ||
+			    !writer.writeP(PSTR("<input type=\"hidden\" name=\"csrf\" value=\"")) ||
+			    !writer.write(portalUpdateCsrfToken) ||
+			    !writer.writeP(PSTR("\">"))) {
+				return false;
+			}
 		htmlEscapeInto(appConfig.wifiSSID.c_str(), escaped, sizeof(escaped));
-		if (!writer.write("<p>WiFi SSID<br><input name=\"s\" value=\"") ||
+		if (!writer.writeP(PSTR("<p>WiFi SSID<br><input name=\"s\" value=\"")) ||
 		    !writer.write(escaped) ||
-		    !writer.write("\" maxlength=\"63\"></p>")) {
+		    !writer.writeP(PSTR("\" maxlength=\"63\"></p>"))) {
 			return false;
 		}
-		if (!writer.write("<p>WiFi password<br><input name=\"p\" type=\"password\" value=\"\" maxlength=\"63\" "
-		                  "autocomplete=\"new-password\"></p>")) {
+		if (!writer.writeP(PSTR("<p>WiFi password<br><input name=\"p\" type=\"password\" value=\"\" maxlength=\"63\" "
+		                        "autocomplete=\"new-password\"></p>"))) {
 			return false;
 		}
 		if (currentBootMode == BootMode::WifiConfig) {
-			if (!writer.write(
-			        "<p><label><input name=\"open\" type=\"checkbox\" value=\"1\"> Open network / clear saved "
-			        "password</label></p>")) {
+			if (!writer.writeP(
+			        PSTR("<p><label><input name=\"open\" type=\"checkbox\" value=\"1\"> Open network / clear saved "
+			             "password</label></p>"))) {
 				return false;
 			}
 			return writer.writeP(kTailSta);
@@ -3326,6 +3790,28 @@ handlePortalWifiSave(WiFiManager& wifiManager)
 	persistUserWifiCredentials(appConfig.wifiSSID.c_str(), appConfig.wifiPass.c_str());
 	portalWifiCredentialsChanged = portalWifiCredentialsChanged || credentialsChanged;
 	capturePortalActiveStaConnection();
+	if (currentBootMode != BootMode::WifiConfig) {
+		const PortalPostWifiAction postWifiAction = portalPostWifiActionAfterWifiSave(
+			appConfig.mqttSrvr.c_str(),
+			static_cast<uint16_t>(appConfig.mqttPort),
+			appConfig.mqttUser.c_str(),
+			appConfig.mqttPass.c_str());
+		portalNeedsMqttConfig = (postWifiAction == PortalPostWifiAction::RedirectToMqttParams);
+		const BootIntent rebootIntent =
+			portalNeedsMqttConfig ? BootIntent::WifiConfig : portalNormalRebootIntent();
+		wifiManager.server->sendHeader("Connection", "close");
+		wifiManager.server->send(
+			200,
+			"text/html",
+			portalNeedsMqttConfig
+				? "<!doctype html><html><body><h3>Wi-Fi saved.</h3><p>Rebooting into Wi-Fi config...</p></body></html>"
+				: "<!doctype html><html><body><h3>Wi-Fi saved.</h3><p>Rebooting into normal runtime...</p></body></html>");
+#if defined(MP_ESP8266)
+		ESP.wdtFeed();
+#endif
+		schedulePortalReboot(rebootIntent);
+		return;
+	}
 	wifiManager.server->sendHeader("Location", "/0wifi?saved=1");
 	wifiManager.server->send(302, "text/plain", "");
 }
@@ -3351,7 +3837,7 @@ handlePortalParamPage(WiFiManager& wifiManager)
 	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
 		const PortalUiMode uiMode =
 			(currentBootMode == BootMode::WifiConfig) ? PortalUiMode::Wifi : PortalUiMode::Ap;
-		if (!writePortalUiPageStart(writer, "Alpha2MQTT MQTT Setup", "MQTT Setup", uiMode)) {
+		if (!writePortalUiPageStartP(writer, PSTR("Alpha2MQTT MQTT Setup"), PSTR("MQTT Setup"), uiMode)) {
 			return false;
 		}
 		if (saved && !writer.writeP(kSaved)) {
@@ -3360,39 +3846,41 @@ handlePortalParamPage(WiFiManager& wifiManager)
 		if (err && !writer.writeP(kErr)) {
 			return false;
 		}
-		if (!writePortalMenuButton(writer, "/", "Menu", "get") ||
-		    !writePortalMenuButton(writer, "/config/polling", "Polling", "get") ||
-		    !writePortalMenuButton(writer, "/config/reboot-normal", "Reboot Normal", "post") ||
-		    !writer.write("<form method=\"POST\" action=\"/config/mqtt/save\">")) {
+		if (!writePortalMenuButtonP(writer, PSTR("/"), PSTR("Menu"), PSTR("get")) ||
+		    !writePortalMenuButtonP(writer, PSTR("/config/polling"), PSTR("Polling"), PSTR("get")) ||
+		    !writePortalMenuButtonP(
+			    writer, PSTR("/config/reboot-normal"), PSTR("Reboot Normal"), PSTR("post")) ||
+		    !writer.writeP(PSTR("<form method=\"POST\" action=\"/config/mqtt/save\">"))) {
 			return false;
 		}
 		htmlEscapeInto(appConfig.mqttSrvr.c_str(), escaped, sizeof(escaped));
-		if (!writer.write("<p>MQTT server<br><input name=\"server\" value=\"") ||
+		if (!writer.writeP(PSTR("<p>MQTT server<br><input name=\"server\" value=\"")) ||
 		    !writer.write(escaped) ||
-		    !writer.write("\" maxlength=\"63\"></p>")) {
+		    !writer.writeP(PSTR("\" maxlength=\"63\"></p>"))) {
 			return false;
 		}
-		if (!writer.write("<p>MQTT port<br><input name=\"port\" type=\"number\" min=\"0\" max=\"32767\" value=\"") ||
+		if (!writer.writeP(
+			    PSTR("<p>MQTT port<br><input name=\"port\" type=\"number\" min=\"0\" max=\"32767\" value=\"")) ||
 		    !writer.write(portValue) ||
-		    !writer.write("\"></p>")) {
+		    !writer.writeP(PSTR("\"></p>"))) {
 			return false;
 		}
 		htmlEscapeInto(appConfig.mqttUser.c_str(), escaped, sizeof(escaped));
-		if (!writer.write("<p>MQTT user<br><input name=\"user\" value=\"") ||
+		if (!writer.writeP(PSTR("<p>MQTT user<br><input name=\"user\" value=\"")) ||
 		    !writer.write(escaped) ||
-		    !writer.write("\" maxlength=\"63\"></p>")) {
+		    !writer.writeP(PSTR("\" maxlength=\"63\"></p>"))) {
 			return false;
 		}
 		htmlEscapeInto(appConfig.mqttPass.c_str(), escaped, sizeof(escaped));
-		if (!writer.write("<p>MQTT password<br><input name=\"mpass\" type=\"password\" value=\"") ||
+		if (!writer.writeP(PSTR("<p>MQTT password<br><input name=\"mpass\" type=\"password\" value=\"")) ||
 		    !writer.write(escaped) ||
-		    !writer.write("\" maxlength=\"63\"></p>")) {
+		    !writer.writeP(PSTR("\" maxlength=\"63\"></p>"))) {
 			return false;
 		}
 		htmlEscapeInto(appConfig.inverterLabel.c_str(), escaped, sizeof(escaped));
-		if (!writer.write("<p>Inverter label<br><input name=\"inverter_label\" value=\"") ||
+		if (!writer.writeP(PSTR("<p>Inverter label<br><input name=\"inverter_label\" value=\"")) ||
 		    !writer.write(escaped) ||
-		    !writer.write("\" maxlength=\"10\"></p>")) {
+		    !writer.writeP(PSTR("\" maxlength=\"10\"></p>"))) {
 			return false;
 		}
 		return writer.writeP(kTail);
@@ -3435,8 +3923,7 @@ handlePortalParamSave(WiFiManager& wifiManager)
 	portalMqttSaved = true;
 	portalNeedsMqttConfig = !mqttConfigComplete;
 	if (portalMqttSaved && !portalNeedsMqttConfig && portalHasPersistedWifiCredentials()) {
-		portalRebootScheduled = true;
-		portalRebootAt = millis() + 1500;
+		schedulePortalReboot(portalNormalRebootIntent());
 	}
 
 	wifiManager.server->sendHeader("Location", "/config/mqtt?saved=1");
@@ -3511,60 +3998,79 @@ handlePortalStatusRequest(WiFiManager& wifiManager)
 	static const char kTail[] PROGMEM =
 		"<form method=\"POST\" action=\"/config/reboot-normal\"><button type=\"submit\">Reboot Normal</button></form>"
 		"<p>Page refreshes every second.</p></body></html>";
+	static const char kStatusSuccessFmt[] PROGMEM =
+		"<p><strong>WiFi Status: %s</strong><br>SSID: %s<br>IP: %s</p>";
+	static const char kSavedWifiFmt[] PROGMEM = "<p>Saved WiFi for next reboot: %s</p>";
+	static const char kStatusFailedFmt[] PROGMEM =
+		"<p><strong>WiFi Status: %s</strong><br>Reason: %s</p>";
+	static const char kStatusOnlyFmt[] PROGMEM = "<p><strong>WiFi Status: %s</strong></p>";
+	static const char kSoftApFmt[] PROGMEM = "<br>SoftAP SSID: %s<br>SoftAP IP: %u.%u.%u.%u";
+	static const char kStaStatusFmt[] PROGMEM = "<br>STA status: %s (%d)";
+	static const char kTargetSsidFmt[] PROGMEM = "<br>Target SSID: %s";
+	static const char kBootModeFmt[] PROGMEM = "<br>Boot intent: %s<br>Boot mode: %s";
+	static const char kFirmwareFmt[] PROGMEM = "<br>Firmware version: %s<br>Reset reason: %s";
+	static const char kDisconnectFmt[] PROGMEM = "<br>Last disconnect: %s (%d)";
+	static const char kRssiFmt[] PROGMEM = "<br>RSSI: %d dBm<br>Channel: %d";
+#if defined(MP_ESP8266)
+	static const char kHeapFmt[] PROGMEM = "<br>Heap: free=%u max=%u frag=%u";
+#else
+	static const char kHeapFmt[] PROGMEM = "<br>Heap free=%u";
+#endif
+	static const char kUptimeFmt[] PROGMEM = "<br>Uptime (ms): %lu</p>";
 	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
 		const PortalUiMode uiMode =
 			(currentBootMode == BootMode::WifiConfig) ? PortalUiMode::Wifi : PortalUiMode::Ap;
-		if (!writePortalUiPageStart(writer, "Alpha2MQTT WiFi Status", "WiFi Status", uiMode, kRefreshHead)) {
+		if (!writePortalUiPageStartP(
+			    writer, PSTR("Alpha2MQTT WiFi Status"), PSTR("WiFi Status"), uiMode, kRefreshHead)) {
 			return false;
 		}
 
 		if (snapshot.status == portalStatusSuccess) {
-			snprintf(buf,
-			         sizeof(buf),
-			         "<p><strong>WiFi Status: %s</strong><br>SSID: %s<br>IP: %s</p>",
-			         portalStatusLabel(snapshot.status),
-			         snapshot.statusSsid,
-			         snapshot.statusIp);
+			snprintf_P(buf,
+			           sizeof(buf),
+			           kStatusSuccessFmt,
+			           portalStatusLabel(snapshot.status),
+			           snapshot.statusSsid,
+			           snapshot.statusIp);
 			if (!writer.write(buf)) {
 				return false;
 			}
 			if (snapshot.bootMode == BootMode::WifiConfig && appConfig.wifiSSID.length() > 0 &&
 			    strcmp(snapshot.statusSsid, appConfig.wifiSSID.c_str()) != 0) {
-				snprintf(buf,
-				         sizeof(buf),
-				         "<p>Saved WiFi for next reboot: %s</p>",
-				         appConfig.wifiSSID.c_str());
+				snprintf_P(buf, sizeof(buf), kSavedWifiFmt, appConfig.wifiSSID.c_str());
 				if (!writer.write(buf)) {
 					return false;
 				}
 			}
 			if (snapshot.needsMqttConfig) {
-				if (!writer.write("<p><strong>MQTT settings not set.</strong> Redirecting to MQTT settings...</p>") ||
-				    !writer.write("<p><a href=\"/config/mqtt\">Open MQTT settings</a></p>") ||
-		    !writer.write("<script>setTimeout(function(){window.location.href='/config/mqtt';},500);</script>")) {
+				if (!writer.writeP(
+				        PSTR("<p><strong>MQTT settings not set.</strong> Redirecting to MQTT settings...</p>")) ||
+				    !writer.writeP(PSTR("<p><a href=\"/config/mqtt\">Open MQTT settings</a></p>")) ||
+				    !writer.writeP(
+					    PSTR("<script>setTimeout(function(){window.location.href='/config/mqtt';},500);</script>"))) {
 					return false;
 				}
 			}
 		} else if (snapshot.status == portalStatusFailed) {
-			snprintf(buf,
-			         sizeof(buf),
-			         "<p><strong>WiFi Status: %s</strong><br>Reason: %s</p>",
-			         portalStatusLabel(snapshot.status),
-			         snapshot.statusReason);
+			snprintf_P(buf,
+			           sizeof(buf),
+			           kStatusFailedFmt,
+			           portalStatusLabel(snapshot.status),
+			           snapshot.statusReason);
 			if (!writer.write(buf)) {
 				return false;
 			}
 		} else {
-			snprintf(buf, sizeof(buf), "<p><strong>WiFi Status: %s</strong></p>", portalStatusLabel(snapshot.status));
+			snprintf_P(buf, sizeof(buf), kStatusOnlyFmt, portalStatusLabel(snapshot.status));
 			if (!writer.write(buf)) {
 				return false;
 			}
 			if (snapshot.bootMode == BootMode::WifiConfig) {
-				if (!writer.write("<p>Portal active. WiFi changes apply on reboot.</p>")) {
+				if (!writer.writeP(PSTR("<p>Portal active. WiFi changes apply on reboot.</p>"))) {
 					return false;
 				}
 			} else {
-				if (!writer.write("<p>Attempting to connect...</p>")) {
+				if (!writer.writeP(PSTR("<p>Attempting to connect...</p>"))) {
 					return false;
 				}
 			}
@@ -3580,70 +4086,67 @@ handlePortalStatusRequest(WiFiManager& wifiManager)
 
 		// Only show SoftAP info when it is actually enabled; MODE_WIFI_CONFIG uses STA-only portal.
 		if (snapshot.wifiMode == WIFI_AP || snapshot.wifiMode == WIFI_AP_STA) {
-			snprintf(buf, sizeof(buf), "<br>SoftAP SSID: %s<br>SoftAP IP: %u.%u.%u.%u",
-			         deviceName, snapshot.apIp[0], snapshot.apIp[1], snapshot.apIp[2], snapshot.apIp[3]);
+			snprintf_P(buf,
+			           sizeof(buf),
+			           kSoftApFmt,
+			           deviceName,
+			           snapshot.apIp[0],
+			           snapshot.apIp[1],
+			           snapshot.apIp[2],
+			           snapshot.apIp[3]);
 			if (!writer.write(buf)) {
 				return false;
 			}
 		} else {
-			if (!writer.write("<br>SoftAP: disabled")) {
+			if (!writer.writeP(PSTR("<br>SoftAP: disabled"))) {
 				return false;
 			}
 		}
 
-		snprintf(buf,
-		         sizeof(buf),
-		         "<br>STA status: %s (%d)",
-		         wifiStatusLabel(snapshot.staStatus),
-		         static_cast<int>(snapshot.staStatus));
+		snprintf_P(
+			buf, sizeof(buf), kStaStatusFmt, wifiStatusLabel(snapshot.staStatus), static_cast<int>(snapshot.staStatus));
 		if (!writer.write(buf)) {
 			return false;
 		}
 
-		snprintf(buf, sizeof(buf), "<br>Target SSID: %s", snapshot.targetSsid);
+		snprintf_P(buf, sizeof(buf), kTargetSsidFmt, snapshot.targetSsid);
 		if (!writer.write(buf)) {
 			return false;
 		}
 
-		snprintf(buf, sizeof(buf), "<br>Boot intent: %s<br>Boot mode: %s",
-		         bootIntentToString(snapshot.bootIntent),
-		         bootModeToString(snapshot.diagnosticsMode));
+		snprintf_P(
+			buf, sizeof(buf), kBootModeFmt, bootIntentToString(snapshot.bootIntent), bootModeToString(snapshot.diagnosticsMode));
 		if (!writer.write(buf)) {
 			return false;
 		}
 
-		snprintf(buf, sizeof(buf), "<br>Firmware version: %s<br>Reset reason: %s", _version, snapshot.resetReason);
+		snprintf_P(buf, sizeof(buf), kFirmwareFmt, _version, snapshot.resetReason);
 		if (!writer.write(buf)) {
 			return false;
 		}
 
-		snprintf(buf,
-		         sizeof(buf),
-		         "<br>Last disconnect: %s (%d)",
-		         snapshot.disconnectLabel,
-		         snapshot.lastDisconnectReason);
+		snprintf_P(buf, sizeof(buf), kDisconnectFmt, snapshot.disconnectLabel, snapshot.lastDisconnectReason);
 		if (!writer.write(buf)) {
 			return false;
 		}
 
 		if (snapshot.staStatus == WL_CONNECTED) {
-			snprintf(buf, sizeof(buf), "<br>RSSI: %d dBm<br>Channel: %d", snapshot.rssi, snapshot.channel);
+			snprintf_P(buf, sizeof(buf), kRssiFmt, snapshot.rssi, snapshot.channel);
 			if (!writer.write(buf)) {
 				return false;
 			}
 		}
 
 #if defined(MP_ESP8266)
-		snprintf(buf, sizeof(buf), "<br>Heap: free=%u max=%u frag=%u",
-		         snapshot.freeHeap, snapshot.maxFreeBlock, snapshot.heapFrag);
+		snprintf_P(buf, sizeof(buf), kHeapFmt, snapshot.freeHeap, snapshot.maxFreeBlock, snapshot.heapFrag);
 #else
-		snprintf(buf, sizeof(buf), "<br>Heap free=%u", snapshot.freeHeap);
+		snprintf_P(buf, sizeof(buf), kHeapFmt, snapshot.freeHeap);
 #endif
 		if (!writer.write(buf)) {
 			return false;
 		}
 
-		snprintf(buf, sizeof(buf), "<br>Uptime (ms): %lu</p>", snapshot.uptimeMs);
+		snprintf_P(buf, sizeof(buf), kUptimeFmt, snapshot.uptimeMs);
 		if (!writer.write(buf)) {
 			return false;
 		}
@@ -3666,22 +4169,23 @@ handlePortalUpdatePage(WiFiManager &wifiManager)
 		"<p><button type=\"submit\">Upload Firmware</button></p>"
 		"</form>"
 		"</body></html>";
+	static const char kFormOpenFmt[] PROGMEM =
+		"<form id=\"ota-form\" method=\"POST\" enctype=\"multipart/form-data\" action=\"/config/update?csrf=%s\">";
 	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
 		const PortalUiMode uiMode =
 			(currentBootMode == BootMode::WifiConfig) ? PortalUiMode::Wifi : PortalUiMode::Ap;
-		if (!writePortalUiPageStart(writer, "Alpha2MQTT OTA Update", "OTA Update", uiMode) ||
-		    !writer.write("<p>Upload a firmware binary. The device reboots automatically after a successful update.</p>") ||
-		    !writePortalMenuButton(writer, "/", "Menu", "get") ||
-		    !writePortalMenuButton(writer, "/config/reboot-normal", "Reboot Normal", "post")) {
+		if (!writePortalUiPageStartP(writer, PSTR("Alpha2MQTT OTA Update"), PSTR("OTA Update"), uiMode) ||
+		    !writer.writeP(PSTR("<p>Upload a firmware binary. The device reboots automatically after a successful update.</p>")) ||
+		    !writePortalMenuButtonP(writer, PSTR("/"), PSTR("Menu"), PSTR("get")) ||
+		    !writePortalMenuButtonP(
+			    writer, PSTR("/config/reboot-normal"), PSTR("Reboot Normal"), PSTR("post"))) {
 			return false;
 		}
 		// ESP8266WebServer buffers non-form POST bodies into a String before dispatch. Keep OTA on
 		// multipart upload so the parser streams chunks through the upload callback instead.
 		char formOpen[200];
-		const int written = snprintf(formOpen,
-		                             sizeof(formOpen),
-		                             "<form id=\"ota-form\" method=\"POST\" enctype=\"multipart/form-data\" action=\"/config/update?csrf=%s\">",
-		                             portalUpdateCsrfToken);
+		const int written = snprintf_P(
+			formOpen, sizeof(formOpen), kFormOpenFmt, portalUpdateCsrfToken);
 		if (written <= 0 || static_cast<size_t>(written) >= sizeof(formOpen) || !writer.write(formOpen)) {
 			return false;
 		}
@@ -3825,9 +4329,7 @@ handlePortalRestartRequest(WiFiManager& wifiManager)
 #if defined(MP_ESP8266)
 	ESP.wdtFeed();
 #endif
-	portalRebootScheduled = true;
-	portalRebootAt = millis() + 1500;
-	deferredControlPlaneRebootIntent = portalRestartIntent();
+	schedulePortalReboot(portalRestartIntent());
 }
 
 void
@@ -3843,9 +4345,7 @@ handlePortalRebootNormalRequest(WiFiManager& wifiManager)
 	ESP.wdtFeed();
 #endif
 	portalNeedsMqttConfig = false;
-	portalRebootScheduled = true;
-	portalRebootAt = millis() + 1500;
-	deferredControlPlaneRebootIntent = portalNormalRebootIntent();
+	schedulePortalReboot(portalNormalRebootIntent());
 }
 
 static constexpr uint8_t kPollingPortalPageSize = 8;
@@ -3953,6 +4453,14 @@ bindPortalRoutes(WiFiManager &wifiManager)
 	if (!wifiManager.server) {
 		return;
 	}
+	// During AP onboarding WiFiManager may swap internal web-server state while
+	// handling /wifisave. Rebinding our custom routes in that window has caused
+	// ESP8266 exceptions from std::function route-table churn. Keep the existing
+	// AP routes stable until the connect attempt either succeeds or fails.
+	if (currentBootMode != BootMode::WifiConfig && portalStatus == portalStatusConnecting &&
+	    portalRoutesBoundServer != nullptr) {
+		return;
+	}
 	if (portalRoutesBoundServer == static_cast<void *>(wifiManager.server.get())) {
 		return;
 	}
@@ -3983,6 +4491,25 @@ bindPortalRoutes(WiFiManager &wifiManager)
 		notePortalActivity();
 		handlePortalPollingPage(wifiManager);
 	});
+	wifiManager.server->on("/config/polling/export", HTTP_GET, [&]() {
+		notePortalActivity();
+		handlePortalPollingExport(wifiManager);
+	});
+	wifiManager.server->on("/config/polling/import", HTTP_GET, [&]() {
+		notePortalActivity();
+		handlePortalPollingImportPage(wifiManager);
+	});
+	wifiManager.server->on(
+		"/config/polling/import",
+		HTTP_POST,
+		[&]() {
+			notePortalActivity();
+			handlePortalPollingImport(wifiManager);
+		},
+		[&]() {
+			notePortalActivity();
+			handlePortalPollingImportUpload(wifiManager);
+		});
 	wifiManager.server->on("/config/polling/reset", HTTP_POST, [&]() {
 		notePortalActivity();
 		handlePortalPollingReset(wifiManager);
@@ -4007,6 +4534,10 @@ bindPortalRoutes(WiFiManager &wifiManager)
 			handlePortalWifiSave(wifiManager);
 		});
 	}
+	wifiManager.server->on("/config/wifi/save", HTTP_POST, [&]() {
+		notePortalActivity();
+		handlePortalWifiSave(wifiManager);
+	});
 	wifiManager.server->on("/config/mqtt", HTTP_GET, [&]() {
 		notePortalActivity();
 #ifdef DEBUG_OVER_SERIAL
@@ -4096,6 +4627,19 @@ ensurePortalPollingRuntimeReady(void)
 	if (currentBootMode != BootMode::ApConfig && currentBootMode != BootMode::WifiConfig) {
 		loadPollingConfig();
 	}
+}
+
+static void
+preparePortalPollingRuntime(void)
+{
+	// Portal-mode contract:
+	// - AP/WiFi portal handlers must not re-read polling prefs inline on ESP8266.
+	// - Portal edits persist schedule changes, but normal-runtime application is
+	//   a separate step that happens after Reboot Normal.
+	// Load the saved schedule once during portal startup so cache/page handlers
+	// can reuse initialized buckets without request-time NVS churn.
+	ensurePortalPollingRuntimeReady();
+	loadPollingConfig();
 }
 
 static void
@@ -4297,6 +4841,26 @@ loadPollingBucketsForPortal(const mqttState *entities,
 	const bool usePersistedOnly =
 		currentBootMode == BootMode::ApConfig || currentBootMode == BootMode::WifiConfig;
 	outPollIntervalSeconds = clampPollInterval(pollIntervalSeconds);
+	if (usePersistedOnly && mqttEntitiesRtAvailable()) {
+		// Portal cache contract:
+		// - wifi_config already loaded the saved schedule during startup
+		// - fresh AP onboarding only needs the current live defaults until the user saves
+		// - request handlers must not touch Preferences again here
+		// - transient startup recovery must keep the cache fail-closed so later
+		//   portal save/clear/import paths cannot overwrite a still-valid
+		//   persisted Bucket_Map with recovered defaults
+		if (!mqttEntityCopyBuckets(outBuckets, entityCount)) {
+			return false;
+		}
+		const bool trustRuntimeCache = shouldTrustPortalPollingRuntimeCache(pollingConfigLoadedFromStorage);
+		g_portalPollingCacheValid = trustRuntimeCache;
+		g_portalPollingCacheEntityCount = trustRuntimeCache ? entityCount : 0;
+		g_portalPollingCacheIntervalSeconds = outPollIntervalSeconds;
+		if (outBuckets != g_portalBucketsScratch) {
+			memcpy(g_portalBucketsScratch, outBuckets, entityCount * sizeof(BucketId));
+		}
+		return true;
+	}
 		if (usePersistedOnly || !mqttEntitiesRtAvailable()) {
 			if (g_portalPollingCacheValid && g_portalPollingCacheEntityCount == entityCount) {
 				outPollIntervalSeconds = g_portalPollingCacheIntervalSeconds;
@@ -4334,6 +4898,12 @@ loadPollingBucketsForPortal(const mqttState *entities,
 				    reason, outBuckets, entityCount, outPollIntervalSeconds, failureKind)) {
 				return false;
 			}
+			// Trust contract:
+			// - transient load failures may recover defaults for this request, but
+			//   must leave the portal cache invalid so later save/clear/import paths
+			//   fail closed instead of overwriting valid persisted data
+			// - only a proven corrupt persisted Bucket_Map may become trusted
+			//   recovered defaults after the reset write succeeds
 			const bool trustRecovered = shouldTrustRecoveredPortalPollingConfig(failureKind);
 			g_portalPollingCacheValid = trustRecovered;
 			g_portalPollingCacheEntityCount = trustRecovered ? entityCount : 0;
@@ -4434,9 +5004,9 @@ primePortalPollingCache(void)
 		// If cache priming fails for a transient reason, leave the cache invalid.
 		// Portal save/page handlers must not synthesize defaults here because that
 		// can overwrite a valid persisted Bucket_Map after a read-time failure.
-			return;
-		}
+		return;
 	}
+}
 
 static uint16_t
 portalArgToU16(const String &arg, uint16_t defaultValue)
@@ -4640,6 +5210,16 @@ portalResolveEntityToken(const char *token, size_t entityCount, size_t &resolved
 	if (token == nullptr || token[0] == '\0' || entityCount == 0 || entityCount > kMqttEntityDescriptorCount) {
 		return false;
 	}
+	if (token[0] == '@') {
+		char *endPtr = nullptr;
+		errno = 0;
+		unsigned long parsed = strtoul(token + 1, &endPtr, 10);
+		if (errno != 0 || endPtr == token + 1 || *endPtr != '\0' || parsed > UINT16_MAX) {
+			return false;
+		}
+		return mqttEntityIndexById(static_cast<mqttEntityId>(parsed), &resolvedIndex) &&
+		       resolvedIndex < entityCount;
+	}
 	if (token[0] == '#') {
 		char *endPtr = nullptr;
 		errno = 0;
@@ -4813,9 +5393,15 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 	}
 
 	const bool saved = wifiManager.server->hasArg("saved") && wifiManager.server->arg("saved") == "1";
+	const bool imported = wifiManager.server->hasArg("imported") && wifiManager.server->arg("imported") == "1";
 	const bool err = wifiManager.server->hasArg("err") && wifiManager.server->arg("err") == "1";
+	const uint16_t importedUnknownCount = portalArgToU16(wifiManager.server->arg("unknown"), 0);
 
 	static const char kSavedMsg[] PROGMEM = "<p><strong>Saved.</strong></p>";
+	static const char kImportedMsg[] PROGMEM =
+		"<p><strong>Polling profile imported. Reboot Normal to apply it to runtime and Home Assistant.</strong></p>";
+	static const char kImportedUnknownFmt[] PROGMEM =
+		"<p><strong>Ignored %u unknown entities from the imported profile.</strong></p>";
 	static const char kErrMsg[] PROGMEM = "<p><strong>Some values were invalid and were ignored.</strong></p>";
 	static const char kFormOpen[] PROGMEM = "<form id=\"polling-form\" method=\"POST\" action=\"/config/polling/save\">";
 	static const char kTableOpen[] PROGMEM = "<table><tr><th>Entity</th><th>Bucket</th></tr>";
@@ -4840,13 +5426,27 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
 		const PortalUiMode uiMode =
 			(currentBootMode == BootMode::WifiConfig) ? PortalUiMode::Wifi : PortalUiMode::Ap;
-		if (!writePortalUiPageStart(writer, "Polling Schedule", "Polling schedule", uiMode, kPollingPageExtraHead) ||
-		    !writer.write("<p><a href=\"/\">Menu</a> | <a href=\"/config/mqtt\">MQTT Setup</a></p>") ||
-		    !writePortalMenuButton(writer, "/config/reboot-normal", "Reboot Normal", "post")) {
+		if (!writePortalUiPageStartP(
+			    writer, PSTR("Polling Schedule"), PSTR("Polling schedule"), uiMode, kPollingPageExtraHead) ||
+		    !writer.writeP(PSTR("<p><a href=\"/\">Menu</a> | <a href=\"/config/mqtt\">MQTT Setup</a> | "
+		                        "<a href=\"/config/polling/import\">Restore Profile</a></p>")) ||
+		    !writePortalMenuButtonP(
+			    writer, PSTR("/config/polling/export"), PSTR("Download Polling Profile"), PSTR("get")) ||
+		    !writePortalMenuButtonP(
+			    writer, PSTR("/config/reboot-normal"), PSTR("Reboot Normal"), PSTR("post"))) {
 			return false;
 		}
 		if (saved && !writer.writeP(kSavedMsg)) {
 			return false;
+		}
+		if (imported && !writer.writeP(kImportedMsg)) {
+			return false;
+		}
+		if (importedUnknownCount != 0) {
+			snprintf_P(buf, sizeof(buf), kImportedUnknownFmt, static_cast<unsigned>(importedUnknownCount));
+			if (!writer.write(buf)) {
+				return false;
+			}
 		}
 		if (err && !writer.writeP(kErrMsg)) {
 			return false;
@@ -4885,33 +5485,34 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		           static_cast<unsigned>(view.page.maxPage + 1),
 		           static_cast<unsigned>(view.page.totalEntityCount));
 		if (!writer.write(buf) ||
-		    !writer.write("<p>Edit the visible rows and save.</p>") ||
-		    !writer.write("<form method=\"post\" action=\"/config/polling/reset\">"
-		                  "<input type=\"hidden\" name=\"csrf\" value=\"") ||
+		    !writer.writeP(PSTR("<p>Edit the visible rows and save.</p>")) ||
+		    !writer.writeP(PSTR("<form method=\"post\" action=\"/config/polling/reset\">"
+		                       "<input type=\"hidden\" name=\"csrf\" value=\"")) ||
 		    !writer.write(portalUpdateCsrfToken) ||
-		    !writer.write("\"><button type=\"submit\">Reset Polling Defaults</button></form>") ||
+		    !writer.writeP(PSTR("\"><button type=\"submit\">Reset Polling Defaults</button></form>")) ||
 		    !writer.writeP(kFormOpen)) {
 			return false;
 		}
-		if (!writer.write("<input type=\"hidden\" name=\"family\" value=\"") ||
+		if (!writer.writeP(PSTR("<input type=\"hidden\" name=\"family\" value=\"")) ||
 		    !writer.write(familyKey) ||
-		    !writer.write("\">")) {
+		    !writer.writeP(PSTR("\">"))) {
 			return false;
 		}
 		snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(view.page.safePage));
-		if (!writer.write("<input type=\"hidden\" name=\"page\" value=\"") ||
+		if (!writer.writeP(PSTR("<input type=\"hidden\" name=\"page\" value=\"")) ||
 		    !writer.write(buf) ||
-		    !writer.write("\">") ||
-		    !writer.write("<input type=\"hidden\" name=\"csrf\" value=\"") ||
+		    !writer.writeP(PSTR("\">")) ||
+		    !writer.writeP(PSTR("<input type=\"hidden\" name=\"csrf\" value=\"")) ||
 		    !writer.write(portalUpdateCsrfToken) ||
-		    !writer.write("\">") ||
-		    !writer.write("<input type=\"hidden\" name=\"bucket_map_full\" value=\"\">")) {
+		    !writer.writeP(PSTR("\">")) ||
+		    !writer.writeP(PSTR("<input type=\"hidden\" name=\"bucket_map_full\" value=\"\">"))) {
 			return false;
 		}
 		snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(storedIntervalSeconds));
-		if (!writer.write("<label>poll_interval_s <input name=\"poll_interval_s\" type=\"number\" min=\"1\" max=\"120\" value=\"") ||
+		if (!writer.writeP(
+			    PSTR("<label>poll_interval_s <input name=\"poll_interval_s\" type=\"number\" min=\"1\" max=\"120\" value=\"")) ||
 		    !writer.write(buf) ||
-		    !writer.write("\"></label><br><br>") ||
+		    !writer.writeP(PSTR("\"></label><br><br>")) ||
 		    !writer.writeP(kTableOpen)) {
 			return false;
 		}
@@ -4952,18 +5553,18 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 			return false;
 		}
 		snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(view.page.safePage));
-		if (!writer.write("<form action=\"/config/polling/clear\" method=\"post\">") ||
-		    !writer.write("<input type=\"hidden\" name=\"family\" value=\"") ||
+		if (!writer.writeP(PSTR("<form action=\"/config/polling/clear\" method=\"post\">")) ||
+		    !writer.writeP(PSTR("<input type=\"hidden\" name=\"family\" value=\"")) ||
 		    !writer.write(familyKey) ||
-		    !writer.write("\">") ||
-		    !writer.write("<input type=\"hidden\" name=\"page\" value=\"") ||
+		    !writer.writeP(PSTR("\">")) ||
+		    !writer.writeP(PSTR("<input type=\"hidden\" name=\"page\" value=\"")) ||
 		    !writer.write(buf) ||
-		    !writer.write("\">") ||
-		    !writer.write("<input type=\"hidden\" name=\"csrf\" value=\"") ||
+		    !writer.writeP(PSTR("\">")) ||
+		    !writer.writeP(PSTR("<input type=\"hidden\" name=\"csrf\" value=\"")) ||
 		    !writer.write(portalUpdateCsrfToken) ||
-		    !writer.write("\">") ||
-		    !writer.write("<button type=\"submit\">Disable All Entities</button></form>") ||
-		    !writer.write("<div class=\"polling-nav\">") ||
+		    !writer.writeP(PSTR("\">")) ||
+		    !writer.writeP(PSTR("<button type=\"submit\">Disable All Entities</button></form>")) ||
+		    !writer.writeP(PSTR("<div class=\"polling-nav\">")) ||
 		    !writePollingNavButton(writer,
 		                           familyKey,
 		                           (view.page.safePage > 0) ? static_cast<uint16_t>(view.page.safePage - 1) : 0,
@@ -4980,13 +5581,181 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		                           "polling-nav-next",
 		                           "Next",
 		                           view.page.safePage < view.page.maxPage) ||
-		    !writer.write("</div>")) {
+		    !writer.writeP(PSTR("</div>"))) {
 			return false;
 		}
 		return writer.writeP(kUiPageTail);
 	};
 	if (!sendPortalHtmlResponse(wifiManager.server.get(), emitPage, "polling config unavailable: emit")) {
 	}
+}
+
+static void
+handlePortalPollingExport(WiFiManager &wifiManager)
+{
+	if (!wifiManager.server) {
+		return;
+	}
+
+	PortalResponseWriter countWriter;
+	if (!writePortalCurrentPollingProfile(countWriter) || countWriter.bytes == 0) {
+		wifiManager.server->send(500, "text/plain", "polling profile unavailable");
+		return;
+	}
+
+	wifiManager.server->sendHeader("Cache-Control", "no-store");
+	wifiManager.server->sendHeader(
+		"Content-Disposition", "attachment; filename=\"alpha2mqtt_polling_profile.txt\"");
+	wifiManager.server->setContentLength(countWriter.bytes);
+	wifiManager.server->send(200, "text/plain", "");
+	PortalResponseWriter writer;
+	writer.server = wifiManager.server.get();
+	(void)writePortalCurrentPollingProfile(writer);
+}
+
+static void
+handlePortalPollingImportPage(WiFiManager &wifiManager)
+{
+	resetPortalPollingProfileUploadState();
+	renderPortalPollingImportPage(wifiManager, nullptr, false);
+}
+
+static void
+handlePortalPollingImportUpload(WiFiManager &wifiManager)
+{
+	static const char kImportUnavailableErr[] PROGMEM = "Polling profile import unavailable.";
+	static const char kImportOomErr[] PROGMEM = "Polling profile import ran out of memory.";
+	static const char kPrepareBucketsErr[] PROGMEM = "Polling profile import could not prepare buckets.";
+	static const char kMissingHeaderErr[] PROGMEM = "Polling profile header is missing.";
+	static const char kMissingIntervalErr[] PROGMEM = "Polling profile must define poll_interval_s.";
+	static const char kImportFailedErr[] PROGMEM = "Polling profile import failed.";
+	static const char kUploadInterruptedErr[] PROGMEM = "Polling profile upload was interrupted.";
+	if (!wifiManager.server) {
+		return;
+	}
+	if (!portalUpdateRequestHasValidToken(&wifiManager)) {
+		return;
+	}
+
+	HTTPUpload &upload = wifiManager.server->upload();
+	switch (upload.status) {
+	case UPLOAD_FILE_START: {
+		resetPortalPollingProfileUploadState();
+		portalPollingProfileUpload.started = true;
+		portalPollingProfileUpload.ok = true;
+		ensurePortalPollingRuntimeReady();
+		const size_t entityCount = mqttEntitiesCount();
+		if (entityCount == 0 || entityCount > kMqttEntityDescriptorCount) {
+			copyPortalPollingProfileUploadErrorP(kImportUnavailableErr);
+			portalPollingProfileUpload.ok = false;
+			break;
+		}
+		portalPollingProfileUpload.entityCount = entityCount;
+		portalPollingProfileUpload.stagedBuckets = new (std::nothrow) BucketId[entityCount];
+		portalPollingProfileUpload.seenEntities = new (std::nothrow) uint8_t[entityCount];
+		portalPollingProfileUpload.lineBuf = new (std::nothrow) char[kPollingProfileLineMaxLen];
+		portalPollingProfileUpload.error = new (std::nothrow) char[kPollingProfileUploadErrorMaxLen];
+		if (portalPollingProfileUpload.stagedBuckets == nullptr ||
+		    portalPollingProfileUpload.seenEntities == nullptr ||
+		    portalPollingProfileUpload.lineBuf == nullptr ||
+		    portalPollingProfileUpload.error == nullptr) {
+			copyPortalPollingProfileUploadErrorP(kImportOomErr);
+			portalPollingProfileUpload.ok = false;
+			break;
+		}
+		portalPollingProfileUpload.error[0] = '\0';
+		memset(portalPollingProfileUpload.seenEntities, 0, entityCount * sizeof(uint8_t));
+		if (!initializePortalPollingProfileBuckets(portalPollingProfileUpload.stagedBuckets, entityCount)) {
+			copyPortalPollingProfileUploadErrorP(kPrepareBucketsErr);
+			portalPollingProfileUpload.ok = false;
+		}
+		break;
+	}
+	case UPLOAD_FILE_WRITE:
+		if (portalPollingProfileUpload.started && portalPollingProfileUpload.ok) {
+			(void)appendPortalPollingProfileUploadBytes(upload.buf, upload.currentSize);
+		}
+		break;
+	case UPLOAD_FILE_END:
+		if (!portalPollingProfileUpload.started) {
+			break;
+		}
+		if (portalPollingProfileUpload.ok && portalPollingProfileUpload.lineLen > 0) {
+			portalPollingProfileUpload.lineBuf[portalPollingProfileUpload.lineLen] = '\0';
+			(void)processPortalPollingProfileUploadLine(portalPollingProfileUpload.lineBuf);
+			portalPollingProfileUpload.lineLen = 0;
+		}
+		if (portalPollingProfileUpload.ok && !portalPollingProfileUpload.sawHeader) {
+			copyPortalPollingProfileUploadErrorP(kMissingHeaderErr);
+			portalPollingProfileUpload.ok = false;
+		}
+		if (portalPollingProfileUpload.ok && !portalPollingProfileUpload.sawPollInterval) {
+			copyPortalPollingProfileUploadErrorP(kMissingIntervalErr);
+			portalPollingProfileUpload.ok = false;
+		}
+		if (portalPollingProfileUpload.ok) {
+			const PortalPollingProfileApplyResult applyResult =
+				applyPortalPollingProfileState(portalPollingProfileUpload.stagedIntervalSeconds,
+				                              portalPollingProfileUpload.stagedBuckets,
+				                              portalPollingProfileUpload.entityCount,
+				                              portalPollingProfileUpload.unknownCount);
+			if (!applyResult.ok) {
+				copyPortalPollingProfileUploadErrorP(kImportFailedErr);
+				portalPollingProfileUpload.ok = false;
+			} else {
+				portalPollingProfileUpload.unknownCount = applyResult.unknownCount;
+			}
+		}
+		portalPollingProfileUpload.finished = true;
+		break;
+	case UPLOAD_FILE_ABORTED:
+		if (portalPollingProfileUpload.started) {
+			copyPortalPollingProfileUploadErrorP(kUploadInterruptedErr);
+			portalPollingProfileUpload.ok = false;
+			portalPollingProfileUpload.finished = true;
+		}
+		break;
+	default:
+		break;
+	}
+}
+
+static void
+handlePortalPollingImport(WiFiManager &wifiManager)
+{
+	if (!wifiManager.server) {
+		return;
+	}
+	if (!portalUpdateRequestHasValidToken(&wifiManager)) {
+		wifiManager.server->send(403, "text/plain", "invalid csrf");
+		return;
+	}
+	if (!portalPollingProfileUpload.started) {
+		renderPortalPollingImportPage(wifiManager, "Polling profile file is required.", true);
+		return;
+	}
+	if (!portalPollingProfileUpload.finished || !portalPollingProfileUpload.ok) {
+		const char *message =
+			(portalPollingProfileUpload.error != nullptr && portalPollingProfileUpload.error[0] != '\0')
+				? portalPollingProfileUpload.error
+				: "Polling profile import failed.";
+		renderPortalPollingImportPage(wifiManager, message, true);
+		resetPortalPollingProfileUploadState();
+		return;
+	}
+
+	char location[96];
+	if (portalPollingProfileUpload.unknownCount != 0) {
+		snprintf(location,
+		         sizeof(location),
+		         "/config/polling?imported=1&unknown=%lu",
+		         static_cast<unsigned long>(portalPollingProfileUpload.unknownCount));
+	} else {
+		strlcpy(location, "/config/polling?imported=1", sizeof(location));
+	}
+	resetPortalPollingProfileUploadState();
+	wifiManager.server->sendHeader("Location", location);
+	wifiManager.server->send(302, "text/plain", "");
 }
 
 static void
@@ -5146,6 +5915,7 @@ handlePortalPollingSave(WiFiManager &wifiManager)
 
 	// Polling save is user-driven config edit only. Never auto-reboot from this path.
 	portalRebootScheduled = false;
+	portalRebootIntent = BootIntent::Normal;
 	portalMqttSaved = false;
 	if (hadError) {
 		g_portalPollingCacheValid = false;
@@ -5233,6 +6003,7 @@ handlePortalPollingClear(WiFiManager &wifiManager)
 		hadError = true;
 	}
 	portalRebootScheduled = false;
+	portalRebootIntent = BootIntent::Normal;
 	portalMqttSaved = false;
 	if (hadError) {
 		g_portalPollingCacheValid = false;
@@ -5606,8 +6377,10 @@ configHandlerSta(void)
 {
 	WiFiManager wifiManager;
 
-	// MODE_WIFI_CONFIG is STA-only (no SoftAP, no DNS). This avoids interfering with the LAN and
-	// keeps heap usage lower, but requires the user to reach the device on its STA IP.
+	// WiFi portal contract:
+	// - wifi_config is STA-only (no SoftAP/DNS)
+	// - connect timeout is not enough to fall back to AP
+	// - only invalid-config classification should redirect to ap_config
 	WiFi.mode(WIFI_STA);
 
 #ifdef DEBUG_OVER_SERIAL
@@ -5672,6 +6445,7 @@ configHandlerSta(void)
 		appConfig.wifiPass = "";
 	});
 
+	preparePortalPollingRuntime();
 	primePortalPollingCache();
 	// STA portal serves custom MQTT/polling pages via bindPortalRoutes(); keeping the old
 	// WiFiManager parameter list registered here only inflates connected-portal heap and
@@ -5689,6 +6463,7 @@ configHandlerSta(void)
 	portalMqttSaved = false;
 	portalWifiCredentialsChanged = false;
 	portalRebootScheduled = false;
+	portalRebootIntent = BootIntent::Normal;
 	portalRebootAt = 0;
 	portalRouteRebindRetriesRemaining = 0;
 	portalRouteRebindRetryAt = 0;
@@ -5743,15 +6518,14 @@ configHandlerSta(void)
 		// earlier WiFi save path. Do not rewrite them on every loop tick while waiting to reboot.
 		if (portalMqttSaved && !portalNeedsMqttConfig && isWifiConfigComplete()) {
 			if (!portalRebootScheduled) {
-				portalRebootScheduled = true;
-				portalRebootAt = millis() + 1500;
+				schedulePortalReboot(portalNormalRebootIntent());
 #ifdef DEBUG_OVER_SERIAL
 				portalLog("MQTT configured and WiFi credentials present; reboot scheduled.");
 #endif
 			}
 				}
 				if (portalRebootScheduled && static_cast<long>(millis() - portalRebootAt) >= 0) {
-					setBootIntentAndReboot(portalNormalRebootIntent());
+					setBootIntentAndReboot(portalRebootIntent);
 				}
 
 		diagDelay(50);
@@ -5799,7 +6573,10 @@ configHandler(void)
 {
 	WiFiManager wifiManager;
 
-	// Keep AP alive while attempting STA connection so the portal stays reachable.
+	// AP portal contract:
+	// - keep the portal reachable while STA onboarding is in progress
+	// - after WiFi is saved but setup is still incomplete, the intended handoff
+	//   is to the STA WiFi portal so the user can finish setup on the LAN
 	WiFi.mode(WIFI_AP_STA);
 	wifiManager.setBreakAfterConfig(false);
 	wifiManager.setTitle(deviceName);
@@ -5825,6 +6602,7 @@ configHandler(void)
 		appConfig.wifiPass = "";
 	});
 	refreshPortalCustomParameters();
+	preparePortalPollingRuntime();
 	primePortalPollingCache();
 #ifdef MP_XIAO_ESP32C6
 	const char _customHtml_checkbox[] = "type=\"checkbox\"";
@@ -5874,6 +6652,7 @@ configHandler(void)
 	portalMqttSaved = false;
 	portalWifiCredentialsChanged = false;
 	portalRebootScheduled = false;
+	portalRebootIntent = BootIntent::Normal;
 	portalRebootAt = 0;
 	portalRouteRebindRetriesRemaining = 0;
 	portalRouteRebindRetryAt = 0;
@@ -5947,6 +6726,13 @@ configHandler(void)
 	// Keeping this separate avoids WiFi saves clobbering MQTT values.
 	wifiManager.setSaveParamsCallback([&]() {
 		notePortalActivity();
+		const String requestUri = wifiManager.server ? wifiManager.server->uri() : String();
+		if (requestUri != "/paramsave" && requestUri != "/config/mqtt/save") {
+#ifdef DEBUG_OVER_SERIAL
+			portalLog("Ignoring saveParams callback on uri=%s", requestUri.c_str());
+#endif
+			return;
+		}
 		if (!portalRequestHasMqttFields(wifiManager)) {
 #ifdef DEBUG_OVER_SERIAL
 			portalLog("Ignoring saveParams callback without MQTT fields.");
@@ -6095,6 +6881,7 @@ configHandler(void)
 					static_cast<int>(WiFi.status()),
 					ESP.getFreeHeap());
 #endif
+				invalidatePortalRouteBinding("ap-connect-failed");
 				updateOLED(false, "Web", "config", "failed");
 				// Stay in the portal on failure so the device remains reachable for retries.
 				portalConnectStart = 0;
@@ -6107,15 +6894,14 @@ configHandler(void)
 			// the WiFiManager call path and cause a core panic in __yield().
 			if (portalMqttSaved && !portalNeedsMqttConfig && isWifiConfigComplete()) {
 				if (!portalRebootScheduled) {
-					portalRebootScheduled = true;
-					portalRebootAt = millis() + 1500;
+					schedulePortalReboot(portalNormalRebootIntent());
 #ifdef DEBUG_OVER_SERIAL
 					portalLog("MQTT configured and WiFi credentials present; reboot scheduled.");
 #endif
 				}
 			}
 			if (portalRebootScheduled && static_cast<long>(millis() - portalRebootAt) >= 0) {
-				setBootIntentAndReboot(portalNormalRebootIntent());
+				setBootIntentAndReboot(portalRebootIntent);
 			}
 			const uint32_t portalIdleMs = millis() - portalLastActivityAt;
 			if (!portalRebootScheduled &&
@@ -7189,6 +7975,17 @@ requestHaDataResend(void)
 	resendHaData = true;
 	resendHaPreludePending = true;
 	resendHaNextEntityIndex = 0;
+}
+
+static void
+queueCurrentHaDiscoveryClears(void)
+{
+	if (controllerIdentifier[0] != '\0') {
+		queueStaleControllerDiscoveryClear(controllerIdentifier);
+	}
+	if (haUniqueId[0] != '\0' && strcmp(haUniqueId, "A2M-UNKNOWN") != 0) {
+		queueStaleInverterDiscoveryClear(haUniqueId);
+	}
 }
 
 static const char *
@@ -11238,6 +12035,50 @@ publishManualRegisterReadState(int32_t requestedReg)
 #endif
 }
 
+static bool
+publishRegisterNumberStateValue(int32_t requestedReg)
+{
+	if (!mqttEntitiesRtAvailable()) {
+		return false;
+	}
+	mqttState regEntity{};
+	if (!lookupEntity(mqttEntityId::entityRegNum, &regEntity)) {
+		return false;
+	}
+	size_t idx = 0;
+	if (!lookupEntityIndex(regEntity.entityId, &idx)) {
+		return false;
+	}
+	const mqttUpdateFreq effectiveFreq = mqttEntityEffectiveFreqByIndex(idx);
+	if (effectiveFreq == mqttUpdateFreq::freqNever || effectiveFreq == mqttUpdateFreq::freqDisabled) {
+		return false;
+	}
+	char topicBase[200];
+	char topic[256];
+	char entityKey[64];
+	mqttEntityNameCopy(&regEntity, entityKey, sizeof(entityKey));
+	if (!buildEntityTopicBase(deviceName,
+	                          mqttEntityScope(regEntity.entityId),
+	                          controllerIdentifier,
+	                          deviceSerialNumber,
+	                          entityKey,
+	                          topicBase,
+	                          sizeof(topicBase))) {
+		return false;
+	}
+	emptyPayload();
+	char valueBuf[16];
+	const int written = snprintf(valueBuf, sizeof(valueBuf), "%ld", static_cast<long>(requestedReg));
+	if (written <= 0 || static_cast<size_t>(written) >= sizeof(valueBuf)) {
+		return false;
+	}
+	if (addToPayload(valueBuf) == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		return false;
+	}
+	snprintf(topic, sizeof(topic), "%s/state", topicBase);
+	return sendMqtt(topic, regEntity.retain ? MQTT_RETAIN : false);
+}
+
 static void
 processPendingEntityCommand(void)
 {
@@ -11433,6 +12274,7 @@ processPendingEntityCommand(void)
 #endif
 		regNumberToRead = singleInt32; // Set local variable
 		publishManualRegisterReadState(singleInt32);
+		handledOwnStatePublish = publishRegisterNumberStateValue(singleInt32);
 		break;
 	case mqttEntityId::entityOpMode:
 		{

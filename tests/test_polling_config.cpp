@@ -126,6 +126,8 @@ TEST_CASE("only corrupt persisted bucket maps trigger destructive polling recove
 		shouldAcceptRecoveredPollingConfig(PollingLoadFailureKind::PersistedBucketMapCorrupt, true));
 	CHECK_FALSE(shouldTrustRecoveredPortalPollingConfig(PollingLoadFailureKind::Transient));
 	CHECK(shouldTrustRecoveredPortalPollingConfig(PollingLoadFailureKind::PersistedBucketMapCorrupt));
+	CHECK_FALSE(shouldTrustPortalPollingRuntimeCache(false));
+	CHECK(shouldTrustPortalPollingRuntimeCache(true));
 }
 
 TEST_CASE("strict uint32 parser rejects blank and signed polling intervals")
@@ -213,6 +215,116 @@ TEST_CASE("polling-set payload builder emits complete/partial JSON")
 
 	CHECK(buildPollingConfigSetPayload("", "Dispatch_Mode=one_min;", out, sizeof(out)));
 	CHECK(std::string(out) == "{\"bucket_map\":\"Dispatch_Mode=one_min;\"}");
+}
+
+TEST_CASE("polling profile payload round-trips line-oriented polling config")
+{
+	char profile[256];
+	char scratch[256];
+	char pollInterval[16];
+	char bucketMap[128];
+
+	CHECK(buildPollingProfilePayload("45", "Dispatch_Mode=one_min;", profile, sizeof(profile)));
+	CHECK(std::string(profile) ==
+	      "A2M_POLLING_PROFILE 1\n"
+	      "poll_interval_s=45\n"
+	      "Dispatch_Mode=one_min\n");
+	CHECK(parsePollingProfilePayload(profile,
+	                                scratch,
+	                                sizeof(scratch),
+	                                pollInterval,
+	                                sizeof(pollInterval),
+	                                bucketMap,
+	                                sizeof(bucketMap)));
+	CHECK(std::string(pollInterval) == "45");
+	CHECK(std::string(bucketMap) == "Dispatch_Mode=one_min;");
+}
+
+TEST_CASE("polling profile payload allows empty bucket map")
+{
+	char profile[128];
+	char scratch[128];
+	char pollInterval[16];
+	char bucketMap[16];
+
+	CHECK(buildPollingProfilePayload("60", "", profile, sizeof(profile)));
+	CHECK(std::string(profile) == "A2M_POLLING_PROFILE 1\npoll_interval_s=60\n");
+	CHECK(parsePollingProfilePayload(profile,
+	                                scratch,
+	                                sizeof(scratch),
+	                                pollInterval,
+	                                sizeof(pollInterval),
+	                                bucketMap,
+	                                sizeof(bucketMap)));
+	CHECK(std::string(pollInterval) == "60");
+	CHECK(std::string(bucketMap).empty());
+}
+
+TEST_CASE("polling profile payload ignores comments blank lines and whitespace")
+{
+	char scratch[256];
+	char pollInterval[16];
+	char bucketMap[128];
+
+	CHECK(parsePollingProfilePayload(
+		"\n"
+		"# comment\n"
+		"  A2M_POLLING_PROFILE 1  \n"
+		"poll_interval_s = 30\n"
+		"\n"
+		" Load_Power = user \n",
+		scratch,
+		sizeof(scratch),
+		pollInterval,
+		sizeof(pollInterval),
+		bucketMap,
+		sizeof(bucketMap)));
+	CHECK(std::string(pollInterval) == "30");
+	CHECK(std::string(bucketMap) == "Load_Power=user;");
+}
+
+TEST_CASE("polling profile payload rejects malformed line format")
+{
+	char scratch[256];
+	char pollInterval[16];
+	char bucketMap[128];
+
+	CHECK_FALSE(parsePollingProfilePayload("A2M_POLLING_PROFILE 1\npoll_interval_s=45\nbroken-line\n",
+	                                      scratch,
+	                                      sizeof(scratch),
+	                                      pollInterval,
+	                                      sizeof(pollInterval),
+	                                      bucketMap,
+	                                      sizeof(bucketMap)));
+}
+
+TEST_CASE("polling profile payload rejects missing header or interval")
+{
+	char scratch[256];
+	char pollInterval[16];
+	char bucketMap[128];
+
+	CHECK_FALSE(parsePollingProfilePayload("poll_interval_s=45\nDispatch_Mode=one_min\n",
+	                                      scratch,
+	                                      sizeof(scratch),
+	                                      pollInterval,
+	                                      sizeof(pollInterval),
+	                                      bucketMap,
+	                                      sizeof(bucketMap)));
+	CHECK_FALSE(parsePollingProfilePayload("A2M_POLLING_PROFILE 1\nDispatch_Mode=one_min\n",
+	                                      scratch,
+	                                      sizeof(scratch),
+	                                      pollInterval,
+	                                      sizeof(pollInterval),
+	                                      bucketMap,
+	                                      sizeof(bucketMap)));
+	CHECK_FALSE(parsePollingProfilePayload("A2M_POLLING_PROFILE 1\npoll_interval_s=999\n",
+	                                      scratch,
+	                                      sizeof(scratch),
+	                                      pollInterval,
+	                                      sizeof(pollInterval),
+	                                      bucketMap,
+	                                      sizeof(bucketMap)));
 }
 
 TEST_CASE("polling-set payload builder handles no-op values")

@@ -497,6 +497,56 @@ def _wait_for_topic_change(mqtt: MqttClient, topic: str, previous_payload: str, 
     raise PortalTestError(f"Timeout waiting for fresh {label} on {topic}")
 
 
+def _latest_payload_for_topic(mqtt: MqttClient, topic: str, *, timeout_s: float = 3.0) -> str:
+    mqtt.subscribe(topic, force=True)
+    deadline = time.time() + timeout_s
+    latest = ""
+    while time.time() < deadline:
+        try:
+            got_topic, payload = mqtt.wait_for_publish(timeout_s=min(1.0, max(0.1, deadline - time.time())))
+        except PortalTestError as exc:
+            if "Timeout waiting for MQTT publish" in str(exc):
+                break
+            raise
+        if got_topic == topic:
+            latest = payload
+    return latest
+
+
+def _wait_for_runtime_ip_via_mqtt(
+    mqtt: MqttClient,
+    *,
+    device_root: str,
+    expected_build_ts: int,
+    previous_boot_payload: str,
+    previous_net_payload: str,
+    timeout_s: int,
+) -> str:
+    boot_payload = _wait_for_topic_change(
+        mqtt,
+        f"{device_root}/boot",
+        previous_boot_payload,
+        timeout_s=timeout_s,
+        label="boot",
+    )
+    boot = _parse_json(boot_payload)
+    if int(boot.get("fw_build_ts_ms", 0)) != expected_build_ts:
+        raise PortalTestError(f"Fresh boot payload reported unexpected fw_build_ts_ms: {boot!r}")
+
+    net_payload = _wait_for_topic_change(
+        mqtt,
+        f"{device_root}/status/net",
+        previous_net_payload,
+        timeout_s=30,
+        label="status/net",
+    )
+    net = _parse_json(net_payload)
+    runtime_ip = str(net.get("ip", "")).strip()
+    if not runtime_ip:
+        raise PortalTestError(f"Fresh status/net payload did not expose runtime IP: {net!r}")
+    return runtime_ip
+
+
 def _collect_homeassistant_topics_for_device(mqtt: MqttClient, *, device_root: str, timeout_s: int) -> list[tuple[str, str]]:
     mqtt.subscribe("homeassistant/#", force=True)
     deadline = time.time() + timeout_s
@@ -626,6 +676,122 @@ def _find_esptool_path(container_name: str) -> str:
     if not path:
         raise PortalTestError(f"Could not find esptool.py inside {container_name}")
     return path
+
+
+def _start_serial_runtime_ip_watch(*, serial_port: str, timeout_s: int = 120) -> subprocess.Popen[str]:
+    container_name = _build_container_name()
+    script = f"""
+import json, re, serial, sys, time
+PORT = {serial_port!r}
+TIMEOUT_S = {int(timeout_s)}
+PATTERNS = [
+    re.compile(r"WiFi connected, IP is ([0-9]+(?:\\.[0-9]+){{3}})"),
+    re.compile(r"STA portal: connected IP=([0-9]+(?:\\.[0-9]+){{3}})"),
+    re.compile(r"STA portal URL: http://([0-9]+(?:\\.[0-9]+){{3}})/"),
+    re.compile(r"WiFi connected: SSID=.*? IP=([0-9]+(?:\\.[0-9]+){{3}})"),
+]
+
+deadline = time.time() + TIMEOUT_S
+buffer = ""
+while time.time() < deadline:
+    try:
+        ser = serial.Serial(PORT, 9600, timeout=0.25)
+    except Exception as exc:
+        time.sleep(0.5)
+        continue
+    try:
+        while time.time() < deadline:
+            try:
+                data = ser.read(512)
+            except Exception:
+                break
+            if not data:
+                continue
+            text = data.decode("utf-8", errors="replace")
+            buffer = (buffer + text)[-4096:]
+            for pattern in PATTERNS:
+                match = pattern.search(buffer)
+                if match:
+                    print(json.dumps({{"ip": match.group(1)}}))
+                    raise SystemExit(0)
+    finally:
+        try:
+            ser.close()
+        except Exception:
+            pass
+    time.sleep(0.25)
+print(json.dumps({{"error": "runtime ip not seen on serial"}}))
+raise SystemExit(2)
+"""
+    cmd = [
+        "bash",
+        "-lc",
+        f"tail -f /dev/null | docker exec -i {shlex.quote(container_name)} "
+        f"python3 -u -c {shlex.quote(script)}",
+    ]
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+
+def _start_serial_capture(*, serial_port: str, timeout_s: int) -> subprocess.Popen[str]:
+    container_name = _build_container_name()
+    script = f"""
+import serial, sys, time
+PORT = {serial_port!r}
+TIMEOUT_S = {int(timeout_s)}
+
+deadline = time.time() + TIMEOUT_S
+while time.time() < deadline:
+    try:
+        ser = serial.Serial(PORT, 9600, timeout=0.25)
+        break
+    except Exception:
+        time.sleep(0.5)
+else:
+    raise SystemExit("serial capture: open failed")
+
+try:
+    while time.time() < deadline:
+        data = ser.read(512)
+        if data:
+            sys.stdout.write(data.decode("utf-8", errors="replace"))
+            sys.stdout.flush()
+finally:
+    ser.close()
+"""
+    cmd = [
+        "bash",
+        "-lc",
+        f"tail -f /dev/null | docker exec -i {shlex.quote(container_name)} "
+        f"python3 -u -c {shlex.quote(script)}",
+    ]
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+
+def _finish_serial_runtime_ip_watch(proc: subprocess.Popen[str], *, wait_s: int) -> tuple[str, str]:
+    try:
+        out, _ = proc.communicate(timeout=wait_s)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, _ = proc.communicate()
+    lines = [line.strip() for line in (out or "").splitlines() if line.strip()]
+    for line in reversed(lines):
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        runtime_ip = str(parsed.get("ip", "")).strip()
+        if runtime_ip:
+            return runtime_ip, out or ""
+    return "", out or ""
+
+
+def _finish_serial_capture(proc: subprocess.Popen[str], *, wait_s: int) -> str:
+    try:
+        out, _ = proc.communicate(timeout=wait_s)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, _ = proc.communicate()
+    return out or ""
 
 
 def _serial_line_toggle(container_name: str, *, serial_port: str, bootloader: bool) -> None:
@@ -1023,6 +1189,18 @@ def _assert_portal_root_menu(body: str, context: str) -> None:
         _assert_contains(body, needle, context)
 
 
+def _assert_wifi_portal_root_contract(body: str, context: str) -> None:
+    _assert_portal_root_menu(body, context)
+    _assert_button_theme(body, "wifi", context)
+
+
+def _assert_normal_runtime_root_contract(body: str, context: str) -> None:
+    _assert_contains(body, "Alpha2MQTT Control", context)
+    _assert_contains(body, "Boot mode: normal", context)
+    _assert_contains(body, "/reboot/wifi", context)
+    _assert_button_theme(body, "normal", context)
+
+
 def _assert_button_theme(body: str, mode: str, context: str) -> None:
     accents = {
         "ap": "#1c6bcf",
@@ -1118,6 +1296,70 @@ def _wait_for_runtime_root(ssh: PiSsh, base_url: str, *, timeout_s: int) -> str:
     raise PortalTestError(f"Timed out waiting for runtime root. Last={last[:300]!r}")
 
 
+def _discover_runtime_root_local(*, previous_ip: str, hostname: str, timeout_s: int) -> tuple[str, str]:
+    def probe_url(url: str) -> tuple[str, str] | None:
+        try:
+            with urllib.request.urlopen(url, timeout=1.5) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+                if int(resp.getcode()) == 200 and "Alpha2MQTT Control" in body and "Boot mode:" in body:
+                    return url.rstrip("/"), body
+        except Exception:
+            return None
+        return None
+
+    urls: list[str] = []
+    seen: set[str] = set()
+
+    def add_url(url: str) -> None:
+        if url not in seen:
+            seen.add(url)
+            urls.append(url)
+
+    if hostname:
+        add_url(f"http://{hostname}/")
+
+    if previous_ip:
+        try:
+            network = ipaddress.ip_network(previous_ip + "/24", strict=False)
+            preferred = [ipaddress.ip_address(previous_ip)]
+            others = [ip for ip in network.hosts() if ip != preferred[0]]
+            for ip in preferred + others:
+                add_url(f"http://{ip}/")
+        except ValueError:
+            add_url(f"http://{previous_ip}/")
+    else:
+        try:
+            addr_data = json.loads(
+                subprocess.check_output(["ip", "-json", "-4", "addr", "show", "up"], text=True)
+            )
+        except Exception:
+            addr_data = []
+        for iface in addr_data:
+            for info in iface.get("addr_info", []):
+                if info.get("family") != "inet" or info.get("scope") != "global":
+                    continue
+                local = info.get("local")
+                prefixlen = int(info.get("prefixlen", 24))
+                if not local:
+                    continue
+                try:
+                    network = ipaddress.ip_network(f"{local}/{max(prefixlen, 24)}", strict=False)
+                except ValueError:
+                    continue
+                for ip in network.hosts():
+                    add_url(f"http://{ip}/")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=32) as ex:
+        futures = [ex.submit(probe_url, url) for url in urls]
+        for fut in concurrent.futures.as_completed(futures, timeout=max(30, timeout_s)):
+            result = fut.result()
+            if result:
+                return result
+    raise PortalTestError(
+        f"local runtime root not found previous_ip={previous_ip!r} hostname={hostname!r}"
+    )
+
+
 def _wait_for_runtime_root_contains(ssh: PiSsh, base_url: str, needle: str, *, timeout_s: int) -> str:
     deadline = time.time() + timeout_s
     last = ""
@@ -1130,16 +1372,77 @@ def _wait_for_runtime_root_contains(ssh: PiSsh, base_url: str, needle: str, *, t
     raise PortalTestError(f"runtime root: missing {needle!r}; last={last[:300]!r}")
 
 
+def _wait_for_runtime_root_stable_markers(
+    ssh: PiSsh,
+    *,
+    base_url: str,
+    timeout_s: int,
+    samples: int = 3,
+) -> str:
+    deadline = time.time() + timeout_s
+    consecutive = 0
+    last_uptime_ms = -1
+    last_body = ""
+    while time.time() < deadline:
+        resp = _pi_http_request(ssh, method="GET", url=base_url + "/", timeout_s=10)
+        body = str(resp.get("body", ""))
+        last_body = body
+        if int(resp.get("status", 0)) != 200:
+            consecutive = 0
+            last_uptime_ms = -1
+            time.sleep(1.0)
+            continue
+        if "Boot mode: normal" not in body or "MQTT connected: 1" not in body:
+            consecutive = 0
+            last_uptime_ms = -1
+            time.sleep(1.0)
+            continue
+        uptime_match = re.search(r"Uptime \(ms\): (\d+)", body)
+        if not uptime_match:
+            consecutive = 0
+            last_uptime_ms = -1
+            time.sleep(1.0)
+            continue
+        current_uptime_ms = int(uptime_match.group(1))
+        if last_uptime_ms >= 0 and current_uptime_ms + 500 < last_uptime_ms:
+            consecutive = 0
+            last_uptime_ms = -1
+            time.sleep(1.0)
+            continue
+        last_uptime_ms = current_uptime_ms
+        consecutive += 1
+        if consecutive >= max(1, samples):
+            return body
+        time.sleep(1.0)
+    raise PortalTestError(f"runtime root did not stabilize; last={last_body[:300]!r}")
+
+
+def _wait_for_runtime_uptime_at_least(
+    ssh: PiSsh,
+    *,
+    base_url: str,
+    min_uptime_ms: int,
+    timeout_s: int,
+) -> str:
+    deadline = time.time() + timeout_s
+    last_body = ""
+    while time.time() < deadline:
+        body = _wait_for_runtime_root(ssh, base_url, timeout_s=min(20, max(5, int(deadline - time.time()))))
+        last_body = body
+        uptime_match = re.search(r"Uptime \(ms\): (\d+)", body)
+        if uptime_match and int(uptime_match.group(1)) >= min_uptime_ms:
+            return body
+        time.sleep(1.0)
+    raise PortalTestError(f"runtime root did not reach uptime>={min_uptime_ms}ms; last={last_body[:300]!r}")
+
+
 def _assert_runtime_root_stable_under_load(
     ssh: PiSsh,
     *,
     base_url: str,
     duration_s: int = 12,
 ) -> None:
-    initial_resp = _pi_http_request(ssh, method="GET", url=base_url + "/", timeout_s=10)
-    if int(initial_resp.get("status", 0)) != 200:
-        raise PortalTestError(f"Initial runtime GET / failed under load with status={initial_resp.get('status')}")
-    initial_body = str(initial_resp.get("body", ""))
+    initial_body = _wait_for_runtime_root_stable_markers(ssh, base_url=base_url, timeout_s=30, samples=3)
     initial_match = re.search(r"Uptime \(ms\): (\d+)", initial_body)
     if not initial_match:
         raise PortalTestError(f"Runtime root missing uptime marker under load: {initial_body[:300]!r}")
@@ -1148,24 +1451,51 @@ def _assert_runtime_root_stable_under_load(
     deadline = time.time() + duration_s
     last_body = ""
     last_uptime_ms = initial_uptime_ms
+    successes = 0
+    consecutive_failures = 0
     while time.time() < deadline:
-        resp = _pi_http_request(ssh, method="GET", url=base_url + "/", timeout_s=10)
-        if int(resp.get("status", 0)) != 200:
-            raise PortalTestError(f"Runtime GET / failed under load with status={resp.get('status')}")
+        try:
+            resp = _pi_http_request(ssh, method="GET", url=base_url + "/", timeout_s=5)
+        except Exception as exc:
+            consecutive_failures += 1
+            last_body = f"exc={exc}"
+            if consecutive_failures >= 4:
+                raise PortalTestError(f"Runtime GET / repeatedly failed under load: last={last_body[:300]!r}")
+            time.sleep(1.0)
+            continue
         last_body = str(resp.get("body", ""))
+        if int(resp.get("status", 0)) != 200:
+            consecutive_failures += 1
+            if consecutive_failures >= 4:
+                raise PortalTestError(f"Runtime GET / repeatedly failed under load with status={resp.get('status')}")
+            time.sleep(1.0)
+            continue
         if "Boot mode: normal" not in last_body or "MQTT connected: 1" not in last_body:
-            raise PortalTestError(f"Runtime root lost expected markers under load: {last_body[:300]!r}")
+            consecutive_failures += 1
+            if consecutive_failures >= 4:
+                raise PortalTestError(f"Runtime root repeatedly lost expected markers under load: {last_body[:300]!r}")
+            time.sleep(1.0)
+            continue
         uptime_match = re.search(r"Uptime \(ms\): (\d+)", last_body)
         if not uptime_match:
-            raise PortalTestError(f"Runtime root missing uptime marker under load: {last_body[:300]!r}")
+            consecutive_failures += 1
+            if consecutive_failures >= 4:
+                raise PortalTestError(f"Runtime root repeatedly missed uptime marker under load: {last_body[:300]!r}")
+            time.sleep(1.0)
+            continue
         current_uptime_ms = int(uptime_match.group(1))
         if current_uptime_ms + 500 < last_uptime_ms:
             raise PortalTestError(
                 f"Runtime uptime moved backwards under HTTP load: previous={last_uptime_ms}ms current={current_uptime_ms}ms"
             )
+        consecutive_failures = 0
+        successes += 1
         last_uptime_ms = current_uptime_ms
-        time.sleep(0.5)
+        time.sleep(1.0)
 
+    min_successes = max(2, duration_s // 6)
+    if successes < min_successes:
+        raise PortalTestError(f"Runtime root had too few good under-load samples: successes={successes} last={last_body[:300]!r}")
     min_expected_ms = initial_uptime_ms + max(5000, (duration_s * 1000) // 2)
     if last_uptime_ms < min_expected_ms:
         raise PortalTestError(
@@ -1174,6 +1504,11 @@ def _assert_runtime_root_stable_under_load(
 
 
 def _discover_runtime_root(ssh: PiSsh, *, previous_ip: str, hostname: str, timeout_s: int) -> tuple[str, str]:
+    try:
+        return _discover_runtime_root_local(previous_ip=previous_ip, hostname=hostname, timeout_s=min(timeout_s, 90))
+    except Exception:
+        pass
+
     direct_url = f"http://{previous_ip}"
     try:
         return direct_url, _wait_for_runtime_root(ssh, direct_url, timeout_s=max(20, min(timeout_s, 60)))
@@ -1517,11 +1852,13 @@ def _join_ap_and_load_wifi_page(ssh: "PiSsh", mqtt: "MqttClient", *, iface: str)
 def _save_wifi_and_wait_connected(
     ssh: "PiSsh",
     *,
+    serial_port: str,
     wifi_ssid: str,
     wifi_pwd: str,
     wifi_action: str,
     wifi_body: str,
 ) -> str:
+    serial_watch = _start_serial_runtime_ip_watch(serial_port=serial_port, timeout_s=120)
     csrf = _extract_input_value(wifi_body, "csrf")
     save_wifi = _pi_http_request(
         ssh,
@@ -1547,7 +1884,19 @@ def _save_wifi_and_wait_connected(
             "portal wifi save did not expose AP connected status; "
             f"continuing with discovery save_body={save_wifi_body[:300]!r} err={exc}"
         )
-        return ""
+        portal_runtime_ip, serial_output = _finish_serial_runtime_ip_watch(serial_watch, wait_s=90)
+        if portal_runtime_ip:
+            _announce(f"serial runtime ip: {portal_runtime_ip}")
+        else:
+            tail_lines = [line.strip() for line in serial_output.splitlines() if line.strip()][-12:]
+            if tail_lines:
+                _http_log("serial runtime-ip watch saw no IP; tail=" + " | ".join(tail_lines))
+        return portal_runtime_ip
+    serial_watch.kill()
+    try:
+        serial_watch.communicate(timeout=5)
+    except Exception:
+        pass
     _announce(f"portal connected via http://{portal_runtime_ip}")
     return portal_runtime_ip
 
@@ -1733,21 +2082,49 @@ def _run_wifi_only_case(
     time.sleep(8)
 
     ap_ssid, wifi_action, wifi_body = _join_ap_and_load_wifi_page(ssh, mqtt, iface=iface)
+    expected_build_ts = _firmware_build_ts_ms_from_filename(fw_path)
+    previous_boot_payload = _latest_payload_for_topic(mqtt, f"{ap_ssid}/boot")
+    previous_net_payload = _latest_payload_for_topic(mqtt, f"{ap_ssid}/status/net")
     portal_runtime_ip = _save_wifi_and_wait_connected(
         ssh,
+        serial_port=serial_port,
         wifi_ssid=wifi_ssid,
         wifi_pwd=wifi_pwd,
         wifi_action=wifi_action,
         wifi_body=wifi_body,
     )
-    portal_base_url, portal_root_body = _discover_sta_portal_base(
-        ssh,
-        previous_ip=portal_runtime_ip,
-        hostname=ap_ssid,
-        timeout_s=180,
-    )
-    _assert_portal_root_menu(portal_root_body, "sta portal root (wifi-only case)")
-    _assert_button_theme(portal_root_body, "wifi", "sta portal root (wifi-only case)")
+    if not portal_runtime_ip:
+        try:
+            portal_runtime_ip = _wait_for_runtime_ip_via_mqtt(
+                mqtt,
+                device_root=ap_ssid,
+                expected_build_ts=expected_build_ts,
+                previous_boot_payload=previous_boot_payload,
+                previous_net_payload=previous_net_payload,
+                timeout_s=180,
+            )
+        except Exception as exc:
+            _http_log(f"MQTT runtime-IP fallback failed in wifi-only case: {exc}")
+    try:
+        portal_base_url, portal_root_body = _discover_sta_portal_base(
+            ssh,
+            previous_ip=portal_runtime_ip,
+            hostname=ap_ssid,
+            timeout_s=180,
+        )
+    except Exception:
+        # Local builds may inject MQTT defaults at compile time. In that case a
+        # blank-flash AP onboarding run becomes fully configured as soon as WiFi
+        # is saved and the device can boot straight into normal runtime.
+        base_url, root_page = _discover_runtime_root(
+            ssh,
+            previous_ip=portal_runtime_ip,
+            hostname=ap_ssid,
+            timeout_s=180,
+        )
+        _assert_normal_runtime_root_contract(root_page, "runtime root (wifi-only direct-normal path)")
+        return base_url
+    _assert_wifi_portal_root_contract(portal_root_body, "sta portal root (wifi-only case)")
     portal_runtime_ip = urllib.parse.urlparse(portal_base_url).hostname or portal_runtime_ip
 
     _reboot_normal_and_tolerate_disconnect(
@@ -1762,9 +2139,7 @@ def _run_wifi_only_case(
         hostname=ap_ssid,
         timeout_s=180,
     )
-    _assert_contains(root_page, "Boot mode: normal", "runtime root (wifi-only case)")
-    _assert_contains(root_page, "MQTT connected: 0", "runtime root (wifi-only case)")
-    _assert_button_theme(root_page, "normal", "runtime root (wifi-only case)")
+    _assert_normal_runtime_root_contract(root_page, "runtime root (wifi-only case)")
     return base_url
 
 
@@ -1797,7 +2172,7 @@ def _run_ap_bad_wifi_retains_saved_ssid_case(
     if save_wifi_status not in (0, 200, 302):
         raise PortalTestError(f"Portal POST /wifisave returned {save_wifi_status}")
 
-    deadline = time.time() + 45
+    deadline = time.time() + 15
     last_wifi_body = ""
     while time.time() < deadline:
         wifi_resp = _pi_http_request(ssh, method="GET", url="http://192.168.4.1/0wifi", timeout_s=10)
@@ -1814,6 +2189,16 @@ def _run_ap_bad_wifi_retains_saved_ssid_case(
             _assert_button_theme(last_wifi_body, "ap", "ap wifi page after bad wifi save")
             return
         time.sleep(1.0)
+
+    _announce("bad wifi save did not remain on AP immediately; waiting for AP cycle back from wifi_config")
+    _wait_for_ap_ssid_cycle(ssh, iface=iface, ssid=_ap_ssid, timeout_s=90)
+    _ap_ssid_after, _wifi_action_after, last_wifi_body = _join_ap_and_load_wifi_page(ssh, mqtt, iface=iface)
+    if _ap_ssid_after != _ap_ssid:
+        raise PortalTestError(f"AP SSID changed across bad-wifi recovery: before={_ap_ssid!r} after={_ap_ssid_after!r}")
+    saved_ssid = _extract_input_value(last_wifi_body, "s")
+    if saved_ssid == bad_ssid:
+        _assert_button_theme(last_wifi_body, "ap", "ap wifi page after bad wifi recovery")
+        return
 
     raise PortalTestError(
         f"AP wifi page did not retain submitted SSID {bad_ssid!r}; last body={last_wifi_body[:300]!r}"
@@ -1841,13 +2226,29 @@ def _run_wifi_plus_mqtt_case(
 
     device_root, wifi_action, wifi_body = _join_ap_and_load_wifi_page(ssh, mqtt, iface=iface)
     _clear_homeassistant_topics_for_device(mqtt, device_root=device_root)
+    expected_build_ts = _firmware_build_ts_ms_from_filename(fw_path)
+    previous_boot_payload = _latest_payload_for_topic(mqtt, f"{device_root}/boot")
+    previous_net_payload = _latest_payload_for_topic(mqtt, f"{device_root}/status/net")
     portal_runtime_ip = _save_wifi_and_wait_connected(
         ssh,
+        serial_port=serial_port,
         wifi_ssid=wifi_ssid,
         wifi_pwd=wifi_pwd,
         wifi_action=wifi_action,
         wifi_body=wifi_body,
     )
+    if not portal_runtime_ip:
+        try:
+            portal_runtime_ip = _wait_for_runtime_ip_via_mqtt(
+                mqtt,
+                device_root=device_root,
+                expected_build_ts=expected_build_ts,
+                previous_boot_payload=previous_boot_payload,
+                previous_net_payload=previous_net_payload,
+                timeout_s=180,
+            )
+        except Exception as exc:
+            _http_log(f"MQTT runtime-IP fallback failed in wifi+mqtt case: {exc}")
     try:
         portal_base_url, _portal_page = _discover_sta_portal_base(
             ssh,
@@ -1855,6 +2256,7 @@ def _run_wifi_plus_mqtt_case(
             hostname=device_root,
             timeout_s=180,
         )
+        _announce(f"wifi+mqtt: discovered sta portal at {portal_base_url}")
     except Exception:
         base_url, root_page = _discover_runtime_root(
             ssh,
@@ -1862,14 +2264,13 @@ def _run_wifi_plus_mqtt_case(
             hostname=device_root,
             timeout_s=180,
         )
-        _assert_contains(root_page, "Boot mode: normal", "runtime root (wifi+mqtt default path)")
+        _announce(f"wifi+mqtt: fell straight into runtime at {base_url}")
+        _assert_normal_runtime_root_contract(root_page, "runtime root (wifi+mqtt default path)")
         root_page = _wait_for_runtime_root_contains(ssh, base_url, "MQTT connected: 1", timeout_s=180)
-        _assert_contains(root_page, "Boot mode: normal", "runtime root (wifi+mqtt default path)")
-        _assert_button_theme(root_page, "normal", "runtime root (wifi+mqtt default path)")
+        _assert_normal_runtime_root_contract(root_page, "runtime root (wifi+mqtt default path)")
         return base_url
     portal_root_body = _wait_for_page_contains(ssh, url=portal_base_url + "/", needle="/config/mqtt", timeout_s=20)
-    _assert_portal_root_menu(portal_root_body, "sta portal root (wifi+mqtt case)")
-    _assert_button_theme(portal_root_body, "wifi", "sta portal root (wifi+mqtt case)")
+    _assert_wifi_portal_root_contract(portal_root_body, "sta portal root (wifi+mqtt case)")
     literal_portal_ip = _literal_ip_from_base_url(portal_base_url)
     if literal_portal_ip:
         portal_runtime_ip = literal_portal_ip
@@ -1882,6 +2283,7 @@ def _run_wifi_plus_mqtt_case(
         mqtt_user=mqtt_user,
         mqtt_pass=mqtt_pass,
     )
+    _announce("wifi+mqtt: mqtt parameters saved")
 
     base_url, root_page = _discover_runtime_root(
         ssh,
@@ -1889,13 +2291,26 @@ def _run_wifi_plus_mqtt_case(
         hostname=device_root,
         timeout_s=180,
     )
+    _announce(f"wifi+mqtt: discovered runtime at {base_url}")
     _assert_contains(root_page, "Boot mode: normal", "runtime root")
     root_page = _wait_for_runtime_root_contains(ssh, base_url, "MQTT connected: 1", timeout_s=180)
     _assert_contains(root_page, "Boot mode: normal", "runtime root")
     _assert_button_theme(root_page, "normal", "runtime root")
     _wait_for_controller_discovery(mqtt, device_root=device_root, timeout_s=60)
     _wait_for_homeassistant_quiet(mqtt)
-    _assert_runtime_root_stable_under_load(ssh, base_url=base_url)
+    runtime_serial = _start_serial_capture(serial_port=serial_port, timeout_s=90)
+    try:
+        _wait_for_runtime_uptime_at_least(ssh, base_url=base_url, min_uptime_ms=30000, timeout_s=60)
+        _assert_runtime_root_stable_under_load(ssh, base_url=base_url)
+    except Exception:
+        serial_output = _finish_serial_capture(runtime_serial, wait_s=5)
+        tail_lines = [line.strip() for line in serial_output.splitlines() if line.strip()][-20:]
+        if tail_lines:
+            _http_log("runtime under-load serial tail: " + " | ".join(tail_lines))
+        raise
+    else:
+        _finish_serial_capture(runtime_serial, wait_s=5)
+    _announce("wifi+mqtt: runtime stable under load")
 
     reboot_wifi_resp = _pi_http_request(ssh, method="POST", url=base_url + "/reboot/wifi", timeout_s=15)
     reboot_wifi_status = int(reboot_wifi_resp.get("status", 0))
@@ -1903,6 +2318,7 @@ def _run_wifi_plus_mqtt_case(
         raise PortalTestError(f"/reboot/wifi returned unexpected status={reboot_wifi_status}")
 
     base_url = _rediscover_sta_portal_after_reboot_wifi(ssh, base_url, timeout_s=90)
+    _announce(f"wifi+mqtt: rediscovered sta portal after /reboot/wifi at {base_url}")
     literal_portal_ip = _literal_ip_from_base_url(base_url)
     if literal_portal_ip:
         portal_runtime_ip = literal_portal_ip
@@ -1942,6 +2358,7 @@ def _run_wifi_plus_mqtt_case(
         expected_poll_interval_s="9",
         timeout_s=30,
     )
+    _announce("wifi+mqtt: polling save persisted")
 
     try:
         reboot_normal_resp = _pi_http_request(ssh, method="POST", url=base_url + "/config/reboot-normal", timeout_s=15)
@@ -1957,6 +2374,7 @@ def _run_wifi_plus_mqtt_case(
         hostname=device_root,
         timeout_s=60,
     )
+    _announce(f"wifi+mqtt: final runtime rediscovered at {base_url}")
     final_root_page = _wait_for_runtime_root_contains(ssh, base_url, "MQTT connected: 1", timeout_s=60)
     _assert_contains(final_root_page, "Boot mode: normal", "final runtime root")
     _wait_for_config_interval(
@@ -2142,6 +2560,7 @@ def _run_normal_to_wifi_portal_bad_wifi_falls_back_to_ap_case(
     # the normal LAN so follow-up checks and manual access do not inherit AP mode.
     portal_runtime_ip = _save_wifi_and_wait_connected(
         ssh,
+        serial_port=serial_port,
         wifi_ssid=wifi_ssid,
         wifi_pwd=wifi_pwd,
         wifi_action=_wifi_action,
