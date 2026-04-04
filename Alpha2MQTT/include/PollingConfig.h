@@ -70,16 +70,30 @@ bool validatePollingConfigEntries(const char *payload,
                                   char *valueScratch,
                                   size_t valueScratchSize);
 
-// Build a compact polling-profile payload suitable for portal export/import.
-// The payload is intentionally small enough to fit within the existing
-// polling-config request envelope on ESP8266.
+enum class PollingProfileLineKind : uint8_t {
+	Ignore = 0,
+	Header,
+	PollInterval,
+	Assignment,
+};
+
+struct PollingProfileLine {
+	PollingProfileLineKind kind = PollingProfileLineKind::Ignore;
+	uint32_t pollIntervalSeconds = 0;
+	BucketId bucketId = BucketId::Unknown;
+	char entityName[64]{};
+};
+
+// Build a line-oriented polling-profile payload that can be exported one line
+// at a time and later parsed incrementally by the portal upload path.
 bool buildPollingProfilePayload(const char *pollIntervalS,
                                 const char *bucketMap,
                                 char *out,
                                 size_t outSize);
 
-// Parse and validate a polling-profile payload. Unknown keys are ignored so
-// future profile exports can remain backward-compatible.
+// Parse and validate a complete line-oriented polling-profile payload. The
+// output bucket map is normalized back to the canonical semicolon form used by
+// existing persistence helpers.
 bool parsePollingProfilePayload(const char *payload,
                                 char *valueScratch,
                                 size_t valueScratchSize,
@@ -87,6 +101,11 @@ bool parsePollingProfilePayload(const char *payload,
                                 size_t pollIntervalOutSize,
                                 char *bucketMapOut,
                                 size_t bucketMapOutSize);
+
+// Parse one line from the line-oriented polling-profile format. Blank lines and
+// comments return Ignore so streaming upload handlers can skip them without
+// holding the full file in memory.
+bool parsePollingProfileLine(const char *line, PollingProfileLine &out);
 
 // Build a JSON payload compatible with MQTT/config/set from optional polling
 // parameters submitted by portal handlers.

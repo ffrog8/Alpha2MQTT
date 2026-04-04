@@ -687,6 +687,52 @@ def _http_post_multipart(url: str, field_name: str, file_path: Path, timeout_s: 
     status, _ = _http_request("POST", url, headers=headers, body=body, timeout_s=timeout_s)
     return status
 
+def _http_post_multipart_bytes_full(
+    url: str,
+    field_name: str,
+    filename: str,
+    body_bytes: bytes,
+    timeout_s: int = 120,
+    content_type: str = "text/plain",
+    max_bytes: int = 65536,
+) -> Tuple[int, bytes]:
+    boundary = f"a2m-e2e-{int(time.time()*1000)}"
+    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+    part_headers = (
+        f'--{boundary}\r\n'
+        f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'
+        f"Content-Type: {content_type}\r\n"
+        f"\r\n"
+    ).encode("utf-8")
+    tail = f"\r\n--{boundary}--\r\n".encode("utf-8")
+    body = part_headers + body_bytes + tail
+    return _http_request_full(
+        "POST",
+        url,
+        headers=headers,
+        body=body,
+        timeout_s=timeout_s,
+        max_bytes=max_bytes,
+    )
+
+def _http_post_multipart_bytes(
+    url: str,
+    field_name: str,
+    filename: str,
+    body_bytes: bytes,
+    timeout_s: int = 120,
+    content_type: str = "text/plain",
+) -> int:
+    status, _ = _http_post_multipart_bytes_full(
+        url,
+        field_name,
+        filename,
+        body_bytes,
+        timeout_s=timeout_s,
+        content_type=content_type,
+    )
+    return status
+
 def _http_post_raw(url: str, file_path: Path, timeout_s: int = 120) -> int:
     headers = {"Content-Type": "application/octet-stream"}
     status, _ = _http_request("POST", url, headers=headers, body=file_path.read_bytes(), timeout_s=timeout_s)
@@ -1320,6 +1366,28 @@ def _parse_bucket_map_assignments(raw: str) -> dict[str, str]:
         if key and value:
             intervals[key] = value
     return intervals
+
+def _parse_polling_profile_text(raw: str) -> tuple[int, dict[str, str]]:
+    lines = [line.strip() for line in raw.splitlines() if line.strip() and not line.strip().startswith("#")]
+    if not lines or lines[0] != "A2M_POLLING_PROFILE 1":
+        raise E2EError(f"polling profile missing expected header: {raw!r}")
+    if len(lines) < 2 or not lines[1].startswith("poll_interval_s="):
+        raise E2EError(f"polling profile missing poll_interval_s: {raw!r}")
+    try:
+        poll_interval = int(lines[1].split("=", 1)[1].strip())
+    except Exception as exc:
+        raise E2EError(f"polling profile poll_interval_s invalid: {raw!r}") from exc
+    intervals: dict[str, str] = {}
+    for line in lines[2:]:
+        if "=" not in line:
+            raise E2EError(f"polling profile assignment invalid: {line!r}")
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key or not value:
+            raise E2EError(f"polling profile assignment invalid: {line!r}")
+        intervals[key] = value
+    return poll_interval, intervals
 
 _ENTITY_DEFAULT_BUCKETS_CACHE: Optional[dict[str, str]] = None
 _ENTITY_ID_TO_NAME_CACHE: Optional[dict[str, str]] = None
@@ -5008,7 +5076,7 @@ def main() -> int:
         _assert_eventually("polling config restored after clear-all portal check", restored_pred, timeout_s=60, poll_s=3.0)
 
     def case_polling_profile_export_import() -> None:
-        print("[e2e] case: portal polling profile export/import replaces current overrides")
+        print("[e2e] case: portal polling profile export/import streams overwrite restores")
         portal_stub_baseline = (
             '{"mode":"online","fail_n":0,"fail_reads":0,"fail_writes":0,'
             '"fail_type":0,"fail_every_n":0,"fail_for_ms":0,'
@@ -5017,6 +5085,22 @@ def main() -> int:
         )
         ensure_clean_suite_baseline()
         base = _resolve_device_http_base(mqtt, device_root)
+        defaults = _load_entity_default_buckets()
+        target_keep = "State_of_Charge"
+        target_clear = "ESS_Power"
+        target_keep_default = str(defaults.get(target_keep, "")).strip()
+        target_clear_default = str(defaults.get(target_clear, "")).strip()
+        if not target_keep_default or not target_clear_default:
+            raise E2EError("could not resolve default buckets for polling profile targets")
+
+        baseline_buckets = {
+            target_keep: target_keep_default,
+            target_clear: target_clear_default,
+            "Register_Number": "one_min",
+            "Register_Value": "one_min",
+        }
+        wait_polling_config_applied(9, baseline_buckets, timeout_s=60, republish_every_s=5.0)
+
         config_before = _fetch_config(mqtt, config_topic)
         intervals_before = config_before.get("entity_intervals", {})
         if not isinstance(intervals_before, dict):
@@ -5038,14 +5122,9 @@ def main() -> int:
         if baseline_export_status != 200:
             raise E2EError(f"baseline polling profile export returned unexpected status={baseline_export_status}")
         restore_profile = baseline_export_body.decode("utf-8", errors="strict")
-        baseline_export = json.loads(restore_profile)
-        if baseline_export.get("schema") != 1 or baseline_export.get("kind") != "polling_profile":
-            raise E2EError(f"baseline polling profile export metadata invalid: {baseline_export}")
-        original_interval = int(baseline_export.get("poll_interval_s", 0) or 0)
-        original_export_map = str(baseline_export.get("bucket_map", ""))
-        original_export_intervals = _parse_bucket_map_assignments(original_export_map)
+        original_interval, original_export_intervals = _parse_polling_profile_text(restore_profile)
         if int(config_before.get("poll_interval_s", 0) or 0) != original_interval:
-            raise E2EError(f"baseline polling profile export poll interval drifted: {baseline_export}")
+            raise E2EError(f"baseline polling profile export poll interval drifted: {restore_profile!r}")
 
         reboot_normal_url = base + "/config/reboot-normal"
         reboot_status, reboot_body = _http_request("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
@@ -5062,47 +5141,22 @@ def main() -> int:
             timeout_s=60,
             poll_s=3.0,
         )
-        wait_stub_control_applied(
-            portal_stub_baseline,
-            label="polling profile baseline reboot control",
-            expect_mode="online",
-            expect_strict_unknown=_payload_strict_unknown(portal_stub_baseline),
-            timeout_s=30,
-        )
+        ensure_stub_online_backend(portal_stub_baseline, label="polling profile baseline reboot control")
 
-        defaults = _load_entity_default_buckets()
-        target_keep = "State_of_Charge"
-        target_clear = "Load_Power"
-        target_keep_default = str(defaults.get(target_keep, "")).strip()
-        target_clear_default = str(defaults.get(target_clear, "")).strip()
-        if not target_keep_default or not target_clear_default:
-            raise E2EError("could not resolve default buckets for polling profile targets")
         original_keep = _effective_bucket(intervals_before, target_keep)
         original_clear = _effective_bucket(intervals_before, target_clear)
         original_register_number = _effective_bucket(intervals_before, "Register_Number")
         original_register_value = _effective_bucket(intervals_before, "Register_Value")
         if original_export_intervals.get(target_keep) != original_keep:
-            raise E2EError(f"baseline polling profile export missing full {target_keep} assignment: {baseline_export}")
+            raise E2EError(f"baseline polling profile export missing full {target_keep} assignment: {restore_profile}")
         if original_export_intervals.get(target_clear) != original_clear:
-            raise E2EError(f"baseline polling profile export missing full {target_clear} assignment: {baseline_export}")
+            raise E2EError(f"baseline polling profile export missing full {target_clear} assignment: {restore_profile}")
 
         def pick_alt_bucket(*excluded: str) -> str:
             for candidate in ("user", "ten_sec", "five_min", "one_hour", "one_day", "disabled"):
                 if candidate not in excluded:
                     return candidate
             raise E2EError(f"unable to choose alternate bucket (excluded={excluded!r})")
-
-        def build_profile(interval_s: int, intervals: dict[str, str]) -> str:
-            bucket_map = "".join(f"{key}={value};" for key, value in sorted(intervals.items()))
-            return json.dumps(
-                {
-                    "schema": 1,
-                    "kind": "polling_profile",
-                    "poll_interval_s": str(interval_s),
-                    "bucket_map": bucket_map,
-                },
-                separators=(",", ":"),
-            )
 
         keep_override = pick_alt_bucket(target_keep_default)
         clear_override = pick_alt_bucket(target_clear_default, keep_override)
@@ -5130,11 +5184,10 @@ def main() -> int:
         )
         if export_status != 200:
             raise E2EError(f"polling profile export returned unexpected status={export_status}")
-        exported_profile = json.loads(export_body.decode("utf-8", errors="strict"))
-        if exported_profile.get("schema") != 1 or exported_profile.get("kind") != "polling_profile":
-            raise E2EError(f"polling profile export metadata invalid: {exported_profile}")
-        exported_map = str(exported_profile.get("bucket_map", ""))
-        exported_intervals = _parse_bucket_map_assignments(exported_map)
+        exported_profile = export_body.decode("utf-8", errors="strict")
+        exported_interval, exported_intervals = _parse_polling_profile_text(exported_profile)
+        if exported_interval != original_interval:
+            raise E2EError(f"polling profile export poll interval drifted: {exported_profile!r}")
         if exported_intervals.get(target_keep) != keep_override:
             raise E2EError(f"exported profile missing {target_keep} override: {exported_profile}")
         if exported_intervals.get(target_clear) != clear_override:
@@ -5154,43 +5207,46 @@ def main() -> int:
         if import_status != 200:
             raise E2EError(f"polling profile import page returned unexpected status={import_status}")
         import_html = import_body.decode("utf-8", errors="replace")
-        if "/config/polling/import" not in import_html or 'name="profile"' not in import_html:
+        if "/config/polling/import" not in import_html or 'name="profile"' not in import_html or 'type="file"' not in import_html:
             raise E2EError("polling profile import page missing form fields")
-        csrf = _extract_input_value(import_html, "csrf")
+        import_action = urllib.parse.urljoin(base + "/config/polling/import", _extract_form_action_with_input(import_html, "profile"))
 
-        invalid_status, invalid_body = _http_post_form_full(
-            base + "/config/polling/import",
-            {
-                "csrf": csrf,
-                "profile": "{\"schema\":1}",
-            },
+        invalid_status, invalid_body = _http_post_multipart_bytes_full(
+            import_action,
+            "profile",
+            "invalid.txt",
+            b"A2M_POLLING_PROFILE 1\npoll_interval_s=17\nbroken-line\n",
             timeout_s=20,
         )
         if invalid_status != 200:
             raise E2EError(f"invalid polling profile import returned unexpected status={invalid_status}")
         invalid_html = invalid_body.decode("utf-8", errors="replace")
-        if "Polling profile import failed." not in invalid_html:
+        if "Invalid polling profile line" not in invalid_html:
             raise E2EError("invalid polling profile import did not show an error banner")
-        csrf = _extract_input_value(invalid_html, "csrf")
+        invalid_action = urllib.parse.urljoin(base + "/config/polling/import", _extract_form_action_with_input(invalid_html, "profile"))
 
         oversize_rejected_with_banner = False
         try:
-            oversize_status, oversize_body = _http_post_form_full(
-                base + "/config/polling/import",
-                {
-                    "csrf": csrf,
-                    "profile": "x" * 5200,
-                },
+            oversize_status, oversize_body = _http_post_multipart_bytes_full(
+                invalid_action,
+                "profile",
+                "oversize.txt",
+                (
+                    b"A2M_POLLING_PROFILE 1\n"
+                    b"poll_interval_s=17\n"
+                    + b"A" * 200
+                    + b"=one_min\n"
+                ),
                 timeout_s=20,
             )
-            if oversize_status not in (200, 403):
+            if oversize_status not in (200, 302):
                 raise E2EError(
                     f"oversize polling profile import returned unexpected status={oversize_status}"
                 )
             if oversize_status == 200:
                 oversize_html = oversize_body.decode("utf-8", errors="replace")
                 oversize_rejected_with_banner = (
-                    "Polling profile exceeds the tested portal request limit." in oversize_html
+                    "Polling profile line exceeds the portal limit." in oversize_html
                 )
         except Exception as exc:
             if not _is_expected_portal_transport_error(exc):
@@ -5208,7 +5264,7 @@ def main() -> int:
             raise E2EError(
                 f"polling profile export after oversize import returned unexpected status={oversize_export_status}"
             )
-        oversize_exported_profile = json.loads(oversize_export_body.decode("utf-8", errors="strict"))
+        oversize_exported_profile = oversize_export_body.decode("utf-8", errors="strict")
         if oversize_exported_profile != exported_profile:
             raise E2EError(
                 f"oversize polling profile import changed persisted state: {oversize_exported_profile}"
@@ -5226,21 +5282,22 @@ def main() -> int:
         if import_status != 200:
             raise E2EError(f"polling profile import page after oversize returned unexpected status={import_status}")
         import_html = import_body.decode("utf-8", errors="replace")
-        csrf = _extract_input_value(import_html, "csrf")
+        import_action = urllib.parse.urljoin(base + "/config/polling/import", _extract_form_action_with_input(import_html, "profile"))
 
-        modified_profile = build_profile(
-            modified_interval,
-            {
-                target_keep: modified_override,
-                "Unknown_Profile_Entity": "one_min",
-            },
+        modified_profile = "\n".join(
+            (
+                "A2M_POLLING_PROFILE 1",
+                f"poll_interval_s={modified_interval}",
+                f"{target_keep}={modified_override}",
+                "Unknown_Profile_Entity=one_min",
+                "",
+            )
         )
-        apply_status = _http_post_form(
-            base + "/config/polling/import",
-            {
-                "csrf": csrf,
-                "profile": modified_profile,
-            },
+        apply_status = _http_post_multipart_bytes(
+            import_action,
+            "profile",
+            "modified.txt",
+            modified_profile.encode("utf-8"),
             timeout_s=20,
         )
         if apply_status not in (200, 302):
@@ -5272,15 +5329,14 @@ def main() -> int:
             raise E2EError(
                 f"polling profile export after import returned unexpected status={exported_modified_status}"
             )
-        exported_modified = json.loads(exported_modified_body.decode("utf-8", errors="strict"))
-        if str(exported_modified.get("poll_interval_s", "")) != str(modified_interval):
+        exported_modified = exported_modified_body.decode("utf-8", errors="strict")
+        exported_modified_interval, exported_modified_intervals = _parse_polling_profile_text(exported_modified)
+        if exported_modified_interval != modified_interval:
             raise E2EError(f"polling profile export did not update poll_interval_s: {exported_modified}")
-        exported_modified_map = str(exported_modified.get("bucket_map", ""))
-        exported_modified_intervals = _parse_bucket_map_assignments(exported_modified_map)
         if exported_modified_intervals.get(target_keep) != modified_override:
             raise E2EError(f"polling profile export did not replace bucket map: {exported_modified}")
-        if exported_modified_intervals.get(target_clear) != target_clear_default:
-            raise E2EError(f"polling profile export did not include restored default assignment: {exported_modified}")
+        if target_clear in exported_modified_intervals:
+            raise E2EError(f"polling profile export did not disable omitted entity {target_clear}: {exported_modified}")
 
         reboot_status, reboot_body = _http_request("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
         if reboot_status != 200:
@@ -5296,13 +5352,7 @@ def main() -> int:
             timeout_s=60,
             poll_s=3.0,
         )
-        wait_stub_control_applied(
-            portal_stub_baseline,
-            label="polling profile after import reboot control",
-            expect_mode="online",
-            expect_strict_unknown=_payload_strict_unknown(portal_stub_baseline),
-            timeout_s=30,
-        )
+        ensure_stub_online_backend(portal_stub_baseline, label="polling profile after import reboot control")
 
         def imported_pred() -> Tuple[bool, str]:
             cfg = _fetch_config(mqtt, config_topic)
@@ -5311,16 +5361,14 @@ def main() -> int:
             if not isinstance(intervals, dict):
                 return False, f"entity_intervals invalid: {cfg!r}"
             actual_keep = _effective_bucket(intervals, target_keep)
-            actual_clear = _effective_bucket(intervals, target_clear)
             detail = (
                 f"cfg_poll_interval_s={cfg.get('poll_interval_s')} runtime_poll_interval_s={poll.get('poll_interval_s')} "
-                f"{target_keep}={actual_keep!r} {target_clear}={actual_clear!r} intervals={intervals!r}"
+                f"{target_keep}={actual_keep!r} {target_clear}_present={target_clear in intervals} intervals={intervals!r}"
             )
             return (
                 int(cfg.get("poll_interval_s", 0) or 0) == modified_interval
                 and int(poll.get("poll_interval_s", 0) or 0) == modified_interval
                 and actual_keep == modified_override
-                and actual_clear == target_clear_default
                 and target_clear not in intervals
             ), detail
 
@@ -5342,13 +5390,13 @@ def main() -> int:
         )
         if restore_import_status != 200:
             raise E2EError(f"polling profile restore page returned unexpected status={restore_import_status}")
-        restore_csrf = _extract_input_value(restore_import_body.decode("utf-8", errors="replace"), "csrf")
-        restore_status, restore_body = _http_post_form_full(
-            base + "/config/polling/import",
-            {
-                "csrf": restore_csrf,
-                "profile": restore_profile,
-            },
+        restore_html = restore_import_body.decode("utf-8", errors="replace")
+        restore_action = urllib.parse.urljoin(base + "/config/polling/import", _extract_form_action_with_input(restore_html, "profile"))
+        restore_status, restore_body = _http_post_multipart_bytes_full(
+            restore_action,
+            "profile",
+            "restore.txt",
+            restore_profile.encode("utf-8"),
             timeout_s=20,
         )
         if restore_status not in (200, 302):
@@ -5369,12 +5417,12 @@ def main() -> int:
             raise E2EError(
                 f"polling profile export after restore returned unexpected status={restored_export_status}"
             )
-        restored_export = json.loads(restored_export_body.decode("utf-8", errors="strict"))
-        if str(restored_export.get("poll_interval_s", "")) != str(original_interval):
+        restored_export = restored_export_body.decode("utf-8", errors="strict")
+        restored_export_interval, restored_export_intervals = _parse_polling_profile_text(restored_export)
+        if restored_export_interval != original_interval:
             raise E2EError(f"polling profile export did not restore poll_interval_s: {restored_export}")
-        restored_export_map = str(restored_export.get("bucket_map", ""))
-        if restored_export_map != original_export_map:
-            raise E2EError(f"polling profile export did not restore the original bucket map: {restored_export}")
+        if restored_export_intervals != original_export_intervals:
+            raise E2EError(f"polling profile export did not restore the original active schedule: {restored_export}")
 
         reboot_status, reboot_body = _http_request("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
         if reboot_status != 200:
@@ -5390,13 +5438,7 @@ def main() -> int:
             timeout_s=60,
             poll_s=3.0,
         )
-        wait_stub_control_applied(
-            portal_stub_baseline,
-            label="polling profile after restore reboot control",
-            expect_mode="online",
-            expect_strict_unknown=_payload_strict_unknown(portal_stub_baseline),
-            timeout_s=30,
-        )
+        ensure_stub_online_backend(portal_stub_baseline, label="polling profile after restore reboot control")
 
         def restored_pred() -> Tuple[bool, str]:
             cfg = _fetch_config(mqtt, config_topic)

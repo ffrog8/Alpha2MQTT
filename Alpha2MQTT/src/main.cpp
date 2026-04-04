@@ -175,6 +175,25 @@ char portalSubmittedPass[64] = "";
 char portalStatusIp[20] = "";
 char portalUpdateCsrfToken[33] = "";
 bool portalUpdateUploadStarted = false;
+constexpr size_t kPollingProfileLineMaxLen = 96;
+constexpr size_t kPollingProfileUploadErrorMaxLen = 72;
+struct PortalPollingProfileUploadState {
+	bool started = false;
+	bool finished = false;
+	bool ok = false;
+	bool sawHeader = false;
+	bool sawPollInterval = false;
+	uint16_t unknownCount = 0;
+	uint16_t lineNumber = 0;
+	uint32_t stagedIntervalSeconds = 0;
+	uint16_t entityCount = 0;
+	uint16_t lineLen = 0;
+	BucketId *stagedBuckets = nullptr;
+	uint8_t *seenEntities = nullptr;
+	char *lineBuf = nullptr;
+	char *error = nullptr;
+};
+static PortalPollingProfileUploadState portalPollingProfileUpload;
 int portalLastDisconnectReason = -1;
 char portalLastDisconnectLabel[32] = "";
 unsigned long portalConnectStart = 0;
@@ -765,6 +784,7 @@ static void handlePortalPollingPage(WiFiManager &wifiManager);
 static void handlePortalPollingExport(WiFiManager &wifiManager);
 static void handlePortalPollingImportPage(WiFiManager &wifiManager);
 static void handlePortalPollingImport(WiFiManager &wifiManager);
+static void handlePortalPollingImportUpload(WiFiManager &wifiManager);
 static void handlePortalPollingReset(WiFiManager &wifiManager);
 static void handlePortalPollingSave(WiFiManager &wifiManager);
 static void handlePortalPollingClear(WiFiManager &wifiManager);
@@ -776,7 +796,6 @@ static void handlePortalUpdatePage(WiFiManager &wifiManager);
 static void handlePortalUpdateUpload(WiFiManager &wifiManager);
 static void handlePortalUpdatePost(WiFiManager &wifiManager);
 static void clearPendingPollingConfigPayload(void);
-static bool portalFormatProfileEntityToken(mqttEntityId entityId, char *out, size_t outSize);
 static bool portalResolveEntityToken(const char *token, size_t entityCount, size_t &resolvedIndex);
 static bool portalApplyBucketMapString(const char *map,
                                        size_t entityCount,
@@ -796,17 +815,9 @@ static bool portalBuildPersistedBucketMap(const BucketId *buckets,
                                           char *out,
                                           size_t outSize,
                                           size_t &appliedCount);
-static bool portalEstimateEffectiveBucketMap(const BucketId *buckets,
-                                             size_t entityCount,
-                                             size_t &used,
-                                             size_t &appliedCount);
-static bool portalBuildEffectiveBucketMap(const BucketId *buckets,
-                                          size_t entityCount,
-                                          char *out,
-                                          size_t outSize,
-                                          size_t &appliedCount);
 static void refreshPortalUpdateCsrfToken(void);
 static bool portalUpdateRequestHasValidToken(WiFiManager *wifiManager);
+static void resetPortalPollingProfileUploadState(void);
 static void refreshPortalCustomParameters(void);
 static bool isWifiConfigComplete(void);
 static bool isMqttConfigComplete(void);
@@ -3223,13 +3234,14 @@ writePortalHtmlEscaped(PortalResponseWriter &writer, const char *src)
 	return flush();
 }
 
-static bool
-buildPortalCurrentPollingProfile(char *out, size_t outSize)
-{
-	if (out == nullptr || outSize == 0) {
-		return false;
-	}
+struct PortalPollingProfileApplyResult {
+	bool ok = false;
+	uint32_t unknownCount = 0;
+};
 
+static bool
+writePortalCurrentPollingProfile(PortalResponseWriter &writer)
+{
 	ensurePortalPollingRuntimeReady();
 	const size_t entityCount = mqttEntitiesCount();
 	if (entityCount == 0 || entityCount > kMqttEntityDescriptorCount) {
@@ -3242,105 +3254,76 @@ buildPortalCurrentPollingProfile(char *out, size_t outSize)
 		return false;
 	}
 
-	size_t exportedEntryCount = 0;
-	size_t exportedMapLen = 0;
-	if (!portalEstimateEffectiveBucketMap(g_portalBucketsScratch,
-	                                      entityCount,
-	                                      exportedMapLen,
-	                                      exportedEntryCount)) {
-		return false;
-	}
-	ScopedCharBuffer canonicalMapBuffer((exportedMapLen == 0 ? 0 : exportedMapLen) + 1);
-	if (!canonicalMapBuffer.ok()) {
-		return false;
-	}
-	if (!portalBuildEffectiveBucketMap(g_portalBucketsScratch,
-	                                   entityCount,
-	                                   canonicalMapBuffer.data,
-	                                   canonicalMapBuffer.size,
-	                                   exportedEntryCount)) {
+	char line[96];
+	const int intervalWritten = snprintf(line,
+	                                     sizeof(line),
+	                                     "poll_interval_s=%lu\n",
+	                                     static_cast<unsigned long>(g_portalPollingCacheIntervalSeconds));
+	if (!writer.write("A2M_POLLING_PROFILE 1\n") || intervalWritten <= 0 ||
+	    static_cast<size_t>(intervalWritten) >= sizeof(line) || !writer.write(line)) {
 		return false;
 	}
 
-	char pollIntervalBuf[16];
-	snprintf(pollIntervalBuf,
-	         sizeof(pollIntervalBuf),
-	         "%lu",
-	         static_cast<unsigned long>(g_portalPollingCacheIntervalSeconds));
-	return buildPollingProfilePayload(
-		pollIntervalBuf, canonicalMapBuffer.data != nullptr ? canonicalMapBuffer.data : "", out, outSize);
+	for (size_t idx = 0; idx < entityCount; ++idx) {
+		const BucketId bucket = g_portalBucketsScratch[idx];
+		if (bucket == BucketId::Unknown || bucket == BucketId::Disabled) {
+			continue;
+		}
+		mqttState entity{};
+		if (!mqttEntityCopyByIndex(idx, &entity)) {
+			return false;
+		}
+		if (!includeEntityInPollingPortal(entity)) {
+			continue;
+		}
+		char entityName[64];
+		mqttEntityNameCopy(&entity, entityName, sizeof(entityName));
+		const char *bucketName = bucketIdToString(bucket);
+		const int written = snprintf(line, sizeof(line), "%s=%s\n", entityName, bucketName);
+		if (written <= 0 || static_cast<size_t>(written) >= sizeof(line) || !writer.write(line)) {
+			return false;
+		}
+	}
+	return true;
 }
 
-struct PortalPollingProfileApplyResult {
-	bool ok = false;
-	uint32_t unknownCount = 0;
-};
+static bool
+initializePortalPollingProfileBuckets(BucketId *buckets, size_t entityCount)
+{
+	if (buckets == nullptr || !resetBucketsToCatalogDefaults(buckets, entityCount)) {
+		return false;
+	}
+	for (size_t idx = 0; idx < entityCount; ++idx) {
+		mqttState entity{};
+		if (!mqttEntityCopyByIndex(idx, &entity)) {
+			return false;
+		}
+		if (includeEntityInPollingPortal(entity)) {
+			buckets[idx] = BucketId::Disabled;
+		}
+	}
+	return true;
+}
 
 static PortalPollingProfileApplyResult
-applyPortalPollingProfilePayload(const char *payload)
+applyPortalPollingProfileState(uint32_t stagedIntervalSeconds,
+                               const BucketId *stagedBuckets,
+                               size_t entityCount,
+                               uint32_t unknownCount)
 {
 	// Import contract:
-	// - portal import canonicalizes and persists the polling profile immediately
-	// - the portal cache is updated so page/export views reflect the saved profile
-	// - normal runtime and HA observe the imported schedule after Reboot Normal
+	// - portal import fully replaces the visible polling schedule
+	// - entities omitted from the file are disabled before apply
+	// - runtime and HA observe the imported schedule after Reboot Normal
 	PortalPollingProfileApplyResult result{};
-	if (payload == nullptr || payload[0] == '\0') {
-		return result;
-	}
-
-	ensurePortalPollingRuntimeReady();
-	const size_t entityCount = mqttEntitiesCount();
-	if (entityCount == 0 || entityCount > kMqttEntityDescriptorCount) {
+	if (stagedBuckets == nullptr || entityCount == 0 || entityCount > kMqttEntityDescriptorCount) {
 		return result;
 	}
 	if (!ensurePortalBucketsScratch()) {
 		return result;
 	}
 
-	ScopedCharBuffer parseScratch(kPollingConfigSetPayloadMaxLen);
-	if (!parseScratch.ok()) {
-		return result;
-	}
-	char pollIntervalBuf[16];
-	char bucketMapBuf[kPrefBucketMapMaxLen];
-	if (!parsePollingProfilePayload(payload,
-	                                parseScratch.data,
-	                                parseScratch.size,
-	                                pollIntervalBuf,
-	                                sizeof(pollIntervalBuf),
-	                                bucketMapBuf,
-	                                sizeof(bucketMapBuf))) {
-		return result;
-	}
-
-	BucketId stagedBuckets[kMqttEntityDescriptorCount]{};
-	if (!resetBucketsToCatalogDefaults(stagedBuckets, entityCount)) {
-		return result;
-	}
-	if (bucketMapBuf[0] != '\0') {
-		uint32_t unknownCount = 0;
-		uint32_t invalidCount = 0;
-		uint32_t duplicateCount = 0;
-		if (!portalApplyBucketMapString(bucketMapBuf,
-		                               entityCount,
-		                               stagedBuckets,
-		                               unknownCount,
-		                               invalidCount,
-		                               duplicateCount)) {
-			return result;
-		}
-		if (invalidCount != 0 || duplicateCount != 0) {
-			return result;
-		}
-		result.unknownCount = unknownCount;
-	}
-
-	uint32_t parsedInterval = 0;
-	if (!parseStrictUint32(pollIntervalBuf, kPollIntervalMaxSeconds, parsedInterval)) {
-		return result;
-	}
-	const uint32_t storedIntervalSeconds = clampPollInterval(parsedInterval);
-
+	const uint32_t storedIntervalSeconds = clampPollInterval(stagedIntervalSeconds);
 	size_t persistedOverrideCount = 0;
 	size_t persistedMapLen = 0;
 	if (!portalEstimatePersistedBucketMap(stagedBuckets,
@@ -3378,12 +3361,161 @@ applyPortalPollingProfilePayload(const char *payload)
 	portalRebootIntent = BootIntent::Normal;
 	portalMqttSaved = false;
 	result.ok = true;
+	result.unknownCount = unknownCount;
 	return result;
 }
 
 static void
+resetPortalPollingProfileUploadState(void)
+{
+	delete[] portalPollingProfileUpload.lineBuf;
+	delete[] portalPollingProfileUpload.error;
+	delete[] portalPollingProfileUpload.stagedBuckets;
+	delete[] portalPollingProfileUpload.seenEntities;
+	portalPollingProfileUpload = PortalPollingProfileUploadState{};
+}
+
+static void
+copyPortalPollingProfileUploadErrorP(PGM_P message)
+{
+	if (message == nullptr || portalPollingProfileUpload.error == nullptr) {
+		return;
+	}
+	const size_t srcLen = strlen_P(message);
+	const size_t copyLen =
+		(srcLen < (kPollingProfileUploadErrorMaxLen - 1)) ? srcLen : (kPollingProfileUploadErrorMaxLen - 1);
+	memcpy_P(portalPollingProfileUpload.error, message, copyLen);
+	portalPollingProfileUpload.error[copyLen] = '\0';
+}
+
+static void
+setPortalPollingProfileUploadError(const char *message)
+{
+	portalPollingProfileUpload.ok = false;
+	if (message != nullptr && message[0] != '\0' && portalPollingProfileUpload.error != nullptr &&
+	    portalPollingProfileUpload.error[0] == '\0') {
+		strlcpy(portalPollingProfileUpload.error, message, kPollingProfileUploadErrorMaxLen);
+	}
+}
+
+static bool
+processPortalPollingProfileUploadLine(const char *line)
+{
+	static const char kInvalidLineFmt[] PROGMEM = "Invalid polling profile line %u.";
+	static const char kHeaderOrderErr[] PROGMEM = "Profile header must appear once at the top.";
+	static const char kIntervalOrderErr[] PROGMEM = "Profile must define poll_interval_s after the header.";
+	static const char kAssignmentOrderErr[] PROGMEM =
+		"Assignments must follow the header and poll_interval_s.";
+	static const char kEntityLookupErr[] PROGMEM = "Profile entity lookup failed.";
+	static const char kDuplicateEntityFmt[] PROGMEM = "Duplicate entity '%s' in polling profile.";
+	portalPollingProfileUpload.lineNumber++;
+	PollingProfileLine parsed{};
+	if (!parsePollingProfileLine(line, parsed)) {
+		if (portalPollingProfileUpload.error != nullptr) {
+			snprintf_P(portalPollingProfileUpload.error,
+			           kPollingProfileUploadErrorMaxLen,
+			           kInvalidLineFmt,
+			           static_cast<unsigned>(portalPollingProfileUpload.lineNumber));
+		}
+		portalPollingProfileUpload.ok = false;
+		return false;
+	}
+
+	switch (parsed.kind) {
+	case PollingProfileLineKind::Ignore:
+		return true;
+	case PollingProfileLineKind::Header:
+		if (portalPollingProfileUpload.sawHeader || portalPollingProfileUpload.sawPollInterval) {
+			copyPortalPollingProfileUploadErrorP(kHeaderOrderErr);
+			portalPollingProfileUpload.ok = false;
+			return false;
+		}
+		portalPollingProfileUpload.sawHeader = true;
+		return true;
+	case PollingProfileLineKind::PollInterval:
+		if (!portalPollingProfileUpload.sawHeader || portalPollingProfileUpload.sawPollInterval) {
+			copyPortalPollingProfileUploadErrorP(kIntervalOrderErr);
+			portalPollingProfileUpload.ok = false;
+			return false;
+		}
+		portalPollingProfileUpload.sawPollInterval = true;
+		portalPollingProfileUpload.stagedIntervalSeconds = parsed.pollIntervalSeconds;
+		return true;
+	case PollingProfileLineKind::Assignment:
+		if (!portalPollingProfileUpload.sawHeader || !portalPollingProfileUpload.sawPollInterval) {
+			copyPortalPollingProfileUploadErrorP(kAssignmentOrderErr);
+			portalPollingProfileUpload.ok = false;
+			return false;
+		}
+		break;
+	}
+
+	size_t idx = 0;
+	if (!mqttEntityIndexByName(parsed.entityName, &idx) || idx >= portalPollingProfileUpload.entityCount) {
+		portalPollingProfileUpload.unknownCount++;
+		return true;
+	}
+	mqttState entity{};
+	if (!mqttEntityCopyByIndex(idx, &entity)) {
+		copyPortalPollingProfileUploadErrorP(kEntityLookupErr);
+		portalPollingProfileUpload.ok = false;
+		return false;
+	}
+	if (!includeEntityInPollingPortal(entity)) {
+		portalPollingProfileUpload.unknownCount++;
+		return true;
+	}
+	if (portalPollingProfileUpload.seenEntities[idx] != 0) {
+		if (portalPollingProfileUpload.error != nullptr) {
+			snprintf_P(portalPollingProfileUpload.error,
+			           kPollingProfileUploadErrorMaxLen,
+			           kDuplicateEntityFmt,
+			           parsed.entityName);
+		}
+		portalPollingProfileUpload.ok = false;
+		return false;
+	}
+	portalPollingProfileUpload.seenEntities[idx] = 1;
+	portalPollingProfileUpload.stagedBuckets[idx] = parsed.bucketId;
+	return true;
+}
+
+static bool
+appendPortalPollingProfileUploadBytes(const uint8_t *data, size_t len)
+{
+	static const char kLineTooLongErr[] PROGMEM = "Polling profile line exceeds the portal limit.";
+	if (data == nullptr || len == 0) {
+		return true;
+	}
+	if (portalPollingProfileUpload.lineBuf == nullptr) {
+		setPortalPollingProfileUploadError("Polling profile upload buffer is unavailable.");
+		return false;
+	}
+	for (size_t i = 0; i < len; ++i) {
+		const char ch = static_cast<char>(data[i]);
+		if (ch == '\r') {
+			continue;
+		}
+		if (ch == '\n') {
+			portalPollingProfileUpload.lineBuf[portalPollingProfileUpload.lineLen] = '\0';
+			if (!processPortalPollingProfileUploadLine(portalPollingProfileUpload.lineBuf)) {
+				return false;
+			}
+			portalPollingProfileUpload.lineLen = 0;
+			continue;
+		}
+		if (portalPollingProfileUpload.lineLen + 1 >= kPollingProfileLineMaxLen) {
+			copyPortalPollingProfileUploadErrorP(kLineTooLongErr);
+			portalPollingProfileUpload.ok = false;
+			return false;
+		}
+		portalPollingProfileUpload.lineBuf[portalPollingProfileUpload.lineLen++] = ch;
+	}
+	return true;
+}
+
+static void
 renderPortalPollingImportPage(WiFiManager &wifiManager,
-                              const char *profileValue,
                               const char *message,
                               bool isError)
 {
@@ -3391,34 +3523,25 @@ renderPortalPollingImportPage(WiFiManager &wifiManager,
 		return;
 	}
 
-	const bool imported = wifiManager.server->hasArg("imported") && wifiManager.server->arg("imported") == "1";
-	const char *prefill = (profileValue != nullptr) ? profileValue : "";
-	char limitBuf[16];
-	snprintf(limitBuf, sizeof(limitBuf), "%u", static_cast<unsigned>(kPollingConfigSetPayloadMaxLen - 1));
 	static const char kTitle[] PROGMEM = "Restore Polling Profile";
 	static const char kHeading[] PROGMEM = "Restore polling profile";
 	static const char kNav[] PROGMEM = "<p><a href=\"/\">Menu</a> | <a href=\"/config/polling\">Polling</a></p>";
-	static const char kImportedMsg[] PROGMEM =
-		"<p><strong>Polling profile imported. Reboot Normal to apply it to runtime and Home Assistant.</strong></p>";
 	static const char kMessageOpen[] PROGMEM = "<p>";
 	static const char kErrorMessageOpen[] PROGMEM = "<p><strong>";
 	static const char kMessageClose[] PROGMEM = "</p>";
 	static const char kErrorMessageClose[] PROGMEM = "</strong></p>";
 	static const char kIntro[] PROGMEM =
-		"<p>Paste a polling profile exported from another Alpha2MQTT device. "
-		"The profile replaces the current poll interval and full visible polling schedule. "
+		"<p>Upload a polling profile exported from another Alpha2MQTT device. "
+		"Restore replaces the current polling config, and any polling entities omitted from the file will be disabled. "
 		"After importing, use Reboot Normal to apply it to runtime and Home Assistant.</p>";
-		static const char kFormOpen[] PROGMEM = "<form id=\"polling-profile-form\" method=\"post\" action=\"/config/polling/import\">";
-	static const char kCsrfOpen[] PROGMEM = "<input type=\"hidden\" name=\"csrf\" value=\"";
-	static const char kValueClose[] PROGMEM = "\">";
-	static const char kLabel[] PROGMEM = "<label for=\"profile\">Polling profile JSON</label><br>";
-	static const char kTextareaOpen[] PROGMEM =
-		"<textarea id=\"profile\" name=\"profile\" rows=\"16\" cols=\"72\" maxlength=\"";
-	static const char kTextareaValueOpen[] PROGMEM = "\">";
-	static const char kTextareaClose[] PROGMEM = "</textarea>";
+	static const char kFormOpenFmt[] PROGMEM =
+		"<form id=\"polling-profile-form\" method=\"post\" enctype=\"multipart/form-data\" action=\"/config/polling/import?csrf=%s\">";
+	static const char kLabel[] PROGMEM = "<label for=\"profile\">Polling profile file</label><br>";
+	static const char kFileInput[] PROGMEM =
+		"<input id=\"profile\" name=\"profile\" type=\"file\" accept=\".txt,.cfg,.profile,text/plain\">";
 	static const char kHint[] PROGMEM =
-		"<p class=\"hint\">This input is bounded by the existing ESP8266 polling-config request limit.</p>";
-		static const char kSubmit[] PROGMEM = "<p><button type=\"submit\">Apply Profile</button></p></form>";
+		"<p class=\"hint\">Import streams one line at a time so stable entity names can be restored without buffering the whole file in RAM.</p>";
+	static const char kSubmit[] PROGMEM = "<p><button type=\"submit\">Apply Profile</button></p></form>";
 	refreshPortalUpdateCsrfToken();
 
 	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
@@ -3434,9 +3557,6 @@ renderPortalPollingImportPage(WiFiManager &wifiManager,
 			    writer, PSTR("/config/reboot-normal"), PSTR("Reboot Normal"), PSTR("post"))) {
 			return false;
 		}
-		if (imported && !writer.writeP(kImportedMsg)) {
-			return false;
-		}
 		if (message != nullptr && message[0] != '\0') {
 			if (!writer.writeP(isError ? kErrorMessageOpen : kMessageOpen) ||
 			    !writer.write(message) ||
@@ -3444,21 +3564,18 @@ renderPortalPollingImportPage(WiFiManager &wifiManager,
 				return false;
 			}
 		}
-			if (!writer.writeP(kIntro) ||
-			    !writer.writeP(kFormOpen) ||
-			    !writer.writeP(kCsrfOpen) ||
-		    !writer.write(portalUpdateCsrfToken) ||
-		    !writer.writeP(kValueClose) ||
+		char formOpen[192];
+		const int formOpenLen =
+			snprintf_P(formOpen, sizeof(formOpen), kFormOpenFmt, portalUpdateCsrfToken);
+		if (formOpenLen <= 0 || static_cast<size_t>(formOpenLen) >= sizeof(formOpen) ||
+		    !writer.writeP(kIntro) ||
+		    !writer.write(formOpen) ||
 		    !writer.writeP(kLabel) ||
-		    !writer.writeP(kTextareaOpen) ||
-		    !writer.write(limitBuf) ||
-		    !writer.writeP(kTextareaValueOpen) ||
-		    !writePortalHtmlEscaped(writer, prefill) ||
-			    !writer.writeP(kTextareaClose) ||
-			    !writer.writeP(kHint) ||
-			    !writer.writeP(kSubmit)) {
-				return false;
-			}
+		    !writer.writeP(kFileInput) ||
+		    !writer.writeP(kHint) ||
+		    !writer.writeP(kSubmit)) {
+			return false;
+		}
 		return writer.writeP(kUiPageTail);
 	};
 
@@ -4382,10 +4499,17 @@ bindPortalRoutes(WiFiManager &wifiManager)
 		notePortalActivity();
 		handlePortalPollingImportPage(wifiManager);
 	});
-	wifiManager.server->on("/config/polling/import", HTTP_POST, [&]() {
-		notePortalActivity();
-		handlePortalPollingImport(wifiManager);
-	});
+	wifiManager.server->on(
+		"/config/polling/import",
+		HTTP_POST,
+		[&]() {
+			notePortalActivity();
+			handlePortalPollingImport(wifiManager);
+		},
+		[&]() {
+			notePortalActivity();
+			handlePortalPollingImportUpload(wifiManager);
+		});
 	wifiManager.server->on("/config/polling/reset", HTTP_POST, [&]() {
 		notePortalActivity();
 		handlePortalPollingReset(wifiManager);
@@ -5053,40 +5177,6 @@ portalEstimatePersistedBucketMap(const BucketId *buckets,
 }
 
 static bool
-portalEstimateEffectiveBucketMap(const BucketId *buckets,
-                                 size_t entityCount,
-                                 size_t &used,
-                                 size_t &appliedCount)
-{
-	if (buckets == nullptr || entityCount == 0 || entityCount > kMqttEntityDescriptorCount) {
-		return false;
-	}
-
-	used = 0;
-	appliedCount = 0;
-	for (size_t idx = 0; idx < entityCount; ++idx) {
-		const BucketId bucket = buckets[idx];
-		if (bucket == BucketId::Unknown) {
-			continue;
-		}
-		mqttState entity{};
-		if (!mqttEntityCopyByIndex(idx, &entity)) {
-			return false;
-		}
-		if (!includeEntityInPollingPortal(entity)) {
-			continue;
-		}
-		char token[16];
-		if (!portalFormatProfileEntityToken(entity.entityId, token, sizeof(token))) {
-			return false;
-		}
-		used += strlen(token) + 1 + strlen(bucketIdToProfileString(bucket)) + 1;
-		appliedCount++;
-	}
-	return true;
-}
-
-static bool
 portalBuildPersistedBucketMap(const BucketId *buckets,
                               size_t entityCount,
                               char *out,
@@ -5112,64 +5202,6 @@ portalBuildPersistedBucketMap(const BucketId *buckets,
 		appliedCount++;
 	}
 	return true;
-}
-
-static bool
-portalBuildEffectiveBucketMap(const BucketId *buckets,
-                              size_t entityCount,
-                              char *out,
-                              size_t outSize,
-                              size_t &appliedCount)
-{
-	if (buckets == nullptr || out == nullptr || outSize == 0 || entityCount == 0 ||
-	    entityCount > kMqttEntityDescriptorCount) {
-		return false;
-	}
-
-	out[0] = '\0';
-	size_t used = 0;
-	appliedCount = 0;
-	for (size_t idx = 0; idx < entityCount; ++idx) {
-		const BucketId bucket = buckets[idx];
-		if (bucket == BucketId::Unknown) {
-			continue;
-		}
-		mqttState entity{};
-		if (!mqttEntityCopyByIndex(idx, &entity)) {
-			return false;
-		}
-		if (!includeEntityInPollingPortal(entity)) {
-			continue;
-		}
-		char token[16];
-		if (!portalFormatProfileEntityToken(entity.entityId, token, sizeof(token))) {
-			return false;
-		}
-		const char *bucketStr = bucketIdToProfileString(bucket);
-		if (bucketStr == nullptr || !strcmp(bucketStr, "unknown")) {
-			return false;
-		}
-		const int needed = snprintf(out + used, outSize - used, "%s=%s;", token, bucketStr);
-		if (needed < 0 || static_cast<size_t>(needed) >= (outSize - used)) {
-			return false;
-		}
-		used += static_cast<size_t>(needed);
-		appliedCount++;
-	}
-	return true;
-}
-
-static bool
-portalFormatProfileEntityToken(mqttEntityId entityId, char *out, size_t outSize)
-{
-	if (out == nullptr || outSize == 0) {
-		return false;
-	}
-	// Polling-profile exports use stable entity ids so a full visible schedule
-	// still fits within the tested ESP8266 portal form limits.
-	const int written =
-		snprintf(out, outSize, "@%u", static_cast<unsigned>(static_cast<uint16_t>(entityId)));
-	return written > 0 && static_cast<size_t>(written) < outSize;
 }
 
 static bool
@@ -5565,26 +5597,127 @@ handlePortalPollingExport(WiFiManager &wifiManager)
 		return;
 	}
 
-	ScopedCharBuffer profileBuffer(kPollingConfigSetPayloadMaxLen);
-	if (!profileBuffer.ok() || !buildPortalCurrentPollingProfile(profileBuffer.data, profileBuffer.size)) {
+	PortalResponseWriter countWriter;
+	if (!writePortalCurrentPollingProfile(countWriter) || countWriter.bytes == 0) {
 		wifiManager.server->send(500, "text/plain", "polling profile unavailable");
 		return;
 	}
 
 	wifiManager.server->sendHeader("Cache-Control", "no-store");
 	wifiManager.server->sendHeader(
-		"Content-Disposition", "attachment; filename=\"alpha2mqtt_polling_profile.json\"");
-	wifiManager.server->setContentLength(strlen(profileBuffer.data));
-	wifiManager.server->send(200, "application/json", "");
+		"Content-Disposition", "attachment; filename=\"alpha2mqtt_polling_profile.txt\"");
+	wifiManager.server->setContentLength(countWriter.bytes);
+	wifiManager.server->send(200, "text/plain", "");
 	PortalResponseWriter writer;
 	writer.server = wifiManager.server.get();
-	(void)writer.write(profileBuffer.data);
+	(void)writePortalCurrentPollingProfile(writer);
 }
 
 static void
 handlePortalPollingImportPage(WiFiManager &wifiManager)
 {
-	renderPortalPollingImportPage(wifiManager, nullptr, nullptr, false);
+	resetPortalPollingProfileUploadState();
+	renderPortalPollingImportPage(wifiManager, nullptr, false);
+}
+
+static void
+handlePortalPollingImportUpload(WiFiManager &wifiManager)
+{
+	static const char kImportUnavailableErr[] PROGMEM = "Polling profile import unavailable.";
+	static const char kImportOomErr[] PROGMEM = "Polling profile import ran out of memory.";
+	static const char kPrepareBucketsErr[] PROGMEM = "Polling profile import could not prepare buckets.";
+	static const char kMissingHeaderErr[] PROGMEM = "Polling profile header is missing.";
+	static const char kMissingIntervalErr[] PROGMEM = "Polling profile must define poll_interval_s.";
+	static const char kImportFailedErr[] PROGMEM = "Polling profile import failed.";
+	static const char kUploadInterruptedErr[] PROGMEM = "Polling profile upload was interrupted.";
+	if (!wifiManager.server) {
+		return;
+	}
+	if (!portalUpdateRequestHasValidToken(&wifiManager)) {
+		return;
+	}
+
+	HTTPUpload &upload = wifiManager.server->upload();
+	switch (upload.status) {
+	case UPLOAD_FILE_START: {
+		resetPortalPollingProfileUploadState();
+		portalPollingProfileUpload.started = true;
+		portalPollingProfileUpload.ok = true;
+		ensurePortalPollingRuntimeReady();
+		const size_t entityCount = mqttEntitiesCount();
+		if (entityCount == 0 || entityCount > kMqttEntityDescriptorCount) {
+			copyPortalPollingProfileUploadErrorP(kImportUnavailableErr);
+			portalPollingProfileUpload.ok = false;
+			break;
+		}
+		portalPollingProfileUpload.entityCount = entityCount;
+		portalPollingProfileUpload.stagedBuckets = new (std::nothrow) BucketId[entityCount];
+		portalPollingProfileUpload.seenEntities = new (std::nothrow) uint8_t[entityCount];
+		portalPollingProfileUpload.lineBuf = new (std::nothrow) char[kPollingProfileLineMaxLen];
+		portalPollingProfileUpload.error = new (std::nothrow) char[kPollingProfileUploadErrorMaxLen];
+		if (portalPollingProfileUpload.stagedBuckets == nullptr ||
+		    portalPollingProfileUpload.seenEntities == nullptr ||
+		    portalPollingProfileUpload.lineBuf == nullptr ||
+		    portalPollingProfileUpload.error == nullptr) {
+			copyPortalPollingProfileUploadErrorP(kImportOomErr);
+			portalPollingProfileUpload.ok = false;
+			break;
+		}
+		portalPollingProfileUpload.error[0] = '\0';
+		memset(portalPollingProfileUpload.seenEntities, 0, entityCount * sizeof(uint8_t));
+		if (!initializePortalPollingProfileBuckets(portalPollingProfileUpload.stagedBuckets, entityCount)) {
+			copyPortalPollingProfileUploadErrorP(kPrepareBucketsErr);
+			portalPollingProfileUpload.ok = false;
+		}
+		break;
+	}
+	case UPLOAD_FILE_WRITE:
+		if (portalPollingProfileUpload.started && portalPollingProfileUpload.ok) {
+			(void)appendPortalPollingProfileUploadBytes(upload.buf, upload.currentSize);
+		}
+		break;
+	case UPLOAD_FILE_END:
+		if (!portalPollingProfileUpload.started) {
+			break;
+		}
+		if (portalPollingProfileUpload.ok && portalPollingProfileUpload.lineLen > 0) {
+			portalPollingProfileUpload.lineBuf[portalPollingProfileUpload.lineLen] = '\0';
+			(void)processPortalPollingProfileUploadLine(portalPollingProfileUpload.lineBuf);
+			portalPollingProfileUpload.lineLen = 0;
+		}
+		if (portalPollingProfileUpload.ok && !portalPollingProfileUpload.sawHeader) {
+			copyPortalPollingProfileUploadErrorP(kMissingHeaderErr);
+			portalPollingProfileUpload.ok = false;
+		}
+		if (portalPollingProfileUpload.ok && !portalPollingProfileUpload.sawPollInterval) {
+			copyPortalPollingProfileUploadErrorP(kMissingIntervalErr);
+			portalPollingProfileUpload.ok = false;
+		}
+		if (portalPollingProfileUpload.ok) {
+			const PortalPollingProfileApplyResult applyResult =
+				applyPortalPollingProfileState(portalPollingProfileUpload.stagedIntervalSeconds,
+				                              portalPollingProfileUpload.stagedBuckets,
+				                              portalPollingProfileUpload.entityCount,
+				                              portalPollingProfileUpload.unknownCount);
+			if (!applyResult.ok) {
+				copyPortalPollingProfileUploadErrorP(kImportFailedErr);
+				portalPollingProfileUpload.ok = false;
+			} else {
+				portalPollingProfileUpload.unknownCount = applyResult.unknownCount;
+			}
+		}
+		portalPollingProfileUpload.finished = true;
+		break;
+	case UPLOAD_FILE_ABORTED:
+		if (portalPollingProfileUpload.started) {
+			copyPortalPollingProfileUploadErrorP(kUploadInterruptedErr);
+			portalPollingProfileUpload.ok = false;
+			portalPollingProfileUpload.finished = true;
+		}
+		break;
+	default:
+		break;
+	}
 }
 
 static void
@@ -5593,51 +5726,34 @@ handlePortalPollingImport(WiFiManager &wifiManager)
 	if (!wifiManager.server) {
 		return;
 	}
-
-	const bool hasProfileArg = wifiManager.server->hasArg("profile");
-	String profileArg;
-	if (hasProfileArg) {
-		profileArg = wifiManager.server->arg("profile");
-	}
-	if (profileArg.length() >= kPollingConfigSetPayloadMaxLen) {
-		renderPortalPollingImportPage(
-			wifiManager,
-			profileArg.c_str(),
-			"Polling profile exceeds the tested portal request limit.",
-			true);
-		return;
-	}
 	if (!portalUpdateRequestHasValidToken(&wifiManager)) {
 		wifiManager.server->send(403, "text/plain", "invalid csrf");
 		return;
 	}
-	if (!hasProfileArg) {
-		renderPortalPollingImportPage(wifiManager, "", "Polling profile is required.", true);
+	if (!portalPollingProfileUpload.started) {
+		renderPortalPollingImportPage(wifiManager, "Polling profile file is required.", true);
 		return;
 	}
-	if (profileArg.length() == 0) {
-		renderPortalPollingImportPage(wifiManager, "", "Polling profile is required.", true);
-		return;
-	}
-	const PortalPollingProfileApplyResult applyResult = applyPortalPollingProfilePayload(profileArg.c_str());
-	if (!applyResult.ok) {
-		renderPortalPollingImportPage(
-			wifiManager,
-			profileArg.c_str(),
-			"Polling profile import failed. Check the JSON and bucket names.",
-			true);
+	if (!portalPollingProfileUpload.finished || !portalPollingProfileUpload.ok) {
+		const char *message =
+			(portalPollingProfileUpload.error != nullptr && portalPollingProfileUpload.error[0] != '\0')
+				? portalPollingProfileUpload.error
+				: "Polling profile import failed.";
+		renderPortalPollingImportPage(wifiManager, message, true);
+		resetPortalPollingProfileUploadState();
 		return;
 	}
 
 	char location[96];
-	if (applyResult.unknownCount != 0) {
+	if (portalPollingProfileUpload.unknownCount != 0) {
 		snprintf(location,
 		         sizeof(location),
 		         "/config/polling?imported=1&unknown=%lu",
-		         static_cast<unsigned long>(applyResult.unknownCount));
+		         static_cast<unsigned long>(portalPollingProfileUpload.unknownCount));
 	} else {
 		strlcpy(location, "/config/polling?imported=1", sizeof(location));
 	}
+	resetPortalPollingProfileUploadState();
 	wifiManager.server->sendHeader("Location", location);
 	wifiManager.server->send(302, "text/plain", "");
 }

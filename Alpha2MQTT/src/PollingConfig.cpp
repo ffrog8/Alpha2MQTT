@@ -511,6 +511,82 @@ validatePollingConfigEntries(const char *payload, char *valueScratch, size_t val
 	                                 nullptr);
 }
 
+namespace {
+constexpr char kPollingProfileHeader[] = "A2M_POLLING_PROFILE 1";
+
+static bool
+appendProfileText(const char *text, char *out, size_t outSize, size_t &used)
+{
+	if (text == nullptr || out == nullptr || outSize == 0 || used >= outSize) {
+		return false;
+	}
+	const size_t len = strlen(text);
+	if (len >= (outSize - used)) {
+		return false;
+	}
+	memcpy(out + used, text, len);
+	used += len;
+	out[used] = '\0';
+	return true;
+}
+
+static bool
+appendProfileLineText(const char *line, char *out, size_t outSize, size_t &used)
+{
+	return appendProfileText(line, out, outSize, used) &&
+	       appendProfileText("\n", out, outSize, used);
+}
+
+static void
+trimSpan(const char *&begin, const char *&end)
+{
+	while (begin < end && isspace(static_cast<unsigned char>(*begin))) {
+		++begin;
+	}
+	while (end > begin && isspace(static_cast<unsigned char>(*(end - 1)))) {
+		--end;
+	}
+}
+
+static bool
+copySpan(const char *begin, const char *end, char *out, size_t outSize)
+{
+	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+	trimSpan(begin, end);
+	const size_t len = static_cast<size_t>(end - begin);
+	if (len == 0 || len >= outSize) {
+		return false;
+	}
+	memcpy(out, begin, len);
+	out[len] = '\0';
+	return true;
+}
+
+static bool
+appendCanonicalBucketMapAssignment(const char *entityName,
+                                   BucketId bucket,
+                                   char *out,
+                                   size_t outSize,
+                                   size_t &used)
+{
+	if (entityName == nullptr || entityName[0] == '\0') {
+		return false;
+	}
+	const char *bucketName = bucketIdToString(bucket);
+	if (bucketName == nullptr || bucket == BucketId::Unknown) {
+		return false;
+	}
+	const int written = snprintf(out + used, outSize - used, "%s=%s;", entityName, bucketName);
+	if (written < 0 || static_cast<size_t>(written) >= (outSize - used)) {
+		return false;
+	}
+	used += static_cast<size_t>(written);
+	return true;
+}
+} // namespace
+
 bool
 buildPollingProfilePayload(const char *pollIntervalS,
                            const char *bucketMap,
@@ -520,87 +596,103 @@ buildPollingProfilePayload(const char *pollIntervalS,
 	if (out == nullptr || outSize == 0 || pollIntervalS == nullptr || pollIntervalS[0] == '\0') {
 		return false;
 	}
-
-	const char *mapValue = (bucketMap != nullptr) ? bucketMap : "";
-	const int written = snprintf(out,
-	                             outSize,
-	                             "{\"schema\":1,\"kind\":\"polling_profile\",\"poll_interval_s\":\"%s\",\"bucket_map\":\"%s\"}",
-	                             pollIntervalS,
-	                             mapValue);
-	if (written < 0) {
+	out[0] = '\0';
+	size_t used = 0;
+	if (!appendProfileLineText(kPollingProfileHeader, out, outSize, used)) {
 		return false;
 	}
-	return static_cast<size_t>(written) < outSize;
+	char intervalLine[32];
+	const int intervalWritten = snprintf(intervalLine, sizeof(intervalLine), "poll_interval_s=%s", pollIntervalS);
+	if (intervalWritten <= 0 || static_cast<size_t>(intervalWritten) >= sizeof(intervalLine) ||
+	    !appendProfileLineText(intervalLine, out, outSize, used)) {
+		return false;
+	}
+
+	const char *cursor = (bucketMap != nullptr) ? bucketMap : "";
+	while (cursor != nullptr && *cursor != '\0') {
+		while (*cursor == ';' || *cursor == '\n' || *cursor == '\r') {
+			++cursor;
+		}
+		if (*cursor == '\0') {
+			break;
+		}
+		const char *lineEnd = cursor;
+		while (*lineEnd != '\0' && *lineEnd != ';') {
+			++lineEnd;
+		}
+		const char *trimmedBegin = cursor;
+		const char *trimmedEnd = lineEnd;
+		trimSpan(trimmedBegin, trimmedEnd);
+		if (trimmedBegin != trimmedEnd) {
+			char assignmentLine[96];
+			const size_t len = static_cast<size_t>(trimmedEnd - trimmedBegin);
+			if (len >= sizeof(assignmentLine)) {
+				return false;
+			}
+			memcpy(assignmentLine, trimmedBegin, len);
+			assignmentLine[len] = '\0';
+			if (!appendProfileLineText(assignmentLine, out, outSize, used)) {
+				return false;
+			}
+		}
+		cursor = (*lineEnd == ';') ? (lineEnd + 1) : lineEnd;
+	}
+	return true;
 }
 
-namespace {
-struct PollingProfileParseContext {
-	char *pollIntervalOut = nullptr;
-	size_t pollIntervalOutSize = 0;
-	char *bucketMapOut = nullptr;
-	size_t bucketMapOutSize = 0;
-	bool sawSchema = false;
-	bool sawKind = false;
-	bool sawPollInterval = false;
-	uint32_t parsedSchema = 0;
-};
-
-static bool
-capturePollingProfileEntry(const char *key, const char *value, void *context)
+bool
+parsePollingProfileLine(const char *line, PollingProfileLine &out)
 {
-	auto &ctx = *static_cast<PollingProfileParseContext *>(context);
-	if (key == nullptr || value == nullptr) {
+	out = PollingProfileLine{};
+	if (line == nullptr) {
+		return false;
+	}
+	const char *begin = line;
+	const char *end = line + strlen(line);
+	trimSpan(begin, end);
+	if (begin == end || *begin == '#') {
+		out.kind = PollingProfileLineKind::Ignore;
+		return true;
+	}
+	if (static_cast<size_t>(end - begin) == strlen(kPollingProfileHeader) &&
+	    strncmp(begin, kPollingProfileHeader, strlen(kPollingProfileHeader)) == 0) {
+		out.kind = PollingProfileLineKind::Header;
+		return true;
+	}
+
+	const char *equals = begin;
+	while (equals < end && *equals != '=') {
+		++equals;
+	}
+	if (equals >= end || *equals != '=') {
 		return false;
 	}
 
-	if (strcmp(key, "schema") == 0) {
-		uint32_t schema = 0;
-		if (!parseStrictUint32(value, 255, schema)) {
-			return false;
-		}
-		ctx.sawSchema = true;
-		ctx.parsedSchema = schema;
-		return true;
+	char key[64];
+	char value[32];
+	if (!copySpan(begin, equals, key, sizeof(key)) || !copySpan(equals + 1, end, value, sizeof(value))) {
+		return false;
 	}
-
-	if (strcmp(key, "kind") == 0) {
-		if (strcmp(value, "polling_profile") != 0) {
-			return false;
-		}
-		ctx.sawKind = true;
-		return true;
-	}
-
 	if (strcmp(key, "poll_interval_s") == 0) {
 		uint32_t parsedInterval = 0;
 		if (!parseStrictUint32(value, kPollIntervalMaxSeconds, parsedInterval)) {
 			return false;
 		}
-		if (ctx.pollIntervalOut == nullptr || ctx.pollIntervalOutSize == 0 ||
-		    !copyLengthDelimitedString(value, strlen(value), ctx.pollIntervalOut, ctx.pollIntervalOutSize)) {
-			return false;
-		}
-		ctx.sawPollInterval = true;
+		out.kind = PollingProfileLineKind::PollInterval;
+		out.pollIntervalSeconds = parsedInterval;
 		return true;
 	}
-
-	if (strcmp(key, "bucket_map") == 0) {
-		if (ctx.bucketMapOut == nullptr || ctx.bucketMapOutSize == 0) {
-			return false;
-		}
-		if (value[0] == '\0') {
-			ctx.bucketMapOut[0] = '\0';
-			return true;
-		}
-		if (!copyLengthDelimitedString(value, strlen(value), ctx.bucketMapOut, ctx.bucketMapOutSize)) {
-			return false;
-		}
-		return true;
+	const BucketId bucket = bucketIdFromString(value);
+	if (bucket == BucketId::Unknown) {
+		return false;
 	}
-
+	if (!copySpan(key, key + strlen(key), out.entityName, sizeof(out.entityName))) {
+		return false;
+	}
+	out.kind = PollingProfileLineKind::Assignment;
+	out.bucketId = bucket;
 	return true;
 }
-} // namespace
 
 bool
 parsePollingProfilePayload(const char *payload,
@@ -619,22 +711,57 @@ parsePollingProfilePayload(const char *payload,
 
 	pollIntervalOut[0] = '\0';
 	bucketMapOut[0] = '\0';
-
-	PollingProfileParseContext ctx{};
-	ctx.pollIntervalOut = pollIntervalOut;
-	ctx.pollIntervalOutSize = pollIntervalOutSize;
-	ctx.bucketMapOut = bucketMapOut;
-	ctx.bucketMapOutSize = bucketMapOutSize;
-
-	if (!visitPollingConfigEntries(payload,
-	                               valueScratch,
-	                               valueScratchSize,
-	                               capturePollingProfileEntry,
-	                               &ctx)) {
-		return false;
+	bool sawHeader = false;
+	bool sawPollInterval = false;
+	size_t bucketMapUsed = 0;
+	const char *cursor = payload;
+	while (*cursor != '\0') {
+		const char *lineEnd = cursor;
+		while (*lineEnd != '\0' && *lineEnd != '\n') {
+			++lineEnd;
+		}
+		const size_t rawLen = static_cast<size_t>(lineEnd - cursor);
+		if (rawLen >= valueScratchSize) {
+			return false;
+		}
+		memcpy(valueScratch, cursor, rawLen);
+		valueScratch[rawLen] = '\0';
+		PollingProfileLine parsed{};
+		if (!parsePollingProfileLine(valueScratch, parsed)) {
+			return false;
+		}
+		switch (parsed.kind) {
+		case PollingProfileLineKind::Ignore:
+			break;
+		case PollingProfileLineKind::Header:
+			if (sawHeader || sawPollInterval || bucketMapUsed != 0) {
+				return false;
+			}
+			sawHeader = true;
+			break;
+		case PollingProfileLineKind::PollInterval: {
+			if (!sawHeader || sawPollInterval) {
+				return false;
+			}
+			const int written =
+				snprintf(pollIntervalOut, pollIntervalOutSize, "%lu", static_cast<unsigned long>(parsed.pollIntervalSeconds));
+			if (written <= 0 || static_cast<size_t>(written) >= pollIntervalOutSize) {
+				return false;
+			}
+			sawPollInterval = true;
+			break;
+		}
+		case PollingProfileLineKind::Assignment:
+			if (!sawHeader || !sawPollInterval ||
+			    !appendCanonicalBucketMapAssignment(
+				    parsed.entityName, parsed.bucketId, bucketMapOut, bucketMapOutSize, bucketMapUsed)) {
+				return false;
+			}
+			break;
+		}
+		cursor = (*lineEnd == '\n') ? (lineEnd + 1) : lineEnd;
 	}
-
-	return ctx.sawSchema && ctx.parsedSchema == 1 && ctx.sawKind && ctx.sawPollInterval;
+	return sawHeader && sawPollInterval;
 }
 
 bool
