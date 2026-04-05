@@ -3203,7 +3203,8 @@ writePortalHtmlEscaped(PortalResponseWriter &writer, const char *src)
 
 enum class RebootProbeStrategy : uint8_t {
 	Fetch,
-	Iframe
+	Iframe,
+	Manual
 };
 
 struct RebootHandoffSpec {
@@ -3233,6 +3234,7 @@ static const char kRebootHandoffTryNowMid[] PROGMEM = "\">Open expected address 
 static const char kRebootHandoffIframe[] PROGMEM = "<iframe id=\"reboot-probe-frame\" hidden></iframe>";
 static const char kRebootProbeKindFetch[] PROGMEM = "fetch";
 static const char kRebootProbeKindIframe[] PROGMEM = "iframe";
+static const char kRebootProbeKindManual[] PROGMEM = "manual";
 static const char kRebootTitleDefault[] PROGMEM = "Rebooting";
 static const char kRebootHeadingDefault[] PROGMEM = "Rebooting";
 static const char kRebootModeDefault[] PROGMEM = "normal";
@@ -3273,6 +3275,11 @@ static const char kRebootHandoffScript[] PROGMEM =
 	"if((Date.now()-started)>timeoutMs){setStatus('Timed out after '+Math.floor(timeoutMs/1000)+'s. Open the expected address manually.');return;}"
 	"if(Date.now()<armAt){setStatus('Waiting to start checks: '+Math.max(0,Math.ceil((armAt-Date.now())/1000))+'s');setTimeout(loop,500);return;}"
 	"setStatus('Checking destination… elapsed '+elapsed()+'s');"
+	"if(kind==='manual'){"
+	"setStatus('Auto-open is disabled for this network change. Join the target network and open the expected address manually. Elapsed '+elapsed()+'s');"
+	"schedule();"
+	"return;"
+	"}"
 	"if(kind==='iframe'){"
 	"if(!frame){setStatus('Browser probe unavailable. Open the expected address manually.');return;}"
 	"frame.onload=function(){redirect();};"
@@ -3357,7 +3364,7 @@ buildRebootHandoffSpec(BootIntent intent, RebootHandoffSpec &spec)
 	}
 
 	if (targetMode == BootMode::ApConfig) {
-		spec.probeStrategy = RebootProbeStrategy::Iframe;
+		spec.probeStrategy = RebootProbeStrategy::Manual;
 		spec.showExpectedUrl = true;
 		strlcpy(spec.probeUrl, "http://192.168.4.1/", sizeof(spec.probeUrl));
 		strlcpy(spec.expectedUrl, spec.probeUrl, sizeof(spec.expectedUrl));
@@ -3403,13 +3410,19 @@ sendRebootHandoffPage(HttpServer *server, BootIntent intent)
 	}
 
 	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
+		PGM_P probeKind =
+			(spec.probeStrategy == RebootProbeStrategy::Fetch)
+				? kRebootProbeKindFetch
+				: ((spec.probeStrategy == RebootProbeStrategy::Iframe)
+					   ? kRebootProbeKindIframe
+					   : kRebootProbeKindManual);
 		if (!writePortalUiPageStartP(writer, spec.title, spec.heading, spec.targetUiMode) ||
 		    !writer.writeP(kRebootHandoffBodyOpen) ||
 		    !writer.writeP(spec.expectedModeToken) ||
 		    !writer.writeP(kRebootHandoffProbeUrlOpen) ||
 		    !writer.write(spec.probeUrl) ||
 		    !writer.writeP(kRebootHandoffProbeKindOpen) ||
-		    !writer.writeP((spec.probeStrategy == RebootProbeStrategy::Fetch) ? kRebootProbeKindFetch : kRebootProbeKindIframe) ||
+		    !writer.writeP(probeKind) ||
 		    !writer.writeP(kRebootHandoffTimingOpen) ||
 		    !writer.writeP(kRebootHandoffLead) ||
 		    !writer.writeP(kRebootHandoffWait)) {
