@@ -3067,7 +3067,7 @@ def main() -> int:
         boot_topic = f"{device_root}/boot"
         previous_boot = _fetch_latest_text(mqtt, boot_topic, label=f"boot_before_{label}_reboot")
         previous_poll = _fetch_latest_text(mqtt, poll_topic, label=f"poll_before_{label}_reboot")
-        reboot_status, reboot_body = _http_request("POST", base + reboot_normal_path, headers={}, body=b"", timeout_s=20)
+        reboot_status, reboot_body = _http_request_full("POST", base + reboot_normal_path, headers={}, body=b"", timeout_s=20)
         if reboot_status != 200:
             raise E2EError(f"/reboot/normal returned unexpected status={reboot_status}")
         if reboot_body:
@@ -4849,7 +4849,7 @@ def main() -> int:
 
         reboot_url = base + reboot_wifi_path
         print(f"[e2e] rebooting into wifi portal via {reboot_url}")
-        reboot_wifi_status, reboot_wifi_body = _http_request("POST", reboot_url, headers={}, body=b"", timeout_s=20)
+        reboot_wifi_status, reboot_wifi_body = _http_request_full("POST", reboot_url, headers={}, body=b"", timeout_s=20)
         if reboot_wifi_status != 200:
             raise E2EError(f"{reboot_wifi_path} returned unexpected status={reboot_wifi_status}")
         if reboot_wifi_body:
@@ -4936,7 +4936,7 @@ def main() -> int:
 
         reboot_normal_url = base + portal_reboot_normal_path
         print(f"[e2e] rebooting to normal via {reboot_normal_url}")
-        reboot_status, reboot_body = _http_request("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
+        reboot_status, reboot_body = _http_request_full("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
         if reboot_status != 200:
             raise E2EError(f"{portal_reboot_normal_path} returned unexpected status={reboot_status}")
         if reboot_body:
@@ -5068,7 +5068,7 @@ def main() -> int:
             raise E2EError(f"{target} bucket UI value not cleared after disable-all (got {cleared_bucket!r})")
 
         print(f"[e2e] rebooting to normal via {reboot_normal_url} (clear-all check)")
-        reboot_status, reboot_body = _http_request("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
+        reboot_status, reboot_body = _http_request_full("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
         if reboot_status != 200:
             raise E2EError(f"{portal_reboot_normal_path} after clear returned unexpected status={reboot_status}")
         if reboot_body:
@@ -5161,7 +5161,7 @@ def main() -> int:
         if not reboot_wifi_path:
             raise E2EError("Could not discover /reboot/wifi endpoint from firmware source")
 
-        reboot_wifi_status, reboot_wifi_body = _http_request(
+        reboot_wifi_status, reboot_wifi_body = _http_request_full(
             "POST", base + reboot_wifi_path, headers={}, body=b"", timeout_s=20
         )
         if reboot_wifi_status != 200:
@@ -5189,7 +5189,7 @@ def main() -> int:
             raise E2EError(f"baseline polling profile export poll interval drifted: {restore_profile!r}")
 
         reboot_normal_url = base + "/config/reboot-normal"
-        reboot_status, reboot_body = _http_request("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
+        reboot_status, reboot_body = _http_request_full("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
         if reboot_status != 200:
             raise E2EError(f"/config/reboot-normal after baseline export returned unexpected status={reboot_status}")
         if reboot_body:
@@ -5237,7 +5237,7 @@ def main() -> int:
             republish_every_s=5.0,
         )
 
-        reboot_wifi_status, reboot_wifi_body = _http_request(
+        reboot_wifi_status, reboot_wifi_body = _http_request_full(
             "POST", base + reboot_wifi_path, headers={}, body=b"", timeout_s=20
         )
         if reboot_wifi_status != 200:
@@ -5414,7 +5414,7 @@ def main() -> int:
         if target_clear in exported_modified_intervals:
             raise E2EError(f"polling profile export did not disable omitted entity {target_clear}: {exported_modified}")
 
-        reboot_status, reboot_body = _http_request("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
+        reboot_status, reboot_body = _http_request_full("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
         if reboot_status != 200:
             raise E2EError(f"/config/reboot-normal after import returned unexpected status={reboot_status}")
         if reboot_body:
@@ -5458,7 +5458,7 @@ def main() -> int:
             poll_s=3.0,
         )
 
-        reboot_wifi_status, reboot_wifi_body = _http_request(
+        reboot_wifi_status, reboot_wifi_body = _http_request_full(
             "POST", base + reboot_wifi_path, headers={}, body=b"", timeout_s=20
         )
         if reboot_wifi_status != 200:
@@ -5514,7 +5514,7 @@ def main() -> int:
         if restored_export_intervals != original_export_intervals:
             raise E2EError(f"polling profile export did not restore the original active schedule: {restored_export}")
 
-        reboot_status, reboot_body = _http_request("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
+        reboot_status, reboot_body = _http_request_full("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
         if reboot_status != 200:
             raise E2EError(f"/config/reboot-normal after restore returned unexpected status={reboot_status}")
         if reboot_body:
@@ -5612,7 +5612,7 @@ def main() -> int:
         base = _resolve_device_http_base(mqtt, device_root)
 
         print(f"[e2e] rebooting into wifi portal via {reboot_url} (wifi save-only check)")
-        reboot_wifi_status, reboot_wifi_body = _http_request(
+        reboot_wifi_status, reboot_wifi_body = _http_request_full(
             "POST", base + reboot_url, headers={}, body=b"", timeout_s=20
         )
         if reboot_wifi_status != 200:
@@ -5655,7 +5655,7 @@ def main() -> int:
 
         reboot_normal_url = base + portal_reboot_normal_path
         print(f"[e2e] rebooting to normal via {reboot_normal_url} (wifi save-only check)")
-        reboot_status, reboot_body = _http_request("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
+        reboot_status, reboot_body = _http_request_full("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
         if reboot_status != 200:
             raise E2EError(f"{portal_reboot_normal_path} returned unexpected status={reboot_status}")
         if reboot_body:
