@@ -844,6 +844,7 @@ void handleRebootApConfirm(void);
 void handleRebootAp(void);
 static bool portalRequestHasMqttFields(WiFiManager &wifiManager);
 void handleRebootWifi(void);
+static bool sendRebootHandoffPage(HttpServer *server, BootIntent intent);
 void triggerRestart(void);
 void subscribeInverterTopics(void);
 void serviceRs485Hooks(void);
@@ -1837,7 +1838,7 @@ handleRebootNormal(void)
 	Serial.println("HTTP POST /reboot/normal");
 	Serial.println("Scheduling deferred reboot -> normal");
 #endif
-	httpServerRef().send(200, "text/plain", "Rebooting into MODE_NORMAL...");
+	(void)sendRebootHandoffPage(&httpServerRef(), BootIntent::Normal);
 	scheduleDeferredControlPlaneReboot(BootIntent::Normal);
 }
 
@@ -1862,7 +1863,7 @@ handleRebootAp(void)
 	Serial.println("HTTP POST /reboot/ap");
 	Serial.println("Scheduling deferred reboot -> ap_config");
 #endif
-	httpServerRef().send(200, "text/plain", "Rebooting into MODE_AP_CONFIG...");
+	(void)sendRebootHandoffPage(&httpServerRef(), BootIntent::ApConfig);
 	scheduleDeferredControlPlaneReboot(BootIntent::ApConfig);
 }
 
@@ -1873,41 +1874,7 @@ handleRebootWifi(void)
 	Serial.println("HTTP POST /reboot/wifi");
 	Serial.println("Scheduling deferred reboot -> wifi_config");
 #endif
-
-	// Serve a small "rebooting" page that polls the same host until the portal comes up.
-	// In STA-only portal mode there is no captive-portal DNS redirect, so this provides
-	// a reasonable browser UX when the mode switch is initiated from the control plane.
-	httpServerRef().send(200, "text/html",
-		"<!doctype html><html><head>"
-		"<meta charset='utf-8'>"
-		"<meta name='viewport' content='width=device-width,initial-scale=1'>"
-		"<title>Rebooting…</title>"
-		"</head><body>"
-		"<h3>Rebooting into Wi-Fi config…</h3>"
-		"<p>This page will auto-redirect when the portal is available.</p>"
-		"<pre id='s'>waiting…</pre>"
-		"<script>"
-		"(function(){"
-		"var start=Date.now();"
-		"var armAt=start+2200;"
-		"function tick(){"
-		"document.getElementById('s').textContent='waiting '+Math.floor((Date.now()-start)/1000)+'s';"
-		"}"
-		"async function probe(){"
-		"if(Date.now()<armAt){tick();setTimeout(probe,250);return;}"
-		"try{"
-		"var r=await fetch('/',{cache:'no-store'});"
-		"if(r && r.ok){window.location.href='/';return;}"
-		"}catch(e){}"
-		"tick();"
-		"setTimeout(probe,1000);"
-		"}"
-		"setTimeout(probe,1000);"
-		"})();"
-		"</script>"
-		"</body></html>");
-
-	// Give the HTTP response a moment to flush before restarting.
+	(void)sendRebootHandoffPage(&httpServerRef(), BootIntent::WifiConfig);
 	scheduleDeferredControlPlaneReboot(BootIntent::WifiConfig, 1500);
 }
 
@@ -3234,6 +3201,263 @@ writePortalHtmlEscaped(PortalResponseWriter &writer, const char *src)
 	return flush();
 }
 
+enum class RebootProbeStrategy : uint8_t {
+	Fetch,
+	Iframe,
+	Manual
+};
+
+struct RebootHandoffSpec {
+	PGM_P title = nullptr;
+	PGM_P heading = nullptr;
+	PortalUiMode targetUiMode = PortalUiMode::Normal;
+	RebootProbeStrategy probeStrategy = RebootProbeStrategy::Fetch;
+	PGM_P expectedModeToken = nullptr;
+	bool showExpectedUrl = false;
+	char probeUrl[96] = "";
+	char expectedUrl[96] = "";
+	char manualHint[192] = "";
+};
+
+static const char kRebootHandoffBodyOpen[] PROGMEM =
+	"<div id=\"reboot-handoff\" data-target-mode=\"";
+static const char kRebootHandoffProbeUrlOpen[] PROGMEM = "\" data-probe-url=\"";
+static const char kRebootHandoffProbeKindOpen[] PROGMEM = "\" data-probe-kind=\"";
+static const char kRebootHandoffTimingOpen[] PROGMEM =
+	"\" data-start-ms=\"10000\" data-retry-ms=\"5000\" data-timeout-ms=\"300000\">";
+static const char kRebootHandoffLead[] PROGMEM =
+	"<p><strong>Auto-refresh starts in 10 seconds and retries every 5 seconds for up to 5 minutes.</strong></p>";
+static const char kRebootHandoffWait[] PROGMEM =
+	"<pre id=\"reboot-status\">Waiting 10s before checks begin.</pre>";
+static const char kRebootHandoffTryNowOpen[] PROGMEM = "<p><a href=\"";
+static const char kRebootHandoffTryNowMid[] PROGMEM = "\">Open expected address now</a></p>";
+static const char kRebootHandoffIframe[] PROGMEM = "<iframe id=\"reboot-probe-frame\" hidden></iframe>";
+static const char kRebootProbeKindFetch[] PROGMEM = "fetch";
+static const char kRebootProbeKindIframe[] PROGMEM = "iframe";
+static const char kRebootProbeKindManual[] PROGMEM = "manual";
+static const char kRebootTitleDefault[] PROGMEM = "Rebooting";
+static const char kRebootHeadingDefault[] PROGMEM = "Rebooting";
+static const char kRebootModeDefault[] PROGMEM = "normal";
+static const char kRebootTitleAp[] PROGMEM = "Rebooting to AP Config";
+static const char kRebootHeadingAp[] PROGMEM = "Rebooting to AP config";
+static const char kRebootTitleWifi[] PROGMEM = "Rebooting to Wi-Fi Config";
+static const char kRebootHeadingWifi[] PROGMEM = "Rebooting to Wi-Fi config";
+static const char kRebootTitleNormal[] PROGMEM = "Rebooting to Normal";
+static const char kRebootHeadingNormal[] PROGMEM = "Rebooting to normal mode";
+static const char kRebootManualHintSameOrigin[] PROGMEM =
+	"This page should return here automatically when the destination is ready. If it does not, refresh this page manually.";
+static const char kRebootManualHintAp[] PROGMEM =
+	"Join WiFi SSID %s first, then open %s if the browser does not return automatically. Auto-refresh is best effort across the network change.";
+static const char kRebootManualHintSta[] PROGMEM =
+	"Reconnect to your LAN, then open %s if the browser does not return automatically. Auto-refresh is best effort across the network change.";
+static const char kRebootHandoffScript[] PROGMEM =
+	"<script>"
+	"(function(){"
+	"var root=document.getElementById('reboot-handoff');"
+	"if(!root){return;}"
+	"var target=root.getAttribute('data-target-mode')||'';"
+	"var probe=root.getAttribute('data-probe-url')||'/';"
+	"var kind=root.getAttribute('data-probe-kind')||'fetch';"
+	"var startMs=parseInt(root.getAttribute('data-start-ms')||'10000',10);"
+	"var retryMs=parseInt(root.getAttribute('data-retry-ms')||'5000',10);"
+	"var timeoutMs=parseInt(root.getAttribute('data-timeout-ms')||'300000',10);"
+	"var status=document.getElementById('reboot-status');"
+	"var frame=document.getElementById('reboot-probe-frame');"
+	"var started=Date.now();"
+	"var armAt=started+startMs;"
+	"var redirected=false;"
+	"function elapsed(){return Math.floor((Date.now()-started)/1000);}"
+	"function setStatus(text){if(status){status.textContent=text;}}"
+	"function redirect(){if(redirected){return;}redirected=true;window.location.href=probe;}"
+	"function schedule(){if(redirected){return;}setTimeout(loop,retryMs);}"
+	"function loop(){"
+	"if(redirected){return;}"
+	"if((Date.now()-started)>timeoutMs){setStatus('Timed out after '+Math.floor(timeoutMs/1000)+'s. Open the expected address manually.');return;}"
+	"if(Date.now()<armAt){setStatus('Waiting to start checks: '+Math.max(0,Math.ceil((armAt-Date.now())/1000))+'s');setTimeout(loop,500);return;}"
+	"setStatus('Checking destination… elapsed '+elapsed()+'s');"
+	"if(kind==='manual'){"
+	"setStatus('Auto-open is disabled for this network change. Join the target network and open the expected address manually. Elapsed '+elapsed()+'s');"
+	"schedule();"
+	"return;"
+	"}"
+	"if(kind==='iframe'){"
+	"if(!frame){setStatus('Browser probe unavailable. Open the expected address manually.');return;}"
+	"frame.onload=function(){redirect();};"
+	"frame.src=probe+(probe.indexOf('?')===-1?'?':'&')+'_a2m_probe='+(Date.now());"
+	"schedule();"
+	"return;"
+	"}"
+	"fetch(probe,{cache:'no-store'})"
+	".then(function(r){return r.text().then(function(t){"
+	"if(r&&r.ok&&t&&t.indexOf('meta name=\"a2m-mode\" content=\"'+target+'\"')!==-1){redirect();return;}"
+	"setStatus('Destination not ready yet. Elapsed '+elapsed()+'s');"
+	"schedule();"
+	"});})"
+	".catch(function(){setStatus('Destination not reachable yet. Elapsed '+elapsed()+'s');schedule();});"
+	"}"
+	"loop();"
+	"})();"
+	"</script>";
+
+static PortalUiMode
+portalUiModeForBootMode(BootMode mode)
+{
+	switch (mode) {
+	case BootMode::ApConfig:
+		return PortalUiMode::Ap;
+	case BootMode::WifiConfig:
+		return PortalUiMode::Wifi;
+	case BootMode::Normal:
+	default:
+		return PortalUiMode::Normal;
+	}
+}
+
+static PGM_P
+portalUiModeTokenP(PortalUiMode mode)
+{
+	switch (mode) {
+	case PortalUiMode::Ap:
+		return PSTR("ap");
+	case PortalUiMode::Wifi:
+		return PSTR("wifi");
+	case PortalUiMode::Normal:
+	default:
+		return PSTR("normal");
+	}
+}
+
+static bool
+buildRebootHandoffSpec(BootIntent intent, RebootHandoffSpec &spec)
+{
+	spec.title = kRebootTitleDefault;
+	spec.heading = kRebootHeadingDefault;
+	spec.expectedModeToken = kRebootModeDefault;
+
+	const BootMode targetMode = bootModeForIntent(intent, currentBootMode);
+	spec.targetUiMode = portalUiModeForBootMode(targetMode);
+	spec.expectedModeToken = portalUiModeTokenP(spec.targetUiMode);
+
+	switch (spec.targetUiMode) {
+	case PortalUiMode::Ap:
+		spec.title = kRebootTitleAp;
+		spec.heading = kRebootHeadingAp;
+		break;
+	case PortalUiMode::Wifi:
+		spec.title = kRebootTitleWifi;
+		spec.heading = kRebootHeadingWifi;
+		break;
+	case PortalUiMode::Normal:
+	default:
+		spec.title = kRebootTitleNormal;
+		spec.heading = kRebootHeadingNormal;
+		break;
+	}
+
+	if (targetMode == currentBootMode) {
+		spec.probeStrategy = RebootProbeStrategy::Fetch;
+		strlcpy(spec.probeUrl, "/", sizeof(spec.probeUrl));
+		strlcpy(spec.expectedUrl, "/", sizeof(spec.expectedUrl));
+		strncpy_P(spec.manualHint, kRebootManualHintSameOrigin, sizeof(spec.manualHint) - 1);
+		spec.manualHint[sizeof(spec.manualHint) - 1] = '\0';
+		return true;
+	}
+
+	if (targetMode == BootMode::ApConfig) {
+		spec.probeStrategy = RebootProbeStrategy::Manual;
+		spec.showExpectedUrl = true;
+		strlcpy(spec.probeUrl, "http://192.168.4.1/", sizeof(spec.probeUrl));
+		strlcpy(spec.expectedUrl, spec.probeUrl, sizeof(spec.expectedUrl));
+		snprintf_P(spec.manualHint,
+		           sizeof(spec.manualHint),
+		           kRebootManualHintAp,
+		           deviceName,
+		           spec.expectedUrl);
+		return true;
+	}
+
+	if (currentBootMode == BootMode::ApConfig &&
+	    (targetMode == BootMode::Normal || targetMode == BootMode::WifiConfig)) {
+		spec.probeStrategy = RebootProbeStrategy::Iframe;
+		spec.showExpectedUrl = true;
+		snprintf(spec.probeUrl, sizeof(spec.probeUrl), "http://%s/", deviceName);
+		strlcpy(spec.expectedUrl, spec.probeUrl, sizeof(spec.expectedUrl));
+		snprintf_P(spec.manualHint,
+		           sizeof(spec.manualHint),
+		           kRebootManualHintSta,
+		           spec.expectedUrl);
+		return true;
+	}
+
+	spec.probeStrategy = RebootProbeStrategy::Fetch;
+	strlcpy(spec.probeUrl, "/", sizeof(spec.probeUrl));
+	strlcpy(spec.expectedUrl, "/", sizeof(spec.expectedUrl));
+	strncpy_P(spec.manualHint, kRebootManualHintSameOrigin, sizeof(spec.manualHint) - 1);
+	spec.manualHint[sizeof(spec.manualHint) - 1] = '\0';
+	return true;
+}
+
+static bool
+sendRebootHandoffPage(HttpServer *server, BootIntent intent)
+{
+	if (server == nullptr) {
+		return false;
+	}
+
+	RebootHandoffSpec spec{};
+	if (!buildRebootHandoffSpec(intent, spec)) {
+		return false;
+	}
+
+	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
+		PGM_P probeKind =
+			(spec.probeStrategy == RebootProbeStrategy::Fetch)
+				? kRebootProbeKindFetch
+				: ((spec.probeStrategy == RebootProbeStrategy::Iframe)
+					   ? kRebootProbeKindIframe
+					   : kRebootProbeKindManual);
+		if (!writePortalUiPageStartP(writer, spec.title, spec.heading, spec.targetUiMode) ||
+		    !writer.writeP(kRebootHandoffBodyOpen) ||
+		    !writer.writeP(spec.expectedModeToken) ||
+		    !writer.writeP(kRebootHandoffProbeUrlOpen) ||
+		    !writer.write(spec.probeUrl) ||
+		    !writer.writeP(kRebootHandoffProbeKindOpen) ||
+		    !writer.writeP(probeKind) ||
+		    !writer.writeP(kRebootHandoffTimingOpen) ||
+		    !writer.writeP(kRebootHandoffLead) ||
+		    !writer.writeP(kRebootHandoffWait)) {
+			return false;
+		}
+		if (spec.showExpectedUrl &&
+		    (!writer.writeP(PSTR("<p>Expected address: <a href=\"")) ||
+		     !writer.write(spec.expectedUrl) ||
+		     !writer.writeP(PSTR("\">")) ||
+		     !writer.write(spec.expectedUrl) ||
+		     !writer.writeP(PSTR("</a></p>")))) {
+			return false;
+		}
+		if (!writer.writeP(PSTR("<p>")) ||
+		    !writePortalHtmlEscaped(writer, spec.manualHint) ||
+		    !writer.writeP(PSTR("</p>"))) {
+			return false;
+		}
+		if (spec.showExpectedUrl &&
+		    (!writer.writeP(kRebootHandoffTryNowOpen) ||
+		     !writer.write(spec.expectedUrl) ||
+		     !writer.writeP(kRebootHandoffTryNowMid))) {
+			return false;
+		}
+		if (spec.probeStrategy == RebootProbeStrategy::Iframe && !writer.writeP(kRebootHandoffIframe)) {
+			return false;
+		}
+		return writer.writeP(PSTR("</div>")) &&
+		       writer.writeP(kRebootHandoffScript) &&
+		       writer.writeP(kUiPageTail);
+	};
+
+	return sendPortalHtmlResponse(server, emitPage, "reboot handoff unavailable");
+}
+
 struct PortalPollingProfileApplyResult {
 	bool ok = false;
 	uint32_t unknownCount = 0;
@@ -4324,8 +4548,7 @@ handlePortalRestartRequest(WiFiManager& wifiManager)
 		return;
 	}
 
-	wifiManager.server->sendHeader("Connection", "close");
-	wifiManager.server->send(200, "text/plain", "Rebooting...");
+	(void)sendRebootHandoffPage(wifiManager.server.get(), portalRestartIntent());
 #if defined(MP_ESP8266)
 	ESP.wdtFeed();
 #endif
@@ -4339,8 +4562,7 @@ handlePortalRebootNormalRequest(WiFiManager& wifiManager)
 		return;
 	}
 
-	wifiManager.server->sendHeader("Connection", "close");
-	wifiManager.server->send(200, "text/plain", "Rebooting to normal mode...");
+	(void)sendRebootHandoffPage(wifiManager.server.get(), portalNormalRebootIntent());
 #if defined(MP_ESP8266)
 	ESP.wdtFeed();
 #endif
