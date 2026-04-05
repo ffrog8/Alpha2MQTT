@@ -920,6 +920,35 @@ def _root_surface_state(base: str) -> tuple[bool, str]:
     return status_root == 200, f"status={status_root} mode={mode or 'unknown'}"
 
 
+def _assert_reboot_handoff_html(
+    html: str,
+    *,
+    expected_heading: str,
+    expected_target_mode: str,
+    expected_probe_kind: str,
+    expected_address: Optional[str] = None,
+) -> None:
+    required = (
+        expected_heading,
+        'id="reboot-handoff"',
+        'id="reboot-status"',
+        f'data-target-mode="{expected_target_mode}"',
+        f'data-probe-kind="{expected_probe_kind}"',
+        'data-start-ms="10000"',
+        'data-retry-ms="5000"',
+        'data-timeout-ms="300000"',
+        "Auto-refresh starts in 10 seconds",
+        "5 minutes",
+    )
+    for token in required:
+        if token not in html:
+            raise E2EError(f"reboot handoff page missing expected token: {token!r}")
+    if expected_address is not None and expected_address not in html:
+        raise E2EError(
+            f"reboot handoff page missing expected address hint: {expected_address!r}"
+        )
+
+
 def _assert_portal_root_menu(base: str, timeout_s: int = 20, required_mode: Optional[str] = None) -> str:
     deadline = time.time() + timeout_s
     last_html = ""
@@ -3038,9 +3067,16 @@ def main() -> int:
         boot_topic = f"{device_root}/boot"
         previous_boot = _fetch_latest_text(mqtt, boot_topic, label=f"boot_before_{label}_reboot")
         previous_poll = _fetch_latest_text(mqtt, poll_topic, label=f"poll_before_{label}_reboot")
-        reboot_status, _ = _http_request("POST", base + reboot_normal_path, headers={}, body=b"", timeout_s=20)
+        reboot_status, reboot_body = _http_request("POST", base + reboot_normal_path, headers={}, body=b"", timeout_s=20)
         if reboot_status != 200:
             raise E2EError(f"/reboot/normal returned unexpected status={reboot_status}")
+        if reboot_body:
+            _assert_reboot_handoff_html(
+                reboot_body.decode("utf-8", errors="replace"),
+                expected_heading="Rebooting to normal mode",
+                expected_target_mode="normal",
+                expected_probe_kind="fetch",
+            )
         _wait_for_topic_change(mqtt, boot_topic, previous_boot, timeout_s=60, label=f"boot after {label} reboot")
         _wait_for_topic_change(mqtt, poll_topic, previous_poll, timeout_s=60, label=f"poll after {label} reboot")
 
@@ -4813,7 +4849,16 @@ def main() -> int:
 
         reboot_url = base + reboot_wifi_path
         print(f"[e2e] rebooting into wifi portal via {reboot_url}")
-        _http_post_simple(reboot_url, timeout_s=10)
+        reboot_wifi_status, reboot_wifi_body = _http_request("POST", reboot_url, headers={}, body=b"", timeout_s=20)
+        if reboot_wifi_status != 200:
+            raise E2EError(f"{reboot_wifi_path} returned unexpected status={reboot_wifi_status}")
+        if reboot_wifi_body:
+            _assert_reboot_handoff_html(
+                reboot_wifi_body.decode("utf-8", errors="replace"),
+                expected_heading="Rebooting to Wi-Fi config",
+                expected_target_mode="wifi",
+                expected_probe_kind="fetch",
+            )
 
         # Portal is STA-only and should come back on the same IP, but runtime
         # can still answer briefly during the deferred reboot window. Wait for
@@ -4895,9 +4940,12 @@ def main() -> int:
         if reboot_status != 200:
             raise E2EError(f"{portal_reboot_normal_path} returned unexpected status={reboot_status}")
         if reboot_body:
-            reboot_html = reboot_body.decode("utf-8", errors="replace")
-            if "Rebooting to normal mode" not in reboot_html:
-                raise E2EError(f"{portal_reboot_normal_path} response missing reboot-to-normal heading")
+            _assert_reboot_handoff_html(
+                reboot_body.decode("utf-8", errors="replace"),
+                expected_heading="Rebooting to normal mode",
+                expected_target_mode="normal",
+                expected_probe_kind="fetch",
+            )
 
         # Wait for MQTT status to resume after reboot to NORMAL.
         _assert_eventually(
@@ -5024,9 +5072,12 @@ def main() -> int:
         if reboot_status != 200:
             raise E2EError(f"{portal_reboot_normal_path} after clear returned unexpected status={reboot_status}")
         if reboot_body:
-            reboot_html = reboot_body.decode("utf-8", errors="replace")
-            if "Rebooting to normal mode" not in reboot_html:
-                raise E2EError(f"{portal_reboot_normal_path} after clear response missing reboot-to-normal heading")
+            _assert_reboot_handoff_html(
+                reboot_body.decode("utf-8", errors="replace"),
+                expected_heading="Rebooting to normal mode",
+                expected_target_mode="normal",
+                expected_probe_kind="fetch",
+            )
 
         _assert_eventually(
             "device publishes status/poll after clear-all reboot to normal",
@@ -5110,7 +5161,18 @@ def main() -> int:
         if not reboot_wifi_path:
             raise E2EError("Could not discover /reboot/wifi endpoint from firmware source")
 
-        _http_post_simple(base + reboot_wifi_path, timeout_s=10)
+        reboot_wifi_status, reboot_wifi_body = _http_request(
+            "POST", base + reboot_wifi_path, headers={}, body=b"", timeout_s=20
+        )
+        if reboot_wifi_status != 200:
+            raise E2EError(f"{reboot_wifi_path} returned unexpected status={reboot_wifi_status}")
+        if reboot_wifi_body:
+            _assert_reboot_handoff_html(
+                reboot_wifi_body.decode("utf-8", errors="replace"),
+                expected_heading="Rebooting to Wi-Fi config",
+                expected_target_mode="wifi",
+                expected_probe_kind="fetch",
+            )
         _assert_portal_root_menu(base, timeout_s=40, required_mode="wifi")
         baseline_export_status, baseline_export_body = _http_request_full(
             "GET",
@@ -5131,9 +5193,12 @@ def main() -> int:
         if reboot_status != 200:
             raise E2EError(f"/config/reboot-normal after baseline export returned unexpected status={reboot_status}")
         if reboot_body:
-            reboot_html = reboot_body.decode("utf-8", errors="replace")
-            if "Rebooting to normal mode" not in reboot_html:
-                raise E2EError("reboot-normal response missing heading after baseline export")
+            _assert_reboot_handoff_html(
+                reboot_body.decode("utf-8", errors="replace"),
+                expected_heading="Rebooting to normal mode",
+                expected_target_mode="normal",
+                expected_probe_kind="fetch",
+            )
 
         _assert_eventually(
             "device publishes status/poll after baseline export reboot",
@@ -5172,7 +5237,18 @@ def main() -> int:
             republish_every_s=5.0,
         )
 
-        _http_post_simple(base + reboot_wifi_path, timeout_s=10)
+        reboot_wifi_status, reboot_wifi_body = _http_request(
+            "POST", base + reboot_wifi_path, headers={}, body=b"", timeout_s=20
+        )
+        if reboot_wifi_status != 200:
+            raise E2EError(f"{reboot_wifi_path} returned unexpected status={reboot_wifi_status}")
+        if reboot_wifi_body:
+            _assert_reboot_handoff_html(
+                reboot_wifi_body.decode("utf-8", errors="replace"),
+                expected_heading="Rebooting to Wi-Fi config",
+                expected_target_mode="wifi",
+                expected_probe_kind="fetch",
+            )
         _assert_portal_root_menu(base, timeout_s=40, required_mode="wifi")
 
         export_status, export_body = _http_request_full(
@@ -5342,9 +5418,12 @@ def main() -> int:
         if reboot_status != 200:
             raise E2EError(f"/config/reboot-normal after import returned unexpected status={reboot_status}")
         if reboot_body:
-            reboot_html = reboot_body.decode("utf-8", errors="replace")
-            if "Rebooting to normal mode" not in reboot_html:
-                raise E2EError("reboot-normal response missing heading after import")
+            _assert_reboot_handoff_html(
+                reboot_body.decode("utf-8", errors="replace"),
+                expected_heading="Rebooting to normal mode",
+                expected_target_mode="normal",
+                expected_probe_kind="fetch",
+            )
 
         _assert_eventually(
             "device publishes status/poll after polling profile import reboot",
@@ -5379,7 +5458,18 @@ def main() -> int:
             poll_s=3.0,
         )
 
-        _http_post_simple(base + reboot_wifi_path, timeout_s=10)
+        reboot_wifi_status, reboot_wifi_body = _http_request(
+            "POST", base + reboot_wifi_path, headers={}, body=b"", timeout_s=20
+        )
+        if reboot_wifi_status != 200:
+            raise E2EError(f"{reboot_wifi_path} returned unexpected status={reboot_wifi_status}")
+        if reboot_wifi_body:
+            _assert_reboot_handoff_html(
+                reboot_wifi_body.decode("utf-8", errors="replace"),
+                expected_heading="Rebooting to Wi-Fi config",
+                expected_target_mode="wifi",
+                expected_probe_kind="fetch",
+            )
         _assert_portal_root_menu(base, timeout_s=40, required_mode="wifi")
         restore_import_status, restore_import_body = _http_request_full(
             "GET",
@@ -5428,9 +5518,12 @@ def main() -> int:
         if reboot_status != 200:
             raise E2EError(f"/config/reboot-normal after restore returned unexpected status={reboot_status}")
         if reboot_body:
-            reboot_html = reboot_body.decode("utf-8", errors="replace")
-            if "Rebooting to normal mode" not in reboot_html:
-                raise E2EError("reboot-normal response missing heading after restore")
+            _assert_reboot_handoff_html(
+                reboot_body.decode("utf-8", errors="replace"),
+                expected_heading="Rebooting to normal mode",
+                expected_target_mode="normal",
+                expected_probe_kind="fetch",
+            )
 
         _assert_eventually(
             "device publishes status/poll after polling profile restore reboot",
@@ -5519,7 +5612,18 @@ def main() -> int:
         base = _resolve_device_http_base(mqtt, device_root)
 
         print(f"[e2e] rebooting into wifi portal via {reboot_url} (wifi save-only check)")
-        _http_post_simple(base + reboot_url, timeout_s=10)
+        reboot_wifi_status, reboot_wifi_body = _http_request(
+            "POST", base + reboot_url, headers={}, body=b"", timeout_s=20
+        )
+        if reboot_wifi_status != 200:
+            raise E2EError(f"{reboot_url} returned unexpected status={reboot_wifi_status}")
+        if reboot_wifi_body:
+            _assert_reboot_handoff_html(
+                reboot_wifi_body.decode("utf-8", errors="replace"),
+                expected_heading="Rebooting to Wi-Fi config",
+                expected_target_mode="wifi",
+                expected_probe_kind="fetch",
+            )
         _wait_for_http_ok(base + "/", timeout_s=40)
         _assert_portal_root_menu(base, timeout_s=20, required_mode="wifi")
 
@@ -5555,9 +5659,12 @@ def main() -> int:
         if reboot_status != 200:
             raise E2EError(f"{portal_reboot_normal_path} returned unexpected status={reboot_status}")
         if reboot_body:
-            reboot_html = reboot_body.decode("utf-8", errors="replace")
-            if "Rebooting to normal mode" not in reboot_html:
-                raise E2EError(f"{portal_reboot_normal_path} response missing reboot-to-normal heading")
+            _assert_reboot_handoff_html(
+                reboot_body.decode("utf-8", errors="replace"),
+                expected_heading="Rebooting to normal mode",
+                expected_target_mode="normal",
+                expected_probe_kind="fetch",
+            )
 
         root_html_box = {"html": ""}
         def root_ready_pred() -> Tuple[bool, str]:
