@@ -1215,6 +1215,21 @@ def _assert_button_theme(body: str, mode: str, context: str) -> None:
     _assert_contains(body, "min-height:52px", context)
 
 
+def _assert_reboot_handoff_contract(body: str, *, heading: str, target_mode: str, context: str) -> None:
+    for needle in (
+        heading,
+        'id="reboot-handoff"',
+        'id="reboot-status"',
+        f'data-target-mode="{target_mode}"',
+        'data-start-ms="10000"',
+        'data-retry-ms="5000"',
+        'data-timeout-ms="300000"',
+        "Auto-refresh starts in 10 seconds",
+        "5 minutes",
+    ):
+        _assert_contains(body, needle, context)
+
+
 def _extract_runtime_ip_from_status(body: str) -> str:
     m = re.search(r"SSID:\s*[^<]+<br>IP:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)", body, flags=re.IGNORECASE)
     if not m:
@@ -2036,7 +2051,7 @@ def _save_mqtt_params(
     mqtt_port: int,
     mqtt_user: str,
     mqtt_pass: str,
-) -> None:
+) -> dict[str, Any]:
     _param_body, param_action = _load_param_page(ssh, base_url=base_url)
     save_param_resp = _pi_http_request(
         ssh,
@@ -2054,6 +2069,7 @@ def _save_mqtt_params(
     save_param_status = int(save_param_resp.get("status", 0))
     if save_param_status not in (200, 302):
         raise PortalTestError(f"Portal POST /config/mqtt/save returned {save_param_status}")
+    return save_param_resp
 
 
 def _reboot_normal_and_tolerate_disconnect(ssh: "PiSsh", *, url: str, context: str) -> None:
@@ -2275,13 +2291,21 @@ def _run_wifi_plus_mqtt_case(
     if literal_portal_ip:
         portal_runtime_ip = literal_portal_ip
 
-    _save_mqtt_params(
+    save_mqtt_resp = _save_mqtt_params(
         ssh,
         base_url=portal_base_url,
         mqtt_host=mqtt_host,
         mqtt_port=mqtt_port,
         mqtt_user=mqtt_user,
         mqtt_pass=mqtt_pass,
+    )
+    if int(save_mqtt_resp.get("status", 0)) != 200:
+        raise PortalTestError(f"/config/mqtt/save should return reboot handoff HTML once reboot is armed (got {save_mqtt_resp.get('status')})")
+    _assert_reboot_handoff_contract(
+        str(save_mqtt_resp.get("body", "")),
+        heading="Rebooting to normal mode",
+        target_mode="normal",
+        context="wifi+mqtt mqtt save handoff",
     )
     _announce("wifi+mqtt: mqtt parameters saved")
 
@@ -2421,7 +2445,7 @@ def _run_normal_to_wifi_portal_set_mqtt_case(
         raise PortalTestError(f"/reboot/wifi returned unexpected status={reboot_wifi_status}")
 
     base_url = _rediscover_sta_portal_after_reboot_wifi(ssh, base_url, timeout_s=90)
-    _save_mqtt_params(
+    save_mqtt_resp = _save_mqtt_params(
         ssh,
         base_url=base_url,
         mqtt_host=mqtt_host,
@@ -2429,10 +2453,13 @@ def _run_normal_to_wifi_portal_set_mqtt_case(
         mqtt_user=mqtt_user,
         mqtt_pass=mqtt_pass,
     )
-    _reboot_normal_and_tolerate_disconnect(
-        ssh,
-        url=base_url + "/config/reboot-normal",
-        context="/config/reboot-normal",
+    if int(save_mqtt_resp.get("status", 0)) != 200:
+        raise PortalTestError(f"/config/mqtt/save should return reboot handoff HTML once reboot is armed (got {save_mqtt_resp.get('status')})")
+    _assert_reboot_handoff_contract(
+        str(save_mqtt_resp.get("body", "")),
+        heading="Rebooting to normal mode",
+        target_mode="normal",
+        context="normal->wifi portal mqtt save handoff",
     )
 
     final_root_page = _wait_for_runtime_root_contains(ssh, base_url, "MQTT connected: 1", timeout_s=60)
