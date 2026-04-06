@@ -981,6 +981,22 @@ def _assert_reboot_handoff_html(
             f"reboot handoff page missing expected address hint: {expected_address!r}"
         )
 
+def _assert_ota_success_response_html(html: str) -> None:
+    # OTA bootstrap must remain backward-compatible with older firmware that
+    # still returns a simple success page instead of the shared reboot handoff.
+    if 'id="reboot-handoff"' in html:
+        _assert_reboot_handoff_html(
+            html,
+            expected_heading="Rebooting to normal mode",
+            expected_target_mode="normal",
+            expected_probe_kind="fetch",
+        )
+        return
+    for token in ("Update complete.", "Rebooting now."):
+        if token in html:
+            return
+    raise E2EError("OTA success response did not match either reboot handoff or legacy success HTML")
+
 
 def _assert_portal_root_menu(base: str, timeout_s: int = 20, required_mode: Optional[str] = None) -> str:
     deadline = time.time() + timeout_s
@@ -2040,12 +2056,7 @@ def _ensure_latest_stub_via_ota(
             if status < 200 or status >= 400:
                 raise E2EError(f"OTA upload failed (HTTP {status})")
             if upload_body:
-                _assert_reboot_handoff_html(
-                    upload_body.decode("utf-8", errors="replace"),
-                    expected_heading="Rebooting to normal mode",
-                    expected_target_mode="normal",
-                    expected_probe_kind="fetch",
-                )
+                _assert_ota_success_response_html(upload_body.decode("utf-8", errors="replace"))
             break
         except TimeoutError:
             # Some OTA implementations reboot before responding, or hold the connection open without a response.
