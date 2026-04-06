@@ -145,6 +145,9 @@ TEST_CASE("status poll JSON builder includes required keys")
 	snapshot.bootHeapMaxBlockB = 2222;
 	snapshot.bootHeapFragPct = 34;
 	snapshot.pollErrCount = 1;
+	snapshot.rs485ErrorCount = 9;
+	snapshot.rs485TransportErrorCount = 4;
+	snapshot.rs485OtherErrorCount = 5;
 	snapshot.lastPollMs = 250;
 	snapshot.lastOkTsMs = 10000;
 	snapshot.lastErrTsMs = 11000;
@@ -241,6 +244,9 @@ TEST_CASE("status poll JSON builder includes required keys")
 	CHECK(payload.find("\"u\":[123,0,0,0,0,0]") != std::string::npos);
 	CHECK(payload.find("\"b\":[2,0,0,0,0,0]") != std::string::npos);
 	CHECK(payload.find("\"poll_err_count\":1") != std::string::npos);
+	CHECK(payload.find("\"rs485_error_count\":9") != std::string::npos);
+	CHECK(payload.find("\"rs485_transport_error_count\":4") != std::string::npos);
+	CHECK(payload.find("\"rs485_other_error_count\":5") != std::string::npos);
 	CHECK(payload.find("\"last_err_code\":2") != std::string::npos);
 	CHECK(payload.find("\"rs485_probe_last_attempt_ms\":12345") != std::string::npos);
 	CHECK(payload.find("\"rs485_probe_backoff_ms\":15000") != std::string::npos);
@@ -318,6 +324,9 @@ TEST_CASE("status poll compact JSON includes snapshot/dispatch and stub schedule
 	snapshot.lastPollMs = 250;
 	snapshot.pollOkCount = 9;
 	snapshot.pollErrCount = 1;
+	snapshot.rs485ErrorCount = 12;
+	snapshot.rs485TransportErrorCount = 7;
+	snapshot.rs485OtherErrorCount = 5;
 	snapshot.rs485ProbeLastAttemptMs = 5000;
 	snapshot.rs485ProbeBackoffMs = 15000;
 	snapshot.pollingBudgetExceeded = false;
@@ -344,6 +353,9 @@ TEST_CASE("status poll compact JSON includes snapshot/dispatch and stub schedule
 	CHECK(payload.find("\"poll_budget\":{\"x\":false,\"c\":3") != std::string::npos);
 	CHECK(payload.find("\"b\":[0,1,0,0,0,0]") != std::string::npos);
 	CHECK(payload.find("\"a\":[0,8000,0,0,0,0]") != std::string::npos);
+	CHECK(payload.find("\"rs485_error_count\":12") != std::string::npos);
+	CHECK(payload.find("\"rs485_transport_error_count\":7") != std::string::npos);
+	CHECK(payload.find("\"rs485_other_error_count\":5") != std::string::npos);
 
 #if RS485_STUB
 	CHECK(payload.find("\"s10_ms\":10") != std::string::npos);
