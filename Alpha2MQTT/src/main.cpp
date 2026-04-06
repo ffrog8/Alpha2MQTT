@@ -9050,7 +9050,13 @@ getSerialNumber()
 	        !inverterSerialIsValid(response.dataValueFormatted)) &&
 	       (serialAttempts++ < kMaxIdentityReadAttempts)) {
 		tries++;
-		recordRs485Error(result);
+		// Preserve the legacy total for syntactically invalid serial payloads while
+		// keeping the split transport/other counters reserved for classified RS485 results.
+		if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
+			rs485Errors++;
+		} else {
+			recordRs485Error(result);
+		}
 		snprintf(oledLine4, sizeof(oledLine4), "%ld", tries);
 		updateOLED(false, "Alpha sys", "not known", oledLine4);
 		pumpMqttDuringSetup(250);
