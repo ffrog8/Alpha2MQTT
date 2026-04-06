@@ -281,6 +281,22 @@ TEST_CASE("mqtt entities: controller diagnostics include runtime polling signals
 	CHECK(rs485Err->scope == MqttEntityScope::Controller);
 	CHECK(rs485Err->updateFreq == mqttUpdateFreq::freqOneMin);
 
+	const mqttState *rs485TransportErr = mqttEntityById(mqttEntityId::entityRs485TransportErrors);
+	REQUIRE(rs485TransportErr != nullptr);
+	CHECK(mqttEntityNameEquals(rs485TransportErr, "A2M_RS485_Transport_Errors"));
+	CHECK(rs485TransportErr->haClass == homeAssistantClass::haClassCounter);
+	CHECK(rs485TransportErr->family == MqttEntityFamily::Controller);
+	CHECK(rs485TransportErr->scope == MqttEntityScope::Controller);
+	CHECK(rs485TransportErr->updateFreq == mqttUpdateFreq::freqOneMin);
+
+	const mqttState *rs485OtherErr = mqttEntityById(mqttEntityId::entityRs485OtherErrors);
+	REQUIRE(rs485OtherErr != nullptr);
+	CHECK(mqttEntityNameEquals(rs485OtherErr, "A2M_RS485_Other_Errors"));
+	CHECK(rs485OtherErr->haClass == homeAssistantClass::haClassCounter);
+	CHECK(rs485OtherErr->family == MqttEntityFamily::Controller);
+	CHECK(rs485OtherErr->scope == MqttEntityScope::Controller);
+	CHECK(rs485OtherErr->updateFreq == mqttUpdateFreq::freqOneMin);
+
 	const mqttState *budgetExceeded = mqttEntityById(mqttEntityId::entityPollingBudgetExceeded);
 	REQUIRE(budgetExceeded != nullptr);
 	CHECK(mqttEntityNameEquals(budgetExceeded, "Polling_Budget_Exceeded"));
@@ -406,6 +422,8 @@ TEST_CASE("mqtt entities: controller diagnostics append after the legacy persist
 	size_t maxFeedinIdx = count;
 	size_t dispatchRequestStatusIdx = count;
 	size_t rs485ErrorsIdx = count;
+	size_t rs485TransportErrorsIdx = count;
+	size_t rs485OtherErrorsIdx = count;
 	size_t budgetExceededIdx = count;
 
 	for (size_t i = 0; i < count; ++i) {
@@ -424,6 +442,12 @@ TEST_CASE("mqtt entities: controller diagnostics append after the legacy persist
 		if (mqttEntityNameEquals(&desc[i], "A2M_RS485_Errors")) {
 			rs485ErrorsIdx = i;
 		}
+		if (mqttEntityNameEquals(&desc[i], "A2M_RS485_Transport_Errors")) {
+			rs485TransportErrorsIdx = i;
+		}
+		if (mqttEntityNameEquals(&desc[i], "A2M_RS485_Other_Errors")) {
+			rs485OtherErrorsIdx = i;
+		}
 		if (mqttEntityNameEquals(&desc[i], "Polling_Budget_Exceeded")) {
 			budgetExceededIdx = i;
 		}
@@ -434,11 +458,16 @@ TEST_CASE("mqtt entities: controller diagnostics append after the legacy persist
 	REQUIRE(maxFeedinIdx < count);
 	REQUIRE(dispatchRequestStatusIdx < count);
 	REQUIRE(rs485ErrorsIdx < count);
+	REQUIRE(rs485TransportErrorsIdx < count);
+	REQUIRE(rs485OtherErrorsIdx < count);
 	REQUIRE(budgetExceededIdx < count);
 	CHECK(registerValueIdx < batteryCurrentIdx);
 	CHECK(batteryCurrentIdx < maxFeedinIdx);
 	CHECK(maxFeedinIdx < dispatchRequestStatusIdx);
 	CHECK(maxFeedinIdx < rs485ErrorsIdx);
+	CHECK(rs485ErrorsIdx < rs485TransportErrorsIdx);
+	CHECK(rs485TransportErrorsIdx < rs485OtherErrorsIdx);
+	CHECK(rs485OtherErrorsIdx < budgetExceededIdx);
 	CHECK(registerValueIdx < rs485ErrorsIdx);
 	CHECK(registerValueIdx < budgetExceededIdx);
 }

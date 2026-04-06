@@ -79,6 +79,9 @@ struct StatusPollSnapshot {
 	uint8_t bootHeapFragPct;
 	uint32_t pollOkCount;
 	uint32_t pollErrCount;
+	uint32_t rs485ErrorCount;
+	uint32_t rs485TransportErrorCount;
+	uint32_t rs485OtherErrorCount;
 	uint32_t lastPollMs;
 	uint32_t lastOkTsMs;
 	uint32_t lastErrTsMs;

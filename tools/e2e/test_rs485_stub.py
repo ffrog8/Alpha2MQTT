@@ -105,6 +105,7 @@ CASE_ORDER: tuple[str, ...] = (
     "dispatch_disable_timed_stops_countdown_wakes",
     "dispatch_boot_fail_closed",
     "fail_specific_snapshot_reg",
+    "rs485_error_counters_split",
     "fail_every_n",
     "latency",
     "flapping",
@@ -4053,6 +4054,85 @@ def main() -> int:
         set_mode_and_wait('{"mode":"online"}', ("online",))
         _assert_eventually("snapshot recovers after clearing failure", lambda: (bool(_fetch_poll(mqtt, poll_topic).get("ess_snapshot_last_ok", False)), "waiting"), timeout_s=60, poll_s=3.0)
 
+    def case_rs485_error_counters_split() -> None:
+        print("[e2e] case: rs485 error counters split transport vs other")
+        reg_soc = _discover_register_value("REG_BATTERY_HOME_R_SOC")
+
+        baseline = _fetch_poll(mqtt, poll_topic)
+        base_total = int(baseline.get("rs485_error_count", 0))
+        base_transport = int(baseline.get("rs485_transport_error_count", 0))
+        base_other = int(baseline.get("rs485_other_error_count", 0))
+
+        set_mode_and_wait(f'{{"mode":"online","fail_n":0,"reg":{reg_soc},"fail_type":0}}', ("online",))
+
+        def transport_pred() -> Tuple[bool, str]:
+            cur = _fetch_poll(mqtt, poll_topic)
+            total = int(cur.get("rs485_error_count", 0))
+            transport = int(cur.get("rs485_transport_error_count", 0))
+            other = int(cur.get("rs485_other_error_count", 0))
+            detail = (
+                f"total={total} transport={transport} other={other} "
+                f"base_total={base_total} base_transport={base_transport} base_other={base_other}"
+            )
+            return (transport > base_transport and other == base_other and total > base_total), detail
+
+        _assert_eventually(
+            "no_response increments transport rs485 errors only",
+            transport_pred,
+            timeout_s=60,
+            poll_s=3.0,
+        )
+
+        set_mode_and_wait('{"mode":"online"}', ("online",))
+        _assert_eventually(
+            "snapshot recovers after clearing transport failure",
+            lambda: (bool(_fetch_poll(mqtt, poll_topic).get("ess_snapshot_last_ok", False)), "waiting"),
+            timeout_s=60,
+            poll_s=3.0,
+        )
+
+        baseline = _fetch_poll(mqtt, poll_topic)
+        base_total = int(baseline.get("rs485_error_count", 0))
+        base_transport = int(baseline.get("rs485_transport_error_count", 0))
+        base_other = int(baseline.get("rs485_other_error_count", 0))
+
+        set_mode_and_wait(f'{{"mode":"online","fail_n":0,"reg":{reg_soc},"fail_type":1}}', ("online",))
+
+        def other_pred() -> Tuple[bool, str]:
+            cur = _fetch_poll(mqtt, poll_topic)
+            total = int(cur.get("rs485_error_count", 0))
+            transport = int(cur.get("rs485_transport_error_count", 0))
+            other = int(cur.get("rs485_other_error_count", 0))
+            detail = (
+                f"total={total} transport={transport} other={other} "
+                f"base_total={base_total} base_transport={base_transport} base_other={base_other}"
+            )
+            return (other > base_other and transport == base_transport and total > base_total), detail
+
+        _assert_eventually(
+            "slave_error increments other rs485 errors only",
+            other_pred,
+            timeout_s=60,
+            poll_s=3.0,
+        )
+
+        set_mode_and_wait('{"mode":"online"}', ("online",))
+        _assert_eventually(
+            "snapshot recovers after clearing other failure",
+            lambda: (bool(_fetch_poll(mqtt, poll_topic).get("ess_snapshot_last_ok", False)), "waiting"),
+            timeout_s=60,
+            poll_s=3.0,
+        )
+
+        base = _resolve_device_http_base(mqtt, device_root)
+        status_code, root_body = _http_request_full("GET", base + "/", headers={}, body=b"", timeout_s=20)
+        if status_code != 200:
+            raise E2EError(f"runtime root unavailable after rs485 split check: status={status_code}")
+        root_html = root_body.decode("utf-8", errors="replace")
+        for needle in ("RS485 errors:", "RS485 transport errors:", "RS485 other errors:"):
+            if needle not in root_html:
+                raise E2EError(f"runtime root missing {needle!r}")
+
     def case_fail_every_n_snapshot_attempts() -> None:
         print("[e2e] case: fail every N snapshot attempts (N=2)")
         # Use slave_error (not no_response) so RS485 stays "online" and we observe clean fail/ok alternation.
@@ -5705,6 +5785,7 @@ def main() -> int:
         ("dispatch_disable_timed_stops_countdown_wakes", case_dispatch_disable_timed_stops_countdown_wakes),
         ("dispatch_boot_fail_closed", case_dispatch_boot_fail_closed),
         ("fail_specific_snapshot_reg", case_fail_specific_snapshot_register_and_type),
+        ("rs485_error_counters_split", case_rs485_error_counters_split),
         ("fail_every_n", case_fail_every_n_snapshot_attempts),
         ("latency", case_latency_does_not_break_status),
         ("flapping", case_flapping_online_offline),
