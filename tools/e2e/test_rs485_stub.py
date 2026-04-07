@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import html as html_lib
 import os
 import re
 import subprocess
@@ -127,6 +128,7 @@ CASE_ORDER: tuple[str, ...] = (
     "polling_profile_export_import",
     "reboot_ap_confirmation",
     "portal_wifi_save_reboot_only",
+    "portal_mqtt_save_reboot_handoff",
 )
 
 
@@ -672,6 +674,10 @@ def _http_post_simple(url: str, timeout_s: int = 20) -> int:
     return status
 
 def _http_post_multipart(url: str, field_name: str, file_path: Path, timeout_s: int = 120) -> int:
+    status, _ = _http_post_multipart_full(url, field_name=field_name, file_path=file_path, timeout_s=timeout_s)
+    return status
+
+def _http_post_multipart_full(url: str, field_name: str, file_path: Path, timeout_s: int = 120) -> Tuple[int, bytes]:
     boundary = f"a2m-e2e-{int(time.time()*1000)}"
     headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
 
@@ -685,8 +691,15 @@ def _http_post_multipart(url: str, field_name: str, file_path: Path, timeout_s: 
     tail = f"\r\n--{boundary}--\r\n".encode("utf-8")
     body = part_headers + file_bytes + tail
 
-    status, _ = _http_request("POST", url, headers=headers, body=body, timeout_s=timeout_s)
-    return status
+    return _http_request_full(
+        "POST",
+        url,
+        headers=headers,
+        body=body,
+        timeout_s=timeout_s,
+        max_bytes=65536,
+        body_read_timeout_s=5,
+    )
 
 def _http_post_multipart_bytes_full(
     url: str,
@@ -735,9 +748,20 @@ def _http_post_multipart_bytes(
     return status
 
 def _http_post_raw(url: str, file_path: Path, timeout_s: int = 120) -> int:
-    headers = {"Content-Type": "application/octet-stream"}
-    status, _ = _http_request("POST", url, headers=headers, body=file_path.read_bytes(), timeout_s=timeout_s)
+    status, _ = _http_post_raw_full(url, file_path=file_path, timeout_s=timeout_s)
     return status
+
+def _http_post_raw_full(url: str, file_path: Path, timeout_s: int = 120) -> Tuple[int, bytes]:
+    headers = {"Content-Type": "application/octet-stream"}
+    return _http_request_full(
+        "POST",
+        url,
+        headers=headers,
+        body=file_path.read_bytes(),
+        timeout_s=timeout_s,
+        max_bytes=65536,
+        body_read_timeout_s=5,
+    )
 
 def _decode_chunked_http_body(body: bytes) -> bytes:
     out = bytearray()
@@ -762,7 +786,15 @@ def _decode_chunked_http_body(body: bytes) -> bytes:
             raise E2EError("invalid chunked HTTP body: missing chunk terminator")
         cursor += 2
 
-def _http_request_full(method: str, url: str, headers: dict[str, str], body: bytes, timeout_s: int = 20, max_bytes: int = 65536) -> Tuple[int, bytes]:
+def _http_request_full(
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    body: bytes,
+    timeout_s: int = 20,
+    max_bytes: int = 65536,
+    body_read_timeout_s: Optional[float] = None,
+) -> Tuple[int, bytes]:
     """
     Read the full HTTP response body (up to max_bytes). Suitable for portal HTML pages.
     """
@@ -828,6 +860,7 @@ def _http_request_full(method: str, url: str, headers: dict[str, str], body: byt
             )
 
         body_bytes = resp_body
+        conn.settimeout(body_read_timeout_s if body_read_timeout_s is not None else timeout_s)
         while len(body_bytes) < max_bytes:
             try:
                 chunk = conn.recv(4096)
@@ -949,6 +982,22 @@ def _assert_reboot_handoff_html(
             f"reboot handoff page missing expected address hint: {expected_address!r}"
         )
 
+def _assert_ota_success_response_html(html: str) -> None:
+    # OTA bootstrap must remain backward-compatible with older firmware that
+    # still returns a simple success page instead of the shared reboot handoff.
+    if 'id="reboot-handoff"' in html:
+        _assert_reboot_handoff_html(
+            html,
+            expected_heading="Rebooting to normal mode",
+            expected_target_mode="normal",
+            expected_probe_kind="fetch",
+        )
+        return
+    for token in ("Update complete.", "Rebooting now."):
+        if token in html:
+            return
+    raise E2EError("OTA success response did not match either reboot handoff or legacy success HTML")
+
 
 def _assert_portal_root_menu(base: str, timeout_s: int = 20, required_mode: Optional[str] = None) -> str:
     deadline = time.time() + timeout_s
@@ -1036,11 +1085,11 @@ def _extract_form_action_with_input(html: str, required_input: str) -> str:
             return action
     raise E2EError(f"could not locate form action for input {required_input}")
 
-def _extract_input_value(html: str, name: str) -> str:
-    m = re.search(rf'name="{re.escape(name)}"[^>]*value="([^"]*)"', html, flags=re.IGNORECASE)
+def _extract_input_value(body: str, name: str) -> str:
+    m = re.search(rf'name="{re.escape(name)}"[^>]*value="([^"]*)"', body, flags=re.IGNORECASE)
     if not m:
         raise E2EError(f"could not locate input value for {name}")
-    return m.group(1)
+    return html_lib.unescape(m.group(1))
 
 def _load_wifi_page(base: str) -> tuple[str, str]:
     status, body = _http_request_full("GET", base + "/0wifi", headers={}, body=b"", timeout_s=20)
@@ -1990,17 +2039,25 @@ def _ensure_latest_stub_via_ota(
 
     print(f"[e2e] POST {upload_path} (upload firmware: {firmware_path.name})")
     status: Optional[int] = None
+    upload_body = b""
     upload_attempt = 0
     while True:
         upload_attempt += 1
         try:
             if upload_mode == "raw":
-                status = _http_post_raw(upload_url, file_path=firmware_path, timeout_s=240)
+                status, upload_body = _http_post_raw_full(upload_url, file_path=firmware_path, timeout_s=240)
             else:
-                status = _http_post_multipart(upload_url, field_name=field_name, file_path=firmware_path, timeout_s=240)
+                status, upload_body = _http_post_multipart_full(
+                    upload_url,
+                    field_name=field_name,
+                    file_path=firmware_path,
+                    timeout_s=240,
+                )
             print(f"[e2e] upload HTTP status={status}")
             if status < 200 or status >= 400:
                 raise E2EError(f"OTA upload failed (HTTP {status})")
+            if upload_body:
+                _assert_ota_success_response_html(upload_body.decode("utf-8", errors="replace"))
             break
         except TimeoutError:
             # Some OTA implementations reboot before responding, or hold the connection open without a response.
@@ -5766,6 +5823,76 @@ def main() -> int:
 
         _assert_eventually("runtime root page after wifi save-only reboot", root_ready_pred, timeout_s=60, poll_s=2.0)
 
+    def case_portal_mqtt_save_reboot_handoff() -> None:
+        reboot_url = _discover_reboot_wifi_path_from_code()
+        if not reboot_url:
+            raise E2EError("Could not discover /reboot/wifi endpoint from firmware source")
+        base = _resolve_device_http_base(mqtt, device_root)
+
+        print(f"[e2e] rebooting into wifi portal via {reboot_url} (mqtt save handoff check)")
+        reboot_wifi_status, reboot_wifi_body = _http_request_full(
+            "POST", base + reboot_url, headers={}, body=b"", timeout_s=20
+        )
+        if reboot_wifi_status != 200:
+            raise E2EError(f"{reboot_url} returned unexpected status={reboot_wifi_status}")
+        if reboot_wifi_body:
+            _assert_reboot_handoff_html(
+                reboot_wifi_body.decode("utf-8", errors="replace"),
+                expected_heading="Rebooting to Wi-Fi config",
+                expected_target_mode="wifi",
+                expected_probe_kind="fetch",
+            )
+        _wait_for_http_ok(base + "/", timeout_s=40)
+        _assert_portal_root_menu(base, timeout_s=20, required_mode="wifi")
+
+        mqtt_status, mqtt_body = _http_request_full("GET", base + "/config/mqtt", headers={}, body=b"", timeout_s=20)
+        if mqtt_status != 200:
+            raise E2EError(f"/config/mqtt returned unexpected status={mqtt_status}")
+        mqtt_html = mqtt_body.decode("utf-8", errors="replace")
+        fields = {
+            "server": _extract_input_value(mqtt_html, "server"),
+            "port": _extract_input_value(mqtt_html, "port"),
+            "user": _extract_input_value(mqtt_html, "user"),
+            "mpass": _extract_input_value(mqtt_html, "mpass"),
+            "inverter_label": _extract_input_value(mqtt_html, "inverter_label"),
+        }
+        if not fields["server"] or not fields["port"]:
+            raise E2EError(f"portal mqtt page missing saved runtime config: {fields!r}")
+
+        boot_topic = f"{device_root}/boot"
+        poll_topic = f"{device_root}/status/poll"
+        previous_boot = _fetch_latest_text(mqtt, boot_topic, label="boot_before_portal_mqtt_save")
+        previous_poll = _fetch_latest_text(mqtt, poll_topic, label="poll_before_portal_mqtt_save")
+
+        save_status, save_body = _http_post_form_full(base + "/config/mqtt/save", fields, timeout_s=20)
+        if save_status != 200:
+            raise E2EError(f"/config/mqtt/save should return reboot handoff HTML (got status={save_status})")
+        _assert_reboot_handoff_html(
+            save_body.decode("utf-8", errors="replace"),
+            expected_heading="Rebooting to normal mode",
+            expected_target_mode="normal",
+            expected_probe_kind="fetch",
+        )
+
+        _wait_for_topic_change(mqtt, boot_topic, previous_boot, timeout_s=60, label="boot after portal mqtt save")
+        _wait_for_topic_change(mqtt, poll_topic, previous_poll, timeout_s=60, label="poll after portal mqtt save")
+
+        def root_ready_pred() -> Tuple[bool, str]:
+            try:
+                root_status, root_body = _http_request_full("GET", base + "/", headers={}, body=b"", timeout_s=20)
+            except Exception as e:
+                return False, f"err={e}"
+            if root_status != 200:
+                return False, f"status={root_status}"
+            html = root_body.decode("utf-8", errors="replace")
+            if "Alpha2MQTT Control" not in html:
+                return False, "waiting for runtime root"
+            if "MQTT connected: 1" not in html:
+                return False, "waiting for runtime mqtt reconnect"
+            return True, "ok"
+
+        _assert_eventually("runtime root page after portal mqtt save reboot", root_ready_pred, timeout_s=60, poll_s=2.0)
+
     cases: list[Tuple[str, Callable[[], None]]] = [
         ("two_device_discovery", case_two_device_discovery),
         ("offline", case_offline),
@@ -5809,6 +5936,7 @@ def main() -> int:
         ("polling_profile_export_import", case_polling_profile_export_import),
         ("reboot_ap_confirmation", case_reboot_ap_confirmation),
         ("portal_wifi_save_reboot_only", case_portal_wifi_save_reboot_only),
+        ("portal_mqtt_save_reboot_handoff", case_portal_mqtt_save_reboot_handoff),
     ]
 
     case_map = {name: fn for name, fn in cases}

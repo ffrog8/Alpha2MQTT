@@ -4216,8 +4216,20 @@ handlePortalParamSave(WiFiManager& wifiManager)
 	mqttRuntimeEnabled = bootPlan.mqtt && mqttConfigComplete;
 	portalMqttSaved = true;
 	portalNeedsMqttConfig = !mqttConfigComplete;
-	if (portalMqttSaved && !portalNeedsMqttConfig && portalHasPersistedWifiCredentials()) {
+	const bool rebootScheduled =
+		portalMqttSaved && !portalNeedsMqttConfig && portalHasPersistedWifiCredentials();
+	if (rebootScheduled) {
 		schedulePortalReboot(portalNormalRebootIntent());
+	}
+
+	if (rebootScheduled) {
+		// Once MQTT save completes the STA portal configuration, the user-facing
+		// next step is the same-origin reboot back to normal runtime.
+		(void)sendRebootHandoffPage(wifiManager.server.get(), portalNormalRebootIntent());
+#if defined(MP_ESP8266)
+		ESP.wdtFeed();
+#endif
+		return;
 	}
 
 	wifiManager.server->sendHeader("Location", "/config/mqtt?saved=1");
@@ -4595,20 +4607,24 @@ handlePortalUpdatePost(WiFiManager &wifiManager)
 	          ESP.getMaxFreeBlockSize(),
 	          ESP.getHeapFragmentation());
 #endif
-	wifiManager.server->sendHeader("Connection", "close");
-	wifiManager.server->send(ok ? 200 : 500,
-	                         "text/html",
-	                         ok
-	                             ? "<!DOCTYPE html><html><body><h2>Update complete.</h2><p>Rebooting now.</p></body></html>"
-	                             : "<!DOCTYPE html><html><body><h2>Update failed.</h2><p>Check serial output for details.</p></body></html>");
 	if (!ok) {
+		wifiManager.server->sendHeader("Connection", "close");
+		wifiManager.server->send(500,
+		                         "text/html",
+		                         "<!DOCTYPE html><html><body><h2>Update failed.</h2><p>Check serial output for details.</p></body></html>");
 		return;
 	}
 #ifdef DEBUG_OVER_SERIAL
 	portalLog("OTA post: rebooting to normal runtime after successful update");
 #endif
-	diagDelay(250);
-	setBootIntentAndReboot(portalNormalRebootIntent());
+	// OTA success remains on the same portal origin, so it should use the same
+	// reboot handoff contract as the explicit reboot actions.
+	(void)sendRebootHandoffPage(wifiManager.server.get(), portalNormalRebootIntent());
+#if defined(MP_ESP8266)
+	ESP.wdtFeed();
+#endif
+	portalNeedsMqttConfig = false;
+	schedulePortalReboot(portalNormalRebootIntent());
 }
 
 void
