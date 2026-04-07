@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import html as html_lib
 import ipaddress
 import json
 import os
@@ -1758,7 +1759,7 @@ def _extract_input_value(body: str, name: str) -> str:
     match = re.search(rf'name=["\']{re.escape(name)}["\'][^>]*value=["\']([^"\']*)["\']', body, flags=re.IGNORECASE)
     if not match:
         raise PortalTestError(f"Could not find input value for {name!r}")
-    return match.group(1)
+    return html_lib.unescape(match.group(1))
 
 
 def _wait_for_polling_page_persisted(

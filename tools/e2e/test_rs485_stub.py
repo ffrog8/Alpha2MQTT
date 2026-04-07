@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import html as html_lib
 import os
 import re
 import subprocess
@@ -1084,11 +1085,11 @@ def _extract_form_action_with_input(html: str, required_input: str) -> str:
             return action
     raise E2EError(f"could not locate form action for input {required_input}")
 
-def _extract_input_value(html: str, name: str) -> str:
-    m = re.search(rf'name="{re.escape(name)}"[^>]*value="([^"]*)"', html, flags=re.IGNORECASE)
+def _extract_input_value(body: str, name: str) -> str:
+    m = re.search(rf'name="{re.escape(name)}"[^>]*value="([^"]*)"', body, flags=re.IGNORECASE)
     if not m:
         raise E2EError(f"could not locate input value for {name}")
-    return m.group(1)
+    return html_lib.unescape(m.group(1))
 
 def _load_wifi_page(base: str) -> tuple[str, str]:
     status, body = _http_request_full("GET", base + "/0wifi", headers={}, body=b"", timeout_s=20)
