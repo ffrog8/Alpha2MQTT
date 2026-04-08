@@ -11603,7 +11603,7 @@ refreshEssSnapshotAfterDispatch(bool primeForCurrentSendDataPass)
 {
 	const bool snapshotOk = refreshEssSnapshot();
 	if (primeForCurrentSendDataPass) {
-		essSnapshotPrimedForSendDataLoop = loopSequence;
+		essSnapshotPrimedForSendDataLoop = snapshotOk ? loopSequence : 0;
 	}
 	return snapshotOk;
 }
