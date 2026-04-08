@@ -124,6 +124,10 @@ bool httpControlPlaneEnabled = false;
 static bool inMqttCallback = false;
 static uint32_t mqttCallbackSequence = 0;
 static uint32_t loopSequence = 0;
+// Dispatch changes can refresh ESS state before sendData() runs later in the
+// same loop. sendData() reuses that primed snapshot instead of issuing a
+// second snapshot refresh for the same bucket pass.
+static uint32_t essSnapshotPrimedForSendDataLoop = 0;
 static bool pendingPollingConfigSet = false;
 static bool pollingConfigLoadedFromStorage = false;
 static bool pendingRs485StubControlSet = false;
@@ -660,6 +664,7 @@ void sendHaData(void);
 void requestHaDataResend(void);
 void getA2mOpDataFromEss(void);
 bool refreshEssSnapshot(void);
+static bool refreshEssSnapshotAfterDispatch(bool primeForCurrentSendDataPass);
 void sendData(void);
 void sendStatus(bool includeEssSnapshot);
 void updateRunstate(void);
@@ -11593,6 +11598,16 @@ refreshEssSnapshot(void)
 	return essSnapshotValid;
 }
 
+static bool
+refreshEssSnapshotAfterDispatch(bool primeForCurrentSendDataPass)
+{
+	const bool snapshotOk = refreshEssSnapshot();
+	if (primeForCurrentSendDataPass) {
+		essSnapshotPrimedForSendDataLoop = loopSequence;
+	}
+	return snapshotOk;
+}
+
 static BucketRuntimeBudgetState *
 bucketBudgetStateFor(BucketId bucket)
 {
@@ -11985,10 +12000,17 @@ sendData()
 	bool snapshotAttemptedThisPass = false;
 	bool snapshotOkThisPass = essSnapshotValid;
 	auto ensureSnapshotForBucket = [&](bool bucketNeedsSnapshot) -> bool {
-		if (shouldAttemptEssSnapshotRefreshForBucket(bucketNeedsSnapshot,
-		                                             bootPlan.inverter,
-		                                             inverterReady,
-		                                             snapshotAttemptedThisPass)) {
+		if (shouldReusePrimedEssSnapshotForBucket(bucketNeedsSnapshot,
+		                                          bootPlan.inverter,
+		                                          inverterReady,
+		                                          snapshotAttemptedThisPass,
+		                                          essSnapshotPrimedForSendDataLoop == loopSequence)) {
+			snapshotAttemptedThisPass = true;
+			snapshotOkThisPass = essSnapshotValid;
+		} else if (shouldAttemptEssSnapshotRefreshForBucket(bucketNeedsSnapshot,
+		                                                    bootPlan.inverter,
+		                                                    inverterReady,
+		                                                    snapshotAttemptedThisPass)) {
 			snapshotAttemptedThisPass = true;
 			snapshotOkThisPass = refreshEssSnapshot();
 		}
@@ -12609,6 +12631,7 @@ processPendingEntityCommand(void)
 						modbusRequestAndResponseStatusValues result = _registerHandler->writeDispatchStop(&response);
 						if (result == modbusRequestAndResponseStatusValues::writeDataRegisterSuccess) {
 							opData.essDispatchStart = DISPATCH_START_STOP;
+							refreshEssSnapshotAfterDispatch(true);
 						} else {
 							recordRs485Error(result);
 						}
@@ -13948,6 +13971,7 @@ serviceAtomicDispatchRequest(void)
 	dispatchMirrorPublishReadbackValid = true;
 	dispatchMirrorPublishPending = true;
 	dispatchMirrorPublishEarliestLoop = loopSequence + 1;
+	refreshEssSnapshotAfterDispatch(true);
 
 	setDispatchRequestStatus("ok");
 	atomicDispatchState = AtomicDispatchRuntimeState{};
@@ -14090,6 +14114,7 @@ dispatchService(void)
 		}
 		timedDispatchState.awaitingStopAck = true;
 		timedDispatchState.restartAfterStop = restartAfterStop;
+		refreshEssSnapshotAfterDispatch(false);
 		strlcpy(dispatchLastSkipReason, reason, sizeof(dispatchLastSkipReason));
 #ifdef DEBUG_OVER_SERIAL
 		snprintf(_debugOutput, sizeof(_debugOutput), "dispatch stop sent: reason=%s restart=%u",
@@ -14109,6 +14134,7 @@ dispatchService(void)
 			return false;
 		}
 		strlcpy(dispatchLastSkipReason, "awaiting_start_ack", sizeof(dispatchLastSkipReason));
+		refreshEssSnapshotAfterDispatch(false);
 		publishDispatchStateEntity(mqttEntityId::entityDispatchStart);
 		publishDispatchStateEntity(mqttEntityId::entityDispatchTime);
 #ifdef DEBUG_OVER_SERIAL

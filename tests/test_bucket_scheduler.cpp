@@ -125,6 +125,15 @@ TEST_CASE("bucket helpers: snapshot failure skips only snapshot-dependent entiti
 	CHECK_FALSE(shouldPublishEntityForBucket(true, snapshotOkThisBucket));
 }
 
+TEST_CASE("bucket helpers: primed snapshot is reused instead of refreshing again")
+{
+	CHECK(shouldReusePrimedEssSnapshotForBucket(true, true, true, false, true));
+	CHECK_FALSE(shouldReusePrimedEssSnapshotForBucket(true, true, true, true, true));
+	CHECK_FALSE(shouldReusePrimedEssSnapshotForBucket(true, true, false, false, true));
+	CHECK_FALSE(shouldReusePrimedEssSnapshotForBucket(false, true, true, false, true));
+	CHECK_FALSE(shouldReusePrimedEssSnapshotForBucket(true, true, true, false, false));
+}
+
 TEST_CASE("bucket helpers: snapshot success publishes snapshot entities")
 {
 	const bool snapshotOkThisBucket = snapshotPrereqSatisfiedForBucket(true, true, true, true);

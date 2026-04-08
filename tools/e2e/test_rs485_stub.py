@@ -99,6 +99,7 @@ CASE_ORDER: tuple[str, ...] = (
     "dispatch_invalid_payload_no_write",
     "dispatch_invalid_numeric_payloads_no_write",
     "dispatch_write_feedback",
+    "dispatch_primes_snapshot_once",
     "dispatch_write_under_100ms",
     "dispatch_timed_restart_expire",
     "dispatch_timed_no_rewrite_without_fresh_snapshot",
@@ -3554,6 +3555,47 @@ def main() -> int:
             poll_s=1.0,
         )
 
+    def case_dispatch_primes_single_snapshot_refresh() -> None:
+        print("[e2e] case: dispatch request primes an immediate ESS snapshot refresh")
+        ha_unique = _ensure_online_inverter_identity("dispatch snapshot prime baseline")
+        ensure_stub_online_backend(
+            '{"mode":"online","soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0}',
+            label="dispatch snapshot prime backend",
+        )
+
+        initial_attempts = int(_fetch_poll(mqtt, poll_topic).get("ess_snapshot_attempts", 0))
+        _assert_eventually(
+            "wait for next scheduled snapshot before dispatch",
+            lambda: (
+                int(_fetch_poll(mqtt, poll_topic).get("ess_snapshot_attempts", 0)) > initial_attempts,
+                f"attempts={_fetch_poll(mqtt, poll_topic).get('ess_snapshot_attempts')}",
+            ),
+            timeout_s=20,
+            poll_s=0.5,
+        )
+        attempts_before_dispatch = int(_fetch_poll(mqtt, poll_topic).get("ess_snapshot_attempts", 0))
+
+        publish_dispatch_request_and_wait_status(
+            ha_unique,
+            _default_dispatch_request(),
+            expected_status="ok",
+            timeout_s=20,
+        )
+
+        snapshot_refresh_started_at = time.time()
+        _assert_eventually(
+            "dispatch primes an immediate snapshot refresh ahead of the next 10s scheduler pass",
+            lambda: (
+                int(_fetch_poll(mqtt, poll_topic).get("ess_snapshot_attempts", 0)) >= attempts_before_dispatch + 1,
+                f"attempts={_fetch_poll(mqtt, poll_topic).get('ess_snapshot_attempts')}",
+            ),
+            timeout_s=4,
+            poll_s=0.5,
+        )
+        if (time.time() - snapshot_refresh_started_at) >= 4.0:
+            raise E2EError(
+                "dispatch-triggered snapshot refresh did not arrive before the normal 10s scheduler cadence"
+            )
     def case_dispatch_write_under_100ms() -> None:
         print("[e2e] case: atomic dispatch request writes the 9-register block within 100 ms")
         ha_unique = _ensure_online_inverter_identity("dispatch timing baseline")
@@ -5779,6 +5821,7 @@ def main() -> int:
         ("dispatch_invalid_payload_no_write", case_dispatch_invalid_payload_no_write),
         ("dispatch_invalid_numeric_payloads_no_write", case_dispatch_invalid_numeric_payloads_no_write),
         ("dispatch_write_feedback", case_dispatch_write_feedback_via_register_value),
+        ("dispatch_primes_snapshot_once", case_dispatch_primes_single_snapshot_refresh),
         ("dispatch_write_under_100ms", case_dispatch_write_under_100ms),
         ("dispatch_timed_restart_expire", case_dispatch_timed_restart_and_expire),
         ("dispatch_timed_no_rewrite_without_fresh_snapshot", case_dispatch_timed_no_rewrite_without_fresh_snapshot),

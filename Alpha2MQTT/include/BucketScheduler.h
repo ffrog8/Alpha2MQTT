@@ -49,6 +49,16 @@ inline bool shouldAttemptEssSnapshotRefreshForBucket(bool bucketNeedsEssSnapshot
 	return bucketNeedsEssSnapshot && inverterEnabled && inverterReady && !snapshotAttemptedThisPass;
 }
 
+inline bool shouldReusePrimedEssSnapshotForBucket(bool bucketNeedsEssSnapshot,
+                                                  bool inverterEnabled,
+                                                  bool inverterReady,
+                                                  bool snapshotAttemptedThisPass,
+                                                  bool primedSnapshotAvailable)
+{
+	return bucketNeedsEssSnapshot && inverterEnabled && inverterReady && !snapshotAttemptedThisPass &&
+	       primedSnapshotAvailable;
+}
+
 inline bool snapshotPrereqSatisfiedForBucket(bool bucketNeedsEssSnapshot,
                                              bool inverterEnabled,
                                              bool inverterReady,
