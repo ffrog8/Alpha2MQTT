@@ -765,6 +765,8 @@ static bool fetchPvMeterTotalSnapshot(PvMeterTotalSnapshot &out,
 static bool prepareDispatchBlockResponse(mqttEntityId entityId,
                                          const DispatchBlockSnapshot &snapshot,
                                          modbusRequestAndResponse &prepared);
+static bool formatDispatchStartValue(char *dest, size_t destSize, uint16_t dispatchStart);
+static bool formatDispatchModeValue(char *dest, size_t destSize, uint16_t dispatchMode);
 static bool preparePvBlockResponse(const mqttState &entity,
                                    const PvStringBlockSnapshot &snapshot,
                                    modbusRequestAndResponse &prepared);
@@ -12267,12 +12269,16 @@ prepareDispatchBlockResponse(mqttEntityId entityId,
 	switch (entityId) {
 	case mqttEntityId::entityDispatchStart:
 		prepareUnsignedShortResponse(snapshot.dispatchStart, prepared);
-		return true;
+		return formatDispatchStartValue(prepared.dataValueFormatted,
+		                                sizeof(prepared.dataValueFormatted),
+		                                snapshot.dispatchStart);
 	case mqttEntityId::entityDispatchMode:
 		prepareUnsignedShortResponse(snapshot.dispatchMode, prepared);
-		return true;
+		return formatDispatchModeValue(prepared.dataValueFormatted,
+		                               sizeof(prepared.dataValueFormatted),
+		                               snapshot.dispatchMode);
 	case mqttEntityId::entityDispatchPower:
-		prepareSignedIntResponse(snapshot.dispatchActivePower, prepared);
+		prepareSignedIntResponse(dispatchActivePowerRawToWatts(snapshot.dispatchActivePower), prepared);
 		return true;
 	case mqttEntityId::entityDispatchSoc:
 		prepareScaledUnsignedShortResponse(snapshot.dispatchSocRaw,
