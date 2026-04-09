@@ -52,6 +52,7 @@ class RegisterHandler
 		void setSerialNumberPrefix(uint8_t char1, uint8_t char2);
 		modbusRequestAndResponseStatusValues readHandledRegister(uint16_t registerAddress, modbusRequestAndResponse* rs);
 		modbusRequestAndResponseStatusValues readRawRegister(uint16_t registerAddress, modbusRequestAndResponse* rs);
+		modbusRequestAndResponseStatusValues readRawRegisterBlock(uint16_t registerAddress, uint16_t registerCount, modbusRequestAndResponse* rs);
 		modbusRequestAndResponseStatusValues writeRawSingleRegister(uint16_t registerAddress, uint16_t value, modbusRequestAndResponse* rs);
 		modbusRequestAndResponseStatusValues writeRawDataRegister(uint16_t registerAddress, uint32_t value, modbusRequestAndResponse* rs);
 		modbusRequestAndResponseStatusValues writeDispatchStop(modbusRequestAndResponse* rs);

@@ -370,7 +370,14 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		    "\"boot_mem\":{\"l\":%u,\"s\":%u,\"f\":%lu,\"m\":%lu,\"g\":%u},"
 		    "\"ess_snapshot_last_ok\":%s,"
 		    "\"ess_snapshot_attempts\":%lu,"
+		    "\"ess_power_snapshot_last_build_ms\":%lu,"
+		    "\"snapshot_publish_skip_count\":%lu,"
 		    "\"dispatch_last_run_ms\":%lu,"
+		    "\"dispatch_wait_due_to_snapshot_ms\":%lu,"
+		    "\"dispatch_queue_coalesce_count\":%lu,"
+		    "\"dispatch_block_cache_hit_count\":%lu,"
+		    "\"pv_block_cache_hit_count\":%lu,"
+		    "\"pv_meter_cache_hit_count\":%lu,"
 		    "\"dispatch_last_skip_reason\":\"%s\",",
 		    rs485Backend,
 		    rs485StubMode,
@@ -393,7 +400,14 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		    static_cast<unsigned>(snapshot.bootHeapFragPct),
 		    snapshot.essSnapshotLastOk ? "true" : "false",
 		    static_cast<unsigned long>(snapshot.essSnapshotAttempts),
+		    static_cast<unsigned long>(snapshot.essPowerSnapshotLastBuildMs),
+		    static_cast<unsigned long>(snapshot.snapshotPublishSkipCount),
 		    static_cast<unsigned long>(snapshot.dispatchLastRunMs),
+		    static_cast<unsigned long>(snapshot.dispatchWaitDueToSnapshotMs),
+		    static_cast<unsigned long>(snapshot.dispatchQueueCoalesceCount),
+		    static_cast<unsigned long>(snapshot.dispatchBlockCacheHitCount),
+		    static_cast<unsigned long>(snapshot.pvBlockCacheHitCount),
+		    static_cast<unsigned long>(snapshot.pvMeterCacheHitCount),
 		    dispatchLastSkipReason)) {
 		return false;
 	}
@@ -656,6 +670,7 @@ buildStatusStubJson(const StatusStubSnapshot &snapshot, char *out, size_t outSiz
 		        "\"stub_unknown_reads\":%lu,"
 		        "\"soc_x10\":%u,"
 		        "\"last_read_reg\":%u,"
+		        "\"last_read_reg_count\":%u,"
 		        "\"last_fn\":%u,"
 		        "\"last_fail_reg\":%u,"
 		        "\"last_fail_fn\":%u,"
@@ -682,6 +697,7 @@ buildStatusStubJson(const StatusStubSnapshot &snapshot, char *out, size_t outSiz
 		static_cast<unsigned long>(snapshot.stubUnknownReads),
 		static_cast<unsigned>(snapshot.socX10),
 		static_cast<unsigned>(snapshot.lastReadStartReg),
+		static_cast<unsigned>(snapshot.lastReadRegCount),
 		static_cast<unsigned>(snapshot.lastFn),
 		static_cast<unsigned>(snapshot.lastFailStartReg),
 		static_cast<unsigned>(snapshot.lastFailFn),

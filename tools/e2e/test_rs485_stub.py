@@ -425,7 +425,7 @@ class MqttClient:
         self.client_id = f"{client_id}-{int(time.time()*1000)}"
         self.sock: Optional[socket.socket] = None
         self._packet_id = 1
-        self._pending_publishes: list[Tuple[str, str]] = []
+        self._pending_publishes: list[Tuple[str, str, bool]] = []
         self._subscriptions: set[str] = set()
         self._latest_by_topic: dict[str, str] = {}
         self._last_tx = time.time()
@@ -517,9 +517,12 @@ class MqttClient:
             pkt_type, _flags, data = self._read_packet(timeout_s=5)
             if pkt_type == 3:  # PUBLISH
                 topic, payload_str = self._decode_publish(data)
+                retained = bool(_flags & 0x01)
                 self._latest_by_topic[topic] = payload_str
-                self._pending_publishes.append((topic, payload_str))
-                _log(f"mqtt rx buffered: topic={topic} bytes={len(payload_str)}")
+                self._pending_publishes.append((topic, payload_str, retained))
+                _log(
+                    f"mqtt rx buffered: topic={topic} bytes={len(payload_str)} retain={int(retained)}"
+                )
                 continue
             if pkt_type != 9:  # not SUBACK
                 continue
@@ -535,6 +538,14 @@ class MqttClient:
 
         raise E2EError("Timeout waiting for SUBACK")
 
+    def _try_wait_for_publish_details(self, timeout_s: float) -> Optional[Tuple[str, str, bool]]:
+        try:
+            return self.wait_for_publish_details(timeout_s=timeout_s)
+        except E2EError as e:
+            if "Timeout waiting for MQTT publish" in str(e):
+                return None
+            raise
+
     def _try_wait_for_publish(self, timeout_s: float) -> Optional[Tuple[str, str]]:
         try:
             return self.wait_for_publish(timeout_s=timeout_s)
@@ -544,6 +555,10 @@ class MqttClient:
             raise
 
     def wait_for_publish(self, timeout_s: float) -> Tuple[str, str]:
+        topic, payload, _retained = self.wait_for_publish_details(timeout_s=timeout_s)
+        return topic, payload
+
+    def wait_for_publish_details(self, timeout_s: float) -> Tuple[str, str, bool]:
         if self._pending_publishes:
             # Even if we're returning buffered publishes, keep the TCP session alive.
             self.ping_if_needed()
@@ -554,12 +569,13 @@ class MqttClient:
         while time.time() < deadline:
             self.ping_if_needed()
             remaining = max(0.1, min(5.0, deadline - time.time()))
-            pkt_type, _flags, data = self._read_packet(timeout_s=remaining)
+            pkt_type, flags, data = self._read_packet(timeout_s=remaining)
             if pkt_type == 3:  # PUBLISH
                 topic, payload = self._decode_publish(data)
+                retained = bool(flags & 0x01)
                 self._latest_by_topic[topic] = payload
-                _log(f"mqtt rx: topic={topic} bytes={len(payload)}")
-                return topic, payload
+                _log(f"mqtt rx: topic={topic} bytes={len(payload)} retain={int(retained)}")
+                return topic, payload, retained
             # Ignore other packet types.
         raise E2EError("Timeout waiting for MQTT publish")
 
@@ -1384,24 +1400,30 @@ def _fetch_live_json(mqtt: MqttClient, topic: str, label: str, *, timeout_s: int
         last_observed = ""
         while time.time() < deadline:
             try:
-                got_topic, payload = mqtt.wait_for_publish(timeout_s=12.0)
+                got_topic, payload, retained = mqtt.wait_for_publish_details(timeout_s=12.0)
             except E2EError as e:
                 if "Timeout waiting for MQTT publish" in str(e):
                     continue
                 raise
-            last_observed = f"topic={got_topic} payload={payload!r}"
+            last_observed = f"topic={got_topic} retain={int(retained)} payload={payload!r}"
             if got_topic != topic:
                 _log(f"{label} live wait: ignoring other topic={got_topic}")
+                continue
+            if retained:
+                _log(f"{label} live wait: ignoring retained publish on {topic}")
                 continue
 
             latest = payload
             settle_deadline = time.time() + 0.25
             while time.time() < settle_deadline:
-                nxt = mqtt._try_wait_for_publish(timeout_s=0.25)
+                nxt = mqtt._try_wait_for_publish_details(timeout_s=0.25)
                 if not nxt:
                     break
-                got_topic2, payload2 = nxt
+                got_topic2, payload2, retained2 = nxt
                 if got_topic2 == topic:
+                    if retained2:
+                        _log(f"{label} live wait: ignoring retained settle publish on {topic}")
+                        continue
                     latest = payload2
                     settle_deadline = time.time() + 0.25
                 else:
@@ -1634,6 +1656,12 @@ def _wait_for_boot_fw_build_ts_ms(
 
 def _fetch_stub(mqtt: MqttClient, topic: str) -> dict[str, Any]:
     return _fetch_latest_json(mqtt, topic, label="stub")
+
+
+def _drop_cached_topics(mqtt: MqttClient, *topics: str) -> None:
+    mqtt._pending_publishes = []
+    for topic in topics:
+        mqtt._latest_by_topic.pop(topic, None)
 
 def _fetch_cached_or_latest_json(mqtt: MqttClient, topic: str, label: str) -> dict[str, Any]:
     cached = mqtt.latest_payload(topic)
@@ -2309,7 +2337,7 @@ def main() -> int:
 
         def pred() -> Tuple[bool, str]:
             nonlocal last_pub
-            cur = _fetch_poll(mqtt, poll_topic)
+            cur = _fetch_live_json(mqtt, poll_topic, "set_mode_poll_current", timeout_s=15)
             mode = str(cur.get("rs485_stub_mode", ""))
             detail = f"mode={mode}"
             if mode in accepted_modes:
@@ -2428,19 +2456,50 @@ def main() -> int:
             if "probe_success_after_n" in expected_control
             else None
         )
-
         def pred() -> Tuple[bool, str]:
             nonlocal last_pub
+            def stub_matches(cur: dict[str, Any]) -> bool:
+                if expect_strict_unknown is not None and bool(cur.get("strict_unknown", False)) != expect_strict_unknown:
+                    return False
+                if expected_fail_reads is not None and bool(cur.get("fail_reads", False)) != expected_fail_reads:
+                    return False
+                if expected_fail_writes is not None and bool(cur.get("fail_writes", False)) != expected_fail_writes:
+                    return False
+                if expected_fail_every_n is not None and int(cur.get("fail_every_n", 0)) != expected_fail_every_n:
+                    return False
+                if expected_fail_for_ms is not None and int(cur.get("fail_for_ms", 0)) != expected_fail_for_ms:
+                    return False
+                if expected_flap_online_ms is not None and int(cur.get("flap_online_ms", 0)) != expected_flap_online_ms:
+                    return False
+                if expected_flap_offline_ms is not None and int(cur.get("flap_offline_ms", 0)) != expected_flap_offline_ms:
+                    return False
+                if expected_probe_success_after_n is not None and int(cur.get("probe_success_after_n", 0)) != expected_probe_success_after_n:
+                    return False
+                return True
+
+            def poll_matches(cur: dict[str, Any]) -> bool:
+                if expected_mode and str(cur.get("rs485_stub_mode", "")) != expected_mode:
+                    return False
+                return True
+
             try:
+                # Control application must be confirmed by a fresh poll publish. Cached matching
+                # state can survive reboots/reconnects and mask a dropped control publish.
                 cur_poll = _fetch_live_json(mqtt, poll_topic, f"{label}_poll_current", timeout_s=15)
             except E2EError as e:
-                if "Timeout waiting for live" not in str(e):
+                if "Timeout waiting for live" not in str(e) and "Timeout waiting for" not in str(e):
                     raise
                 if (time.time() - last_pub) >= republish_s:
                     set_mode(normalized_payload)
                     last_pub = time.time()
-                return False, "waiting for live poll"
-            cur_stub = _fetch_cached_or_latest_json(mqtt, stub_topic, f"{label}_stub_current")
+                return False, "waiting for poll match"
+
+            cur_stub = _fetch_matching_or_latest_json(
+                mqtt,
+                stub_topic,
+                f"{label}_stub_current",
+                stub_matches,
+            )
             mode = str(cur_poll.get("rs485_stub_mode", ""))
             strict_unknown = bool(cur_stub.get("strict_unknown", False))
             fail_reads = bool(cur_stub.get("fail_reads", False))
@@ -2459,22 +2518,7 @@ def main() -> int:
             ok = True
             if expected_mode:
                 ok = ok and (mode == expected_mode)
-            if expect_strict_unknown is not None:
-                ok = ok and (strict_unknown == expect_strict_unknown)
-            if expected_fail_reads is not None:
-                ok = ok and (fail_reads == expected_fail_reads)
-            if expected_fail_writes is not None:
-                ok = ok and (fail_writes == expected_fail_writes)
-            if expected_fail_every_n is not None:
-                ok = ok and (fail_every_n == expected_fail_every_n)
-            if expected_fail_for_ms is not None:
-                ok = ok and (fail_for_ms == expected_fail_for_ms)
-            if expected_flap_online_ms is not None:
-                ok = ok and (flap_online_ms == expected_flap_online_ms)
-            if expected_flap_offline_ms is not None:
-                ok = ok and (flap_offline_ms == expected_flap_offline_ms)
-            if expected_probe_success_after_n is not None:
-                ok = ok and (probe_success_after_n == expected_probe_success_after_n)
+            ok = ok and stub_matches(cur_stub)
             if ok:
                 return True, detail
             if (time.time() - last_pub) >= republish_s:
@@ -3048,6 +3092,9 @@ def main() -> int:
             _ensure_runtime_http_from_portal(http_base)
         except Exception:
             pass
+        _drop_cached_topics(mqtt, poll_topic, stub_topic, status_core_topic, config_topic)
+        _fetch_live_json(mqtt, poll_topic, "suite baseline sync poll", timeout_s=20)
+        _fetch_live_json(mqtt, status_core_topic, "suite baseline sync core", timeout_s=20)
         ensure_stub_online_backend(
             '{"mode":"online","soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0}',
             label="suite baseline",
@@ -3062,18 +3109,32 @@ def main() -> int:
             timeout_s=35,
         )
 
+    def _inverter_id_from_ha_unique(ha_unique: str) -> str:
+        ha_unique = ha_unique.strip()
+        if not ha_unique.startswith("A2M-"):
+            return ""
+        serial = ha_unique[len("A2M-"):].strip()
+        if not serial or serial.lower() == "unknown":
+            return ""
+        return f"alpha2mqtt_inv_{serial}"
+
+    def _current_inverter_identity() -> str:
+        try:
+            poll = _fetch_poll(mqtt, poll_topic)
+            core = _fetch_status_core(mqtt, status_core_topic)
+        except E2EError:
+            return ""
+        inverter_ready = bool(poll.get("inverter_ready", False))
+        backend = str(poll.get("rs485_backend", "")).strip()
+        ha_unique = str(core.get("ha_unique_id", "")).strip()
+        inverter_id = _inverter_id_from_ha_unique(ha_unique)
+        if inverter_ready and backend == "stub" and inverter_id:
+            return inverter_id
+        return ""
+
     def _wait_for_inverter_identity() -> str:
         _fetch_poll(mqtt, poll_topic)
         _fetch_status_core(mqtt, status_core_topic)
-
-        def inverter_id_from_ha_unique(ha_unique: str) -> str:
-            ha_unique = ha_unique.strip()
-            if not ha_unique.startswith("A2M-"):
-                return ""
-            serial = ha_unique[len("A2M-"):].strip()
-            if not serial or serial.lower() == "unknown":
-                return ""
-            return f"alpha2mqtt_inv_{serial}"
 
         deadline = time.time() + 60.0
         last_detail = "waiting for live poll + status/core identity"
@@ -3086,7 +3147,7 @@ def main() -> int:
             # a fresh core publish before trusting the inverter device id for dispatch.
             core = _fetch_live_json(mqtt, status_core_topic, "identity_core")
             ha_unique = str(core.get("ha_unique_id", "")).strip()
-            inverter_id = inverter_id_from_ha_unique(ha_unique)
+            inverter_id = _inverter_id_from_ha_unique(ha_unique)
             last_detail = (
                 f"backend={backend!r} inverter_ready={inverter_ready} "
                 f"ha_unique_id={ha_unique!r} inverter_id={inverter_id!r}"
@@ -4067,7 +4128,9 @@ def main() -> int:
 
     def case_strict_unknown_register_reads() -> None:
         print("[e2e] case: strict/loose unknown register reads via Register_Value")
+        print("[e2e] strict register: rebooting to clean baseline")
         _reboot_normal_and_wait("strict_register_reads")
+        print("[e2e] strict register: reacquiring inverter identity")
         ha_unique = _ensure_online_inverter_identity("strict unknown register baseline")
         manual_topic = _manual_read_topic()
         baseline_payload = '{"mode":"online"}'
@@ -4075,6 +4138,7 @@ def main() -> int:
         # Use a handled register that is not virtualized by the stub (so the stub sees it as unknown).
         reg = _discover_register_value("REG_INVERTER_HOME_R_INVERTER_TEMP")
 
+        print("[e2e] strict register: applying loose baseline")
         wait_stub_control_applied(
             baseline_payload,
             label="strict register loose baseline",
@@ -4082,6 +4146,7 @@ def main() -> int:
             expect_strict_unknown=False,
             timeout_s=30,
         )
+        print("[e2e] strict register: verifying loose unknown read")
         loose_manual = _select_register_and_wait_manual_read(
             mqtt,
             _command_topic(ha_unique, "Register_Number"),
@@ -4099,6 +4164,7 @@ def main() -> int:
             )
 
         strict_payload = '{"mode":"online","strict_unknown":1}'
+        print("[e2e] strict register: applying strict mode")
         wait_stub_control_applied(
             strict_payload,
             label="strict register control",
@@ -4131,7 +4197,9 @@ def main() -> int:
             timeout_s=30,
             poll_s=2.0,
         )
+        print("[e2e] strict register: restoring clean suite baseline")
         ensure_clean_suite_baseline()
+        print("[e2e] strict register: confirming inverter identity after cleanup")
         _wait_for_inverter_identity()
         return
 
@@ -4451,6 +4519,7 @@ def main() -> int:
 
     def case_dispatch_readback_window_tolerates_transient_read_failures() -> None:
         print("[e2e] case: atomic dispatch waits out transient readback failures")
+        ha_unique = _wait_for_inverter_identity()
         ensure_stub_online_backend(
             '{"mode":"online","soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0,'
             '"dispatch_start":0,"dispatch_mode":0,"dispatch_soc":0,"dispatch_time":0}',
@@ -4481,8 +4550,6 @@ def main() -> int:
             timeout_s=10,
             poll_s=0.5,
         )
-
-        ha_unique = _wait_for_inverter_identity()
         publish_dispatch_request_and_wait_status(
             ha_unique,
             _default_dispatch_request(duration_s=60),
@@ -4493,13 +4560,13 @@ def main() -> int:
     def case_dispatch_readback_timeout_status() -> None:
         print("[e2e] case: atomic dispatch reports readback timeout after a successful write")
         reg_dispatch_start = _discover_register_value("REG_DISPATCH_RW_DISPATCH_START")
+        ha_unique = _wait_for_inverter_identity()
         set_mode_and_wait(
             f'{{"mode":"online","reg":{reg_dispatch_start},"fail_for_ms":4000,"fail_reads":1,"fail_writes":0,"fail_type":0,'
             '"soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0,'
             '"dispatch_start":0,"dispatch_mode":0,"dispatch_soc":0,"dispatch_time":0}',
             ("online",),
         )
-        ha_unique = _wait_for_inverter_identity()
         status_topic = _dispatch_status_topic(ha_unique)
         mqtt.subscribe(status_topic, force=True)
         publish_dispatch_request_no_wait(
@@ -4616,41 +4683,85 @@ def main() -> int:
     def case_fail_for_ms_then_recover() -> None:
         print("[e2e] case: fail for N ms then recover")
         transient_fail_ms = 15000
-        wait_stub_control_applied(
+        baseline = _fetch_poll(mqtt, poll_topic)
+        baseline_attempts = int(baseline.get("ess_snapshot_attempts", 0))
+        baseline_poll_errs = int(baseline.get("poll_err_count", 0))
+        baseline_transport_errs = int(baseline.get("rs485_transport_error_count", 0))
+        fail_payload = (
             f'{{"mode":"online","fail_for_ms":{transient_fail_ms},"fail_reads":1,"fail_writes":1,'
             '"fail_type":0,"fail_every_n":0,"reg":0,"latency_ms":0,'
             '"flap_online_ms":0,"flap_offline_ms":0,"probe_success_after_n":0,'
-            '"strict_unknown":0,"strict":0,"soc_step_x10_per_snapshot":0}',
-            label="fail_for_ms",
-            expect_mode="online",
-            timeout_s=20,
+            '"strict_unknown":0,"strict":0,"soc_step_x10_per_snapshot":0}'
         )
-        # Expect at least one fail early and eventual recovery.
-        baseline = _fetch_poll(mqtt, poll_topic)
-        baseline_attempts = int(baseline.get("ess_snapshot_attempts", 0))
+        set_mode(fail_payload)
+        last_pub = time.time()
+
+        def fail_window_ack_pred() -> Tuple[bool, str]:
+            nonlocal last_pub
+            cur_stub = _fetch_matching_or_latest_json(
+                mqtt,
+                stub_topic,
+                "fail_for_ms_stub_current",
+                lambda cur: (
+                    bool(cur.get("fail_reads", False))
+                    and bool(cur.get("fail_writes", False))
+                    and int(cur.get("fail_for_ms", 0)) == transient_fail_ms
+                ),
+            )
+            fail_reads = bool(cur_stub.get("fail_reads", False))
+            fail_writes = bool(cur_stub.get("fail_writes", False))
+            fail_for_ms = int(cur_stub.get("fail_for_ms", 0))
+            detail = (
+                f"fail_reads={fail_reads} fail_writes={fail_writes} "
+                f"fail_for_ms={fail_for_ms}"
+            )
+            if fail_reads and fail_writes and fail_for_ms == transient_fail_ms:
+                return True, detail
+            if (time.time() - last_pub) >= 6.0:
+                set_mode(fail_payload)
+                last_pub = time.time()
+            return False, detail
+
+        _assert_eventually(
+            "fail_for_ms control acknowledged",
+            fail_window_ack_pred,
+            timeout_s=10,
+            poll_s=1.0,
+        )
+
+        # Expect at least one failing snapshot after the control is armed and then eventual recovery.
         seen_fail = False
         deadline = time.time() + 60
         last_detail = ""
         while time.time() < deadline:
-            cur = _fetch_poll(mqtt, poll_topic)
+            # This case needs fresh runtime progress. Sampling the retained/latest
+            # poll payload can skip the transient failing window entirely and only
+            # observe the later recovered state.
+            cur = _fetch_live_json(mqtt, poll_topic, "fail_for_ms_poll", timeout_s=20)
             ok = bool(cur.get("ess_snapshot_last_ok", False))
             attempts = int(cur.get("ess_snapshot_attempts", 0))
+            poll_errs = int(cur.get("poll_err_count", 0))
+            transport_errs = int(cur.get("rs485_transport_error_count", 0))
             mode = str(cur.get("rs485_stub_mode", ""))
             last_detail = (
                 f"attempts={attempts} baseline_attempts={baseline_attempts} "
+                f"poll_errs={poll_errs} baseline_poll_errs={baseline_poll_errs} "
+                f"transport_errs={transport_errs} baseline_transport_errs={baseline_transport_errs} "
                 f"ok={ok} mode={mode!r}"
             )
             if attempts <= baseline_attempts:
                 time.sleep(3.0)
                 continue
             if mode != "online":
-                time.sleep(3.0)
                 continue
-            if not ok:
+            if (
+                not ok or
+                poll_errs > baseline_poll_errs or
+                transport_errs > baseline_transport_errs
+            ):
                 seen_fail = True
             if seen_fail and ok:
                 return
-            time.sleep(3.0)
         raise E2EError(f"fail_for_ms did not show fail then recover within timeout; last={last_detail}")
 
     def _soc_drift_payload() -> str:
@@ -4669,7 +4780,7 @@ def main() -> int:
 
     def _verify_soc_drift_internal() -> None:
         nonlocal soc_drift_verified
-        ha_unique = _wait_for_inverter_identity()
+        ha_unique = _current_inverter_identity() or _wait_for_inverter_identity()
         manual_topic = _manual_read_topic()
         reg_soc = _discover_register_value("REG_BATTERY_HOME_R_SOC")
         state_topic = _state_topic(ha_unique, "Register_Number")
@@ -4714,6 +4825,9 @@ def main() -> int:
     def _ensure_soc_drift_backend(current_poll_interval: int, *, force_reset: bool = False) -> None:
         nonlocal soc_drift_verified
         drift_mode_payload = _soc_drift_payload()
+        baseline_poll = _fetch_poll(mqtt, poll_topic)
+        baseline_ok_count = int(baseline_poll.get("poll_ok_count", 0))
+        baseline_err_count = int(baseline_poll.get("poll_err_count", 0))
         if force_reset:
             soc_drift_verified = False
             ensure_stub_online_backend('{"mode":"online","soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0}', label="soc drift reset")
@@ -4740,17 +4854,29 @@ def main() -> int:
                 set_mode(drift_mode_payload)
                 set_polling_config(current_poll_interval, "State_of_Charge=ten_sec;")
                 last_pub = now
-            cur_poll = _fetch_poll(mqtt, poll_topic)
+            cur_poll = _fetch_matching_or_latest_json(
+                mqtt,
+                poll_topic,
+                "soc_drift_ready_poll",
+                lambda cur: (
+                    bool(cur.get("ess_snapshot_last_ok", False)) or
+                    int(cur.get("poll_ok_count", 0)) > baseline_ok_count
+                ),
+            )
             mode = str(cur_poll.get("rs485_stub_mode", ""))
             snapshot_ok = bool(cur_poll.get("ess_snapshot_last_ok", False))
+            poll_ok = int(cur_poll.get("poll_ok_count", 0))
+            poll_err = int(cur_poll.get("poll_err_count", 0))
             probe_backoff_ms = int(cur_poll.get("rs485_probe_backoff_ms", 0))
             detail = (
                 f"mode={mode!r} snapshot_ok={snapshot_ok} "
+                f"poll_ok={poll_ok} baseline_ok={baseline_ok_count} "
+                f"poll_err={poll_err} baseline_err={baseline_err_count} "
                 f"probe_backoff_ms={probe_backoff_ms}"
             )
             return (
                 mode == "online"
-                and snapshot_ok
+                and (snapshot_ok or (poll_ok > baseline_ok_count and poll_err == baseline_err_count))
                 and probe_backoff_ms == 0
             ), detail
 
@@ -4789,7 +4915,7 @@ def main() -> int:
         print("[e2e] case: State_of_Charge publish respects bucket")
         current_poll_interval = _soc_drift_poll_interval()
         _ensure_soc_drift_backend(current_poll_interval)
-        ha_unique = _wait_for_inverter_identity()
+        ha_unique = _current_inverter_identity() or _wait_for_inverter_identity()
         soc_topic = _state_topic(ha_unique, "State_of_Charge")
         mqtt.subscribe(soc_topic, force=True)
         v1 = _fetch_latest_text(mqtt, soc_topic, label="soc")
@@ -4801,7 +4927,7 @@ def main() -> int:
         print("[e2e] case: soc drift end-to-end")
         current_poll_interval = _soc_drift_poll_interval()
         _ensure_soc_drift_backend(current_poll_interval)
-        ha_unique = _wait_for_inverter_identity()
+        ha_unique = _current_inverter_identity() or _wait_for_inverter_identity()
         soc_topic = _state_topic(ha_unique, "State_of_Charge")
         mqtt.subscribe(soc_topic, force=True)
         v1 = _fetch_latest_text(mqtt, soc_topic, label="soc")

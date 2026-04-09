@@ -65,6 +65,22 @@ Verification (required after any firmware change):
 
 If you can’t verify heap impact, explicitly state “Not verified” and avoid claiming stability.
 
+## Serial diagnostics policy (baseline firmware requirement)
+Compile-time-gated serial diagnostics are a permanent feature of this codebase, not temporary churn to add and remove during diagnosis.
+
+Rules:
+- Keep rare fault and state-transition serial diagnostics in source permanently when they materially help diagnosis.
+- Gate serial diagnostics with compile-time flags such as `DEBUG_OVER_SERIAL`; disabled diagnostics must impose effectively zero runtime cost in normal builds.
+- Real builds should keep `DEBUG_OVER_SERIAL` off by default unless the task explicitly requires a diagnostic build.
+- Stub or focused diagnosis builds may enable `DEBUG_OVER_SERIAL` when needed.
+- In hot or timing-sensitive paths, do not leave high-frequency logs unbounded. Prefer first-occurrence, state-transition, threshold-crossing, or rate-limited diagnostics.
+- Use `F("...")` for constant serial strings on ESP8266-class targets so enabled logs stay in flash instead of consuming RAM.
+- Avoid edit churn whose only purpose is to add then later remove serial diagnostics. Prefer stable guarded statements and adjust build flags or local throttling instead.
+
+Engineering intent:
+- The main risk is enabled serial I/O altering timing when logs are frequent.
+- Rare error-path diagnostics such as payload overflow, readback mismatch, or skipped publish are low risk and should generally remain in source behind compile-time guards.
+
 ## Memory health reporting (required for core changes)
 For any change that touches networking, webserver, MQTT, RS485, scheduling, or entity metadata:
 - Include the toolchain “RAM used … / 80192” and “IRAM used … / 65536” lines in your summary.

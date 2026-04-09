@@ -169,6 +169,11 @@ class RS485Handler
 				*outWord = lo16(static_cast<uint32_t>(_state.dispatchActivePower));
 				return true;
 			}
+			if (reg == REG_DISPATCH_RW_REACTIVE_POWER_1 ||
+			    reg == static_cast<uint16_t>(REG_DISPATCH_RW_REACTIVE_POWER_1 + 1)) {
+				*outWord = 0;
+				return true;
+			}
 			if (reg == REG_DISPATCH_RW_DISPATCH_SOC) {
 				*outWord = _state.dispatchSoc;
 				return true;
@@ -210,7 +215,25 @@ class RS485Handler
 				return true;
 			}
 
-			// PV1..PV6 power (each is 2 registers).
+			// PV1..PV6 grouped block. The real grouped read spans voltage/current/power,
+			// so strict-unknown mode must virtualize the whole contiguous region, not
+			// only the power words that the current snapshot math consumes.
+			const uint16_t pvVoltageRegs[6] = {
+				REG_INVERTER_HOME_R_PV1_VOLTAGE,
+				REG_INVERTER_HOME_R_PV2_VOLTAGE,
+				REG_INVERTER_HOME_R_PV3_VOLTAGE,
+				REG_INVERTER_HOME_R_PV4_VOLTAGE,
+				REG_INVERTER_HOME_R_PV5_VOLTAGE,
+				REG_INVERTER_HOME_R_PV6_VOLTAGE,
+			};
+			const uint16_t pvCurrentRegs[6] = {
+				REG_INVERTER_HOME_R_PV1_CURRENT,
+				REG_INVERTER_HOME_R_PV2_CURRENT,
+				REG_INVERTER_HOME_R_PV3_CURRENT,
+				REG_INVERTER_HOME_R_PV4_CURRENT,
+				REG_INVERTER_HOME_R_PV5_CURRENT,
+				REG_INVERTER_HOME_R_PV6_CURRENT,
+			};
 			const uint16_t pvRegs[6] = {
 				REG_INVERTER_HOME_R_PV1_POWER_1,
 				REG_INVERTER_HOME_R_PV2_POWER_1,
@@ -220,6 +243,10 @@ class RS485Handler
 				REG_INVERTER_HOME_R_PV6_POWER_1,
 			};
 			for (uint8_t i = 0; i < 6; i++) {
+				if (reg == pvVoltageRegs[i] || reg == pvCurrentRegs[i]) {
+					*outWord = 0;
+					return true;
+				}
 				if (reg == pvRegs[i]) {
 					*outWord = hi16(static_cast<uint32_t>(_state.pvPowerW[i]));
 					return true;
@@ -385,6 +412,7 @@ class RS485Handler
 		uint32_t stubWriteCount() const { return _writeCount; }
 		uint32_t stubUnknownRegisterReads() const { return _unknownRegisterReads; }
 		uint16_t stubLastReadStartReg() const { return _lastReadStartReg; }
+		uint16_t stubLastReadRegCount() const { return _lastReadRegCount; }
 		uint8_t stubLastFn() const { return _lastFn; }
 		uint16_t stubLastFailStartReg() const { return _lastFailStartReg; }
 		uint8_t stubLastFailFn() const { return _lastFailFn; }

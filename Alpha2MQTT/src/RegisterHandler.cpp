@@ -1700,55 +1700,37 @@ modbusRequestAndResponseStatusValues RegisterHandler::readHandledRegister(uint16
 
 			So essentially to get a solar reading which is safe across all types, we will just add all these up and present as a custom reg
 			*/
+			auto decodeSignedIntAt = [](const modbusRequestAndResponse &response, size_t wordOffset) -> int32_t {
+				const size_t byteOffset = wordOffset * 2U;
+				return static_cast<int32_t>(
+					(static_cast<uint32_t>(response.data[byteOffset]) << 24) |
+					(static_cast<uint32_t>(response.data[byteOffset + 1]) << 16) |
+					(static_cast<uint32_t>(response.data[byteOffset + 2]) << 8) |
+					static_cast<uint32_t>(response.data[byteOffset + 3]));
+			};
 
-
-			uint8_t	frame[] = { ALPHA_SLAVE_ID, MODBUS_FN_READDATAREGISTER, REG_PV_METER_R_TOTAL_ACTIVE_POWER_1 >> 8, REG_PV_METER_R_TOTAL_ACTIVE_POWER_1 & 0xff, 0, 2, 0, 0 };
-			result = _modBus->sendModbus(frame, sizeof(frame), rs);
+			modbusRequestAndResponse meterResponse{};
+			meterResponse.returnDataType = modbusReturnDataType::signedInt;
+			result = readRawRegisterBlock(REG_PV_METER_R_TOTAL_ACTIVE_POWER_1, 2, &meterResponse);
 			if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess)
 			{
-				pvPower = (int32_t)(rs->data[0] << 24 | rs->data[1] << 16 | rs->data[2] << 8 | rs->data[3]);
-				uint8_t	frame[] = { ALPHA_SLAVE_ID, MODBUS_FN_READDATAREGISTER, REG_INVERTER_HOME_R_PV1_POWER_1 >> 8, REG_INVERTER_HOME_R_PV1_POWER_1 & 0xff, 0, 2, 0, 0 };
-				result = _modBus->sendModbus(frame, sizeof(frame), rs);
+				pvPower = decodeSignedIntAt(meterResponse, 0);
+
+				modbusRequestAndResponse pvBlockResponse{};
+				pvBlockResponse.returnDataType = modbusReturnDataType::unsignedShort;
+				result = readRawRegisterBlock(REG_INVERTER_HOME_R_PV1_VOLTAGE, 24, &pvBlockResponse);
 				if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess)
 				{
-					pvPower = pvPower + ((int32_t)(rs->data[0] << 24 | rs->data[1] << 16 | rs->data[2] << 8 | rs->data[3]));
-					uint8_t	frame[] = { ALPHA_SLAVE_ID, MODBUS_FN_READDATAREGISTER, REG_INVERTER_HOME_R_PV2_POWER_1 >> 8, REG_INVERTER_HOME_R_PV2_POWER_1 & 0xff, 0, 2, 0, 0 };
-					result = _modBus->sendModbus(frame, sizeof(frame), rs);
-					if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess)
-					{
-						pvPower = pvPower + ((int32_t)(rs->data[0] << 24 | rs->data[1] << 16 | rs->data[2] << 8 | rs->data[3]));
-						uint8_t	frame[] = { ALPHA_SLAVE_ID, MODBUS_FN_READDATAREGISTER, REG_INVERTER_HOME_R_PV3_POWER_1 >> 8, REG_INVERTER_HOME_R_PV3_POWER_1 & 0xff, 0, 2, 0, 0 };
-						result = _modBus->sendModbus(frame, sizeof(frame), rs);
-						if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess)
-						{
-							pvPower = pvPower + ((int32_t)(rs->data[0] << 24 | rs->data[1] << 16 | rs->data[2] << 8 | rs->data[3]));
-							uint8_t	frame[] = { ALPHA_SLAVE_ID, MODBUS_FN_READDATAREGISTER, REG_INVERTER_HOME_R_PV4_POWER_1 >> 8, REG_INVERTER_HOME_R_PV4_POWER_1 & 0xff, 0, 2, 0, 0 };
-							result = _modBus->sendModbus(frame, sizeof(frame), rs);
-							if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess)
-							{
-								pvPower = pvPower + ((int32_t)(rs->data[0] << 24 | rs->data[1] << 16 | rs->data[2] << 8 | rs->data[3]));
-								uint8_t	frame[] = { ALPHA_SLAVE_ID, MODBUS_FN_READDATAREGISTER, REG_INVERTER_HOME_R_PV5_POWER_1 >> 8, REG_INVERTER_HOME_R_PV5_POWER_1 & 0xff, 0, 2, 0, 0 };
-								result = _modBus->sendModbus(frame, sizeof(frame), rs);
-								if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess)
-								{
-									pvPower = pvPower + ((int32_t)(rs->data[0] << 24 | rs->data[1] << 16 | rs->data[2] << 8 | rs->data[3]));
-									uint8_t	frame[] = { ALPHA_SLAVE_ID, MODBUS_FN_READDATAREGISTER, REG_INVERTER_HOME_R_PV6_POWER_1 >> 8, REG_INVERTER_HOME_R_PV6_POWER_1 & 0xff, 0, 2, 0, 0 };
-									result = _modBus->sendModbus(frame, sizeof(frame), rs);
-									if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess)
-									{
-										pvPower = pvPower + ((int32_t)(rs->data[0] << 24 | rs->data[1] << 16 | rs->data[2] << 8 | rs->data[3]));
-										rs->signedIntValue = pvPower;
-
-										rs->dataSize = 4;
-										rs->data[0] = rs->signedIntValue >> 24;
-										rs->data[1] = rs->signedIntValue >> 16;
-										rs->data[2] = rs->signedIntValue >> 8;
-										rs->data[3] = rs->signedIntValue & 0xff;
-									}
-								}
-							}
-						}
+					for (size_t pv = 0; pv < 6; ++pv) {
+						const size_t wordOffset = pv * 4U + 2U;
+						pvPower = pvPower + decodeSignedIntAt(pvBlockResponse, wordOffset);
 					}
+					rs->signedIntValue = pvPower;
+					rs->dataSize = 4;
+					rs->data[0] = static_cast<uint8_t>(rs->signedIntValue >> 24);
+					rs->data[1] = static_cast<uint8_t>(rs->signedIntValue >> 16);
+					rs->data[2] = static_cast<uint8_t>(rs->signedIntValue >> 8);
+					rs->data[3] = static_cast<uint8_t>(rs->signedIntValue & 0xff);
 				}
 			}
 
@@ -4583,21 +4565,31 @@ Sends a basic Read Data Register request to the Alpha system and returns back fo
 */
 modbusRequestAndResponseStatusValues RegisterHandler::readRawRegister(uint16_t registerAddress, modbusRequestAndResponse* rs)
 {
-	modbusRequestAndResponseStatusValues result;
+	return readRawRegisterBlock(registerAddress, rs != nullptr ? rs->registerCount : 0, rs);
+}
 
-	// Generate a frame with CRC placeholders of 0, 0 at the end
-	uint8_t frame[kModbusReadFrameSize];
-	buildReadFrame(ALPHA_SLAVE_ID, MODBUS_FN_READDATAREGISTER, registerAddress, rs->registerCount, frame);
+/*
+readRawRegisterBlock
 
-	// And send to the device, it's all synchronos so by the time we get a response we will know if success or failure
-	result = _modBus->sendModbus(frame, sizeof(frame), rs);
-
-	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess)
-	{
-		// Maybe we will want to do something?
+Sends a raw contiguous Read Data Register request. The caller is responsible for
+decoding the returned words according to its own block layout.
+*/
+modbusRequestAndResponseStatusValues RegisterHandler::readRawRegisterBlock(uint16_t registerAddress,
+                                                                          uint16_t registerCount,
+                                                                          modbusRequestAndResponse* rs)
+{
+	if (_modBus == NULL || rs == NULL) {
+		return modbusRequestAndResponseStatusValues::preProcessing;
 	}
 
-	return result;
+	rs->registerCount = static_cast<uint8_t>(registerCount > 0xFF ? 0xFF : registerCount);
+	if (rs->returnDataType == modbusReturnDataType::notDefined) {
+		rs->returnDataType = modbusReturnDataType::unsignedShort;
+	}
+
+	uint8_t frame[kModbusReadFrameSize];
+	buildReadFrame(ALPHA_SLAVE_ID, MODBUS_FN_READDATAREGISTER, registerAddress, registerCount, frame);
+	return _modBus->sendModbus(frame, sizeof(frame), rs);
 }
 
 

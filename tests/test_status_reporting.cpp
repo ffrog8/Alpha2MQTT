@@ -159,6 +159,8 @@ TEST_CASE("status poll JSON builder includes required keys")
 	snapshot.essSnapshotOk = false;
 	snapshot.essSnapshotLastOk = false;
 	snapshot.essSnapshotAttempts = 3;
+	snapshot.essPowerSnapshotLastBuildMs = 91;
+	snapshot.snapshotPublishSkipCount = 7;
 	snapshot.rs485StubMode = "offline";
 	snapshot.rs485StubFailRemaining = 0;
 	snapshot.rs485StubWriteCount = 3;
@@ -167,6 +169,11 @@ TEST_CASE("status poll JSON builder includes required keys")
 	snapshot.rs485StubLastWriteMs = 4242;
 	snapshot.dispatchRequestQueuedMs = 4000;
 	snapshot.dispatchLastRunMs = 0;
+	snapshot.dispatchWaitDueToSnapshotMs = 33;
+	snapshot.dispatchQueueCoalesceCount = 4;
+	snapshot.dispatchBlockCacheHitCount = 5;
+	snapshot.pvBlockCacheHitCount = 6;
+	snapshot.pvMeterCacheHitCount = 7;
 	snapshot.dispatchLastSkipReason = "ess_snapshot_failed";
 	snapshot.worstPhase = "bucket_publish";
 	snapshot.worstFreeHeapB = 2048;
@@ -219,7 +226,14 @@ TEST_CASE("status poll JSON builder includes required keys")
 	CHECK(payload.find("\"boot_mem\":{\"l\":2,\"s\":3,\"f\":3333,\"m\":2222,\"g\":34}") != std::string::npos);
 	CHECK(payload.find("\"ess_snapshot_last_ok\":false") != std::string::npos);
 	CHECK(payload.find("\"ess_snapshot_attempts\":3") != std::string::npos);
+	CHECK(payload.find("\"ess_power_snapshot_last_build_ms\":91") != std::string::npos);
+	CHECK(payload.find("\"snapshot_publish_skip_count\":7") != std::string::npos);
 	CHECK(payload.find("\"dispatch_last_run_ms\":0") != std::string::npos);
+	CHECK(payload.find("\"dispatch_wait_due_to_snapshot_ms\":33") != std::string::npos);
+	CHECK(payload.find("\"dispatch_queue_coalesce_count\":4") != std::string::npos);
+	CHECK(payload.find("\"dispatch_block_cache_hit_count\":5") != std::string::npos);
+	CHECK(payload.find("\"pv_block_cache_hit_count\":6") != std::string::npos);
+	CHECK(payload.find("\"pv_meter_cache_hit_count\":7") != std::string::npos);
 	CHECK(payload.find("\"dispatch_last_skip_reason\":\"ess_snapshot_failed\"") != std::string::npos);
 	CHECK(payload.find("\"worst_phase\":\"bucket_publish\"") != std::string::npos);
 	CHECK(payload.find("\"worst_free_heap\":2048") != std::string::npos);
@@ -306,7 +320,14 @@ TEST_CASE("status poll compact JSON includes snapshot/dispatch and stub schedule
 	snapshot.essSnapshotOk = true;
 	snapshot.essSnapshotLastOk = true;
 	snapshot.essSnapshotAttempts = 42;
+	snapshot.essPowerSnapshotLastBuildMs = 88;
+	snapshot.snapshotPublishSkipCount = 9;
 	snapshot.dispatchLastRunMs = 1000;
+	snapshot.dispatchWaitDueToSnapshotMs = 44;
+	snapshot.dispatchQueueCoalesceCount = 2;
+	snapshot.dispatchBlockCacheHitCount = 11;
+	snapshot.pvBlockCacheHitCount = 12;
+	snapshot.pvMeterCacheHitCount = 13;
 	snapshot.dispatchLastSkipReason = "";
 	snapshot.worstPhase = "dispatch_force_publish";
 	snapshot.worstFreeHeapB = 2222;
@@ -498,6 +519,7 @@ TEST_CASE("status stub JSON builder includes required keys")
 	snapshot.stubUnknownReads = 4;
 	snapshot.socX10 = 655;
 	snapshot.lastReadStartReg = 123;
+	snapshot.lastReadRegCount = 24;
 	snapshot.lastFn = 3;
 	snapshot.lastFailStartReg = 456;
 	snapshot.lastFailFn = 16;
@@ -528,6 +550,7 @@ TEST_CASE("status stub JSON builder includes required keys")
 	CHECK(payload.find("\"stub_unknown_reads\":4") != std::string::npos);
 	CHECK(payload.find("\"soc_x10\":655") != std::string::npos);
 	CHECK(payload.find("\"last_read_reg\":123") != std::string::npos);
+	CHECK(payload.find("\"last_read_reg_count\":24") != std::string::npos);
 	CHECK(payload.find("\"last_fn\":3") != std::string::npos);
 	CHECK(payload.find("\"last_fail_reg\":456") != std::string::npos);
 	CHECK(payload.find("\"last_fail_fn\":16") != std::string::npos);
@@ -558,6 +581,7 @@ TEST_CASE("status stub JSON builder needs the firmware-sized buffer for worst-ca
 	snapshot.stubUnknownReads = 4294967295UL;
 	snapshot.socX10 = 65535;
 	snapshot.lastReadStartReg = 65535;
+	snapshot.lastReadRegCount = 65535;
 	snapshot.lastFn = 255;
 	snapshot.lastFailStartReg = 65535;
 	snapshot.lastFailFn = 255;
