@@ -13120,6 +13120,11 @@ executePollTransaction(const MqttEntityActiveBucket &bucketPlan,
 	if (!mqttEntityCopyByIndex(leaderIdx, &leader)) {
 		return;
 	}
+	if (shouldSkipScheduledEntityRead(mqttEntityScope(leader.entityId),
+	                                  inverterReady,
+	                                  inverterSerialKnown())) {
+		return;
+	}
 	if (leader.readKind == MqttEntityReadKind::Register && isDispatchBlockReadKey(leader.readKey)) {
 		executeDispatchBlockTransaction(bucketPlan, transaction);
 		return;
