@@ -12046,6 +12046,19 @@ prepareUnsignedShortResponse(uint16_t value, modbusRequestAndResponse &prepared)
 }
 
 static void
+prepareScaledUnsignedShortResponse(uint16_t rawValue,
+                                   float scaledValue,
+                                   uint8_t decimalPlaces,
+                                   modbusRequestAndResponse &prepared)
+{
+	prepareUnsignedShortResponse(rawValue, prepared);
+	snprintf(prepared.dataValueFormatted,
+	         sizeof(prepared.dataValueFormatted),
+	         decimalPlaces == 1 ? "%0.1f" : "%0.02f",
+	         scaledValue);
+}
+
+static void
 prepareUnsignedIntResponse(uint32_t value, modbusRequestAndResponse &prepared)
 {
 	prepared = modbusRequestAndResponse{};
@@ -12262,7 +12275,10 @@ prepareDispatchBlockResponse(mqttEntityId entityId,
 		prepareSignedIntResponse(snapshot.dispatchActivePower, prepared);
 		return true;
 	case mqttEntityId::entityDispatchSoc:
-		prepareUnsignedShortResponse(snapshot.dispatchSocRaw, prepared);
+		prepareScaledUnsignedShortResponse(snapshot.dispatchSocRaw,
+		                                   dispatchSocPercentFromRaw(snapshot.dispatchSocRaw),
+		                                   2,
+		                                   prepared);
 		return true;
 	case mqttEntityId::entityDispatchTime:
 		prepareUnsignedIntResponse(snapshot.dispatchTimeRaw, prepared);
@@ -12288,10 +12304,16 @@ preparePvBlockResponse(const mqttState &entity,
 	}
 	switch (fieldOffset) {
 	case 0:
-		prepareUnsignedShortResponse(snapshot.voltage[pvIndex], prepared);
+		prepareScaledUnsignedShortResponse(snapshot.voltage[pvIndex],
+		                                   pvVoltageCurrentFromRaw(snapshot.voltage[pvIndex]),
+		                                   1,
+		                                   prepared);
 		return true;
 	case 1:
-		prepareUnsignedShortResponse(snapshot.current[pvIndex], prepared);
+		prepareScaledUnsignedShortResponse(snapshot.current[pvIndex],
+		                                   pvVoltageCurrentFromRaw(snapshot.current[pvIndex]),
+		                                   1,
+		                                   prepared);
 		return true;
 	case 2:
 		prepareUnsignedIntResponse(static_cast<uint32_t>(snapshot.power[pvIndex]), prepared);
@@ -12549,11 +12571,11 @@ refreshEssSnapshot(void)
 		essPowerSnapshotLastBuildMs = 0;
 		essSnapshotLastOk = false;
 		if (schedulerPassCache.active) {
-			schedulerPassCache.essSnapshot.passId = schedulerPassCache.passId;
-			schedulerPassCache.essSnapshot.snapshotId = schedulerPassCache.passId;
-			schedulerPassCache.essSnapshot.builtStartedMs = pollStartMs;
-			schedulerPassCache.essSnapshot.builtCompletedMs = pollStartMs;
-			schedulerPassCache.essSnapshot.valid = false;
+			populateEssSnapshotMeta(schedulerPassCache.essSnapshot,
+			                        schedulerPassCache.passId,
+			                        pollStartMs,
+			                        pollStartMs,
+			                        false);
 		}
 		lastErrCode = static_cast<int>(MqttEventCode::Rs485Timeout);
 		diag_rs485_poll_end(millis(), false);
@@ -12692,11 +12714,11 @@ refreshEssSnapshot(void)
 	}
 	essSnapshotLastOk = essSnapshotValid;
 	if (schedulerPassCache.active) {
-		schedulerPassCache.essSnapshot.passId = schedulerPassCache.passId;
-		schedulerPassCache.essSnapshot.snapshotId = schedulerPassCache.passId;
-		schedulerPassCache.essSnapshot.builtStartedMs = powerSnapshotStartedMs;
-		schedulerPassCache.essSnapshot.builtCompletedMs = powerSnapshotCompletedMs;
-		schedulerPassCache.essSnapshot.valid = essPowerSnapshotValid;
+		populateEssSnapshotMeta(schedulerPassCache.essSnapshot,
+		                        schedulerPassCache.passId,
+		                        powerSnapshotStartedMs,
+		                        powerSnapshotCompletedMs,
+		                        essPowerSnapshotValid);
 	}
 	if (lastPollMs > kPollOverrunMs) {
 		publishEvent(MqttEventCode::PollOverrun, "");
@@ -13121,6 +13143,14 @@ ensureSnapshotForBucketPass(bool bucketNeedsSnapshot,
 	                                          essSnapshotPrimedForSendDataLoop == loopSequence)) {
 		snapshotAttemptedThisPass = true;
 		snapshotOkThisPass = essSnapshotValid;
+		if (schedulerPassCache.active) {
+			const uint32_t primedSnapshotMs = millis();
+			populateEssSnapshotMeta(schedulerPassCache.essSnapshot,
+			                        schedulerPassCache.passId,
+			                        primedSnapshotMs,
+			                        primedSnapshotMs,
+			                        essPowerSnapshotValid);
+		}
 	} else if (shouldAttemptEssSnapshotRefreshForBucket(bucketNeedsSnapshot,
 	                                                    bootPlan.inverter,
 	                                                    inverterReady,

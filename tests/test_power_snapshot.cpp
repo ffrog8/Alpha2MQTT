@@ -32,6 +32,18 @@ TEST_CASE("power snapshot helpers require matching pass identity for snapshot pu
 	CHECK_FALSE(snapshotPublishAllowedForPass(meta, 11));
 }
 
+TEST_CASE("power snapshot helpers populate ESS snapshot metadata with pass identity")
+{
+	EssSnapshotMeta meta{};
+	populateEssSnapshotMeta(meta, 19, 1200, 1250, true);
+
+	CHECK(meta.passId == 19);
+	CHECK(meta.snapshotId == 19);
+	CHECK(meta.builtStartedMs == 1200);
+	CHECK(meta.builtCompletedMs == 1250);
+	CHECK(meta.valid);
+}
+
 TEST_CASE("power snapshot helpers coalesce dispatch requests only during snapshot build")
 {
 	CHECK(shouldQueueDispatchRequest(true, false, true));
@@ -79,4 +91,10 @@ TEST_CASE("power snapshot helpers classify coherent power entities explicitly")
 	CHECK_FALSE(isEssPowerSnapshotEntityId(mqttEntityId::entityBatSoc));
 	CHECK_FALSE(isEssPowerSnapshotEntityId(mqttEntityId::entityInverterMode));
 	CHECK_FALSE(isEssPowerSnapshotEntityId(mqttEntityId::entityDispatchStart));
+}
+
+TEST_CASE("power snapshot helpers expose scaled dispatch and PV values")
+{
+	CHECK(dispatchSocPercentFromRaw(95) == doctest::Approx(38.0f));
+	CHECK(pvVoltageCurrentFromRaw(123) == doctest::Approx(12.3f));
 }

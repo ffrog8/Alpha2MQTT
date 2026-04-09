@@ -25,6 +25,8 @@ struct EssSnapshotMeta {
 	bool valid = false;
 };
 
+constexpr float kPvVoltageCurrentMultiplier = 0.1f;
+
 constexpr uint16_t kDispatchBlockStartReg = REG_DISPATCH_RW_DISPATCH_START;
 constexpr uint16_t kDispatchBlockRegisterCount = 9;
 
@@ -43,6 +45,32 @@ inline bool
 snapshotPublishAllowedForPass(const EssSnapshotMeta &meta, uint32_t passId)
 {
 	return meta.valid && meta.passId == passId && meta.snapshotId == passId;
+}
+
+inline void
+populateEssSnapshotMeta(EssSnapshotMeta &meta,
+                        uint32_t passId,
+                        uint32_t builtStartedMs,
+                        uint32_t builtCompletedMs,
+                        bool valid)
+{
+	meta.passId = passId;
+	meta.snapshotId = passId;
+	meta.builtStartedMs = builtStartedMs;
+	meta.builtCompletedMs = builtCompletedMs;
+	meta.valid = valid;
+}
+
+inline float
+dispatchSocPercentFromRaw(uint16_t raw)
+{
+	return raw * DISPATCH_SOC_MULTIPLIER;
+}
+
+inline float
+pvVoltageCurrentFromRaw(uint16_t raw)
+{
+	return raw * kPvVoltageCurrentMultiplier;
 }
 
 inline bool
