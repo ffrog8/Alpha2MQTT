@@ -30,12 +30,12 @@ jobs:
         run: |
           mkdir -p logs
           fail=0
-          arduino-cli compile -e --build-property build.extra_flags="-DESP8266 -DHTTP_UPLOAD_BUFLEN=512 -DDEVICE_NAME=\"Alpha2MQTT-63\"" --fqbn esp8266:esp8266:d1_mini Alpha2MQTT 2>&1 | tee logs/compile-63.log
+          arduino-cli compile -e --build-property build.extra_flags="-DESP8266 -DHTTP_UPLOAD_BUFLEN=512 -DDEVICE_NAME=\"Alpha2MQTT-63\"" --fqbn esp8266:esp8266:d1_mini:stacksmash=enabled Alpha2MQTT 2>&1 | tee logs/compile-63.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
             fail=1
           fi
-          arduino-cli compile -e --build-property build.extra_flags="-DESP8266 -DHTTP_UPLOAD_BUFLEN=512 -DDEVICE_NAME=\"Alpha2MQTT-54\"" --fqbn esp8266:esp8266:d1_mini Alpha2MQTT 2>&1 | tee logs/compile-54.log
+          arduino-cli compile -e --build-property build.extra_flags="-DESP8266 -DHTTP_UPLOAD_BUFLEN=512 -DDEVICE_NAME=\"Alpha2MQTT-54\"" --fqbn esp8266:esp8266:d1_mini:stacksmash=enabled Alpha2MQTT 2>&1 | tee logs/compile-54.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
             fail=1

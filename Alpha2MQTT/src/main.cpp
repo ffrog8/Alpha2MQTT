@@ -29,8 +29,10 @@ First, go and customise options at the top of Definitions.h!
 #include "../include/MqttEntities.h"
 #include "../include/PortalConfig.h"
 #include "../include/ConfigCodec.h"
+#include "../include/DebugLog.h"
 #include "../include/MemoryHealth.h"
 #include "../include/PollingConfig.h"
+#include "../include/PowerSnapshot.h"
 #include "../include/RebootRequest.h"
 #include "../include/StatusReporting.h"
 #include "../include/StatusLedPolicy.h"
@@ -116,8 +118,6 @@ char haUniqueId[32] = "A2M-UNKNOWN";
 char controllerIdentifier[40] = "";
 char statusTopic[128];
 char deviceName[32];
-char configSetTopic[64];
-char rs485StubControlTopic[96];
 char lastResetReason[64] = "";
 static HttpServer *g_httpServer = nullptr;
 bool httpControlPlaneEnabled = false;
@@ -129,6 +129,7 @@ static uint32_t loopSequence = 0;
 // second snapshot refresh for the same bucket pass.
 static uint32_t essSnapshotPrimedForSendDataLoop = 0;
 static bool pendingPollingConfigSet = false;
+static bool pendingPollingConfigPublish = false;
 static bool pollingConfigLoadedFromStorage = false;
 static bool pendingRs485StubControlSet = false;
 static bool pendingEntityCommandSet = false;
@@ -269,6 +270,9 @@ bool bootEventPublished = false;
 bool bootMemEventPublished = false;
 bool inverterReady = false;
 bool inverterSubscriptionsSet = false;
+bool inverterCommandSubscriptionsSet = false;
+bool inverterDispatchSubscriptionSet = false;
+size_t inverterNextCommandSubscriptionIndex = 0;
 SubsystemPlan bootPlan = { true, true, true };
 BootMemWorst bootMemWorst = { MemLevel::Ok, BootMemStage::Boot0, { 0, 0, 0 } };
 BootMemPublishState bootMemPublishState{};
@@ -291,11 +295,18 @@ int lastErrCode = 0;
 uint32_t rs485TransportErrors = 0;
 uint32_t rs485OtherErrors = 0;
 uint32_t essSnapshotAttemptCount = 0;
+uint32_t essPowerSnapshotLastBuildMs = 0;
+uint32_t snapshotPublishSkipCount = 0;
+uint32_t dispatchWaitDueToSnapshotMs = 0;
+uint32_t dispatchQueueCoalesceCount = 0;
+uint32_t dispatchBlockCacheHitCount = 0;
+uint32_t pvBlockCacheHitCount = 0;
+uint32_t pvMeterCacheHitCount = 0;
 bool essSnapshotLastOk = false;
 uint32_t dispatchLastRunMs = 0;
 char dispatchLastSkipReason[48] = "";
 static TimedDispatchRuntimeState timedDispatchState;
-static char dispatchRequestStatus[96] = "";
+static char *g_dispatchRequestStatus = nullptr;
 static bool dispatchRequestStatusDirty = false;
 static bool dispatchMirrorPublishPending = false;
 static uint32_t dispatchRequestQueuedMs = 0;
@@ -318,6 +329,76 @@ struct AtomicDispatchRuntimeState {
 	uint8_t readbackAttempts = 0;
 };
 static AtomicDispatchRuntimeState atomicDispatchState{};
+
+struct DispatchBlockSnapshot {
+	SourceGroupReadMeta meta{};
+	uint16_t dispatchStart = UINT16_MAX;
+	uint16_t dispatchMode = UINT16_MAX;
+	int32_t dispatchActivePower = INT32_MAX;
+	uint16_t dispatchSocRaw = UINT16_MAX;
+	uint32_t dispatchTimeRaw = UINT32_MAX;
+};
+
+struct PvStringBlockSnapshot {
+	SourceGroupReadMeta meta{};
+	uint16_t voltage[kPvStringCount] = { 0, 0, 0, 0, 0, 0 };
+	uint16_t current[kPvStringCount] = { 0, 0, 0, 0, 0, 0 };
+	int32_t power[kPvStringCount] = { 0, 0, 0, 0, 0, 0 };
+};
+
+struct PvMeterTotalSnapshot {
+	SourceGroupReadMeta meta{};
+	int32_t totalPower = 0;
+};
+
+struct SchedulerPassSourceCache {
+	uint32_t passId = 0;
+	bool active = false;
+	bool snapshotBuildInProgress = false;
+	bool dispatchQueuedDuringSnapshot = false;
+	uint32_t dispatchWaitDueToSnapshotMs = 0;
+	uint32_t dispatchQueueCoalesceCount = 0;
+	uint32_t dispatchCacheHitCount = 0;
+	uint32_t pvBlockCacheHitCount = 0;
+	uint32_t pvMeterCacheHitCount = 0;
+	EssSnapshotMeta essSnapshot{};
+	DispatchBlockSnapshot dispatch{};
+	PvStringBlockSnapshot pvBlock{};
+	PvMeterTotalSnapshot pvMeter{};
+};
+
+static uint32_t schedulerPassSequence = 0;
+static SchedulerPassSourceCache schedulerPassCache{};
+static bool essSnapshotBuildInProgress = false;
+static bool essPowerSnapshotValid = false;
+static constexpr size_t kEntityTopicScratchSize = 176;
+static constexpr size_t kEntityTopicBaseScratchSize = 164;
+static constexpr size_t kRuntimeTopicScratchSize = 192;
+static constexpr size_t kStaleInverterDiscoveryQueueMax = 2;
+// MQTT publish helpers are single-threaded. Keep the runtime scratch bounded to the
+// actual topic lengths instead of reserving oversized publish buffers permanently in .bss.
+struct MqttPublishTopicScratch {
+	char topic[kEntityTopicScratchSize];
+	char topicBase[kEntityTopicBaseScratchSize];
+	char entityKey[64];
+};
+
+struct RuntimeScratch {
+	modbusRequestAndResponse modbusReadScratch{};
+	MqttPublishTopicScratch publishTopic{};
+	char inverterSubscription[kRuntimeTopicScratchSize] = "";
+	char inverterSubscriptionEntityKey[64] = "";
+	mqttState inverterSubscriptionEntity{};
+};
+
+static RuntimeScratch *g_runtimeScratch = nullptr;
+
+struct ControllerDiscoveryClearScratch {
+	char deviceIds[kStaleInverterDiscoveryQueueMax][64] = {{0}};
+	char lastQueued[64] = "";
+};
+
+static ControllerDiscoveryClearScratch *g_controllerDiscoveryClearScratch = nullptr;
 
 enum class RuntimeDiagPhase : uint8_t {
 	None = 0,
@@ -402,7 +483,6 @@ bool resendHaPreludePending = false;
 size_t resendHaNextEntityIndex = 0;
 bool resendHaClearStaleInverterPending = false;
 bool resendHaClearStaleControllerPending = false;
-static constexpr size_t kStaleInverterDiscoveryQueueMax = 2;
 size_t resendHaClearStaleInverterIndex = 0;
 size_t resendHaClearStaleInverterQueueIndex = 0;
 size_t resendHaClearStaleInverterQueueCount = 0;
@@ -410,9 +490,14 @@ char resendHaClearStaleInverterDeviceIds[kStaleInverterDiscoveryQueueMax][64] = 
 size_t resendHaClearStaleControllerIndex = 0;
 size_t resendHaClearStaleControllerQueueIndex = 0;
 size_t resendHaClearStaleControllerQueueCount = 0;
-char resendHaClearStaleControllerDeviceIds[kStaleInverterDiscoveryQueueMax][64] = {{0}};
-char lastQueuedStaleControllerDiscoveryId[64] = "";
 bool resendAllData = false;
+#if RS485_STUB
+uint32_t rs485StubControlSchedulerCooldownUntilMs = 0;
+bool rs485StubSkipNextScheduledStatusPublish = false;
+bool rs485StubStatusAckPending = false;
+bool rs485StubControlProcessedThisLoop = false;
+uint32_t rs485StubLastOnlineControlMs = 0;
+#endif
 static constexpr uint8_t kBootstrapPublishPerTick = 3;
 static constexpr size_t kBootstrapPublishBitsetBytes =
 	(kMqttEntityDescriptorCount + 7U) / 8U;
@@ -621,6 +706,10 @@ static bool rs485TryReadIdentityOnce(void);
 static void rs485ProbeTick(void);
 #if RS485_STUB
 static void rs485ApplyStubConnectivityMode(Rs485StubMode mode);
+struct Rs485StubControlRequest;
+static Rs485StubControlRequest *ensureRs485StubControlRequestScratch(void);
+static bool parseRs485StubControlPayload(const char *payload, Rs485StubControlRequest &request);
+static void applyParsedRs485StubControl(const Rs485StubControlRequest &request);
 #endif
 
 /*
@@ -665,8 +754,40 @@ void requestHaDataResend(void);
 void getA2mOpDataFromEss(void);
 bool refreshEssSnapshot(void);
 static bool refreshEssSnapshotAfterDispatch(bool primeForCurrentSendDataPass);
+static void beginSchedulerPass(void);
+static void endSchedulerPass(void);
+static bool fetchDispatchBlockSnapshot(DispatchBlockSnapshot &out,
+                                       modbusRequestAndResponseStatusValues *resultOut = nullptr);
+static bool fetchPvStringBlockSnapshot(PvStringBlockSnapshot &out,
+                                       modbusRequestAndResponseStatusValues *resultOut = nullptr);
+static bool fetchPvMeterTotalSnapshot(PvMeterTotalSnapshot &out,
+                                      modbusRequestAndResponseStatusValues *resultOut = nullptr);
+static bool prepareDispatchBlockResponse(mqttEntityId entityId,
+                                         const DispatchBlockSnapshot &snapshot,
+                                         modbusRequestAndResponse &prepared);
+static bool formatDispatchStartValue(char *dest, size_t destSize, uint16_t dispatchStart);
+static bool formatDispatchModeValue(char *dest, size_t destSize, uint16_t dispatchMode);
+static bool preparePvBlockResponse(const mqttState &entity,
+                                   const PvStringBlockSnapshot &snapshot,
+                                   modbusRequestAndResponse &prepared);
+static void executeDispatchBlockTransaction(const MqttEntityActiveBucket &bucketPlan,
+                                            const MqttPollTransaction &transaction);
+static void executePvBlockTransaction(const MqttEntityActiveBucket &bucketPlan,
+                                      const MqttPollTransaction &transaction);
+static void executeGenericPollTransaction(const MqttEntityActiveBucket &bucketPlan,
+                                          const MqttPollTransaction &transaction,
+                                          const mqttState &leader);
 void sendData(void);
 void sendStatus(bool includeEssSnapshot);
+static void populateStatusPollSnapshot(StatusPollSnapshot &poll, bool includeEssSnapshot);
+#if RS485_STUB
+static bool populateStatusStubSnapshot(StatusStubSnapshot &stub);
+#endif
+static bool publishStatusPollSnapshot(const StatusPollSnapshot &poll);
+#if RS485_STUB
+static bool publishStatusStubSnapshot(const StatusStubSnapshot &stub);
+static bool publishStubControlStatusNow(bool includeEssSnapshot);
+#endif
 void updateRunstate(void);
 uint32_t getUptimeSeconds(void);
 bool checkTimer(unsigned long *lastRun, unsigned long interval);
@@ -685,7 +806,20 @@ bool clearHaEntityDiscovery(const mqttState*, const char *deviceId);
 bool publishControllerInverterSerialDiscovery(void);
 void publishControllerInverterSerialState(void);
 bool handlePollingConfigSet(char*);
+static bool subscribeMqttReconnectTopic(bool current, const char *topic);
+static bool __attribute__((noinline)) subscribeMqttReconnectTopics(bool *inverterSubscriptionsAdded);
+static bool __attribute__((noinline)) subscribeInverterCommandTopicByIndex(size_t idx, bool *eligibleOut);
+static bool __attribute__((noinline)) subscribeInverterDispatchTopic(void);
+#if defined(MP_ESP8266)
+static void guardPendingAsyncWifiScanBeforeMqttReconnect(void);
+#endif
+#ifdef DEBUG_OVER_SERIAL
+static void debugLogMqttReconnectProbe(void);
+#endif
+static void __attribute__((noinline))
+completeSuccessfulMqttReconnect(unsigned long attemptStart, int tries, bool inverterSubscriptionsAdded);
 static bool lookupSubscription(char *entityName, mqttState *outEntity);
+static bool lookupSubscriptionSpan(const char *entityName, size_t entityNameLen, mqttState *outEntity);
 static bool lookupEntity(mqttEntityId entityId, mqttState *outEntity);
 static bool lookupEntityIndex(mqttEntityId entityId, size_t *outIdx);
 const char* mqttUpdateFreqToString(mqttUpdateFreq);
@@ -704,7 +838,7 @@ static bool readLegacyPollingPref(size_t index,
                                   int &storedValue,
                                   void *context);
 static void dispatchService(void);
-static void serviceDeferredMqttWork(void);
+static void __attribute__((noinline)) serviceDeferredMqttWork(void);
 static void publishDispatchStateEntity(mqttEntityId entityId);
 static void publishDispatchAuxiliaryStates(bool publishRawTime);
 static bool publishDispatchAuxiliaryStatesIfReady(bool publishRawTime);
@@ -755,6 +889,9 @@ void queueStaleControllerDiscoveryClear(const char *deviceId);
 static void queueCurrentHaDiscoveryClears(void);
 bool inverterSerialKnown(void);
 const char *discoveryDeviceIdForScope(DiscoveryDeviceScope scope);
+#if RS485_STUB
+static void primeStubRuntimeInverterIdentity(const char *serial);
+#endif
 void publishStatusNow(void);
 void publishEvent(MqttEventCode code, const char *detail);
 MqttEventCode eventCodeFromResult(modbusRequestAndResponseStatusValues result);
@@ -762,10 +899,13 @@ enum class Rs485ErrorClass : uint8_t;
 static Rs485ErrorClass classifyRs485Error(modbusRequestAndResponseStatusValues result);
 static void recordRs485Error(modbusRequestAndResponseStatusValues result, uint32_t count = 1);
 void noteRs485Error(modbusRequestAndResponseStatusValues result, const char *detail);
+static void maybeYield(void);
 static void processPendingEntityCommand(void);
 static bool entityCommandEnabled(mqttEntityId entityId);
 static bool applyMaxFeedinPercentCommand(const mqttState *entity, int32_t requestedPercent);
-static void applyRs485StubControlPayload(const char *payload);
+static void __attribute__((noinline)) applyRs485StubControlPayload(const char *payload);
+static void __attribute__((noinline)) servicePendingRs485StubControl(void);
+static bool __attribute__((noinline)) servicePendingRs485StubControlInLoop(void);
 static void publishManualRegisterReadState(int32_t requestedReg);
 void setBootIntentAndReboot(BootIntent intent, bool persistIntent = true);
 static void scheduleDeferredControlPlaneReboot(BootIntent intent, unsigned long delayMs = 1500);
@@ -856,7 +996,7 @@ static bool portalRequestHasMqttFields(WiFiManager &wifiManager);
 void handleRebootWifi(void);
 static bool sendRebootHandoffPage(HttpServer *server, BootIntent intent);
 void triggerRestart(void);
-void subscribeInverterTopics(void);
+bool subscribeInverterTopics(void);
 void serviceRs485Hooks(void);
 const char* portalStatusLabel(PortalStatus status);
 const char* wifiStatusReason(wl_status_t status);
@@ -896,6 +1036,12 @@ ensureStatusJsonScratch(void)
 }
 
 static bool
+ensureDispatchRequestStatusBuffer(void)
+{
+	return ensureSharedRuntimeBuffer(g_dispatchRequestStatus, 96);
+}
+
+static bool
 ensureDeferredControlPayload(void)
 {
 	return ensureSharedRuntimeBuffer(pendingDeferredControlPayload, kPendingDeferredControlPayloadSize);
@@ -908,11 +1054,60 @@ ensureDispatchPayload(void)
 }
 
 static bool
+ensureRuntimeScratch(void)
+{
+	if (g_runtimeScratch != nullptr) {
+		return true;
+	}
+	g_runtimeScratch = new (std::nothrow) RuntimeScratch();
+	return g_runtimeScratch != nullptr;
+}
+
+static bool
+ensureControllerDiscoveryClearScratch(void)
+{
+	if (g_controllerDiscoveryClearScratch != nullptr) {
+		return true;
+	}
+	g_controllerDiscoveryClearScratch = new (std::nothrow) ControllerDiscoveryClearScratch();
+	return g_controllerDiscoveryClearScratch != nullptr;
+}
+
+static modbusRequestAndResponse *
+runtimeModbusReadScratch(void)
+{
+	if (!ensureRuntimeScratch()) {
+		return nullptr;
+	}
+	return &g_runtimeScratch->modbusReadScratch;
+}
+
+static MqttPublishTopicScratch *
+runtimePublishTopicScratch(void)
+{
+	if (!ensureRuntimeScratch()) {
+		return nullptr;
+	}
+	return &g_runtimeScratch->publishTopic;
+}
+
+static bool
 ensureNormalRuntimeBuffers(void)
 {
 	return ensureStatusJsonScratch() &&
 	       ensureDeferredControlPayload() &&
 	       ensureDispatchPayload();
+}
+
+static bool
+topicEqualsDeviceSuffix(const char *topic, const char *suffix)
+{
+	if (topic == nullptr || suffix == nullptr || deviceName[0] == '\0') {
+		return false;
+	}
+	const size_t deviceLen = strlen(deviceName);
+	return strncmp(topic, deviceName, deviceLen) == 0 &&
+	       strcmp(topic + deviceLen, suffix) == 0;
 }
 
 static bool
@@ -948,9 +1143,7 @@ buildDeviceName(void)
 	WiFi.macAddress(mac);
 	snprintf(deviceName, sizeof(deviceName), "%s-%02X%02X%02X", DEVICE_NAME, mac[3], mac[4], mac[5]);
 	buildControllerIdentifier(mac, controllerIdentifier, sizeof(controllerIdentifier));
-	snprintf(configSetTopic, sizeof(configSetTopic), "%s/config/set", deviceName);
 	snprintf(statusTopic, sizeof(statusTopic), "%s/status", deviceName);
-	snprintf(rs485StubControlTopic, sizeof(rs485StubControlTopic), "%s/debug/rs485_stub/set", deviceName);
 }
 
 bool
@@ -1000,9 +1193,14 @@ legacyDispatchControlSurfaceEnabled(void)
 static void
 setDispatchRequestStatus(const char *status)
 {
-	strlcpy(dispatchRequestStatus, (status != nullptr) ? status : "", sizeof(dispatchRequestStatus));
+	if (!ensureDispatchRequestStatusBuffer()) {
+		A2M_DEBUG_LINE("dq:stat:oom");
+		return;
+	}
+	strlcpy(g_dispatchRequestStatus, (status != nullptr) ? status : "", 96);
 	dispatchRequestStatusDirty = true;
 	dispatchRequestStatusPublishEarliestLoop = loopSequence + 1;
+	A2M_DEBUG_PRINTF("dq:stat:set:%s\r\n", g_dispatchRequestStatus);
 }
 
 static void
@@ -1054,6 +1252,9 @@ setMqttIdentifiersFromSerial(const char *serial)
 	buildInverterHaUniqueId(serial, haUniqueId, sizeof(haUniqueId));
 	// Subscriptions are bound to the HA unique id; if identity changes from unknown/persisted, resubscribe.
 	inverterSubscriptionsSet = false;
+	inverterCommandSubscriptionsSet = false;
+	inverterDispatchSubscriptionSet = false;
+	inverterNextCommandSubscriptionIndex = 0;
 }
 
 static void
@@ -1063,10 +1264,38 @@ clearRuntimeInverterIdentity(void)
 	strlcpy(haUniqueId, "A2M-UNKNOWN", sizeof(haUniqueId));
 	inverterReady = false;
 	inverterSubscriptionsSet = false;
+	inverterCommandSubscriptionsSet = false;
+	inverterDispatchSubscriptionSet = false;
+	inverterNextCommandSubscriptionIndex = 0;
 	if (_registerHandler != NULL) {
 		_registerHandler->setSerialNumberPrefix('\0', '\0');
 	}
 }
+
+#if RS485_STUB
+static void
+primeStubRuntimeInverterIdentity(const char *serial)
+{
+	if (!inverterSerialIsValid(serial)) {
+		return;
+	}
+	const bool serialChanged = strcmp(deviceSerialNumber, serial) != 0;
+	strlcpy(deviceSerialNumber, serial, sizeof(deviceSerialNumber));
+	if (_registerHandler != NULL) {
+		_registerHandler->setSerialNumberPrefix(deviceSerialNumber[0], deviceSerialNumber[1]);
+	}
+	if (serialChanged || haUniqueId[0] == '\0' || strcmp(haUniqueId, "A2M-UNKNOWN") == 0) {
+		setMqttIdentifiersFromSerial(deviceSerialNumber);
+	}
+}
+
+static void
+applyStubRuntimeInverterIdentity(const char *serial)
+{
+	primeStubRuntimeInverterIdentity(serial);
+	inverterReady = inverterSerialKnown();
+}
+#endif
 
 static bool
 applyLiveInverterIdentity(const char *serial)
@@ -1092,15 +1321,20 @@ applyLiveInverterIdentity(const char *serial)
 	inverterReady = true;
 
 	auto queueLegacyControllerClearIfNeeded = [&](const char *deviceId) {
+		if (!ensureControllerDiscoveryClearScratch()) {
+			return;
+		}
 		if (deviceId == nullptr || deviceId[0] == '\0' || strcmp(deviceId, "A2M-UNKNOWN") == 0 ||
 		    strcmp(deviceId, controllerIdentifier) == 0) {
 			return;
 		}
-		if (strcmp(lastQueuedStaleControllerDiscoveryId, deviceId) == 0) {
+		if (strcmp(g_controllerDiscoveryClearScratch->lastQueued, deviceId) == 0) {
 			return;
 		}
 		queueStaleControllerDiscoveryClear(deviceId);
-		strlcpy(lastQueuedStaleControllerDiscoveryId, deviceId, sizeof(lastQueuedStaleControllerDiscoveryId));
+		strlcpy(g_controllerDiscoveryClearScratch->lastQueued,
+		        deviceId,
+		        sizeof(g_controllerDiscoveryClearScratch->lastQueued));
 	};
 
 	queueLegacyControllerClearIfNeeded(currentLegacyHaUniqueId);
@@ -1149,8 +1383,11 @@ queueStaleControllerDiscoveryClear(const char *deviceId)
 	if (deviceId == nullptr || deviceId[0] == '\0') {
 		return;
 	}
+	if (!ensureControllerDiscoveryClearScratch()) {
+		return;
+	}
 	for (size_t i = 0; i < resendHaClearStaleControllerQueueCount; ++i) {
-		if (strcmp(resendHaClearStaleControllerDeviceIds[i], deviceId) == 0) {
+		if (strcmp(g_controllerDiscoveryClearScratch->deviceIds[i], deviceId) == 0) {
 			resendHaClearStaleControllerPending = true;
 			return;
 		}
@@ -1158,9 +1395,9 @@ queueStaleControllerDiscoveryClear(const char *deviceId)
 	if (resendHaClearStaleControllerQueueCount >= kStaleInverterDiscoveryQueueMax) {
 		return;
 	}
-	strlcpy(resendHaClearStaleControllerDeviceIds[resendHaClearStaleControllerQueueCount],
+	strlcpy(g_controllerDiscoveryClearScratch->deviceIds[resendHaClearStaleControllerQueueCount],
 	        deviceId,
-	        sizeof(resendHaClearStaleControllerDeviceIds[0]));
+	        sizeof(g_controllerDiscoveryClearScratch->deviceIds[0]));
 	resendHaClearStaleControllerQueueCount++;
 	resendHaClearStaleControllerPending = true;
 }
@@ -1490,23 +1727,28 @@ rs485TryReadIdentityOnce(void)
 	}
 
 	modbusRequestAndResponseStatusValues result;
-	modbusRequestAndResponse response;
-
-	result = _registerHandler->readHandledRegister(REG_SYSTEM_INFO_R_EMS_SN_BYTE_1_2, &response);
-	if (result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess ||
-	    response.dataValueFormatted[0] == '\0' ||
-	    !inverterSerialIsValid(response.dataValueFormatted)) {
+	modbusRequestAndResponse *response = runtimeModbusReadScratch();
+	if (response == nullptr) {
 		return false;
 	}
-	if (!applyLiveInverterIdentity(response.dataValueFormatted)) {
+
+	*response = modbusRequestAndResponse{};
+	result = _registerHandler->readHandledRegister(REG_SYSTEM_INFO_R_EMS_SN_BYTE_1_2, response);
+	if (result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess ||
+	    response->dataValueFormatted[0] == '\0' ||
+	    !inverterSerialIsValid(response->dataValueFormatted)) {
+		return false;
+	}
+	if (!applyLiveInverterIdentity(response->dataValueFormatted)) {
 		return false;
 	}
 
 	// Battery type is helpful for diagnostics, but it is not required to establish inverter identity.
-	result = _registerHandler->readHandledRegister(REG_BATTERY_HOME_R_BATTERY_TYPE, &response);
+	*response = modbusRequestAndResponse{};
+	result = _registerHandler->readHandledRegister(REG_BATTERY_HOME_R_BATTERY_TYPE, response);
 	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess &&
-	    response.dataValueFormatted[0] != '\0') {
-		strlcpy(deviceBatteryType, response.dataValueFormatted, sizeof(deviceBatteryType));
+	    response->dataValueFormatted[0] != '\0') {
+		strlcpy(deviceBatteryType, response->dataValueFormatted, sizeof(deviceBatteryType));
 	}
 
 #ifdef DEBUG_OVER_SERIAL
@@ -1535,21 +1777,25 @@ rs485ApplyStubConnectivityMode(Rs485StubMode mode)
 		rs485ConnectState = Rs485ConnectState::ProbingBaud;
 		essSnapshotValid = false;
 		essSnapshotLastOk = false;
+		rs485StubSkipNextScheduledStatusPublish = false;
 		resendAllData = true;
 		return;
 	}
 
 	// Online-like stub modes are intended to exercise snapshot and publish behavior directly.
 	// Do not make them depend on the separate baud-probe state machine or issue Modbus reads
-	// from the MQTT callback path.
+	// from the MQTT callback path. Also avoid forcing the full resend/bootstrap path here:
+	// the immediate status refresh is enough for control acknowledgement, and the first normal
+	// scheduler pass should avoid stacking a second full status burst onto the same transition.
 	if (!inverterSerialKnown()) {
-		applyLiveInverterIdentity("STUBSN000000000");
+		primeStubRuntimeInverterIdentity("STUBSN000000000");
 	}
+	inverterReady = inverterSerialKnown();
 	rs485ConnectState = Rs485ConnectState::Connected;
 	rs485LockedBaud = DEFAULT_BAUD_RATE;
 	essSnapshotValid = false;
 	essSnapshotLastOk = false;
-	resendAllData = true;
+	rs485StubSkipNextScheduledStatusPublish = true;
 }
 #endif
 
@@ -1610,11 +1856,15 @@ rs485ProbeTick(void)
 	_modBus->setBaudRate(baud);
 
 	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
-	modbusRequestAndResponse response;
+	modbusRequestAndResponse *response = runtimeModbusReadScratch();
+	if (response == nullptr) {
+		return;
+	}
 #ifdef DEBUG_NO_RS485
 	result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
 #else
-	result = _registerHandler->readHandledRegister(REG_SAFETY_TEST_RW_GRID_REGULATION, &response);
+	*response = modbusRequestAndResponse{};
+	result = _registerHandler->readHandledRegister(REG_SAFETY_TEST_RW_GRID_REGULATION, response);
 #endif
 
 #ifdef DEBUG_OVER_SERIAL
@@ -1637,11 +1887,11 @@ rs485ProbeTick(void)
 	}
 
 #ifdef DEBUG_OVER_SERIAL
-	snprintf(_debugOutput, sizeof(_debugOutput), "Baud Rate Checker Problem: %s", response.statusMqttMessage);
+	snprintf(_debugOutput, sizeof(_debugOutput), "Baud Rate Checker Problem: %s", response->statusMqttMessage);
 	Serial.println(_debugOutput);
-#endif
+	#endif
 	recordRs485Error(result);
-	updateOLED(false, "Test Baud", baudRateString, response.displayMessage);
+	updateOLED(false, "Test Baud", baudRateString, response->displayMessage);
 
 	rs485AttemptsInCycle++;
 	if (rs485AttemptsInCycle >= (sizeof(kKnownBaudRates) / sizeof(kKnownBaudRates[0]))) {
@@ -1888,52 +2138,127 @@ handleRebootWifi(void)
 	scheduleDeferredControlPlaneReboot(BootIntent::WifiConfig, 1500);
 }
 
-void
+static bool __attribute__((noinline))
+subscribeInverterCommandTopicByIndex(size_t idx, bool *eligibleOut)
+{
+	if (!ensureRuntimeScratch()) {
+		return false;
+	}
+	RuntimeScratch &scratch = *g_runtimeScratch;
+	if (eligibleOut != nullptr) {
+		*eligibleOut = false;
+	}
+	if (!mqttEntityCopyByIndex(idx, &scratch.inverterSubscriptionEntity) ||
+	    !scratch.inverterSubscriptionEntity.subscribe ||
+	    mqttEntityScope(scratch.inverterSubscriptionEntity.entityId) != DiscoveryDeviceScope::Inverter) {
+		return false;
+	}
+	if (eligibleOut != nullptr) {
+		*eligibleOut = true;
+	}
+
+	mqttEntityNameCopy(&scratch.inverterSubscriptionEntity,
+	                   scratch.inverterSubscriptionEntityKey,
+	                   sizeof(scratch.inverterSubscriptionEntityKey));
+	const char *inverterDeviceId = discoveryDeviceIdForScope(DiscoveryDeviceScope::Inverter);
+	if (deviceName[0] == '\0' ||
+	    inverterDeviceId == nullptr ||
+	    inverterDeviceId[0] == '\0' ||
+	    scratch.inverterSubscriptionEntityKey[0] == '\0') {
+		scratch.inverterSubscription[0] = '\0';
+		return false;
+	}
+
+	const int written = snprintf(scratch.inverterSubscription,
+	                             sizeof(scratch.inverterSubscription),
+	                             "%s/%s/%s/command",
+	                             deviceName,
+	                             inverterDeviceId,
+	                             scratch.inverterSubscriptionEntityKey);
+	if (written <= 0 || static_cast<size_t>(written) >= sizeof(scratch.inverterSubscription)) {
+		scratch.inverterSubscription[0] = '\0';
+		return false;
+	}
+	return _mqtt.subscribe(scratch.inverterSubscription, MQTT_SUBSCRIBE_QOS);
+}
+
+static bool __attribute__((noinline))
+subscribeInverterDispatchTopic(void)
+{
+	if (!ensureRuntimeScratch()) {
+		return false;
+	}
+	RuntimeScratch &scratch = *g_runtimeScratch;
+	const char *inverterDeviceId = discoveryDeviceIdForScope(DiscoveryDeviceScope::Inverter);
+	if (inverterDeviceId == nullptr || inverterDeviceId[0] == '\0') {
+		scratch.inverterSubscription[0] = '\0';
+		return false;
+	}
+	const int written = snprintf(scratch.inverterSubscription,
+	                             sizeof(scratch.inverterSubscription),
+	                             "%s/dispatch/set",
+	                             inverterDeviceId);
+	if (written <= 0 || static_cast<size_t>(written) >= sizeof(scratch.inverterSubscription)) {
+		scratch.inverterSubscription[0] = '\0';
+		return false;
+	}
+	return _mqtt.subscribe(scratch.inverterSubscription, MQTT_SUBSCRIBE_QOS);
+}
+
+bool __attribute__((noinline))
 subscribeInverterTopics(void)
 {
 	static uint32_t lastSubscribeAttemptMs = 0;
 
 	if (!inverterReady || !inverterSerialKnown() || !_mqtt.connected()) {
-		return;
+		return false;
 	}
 	if (!mqttEntitiesRtAvailable()) {
-		return;
+		return false;
 	}
 	if (inverterSubscriptionsSet) {
-		return;
+		return false;
 	}
 	const uint32_t nowMs = millis();
-	if ((nowMs - lastSubscribeAttemptMs) < 5000U) {
-		return;
+	if ((nowMs - lastSubscribeAttemptMs) < 250U) {
+		return false;
 	}
 	lastSubscribeAttemptMs = nowMs;
 
-	char wildcardSubscription[100];
-	char dispatchSubscription[96];
-	// Reassert a single wildcard subscription instead of dozens of per-entity subscriptions.
-	// This is both cheaper and more robust across identity refreshes and reconnects.
-	snprintf(wildcardSubscription, sizeof(wildcardSubscription), "%s/+/+/command", deviceName);
-	bool subscribed = _mqtt.subscribe(wildcardSubscription, MQTT_SUBSCRIBE_QOS);
-#ifdef DEBUG_OVER_SERIAL
-	snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", wildcardSubscription, subscribed);
-	Serial.println(_debugOutput);
-#endif
-
-	// The atomic dispatch request is intentionally inverter-rooted so a
-	// controller replacement does not change the command path.
-	snprintf(dispatchSubscription,
-	         sizeof(dispatchSubscription),
-	         "%s/dispatch/set",
-	         discoveryDeviceIdForScope(DiscoveryDeviceScope::Inverter));
-	subscribed = subscribed && _mqtt.subscribe(dispatchSubscription, MQTT_SUBSCRIBE_QOS);
-#ifdef DEBUG_OVER_SERIAL
-	snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", dispatchSubscription, subscribed);
-	Serial.println(_debugOutput);
-#endif
-
-	if (subscribed) {
-		inverterSubscriptionsSet = true;
+	// Stage inverter command-topic subscriptions across later loops. The wildcard
+	// subscribe path started tripping ESP8266 stack-smash resets during stub-online
+	// transitions; explicit command topics preserve the MQTT surface without that
+	// broker/client wildcard path.
+	if (!inverterCommandSubscriptionsSet) {
+		const size_t entityCount = mqttEntitiesCount();
+		for (size_t idx = inverterNextCommandSubscriptionIndex; idx < entityCount; ++idx) {
+			bool eligible = false;
+			const bool subscribed = subscribeInverterCommandTopicByIndex(idx, &eligible);
+			if (!eligible) {
+				continue;
+			}
+			if (subscribed) {
+				inverterNextCommandSubscriptionIndex = idx + 1;
+				if (inverterNextCommandSubscriptionIndex >= entityCount) {
+					inverterCommandSubscriptionsSet = true;
+				}
+			}
+			return subscribed;
+		}
+		inverterCommandSubscriptionsSet = true;
 	}
+	if (!inverterDispatchSubscriptionSet) {
+		// The atomic dispatch request is intentionally inverter-rooted so a
+		// controller replacement does not change the command path.
+		const bool subscribed = subscribeInverterDispatchTopic();
+			if (subscribed) {
+				inverterDispatchSubscriptionSet = true;
+				inverterSubscriptionsSet = true;
+		}
+		return subscribed;
+	}
+	inverterSubscriptionsSet = true;
+	return false;
 }
 
 void
@@ -1944,6 +2269,37 @@ publishStatusNow(void)
 	}
 	// Status-on-connect must not bypass ESS snapshot prerequisite. Publish liveness/net/poll only.
 	sendStatus(false);
+}
+
+static bool
+publishStatusCoreNow(void)
+{
+	if (!_mqtt.connected() || !ensureStatusJsonScratch()) {
+		return false;
+	}
+
+	StatusCoreSnapshot core{};
+	core.presence = "online";
+	core.a2mStatus = "online";
+	core.rs485Status = essSnapshotValid ? (opData.essRs485Connected ? "OK" : "Problem") : "unknown";
+	core.gridStatus = "unknown";
+	core.bootMode = bootModeToString(currentBootMode);
+	core.bootIntent = bootIntentToString(currentBootIntent);
+	core.httpControlPlaneEnabled = httpControlPlaneEnabled;
+	core.haUniqueId = inverterReady ? haUniqueId : "A2M-UNKNOWN";
+
+	if (!buildStatusCoreJson(core, g_statusJsonScratch, kStatusJsonScratchSize)) {
+		return false;
+	}
+
+	RuntimeDiagScope diagScope(RuntimeDiagPhase::StatusPublish, "core");
+	if (!publishTrackedTextPayload(statusTopic, g_statusJsonScratch, MQTT_RETAIN)) {
+		return false;
+	}
+	maybeYield();
+	publishControllerInverterSerialState();
+	maybeYield();
+	return true;
 }
 
 void
@@ -6661,6 +7017,14 @@ void setup()
 			if (deviceSerialNumber[0] != '\0' && deviceSerialNumber[1] != '\0') {
 				_registerHandler->setSerialNumberPrefix(deviceSerialNumber[0], deviceSerialNumber[1]);
 			}
+#if RS485_STUB
+			if (!inverterSerialKnown()) {
+				// Seed the fixed stub identity during RS485 init so online control transitions only need
+				// to flip readiness/connectivity instead of rebuilding identifiers on the MQTT control path.
+				primeStubRuntimeInverterIdentity("STUBSN000000000");
+				inverterReady = false;
+			}
+#endif
 #if defined(DEBUG_OVER_SERIAL)
 			logHeapFreeOnly("after RS485 init");
 #endif
@@ -7240,6 +7604,9 @@ loop()
 #ifdef FORCE_RESTART_HOURS
 	static unsigned long autoReboot = 0;
 #endif
+#if RS485_STUB
+	bool hadPendingStubControlAtLoopEntry = pendingRs485StubControlSet;
+#endif
 
 #ifdef BUTTON_PIN
 	// Read button state
@@ -7288,8 +7655,52 @@ loop()
 		}
 	}
 
+#if RS485_STUB
+	if (mqttSubsystemEnabled() &&
+	    !hadPendingStubControlAtLoopEntry &&
+	    pendingRs485StubControlSet) {
+		// Apply stub-control updates on the next loop turn after the MQTT callback that queued them.
+		// Keeping the mode transition off the same turn as packet dispatch avoids compounding stack
+		// depth from PubSubClient processing with the online-transition control path.
+		return;
+	}
+#endif
+
 	if (mqttSubsystemEnabled()) {
+#if RS485_STUB
+		rs485StubControlProcessedThisLoop = false;
+		if (servicePendingRs485StubControlInLoop()) {
+			return;
+		}
+#endif
 		serviceDeferredMqttWork();
+#if RS485_STUB
+		if (servicePendingRs485StubControlInLoop()) {
+			return;
+		}
+		if (rs485StubControlProcessedThisLoop) {
+			return;
+		}
+#endif
+	}
+
+#if RS485_STUB
+	const bool rs485StubControlSchedulerCoolingDown =
+		static_cast<long>(rs485StubControlSchedulerCooldownUntilMs - millis()) > 0;
+#endif
+	if (mqttSubsystemEnabled() &&
+	    pendingPollingConfigPublish &&
+	    _mqtt.connected() &&
+	    !inMqttCallback &&
+#if RS485_STUB
+	    !rs485StubControlProcessedThisLoop &&
+	    !rs485StubControlSchedulerCoolingDown
+#else
+	    true
+#endif
+	    ) {
+		publishPollingConfig();
+		pendingPollingConfigPublish = false;
 	}
 
 	if (httpControlPlaneEnabled) {
@@ -7302,8 +7713,16 @@ loop()
 		deferredControlPlaneRebootScheduled = false;
 		setBootIntentAndReboot(deferredControlPlaneRebootIntent);
 	}
-	if (mqttSubsystemEnabled()) {
-		subscribeInverterTopics();
+	bool subscribedInverterTopicsThisLoop = false;
+	if (mqttSubsystemEnabled() &&
+#if RS485_STUB
+	    !rs485StubControlProcessedThisLoop &&
+	    !rs485StubControlSchedulerCoolingDown
+#else
+	    true
+#endif
+	    ) {
+		subscribedInverterTopicsThisLoop = subscribeInverterTopics();
 	}
 
 	// Keep attempting RS485/inverter connection in the background. This must not block loop() so MQTT, HTTP,
@@ -7318,7 +7737,12 @@ loop()
 	updateRunstate();
 
 	// Send HA auto-discovery info
-	if (mqttSubsystemEnabled() && resendHaData == true && _mqtt.connected()) {
+	if (!subscribedInverterTopicsThisLoop &&
+	    mqttSubsystemEnabled() &&
+#if RS485_STUB
+	    !rs485StubControlSchedulerCoolingDown &&
+#endif
+	    resendHaData == true && _mqtt.connected()) {
 		sendHaData();
 	}
 
@@ -7335,10 +7759,25 @@ loop()
 	}
 
 	// Scheduler runs continuously; per-bucket prerequisites are resolved inside sendData().
-	if (mqttSubsystemEnabled()) {
+	if (!subscribedInverterTopicsThisLoop &&
+	    mqttSubsystemEnabled() &&
+#if RS485_STUB
+	    !rs485StubControlSchedulerCoolingDown
+#else
+	    true
+#endif
+	    ) {
 		sendData();
 	}
-	if (bootPlan.inverter && mqttSubsystemEnabled()) {
+	if (!subscribedInverterTopicsThisLoop &&
+	    bootPlan.inverter &&
+	    mqttSubsystemEnabled() &&
+#if RS485_STUB
+	    !rs485StubControlSchedulerCoolingDown
+#else
+	    true
+#endif
+	    ) {
 		dispatchService();
 	}
 
@@ -7502,24 +7941,25 @@ wifiScanCompleteNoop(int)
 void
 getPollingTimestamp(char *target, size_t size)
 {
-	modbusRequestAndResponse response;
+	modbusRequestAndResponse *response = runtimeModbusReadScratch();
 	modbusRequestAndResponseStatusValues result;
 	const char *fallback = "01/Jan/1970 00:00:00";
 
-	if (_registerHandler != NULL) {
-		result = _registerHandler->readHandledRegister(REG_CUSTOM_SYSTEM_DATE_TIME, &response);
+	if (_registerHandler != NULL && response != nullptr) {
+		*response = modbusRequestAndResponse{};
+		result = _registerHandler->readHandledRegister(REG_CUSTOM_SYSTEM_DATE_TIME, response);
 		if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess &&
-		    response.dataValueFormatted[0] != 0) {
+		    response->dataValueFormatted[0] != 0) {
 			bool printable = true;
-			for (size_t i = 0; response.dataValueFormatted[i] != '\0'; i++) {
-				const unsigned char ch = static_cast<unsigned char>(response.dataValueFormatted[i]);
+			for (size_t i = 0; response->dataValueFormatted[i] != '\0'; i++) {
+				const unsigned char ch = static_cast<unsigned char>(response->dataValueFormatted[i]);
 				if (ch < 0x20 || ch > 0x7e) {
 					printable = false;
 					break;
 				}
 			}
 			if (printable) {
-				strlcpy(target, response.dataValueFormatted, size);
+				strlcpy(target, response->dataValueFormatted, size);
 				return;
 			}
 		}
@@ -8269,6 +8709,8 @@ publishControllerInverterSerialDiscovery(void)
 void
 publishControllerInverterSerialState(void)
 {
+	static char lastPublishedPayload[40] = "";
+	static unsigned long lastPublishedReconnectCount = 0;
 	char topic[160];
 	char payload[40];
 	snprintf(topic, sizeof(topic), "%s/%s/%s/state", deviceName, controllerIdentifier, kControllerInverterSerialEntity);
@@ -8277,7 +8719,13 @@ publishControllerInverterSerialState(void)
 	} else {
 		strlcpy(payload, "unknown", sizeof(payload));
 	}
+	if (lastPublishedReconnectCount == mqttReconnectCount &&
+	    strcmp(lastPublishedPayload, payload) == 0) {
+		return;
+	}
 	if (_mqtt.publish(topic, payload, true)) {
+		strlcpy(lastPublishedPayload, payload, sizeof(lastPublishedPayload));
+		lastPublishedReconnectCount = mqttReconnectCount;
 		noteMqttActivityPulse();
 	}
 }
@@ -8412,9 +8860,12 @@ publishPendingStaleInverterDiscoveryClears(void)
 static bool
 publishPendingStaleControllerDiscoveryClears(void)
 {
+	if (g_controllerDiscoveryClearScratch == nullptr) {
+		return false;
+	}
 	if (!resendHaClearStaleControllerPending ||
 	    resendHaClearStaleControllerQueueIndex >= resendHaClearStaleControllerQueueCount ||
-	    resendHaClearStaleControllerDeviceIds[resendHaClearStaleControllerQueueIndex][0] == '\0') {
+	    g_controllerDiscoveryClearScratch->deviceIds[resendHaClearStaleControllerQueueIndex][0] == '\0') {
 		return false;
 	}
 	if (!mqttEntitiesRtAvailable()) {
@@ -8435,7 +8886,7 @@ publishPendingStaleControllerDiscoveryClears(void)
 		}
 		if (!clearHaEntityDiscovery(
 		        &entity,
-		        resendHaClearStaleControllerDeviceIds[resendHaClearStaleControllerQueueIndex])) {
+		        g_controllerDiscoveryClearScratch->deviceIds[resendHaClearStaleControllerQueueIndex])) {
 			return true;
 		}
 		resendHaClearStaleControllerIndex++;
@@ -8447,12 +8898,12 @@ publishPendingStaleControllerDiscoveryClears(void)
 	}
 
 	if (!clearHaControllerExtraDiscovery(
-	        resendHaClearStaleControllerDeviceIds[resendHaClearStaleControllerQueueIndex])) {
+	        g_controllerDiscoveryClearScratch->deviceIds[resendHaClearStaleControllerQueueIndex])) {
 		return true;
 	}
 
 	resendHaClearStaleControllerIndex = 0;
-	resendHaClearStaleControllerDeviceIds[resendHaClearStaleControllerQueueIndex][0] = '\0';
+	g_controllerDiscoveryClearScratch->deviceIds[resendHaClearStaleControllerQueueIndex][0] = '\0';
 	resendHaClearStaleControllerQueueIndex++;
 	if (resendHaClearStaleControllerQueueIndex < resendHaClearStaleControllerQueueCount) {
 		return true;
@@ -9050,7 +9501,12 @@ modbusRequestAndResponseStatusValues
 getSerialNumber()
 {
 	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
-	modbusRequestAndResponse response;
+	modbusRequestAndResponse *response = runtimeModbusReadScratch();
+	if (response == nullptr) {
+		clearRuntimeInverterIdentity();
+		strlcpy(deviceBatteryType, "UNKNOWN", sizeof(deviceBatteryType));
+		return modbusRequestAndResponseStatusValues::preProcessing;
+	}
 #ifndef DEBUG_NO_RS485
 	uint32_t tries = 0;
 	const uint8_t kMaxIdentityReadAttempts = 4;
@@ -9060,45 +9516,50 @@ getSerialNumber()
 
 #ifdef DEBUG_NO_RS485
 	result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
-	strcpy(response.dataValueFormatted, "AL9876543210987");
+	*response = modbusRequestAndResponse{};
+	strcpy(response->dataValueFormatted, "AL9876543210987");
 #else // DEBUG_NO_RS485
 	// Get the serial number
-	result = _registerHandler->readHandledRegister(REG_SYSTEM_INFO_R_EMS_SN_BYTE_1_2, &response);
+	*response = modbusRequestAndResponse{};
+	result = _registerHandler->readHandledRegister(REG_SYSTEM_INFO_R_EMS_SN_BYTE_1_2, response);
 
 	// Keep retries bounded so startup cannot stall indefinitely when RS485 is unavailable.
 	uint8_t serialAttempts = 0;
-	while (((result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) ||
-	        !inverterSerialIsValid(response.dataValueFormatted)) &&
-	       (serialAttempts++ < kMaxIdentityReadAttempts)) {
-		tries++;
+		while (((result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) ||
+		        !inverterSerialIsValid(response->dataValueFormatted)) &&
+		       (serialAttempts++ < kMaxIdentityReadAttempts)) {
+			tries++;
 		// Preserve the legacy total for syntactically invalid serial payloads while
 		// keeping the split transport/other counters reserved for classified RS485 results.
 		if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
 			rs485Errors++;
 		} else {
 			recordRs485Error(result);
+			}
+			snprintf(oledLine4, sizeof(oledLine4), "%ld", tries);
+			updateOLED(false, "Alpha sys", "not known", oledLine4);
+			pumpMqttDuringSetup(250);
+			*response = modbusRequestAndResponse{};
+			result = _registerHandler->readHandledRegister(REG_SYSTEM_INFO_R_EMS_SN_BYTE_1_2, response);
 		}
-		snprintf(oledLine4, sizeof(oledLine4), "%ld", tries);
-		updateOLED(false, "Alpha sys", "not known", oledLine4);
-		pumpMqttDuringSetup(250);
-		result = _registerHandler->readHandledRegister(REG_SYSTEM_INFO_R_EMS_SN_BYTE_1_2, &response);
-	}
 #endif // DEBUG_NO_RS485
 	const bool liveSerialReadOk =
 		(result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) &&
-		inverterSerialIsValid(response.dataValueFormatted);
+		inverterSerialIsValid(response->dataValueFormatted);
 	if (liveSerialReadOk) {
-		applyLiveInverterIdentity(response.dataValueFormatted);
+		applyLiveInverterIdentity(response->dataValueFormatted);
 	} else {
 		clearRuntimeInverterIdentity();
 	}
 
 #ifdef DEBUG_NO_RS485
-result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
-	strcpy(response.dataValueFormatted, "FAKE-BAT");
+	result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
+	*response = modbusRequestAndResponse{};
+	strcpy(response->dataValueFormatted, "FAKE-BAT");
 #else // DEBUG_NO_RS485
 	// Get the Battery Type
-	result = _registerHandler->readHandledRegister(REG_BATTERY_HOME_R_BATTERY_TYPE, &response);
+	*response = modbusRequestAndResponse{};
+	result = _registerHandler->readHandledRegister(REG_BATTERY_HOME_R_BATTERY_TYPE, response);
 	// Keep retries bounded so startup cannot stall indefinitely when RS485 is unavailable.
 	uint8_t batteryAttempts = 0;
 	while ((result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) &&
@@ -9106,13 +9567,14 @@ result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
 		tries++;
 		recordRs485Error(result);
 		snprintf(oledLine4, sizeof(oledLine4), "%ld", tries);
-		updateOLED(false, "Bat type", "not known", oledLine4);
-		pumpMqttDuringSetup(250);
-		result = _registerHandler->readHandledRegister(REG_BATTERY_HOME_R_BATTERY_TYPE, &response);
-	}
+			updateOLED(false, "Bat type", "not known", oledLine4);
+			pumpMqttDuringSetup(250);
+			*response = modbusRequestAndResponse{};
+			result = _registerHandler->readHandledRegister(REG_BATTERY_HOME_R_BATTERY_TYPE, response);
+		}
 #endif // DEBUG_NO_RS485
 	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
-		strlcpy(deviceBatteryType, response.dataValueFormatted, sizeof(deviceBatteryType));
+		strlcpy(deviceBatteryType, response->dataValueFormatted, sizeof(deviceBatteryType));
 	} else {
 		strlcpy(deviceBatteryType, "UNKNOWN", sizeof(deviceBatteryType));
 	}
@@ -9458,34 +9920,10 @@ mqttReconnect(void)
 	static unsigned long lastAttemptMs = 0;
 	static int tries = 0;
 	static bool mqttTargetLogged = false;
+	char mqttReconnectLine3[OLED_CHARACTER_WIDTH] = "";
 
 	bool subscribed = false;
-	char subscriptionDef[192];
-	char line3[OLED_CHARACTER_WIDTH];
 	bool inverterSubscriptionsAdded = false;
-
-#if defined(MP_ESP8266)
-	// Defensive: avoid rare soft-WDT crashes in ESP8266WiFiScanClass::_scanDone calling a stale std::function
-	// callback when an async scan is in progress. We do not rely on async scans in NORMAL mode; if one is
-	// running, replace the completion callback with a safe no-op so the core can finish the scan without
-	// calling into a dangling target.
-	auto guardAsyncWifiScanCallback = []() {
-		const int8_t scanState = WiFi.scanComplete();
-#ifdef DEBUG_OVER_SERIAL
-		Serial.printf("WiFi guard scan state %d\r\n", scanState);
-#endif
-		const WifiScanGuardAction action = classifyWifiScanGuard(scanState);
-		if (action == WifiScanGuardAction::RebindNoopCallback) {
-			// Guard any in-flight scan, even in NORMAL mode. The protection is about
-			// neutralizing a stale callback target, not authorizing new scans.
-			WiFi.scanNetworksAsync(wifiScanCompleteNoop, false);
-			return;
-		}
-		if (action == WifiScanGuardAction::DeleteResults) {
-			WiFi.scanDelete();
-		}
-	};
-#endif
 
 	// Throttle reconnect attempts; do not block the main loop.
 	const unsigned long nowMs = millis();
@@ -9532,7 +9970,7 @@ mqttReconnect(void)
 #ifdef DEBUG_OVER_SERIAL
 		logHeapFreeOnly("before WiFi guard");
 #endif
-		guardAsyncWifiScanCallback();
+		guardPendingAsyncWifiScanBeforeMqttReconnect();
 		if (!shouldStartWifiScan(currentBootMode)) {
 #ifdef DEBUG_OVER_SERIAL
 			Serial.println(F("WiFi guard: scans disabled in NORMAL."));
@@ -9547,43 +9985,12 @@ mqttReconnect(void)
 		Serial.print("Attempting MQTT connection...");
 #endif
 
-		snprintf(line3, sizeof(line3), "MQTT %d ...", tries);
-		updateOLED(false, "Connecting", line3, _version);
+		snprintf(mqttReconnectLine3, sizeof(mqttReconnectLine3), "MQTT %d ...", tries);
+		updateOLED(false, "Connecting", mqttReconnectLine3, _version);
 		diagDelay(100);
 
 #ifdef DEBUG_OVER_SERIAL
-		{
-			const char *mqttHost = appConfig.mqttSrvr.c_str();
-			const uint16_t mqttPort = static_cast<uint16_t>(appConfig.mqttPort);
-			const size_t mqttHostLen = strlen(mqttHost);
-			const size_t mqttUserLen = appConfig.mqttUser.length();
-			const size_t mqttPassLen = appConfig.mqttPass.length();
-
-			Serial.printf("MQTT diag: host_len=%u user_len=%u pass_len=%u port=%u wifi=%d ip=%s rssi=%d\r\n",
-			              static_cast<unsigned>(mqttHostLen),
-			              static_cast<unsigned>(mqttUserLen),
-			              static_cast<unsigned>(mqttPassLen),
-			              static_cast<unsigned>(mqttPort),
-			              static_cast<int>(WiFi.status()),
-			              WiFi.localIP().toString().c_str(),
-			              WiFi.RSSI());
-
-			Serial.print("MQTT host bytes:");
-			for (size_t i = 0; i < mqttHostLen; i++) {
-				Serial.printf(" %02X", static_cast<unsigned>(static_cast<uint8_t>(mqttHost[i])));
-			}
-			Serial.println();
-
-			WiFiClient mqttProbe;
-			mqttProbe.setTimeout(2000);
-			const unsigned long probeStartMs = millis();
-			const bool probeOk = mqttProbe.connect(mqttHost, mqttPort);
-			const unsigned long probeElapsedMs = millis() - probeStartMs;
-			Serial.printf("MQTT TCP probe: ok=%d elapsed_ms=%lu\r\n", probeOk ? 1 : 0, probeElapsedMs);
-			if (probeOk) {
-				mqttProbe.stop();
-			}
-			}
+		debugLogMqttReconnectProbe();
 	#endif
 
 		// Attempt to connect.
@@ -9610,10 +10017,10 @@ mqttReconnect(void)
 			// Publish boot intent early; RS485 init can stall before periodic status messages.
 			publishBootEventOncePerBoot();
 			publishBootMemEventOncePerBoot();
-			publishStatusNow();
 			mqttReconnectCount++;
 			lastMqttConnectMs = millis();
 			lastMqttConnected = true;
+			resendAllData = true;
 			if (pendingWifiDisconnectEvent) {
 				publishEvent(MqttEventCode::WifiDisconnect, "");
 				pendingWifiDisconnectEvent = false;
@@ -9623,62 +10030,15 @@ mqttReconnect(void)
 				pendingMqttDisconnectEvent = false;
 			}
 
-			// Special case for Home Assistant
-			sprintf(subscriptionDef, "%s", MQTT_SUB_HOMEASSISTANT);
-			subscribed = _mqtt.subscribe(subscriptionDef, MQTT_SUBSCRIBE_QOS);
-#ifdef DEBUG_OVER_SERIAL
-			snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", subscriptionDef, subscribed);
-			Serial.println(_debugOutput);
-#endif
-				sprintf(subscriptionDef, "%s/config/set", deviceName);
-				subscribed = subscribed && _mqtt.subscribe(subscriptionDef, MQTT_SUBSCRIBE_QOS);
-#ifdef DEBUG_OVER_SERIAL
-				snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", subscriptionDef, subscribed);
-				Serial.println(_debugOutput);
-#endif
-
-#if RS485_STUB
-				subscribed = subscribed && _mqtt.subscribe(rs485StubControlTopic, MQTT_SUBSCRIBE_QOS);
-#ifdef DEBUG_OVER_SERIAL
-				snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", rs485StubControlTopic, subscribed);
-				Serial.println(_debugOutput);
-#endif
-#endif
-
-				if (inverterReady && inverterSerialKnown()) {
-					snprintf(subscriptionDef, sizeof(subscriptionDef), "%s/+/+/command", deviceName);
-					subscribed = subscribed && _mqtt.subscribe(subscriptionDef, MQTT_SUBSCRIBE_QOS);
-#ifdef DEBUG_OVER_SERIAL
-					snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", subscriptionDef, subscribed);
-					Serial.println(_debugOutput);
-#endif
-					snprintf(subscriptionDef,
-					         sizeof(subscriptionDef),
-					         "%s/dispatch/set",
-					         discoveryDeviceIdForScope(DiscoveryDeviceScope::Inverter));
-					subscribed = subscribed && _mqtt.subscribe(subscriptionDef, MQTT_SUBSCRIBE_QOS);
-#ifdef DEBUG_OVER_SERIAL
-					snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", subscriptionDef, subscribed);
-					Serial.println(_debugOutput);
-#endif
-					inverterSubscriptionsAdded = true;
-				}
+			subscribed = subscribeMqttReconnectTopics(&inverterSubscriptionsAdded);
 
 			// Subscribe or resubscribe to topics.
 			if (subscribed) {
-#ifdef DEBUG_OVER_SERIAL
-				Serial.printf("mqttReconnect attempt %d succeeded after %lu ms\r\n", tries, millis() - attemptStart);
-#endif
-				setStatusLedColor(0, 255, 0);
-				updateRunstate();
-				// Always republish controller HA discovery after MQTT connect so the bridge device
-				// appears in Home Assistant even before inverter identity is known.
-				handleMqttReconnectDispatchReset();
-				requestHaDataResend();
-				publishPollingConfig();
-				if (inverterSubscriptionsAdded) {
-					inverterSubscriptionsSet = true;
-				}
+				inverterSubscriptionsSet = false;
+				inverterCommandSubscriptionsSet = false;
+				inverterDispatchSubscriptionSet = false;
+				inverterNextCommandSubscriptionIndex = 0;
+				completeSuccessfulMqttReconnect(attemptStart, tries, inverterSubscriptionsAdded);
 				return;
 			}
 		}
@@ -9696,20 +10056,40 @@ mqttReconnect(void)
 static bool
 lookupSubscription(char *entityName, mqttState *outEntity)
 {
-	if (outEntity == nullptr) {
+	if (entityName == nullptr) {
 		return false;
 	}
-	mqttState entity{};
+	return lookupSubscriptionSpan(entityName, strlen(entityName), outEntity);
+}
+
+static bool
+lookupSubscriptionSpan(const char *entityName, size_t entityNameLen, mqttState *outEntity)
+{
+	if (!ensureRuntimeScratch()) {
+		return false;
+	}
+	RuntimeScratch &scratch = *g_runtimeScratch;
+	if (entityName == nullptr || outEntity == nullptr || entityNameLen == 0) {
+		return false;
+	}
 	int numberOfEntities = static_cast<int>(mqttEntitiesCount());
 	for (int i = 0; i < numberOfEntities; i++) {
-		if (!mqttEntityCopyByIndex(static_cast<size_t>(i), &entity)) {
+		if (!mqttEntityCopyByIndex(static_cast<size_t>(i), &scratch.inverterSubscriptionEntity)) {
 			continue;
 		}
-		if (!includeEntityInPublicSurfaces(entity)) {
+		if (!includeEntityInPublicSurfaces(scratch.inverterSubscriptionEntity) ||
+		    !scratch.inverterSubscriptionEntity.subscribe) {
 			continue;
 		}
-		if (entity.subscribe && mqttEntityNameEquals(&entity, entityName)) {
-			*outEntity = entity;
+		mqttEntityNameCopy(&scratch.inverterSubscriptionEntity,
+		                   scratch.inverterSubscriptionEntityKey,
+		                   sizeof(scratch.inverterSubscriptionEntityKey));
+		const size_t candidateLen = strlen(scratch.inverterSubscriptionEntityKey);
+		if (candidateLen != entityNameLen) {
+			continue;
+		}
+		if (memcmp(scratch.inverterSubscriptionEntityKey, entityName, entityNameLen) == 0) {
+			*outEntity = scratch.inverterSubscriptionEntity;
 			return true;
 		}
 	}
@@ -9729,6 +10109,53 @@ lookupEntityIndex(mqttEntityId entityId, size_t *outIdx)
 		return false;
 	}
 	return mqttEntityIndexById(entityId, outIdx);
+}
+
+static bool
+beginAggregateEventsJson(char *out, size_t outSize, unsigned int count)
+{
+	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+	const int written = snprintf(out, outSize, "{ \"numEvents\": %u", count);
+	return written >= 0 && static_cast<size_t>(written) < outSize;
+}
+
+static bool
+appendAggregateHexField(char *out,
+	                        size_t outSize,
+	                        const char *label,
+	                        uint16_t reg,
+	                        uint32_t value)
+{
+	if (out == nullptr || outSize == 0 || label == nullptr) {
+		return false;
+	}
+	const size_t used = strnlen(out, outSize);
+	if (used >= outSize) {
+		return false;
+	}
+	const int written = snprintf(out + used,
+	                             outSize - used,
+	                             ", \"%s (0x%04X)\": \"0x%08lX\"",
+	                             label,
+	                             reg,
+	                             static_cast<unsigned long>(value));
+	return written >= 0 && static_cast<size_t>(written) < (outSize - used);
+}
+
+static bool
+finishAggregateEventsJson(char *out, size_t outSize)
+{
+	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+	const size_t used = strnlen(out, outSize);
+	if (used >= outSize) {
+		return false;
+	}
+	const int written = snprintf(out + used, outSize - used, " }");
+	return written >= 0 && static_cast<size_t>(written) < (outSize - used);
 }
 
 modbusRequestAndResponseStatusValues
@@ -9877,18 +10304,38 @@ readEntity(const mqttState *singleEntity, modbusRequestAndResponse* rs)
 			if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
 				count = popcount(bf) + popcount(bf1) + popcount(bf2) + popcount(bf3) +
 					popcount(bf4) + popcount(bf5) + popcount(bf6);
-				sprintf(rs->dataValueFormatted, "{ \"numEvents\": %u, "
-								  "\"Battery Faults (0x%04X)\": \"0x%08X\","
-								  "\"Battery Faults 1 (0x%04X)\": \"0x%08X\","
-								  "\"Battery Faults 2 (0x%04X)\": \"0x%08X\","
-								  "\"Battery Faults 3 (0x%04X)\": \"0x%08X\","
-								  "\"Battery Faults 4 (0x%04X)\": \"0x%08X\","
-								  "\"Battery Faults 5 (0x%04X)\": \"0x%08X\","
-								  "\"Battery Faults 6 (0x%04X)\": \"0x%08X\" }",
-					count, REG_BATTERY_HOME_R_BATTERY_FAULT_1, bf, REG_BATTERY_HOME_R_BATTERY_FAULT_1_1, bf1,
-					REG_BATTERY_HOME_R_BATTERY_FAULT_2_1, bf2, REG_BATTERY_HOME_R_BATTERY_FAULT_3_1, bf3,
-					REG_BATTERY_HOME_R_BATTERY_FAULT_4_1, bf4, REG_BATTERY_HOME_R_BATTERY_FAULT_5_1, bf5,
-					REG_BATTERY_HOME_R_BATTERY_FAULT_6_1, bf6);
+				if (!beginAggregateEventsJson(rs->dataValueFormatted, sizeof(rs->dataValueFormatted), count) ||
+				    !appendAggregateHexField(rs->dataValueFormatted, sizeof(rs->dataValueFormatted),
+				                             "Battery Faults",
+				                             REG_BATTERY_HOME_R_BATTERY_FAULT_1,
+				                             bf) ||
+				    !appendAggregateHexField(rs->dataValueFormatted, sizeof(rs->dataValueFormatted),
+				                             "Battery Faults 1",
+				                             REG_BATTERY_HOME_R_BATTERY_FAULT_1_1,
+				                             bf1) ||
+				    !appendAggregateHexField(rs->dataValueFormatted, sizeof(rs->dataValueFormatted),
+				                             "Battery Faults 2",
+				                             REG_BATTERY_HOME_R_BATTERY_FAULT_2_1,
+				                             bf2) ||
+				    !appendAggregateHexField(rs->dataValueFormatted, sizeof(rs->dataValueFormatted),
+				                             "Battery Faults 3",
+				                             REG_BATTERY_HOME_R_BATTERY_FAULT_3_1,
+				                             bf3) ||
+				    !appendAggregateHexField(rs->dataValueFormatted, sizeof(rs->dataValueFormatted),
+				                             "Battery Faults 4",
+				                             REG_BATTERY_HOME_R_BATTERY_FAULT_4_1,
+				                             bf4) ||
+				    !appendAggregateHexField(rs->dataValueFormatted, sizeof(rs->dataValueFormatted),
+				                             "Battery Faults 5",
+				                             REG_BATTERY_HOME_R_BATTERY_FAULT_5_1,
+				                             bf5) ||
+				    !appendAggregateHexField(rs->dataValueFormatted, sizeof(rs->dataValueFormatted),
+				                             "Battery Faults 6",
+				                             REG_BATTERY_HOME_R_BATTERY_FAULT_6_1,
+				                             bf6) ||
+				    !finishAggregateEventsJson(rs->dataValueFormatted, sizeof(rs->dataValueFormatted))) {
+					result = modbusRequestAndResponseStatusValues::payloadExceededCapacity;
+				}
 			}
 		}
 		break;
@@ -9929,18 +10376,38 @@ readEntity(const mqttState *singleEntity, modbusRequestAndResponse* rs)
 			if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
 				count = popcount(bw) + popcount(bw1) + popcount(bw2) + popcount(bw3) +
 					popcount(bw4) + popcount(bw5) + popcount(bw6);
-				sprintf(rs->dataValueFormatted, "{ \"numEvents\": %u, "
-								  "\"Battery Warnings (0x%04X)\": \"0x%08X\","
-								  "\"Battery Warnings 1 (0x%04X)\": \"0x%08X\","
-								  "\"Battery Warnings 2 (0x%04X)\": \"0x%08X\","
-								  "\"Battery Warnings 3 (0x%04X)\": \"0x%08X\","
-								  "\"Battery Warnings 4 (0x%04X)\": \"0x%08X\","
-								  "\"Battery Warnings 5 (0x%04X)\": \"0x%08X\","
-								  "\"Battery Warnings 6 (0x%04X)\": \"0x%08X\" }",
-					count, REG_BATTERY_HOME_R_BATTERY_WARNING_1, bw, REG_BATTERY_HOME_R_BATTERY_WARNING_1_1, bw1,
-					REG_BATTERY_HOME_R_BATTERY_WARNING_2_1, bw2, REG_BATTERY_HOME_R_BATTERY_WARNING_3_1, bw3,
-					REG_BATTERY_HOME_R_BATTERY_WARNING_4_1, bw4, REG_BATTERY_HOME_R_BATTERY_WARNING_5_1, bw5,
-					REG_BATTERY_HOME_R_BATTERY_WARNING_6_1, bw6);
+				if (!beginAggregateEventsJson(rs->dataValueFormatted, sizeof(rs->dataValueFormatted), count) ||
+				    !appendAggregateHexField(rs->dataValueFormatted, sizeof(rs->dataValueFormatted),
+				                             "Battery Warnings",
+				                             REG_BATTERY_HOME_R_BATTERY_WARNING_1,
+				                             bw) ||
+				    !appendAggregateHexField(rs->dataValueFormatted, sizeof(rs->dataValueFormatted),
+				                             "Battery Warnings 1",
+				                             REG_BATTERY_HOME_R_BATTERY_WARNING_1_1,
+				                             bw1) ||
+				    !appendAggregateHexField(rs->dataValueFormatted, sizeof(rs->dataValueFormatted),
+				                             "Battery Warnings 2",
+				                             REG_BATTERY_HOME_R_BATTERY_WARNING_2_1,
+				                             bw2) ||
+				    !appendAggregateHexField(rs->dataValueFormatted, sizeof(rs->dataValueFormatted),
+				                             "Battery Warnings 3",
+				                             REG_BATTERY_HOME_R_BATTERY_WARNING_3_1,
+				                             bw3) ||
+				    !appendAggregateHexField(rs->dataValueFormatted, sizeof(rs->dataValueFormatted),
+				                             "Battery Warnings 4",
+				                             REG_BATTERY_HOME_R_BATTERY_WARNING_4_1,
+				                             bw4) ||
+				    !appendAggregateHexField(rs->dataValueFormatted, sizeof(rs->dataValueFormatted),
+				                             "Battery Warnings 5",
+				                             REG_BATTERY_HOME_R_BATTERY_WARNING_5_1,
+				                             bw5) ||
+				    !appendAggregateHexField(rs->dataValueFormatted, sizeof(rs->dataValueFormatted),
+				                             "Battery Warnings 6",
+				                             REG_BATTERY_HOME_R_BATTERY_WARNING_6_1,
+				                             bw6) ||
+				    !finishAggregateEventsJson(rs->dataValueFormatted, sizeof(rs->dataValueFormatted))) {
+					result = modbusRequestAndResponseStatusValues::payloadExceededCapacity;
+				}
 			}
 		}
 		break;
@@ -9987,22 +10454,36 @@ readEntity(const mqttState *singleEntity, modbusRequestAndResponse* rs)
 #ifdef EMS_35_36
 				count += popcount(ife1) + popcount(ife2) + popcount(ife3) + popcount(ife4);
 #endif // EMS_35_36
-				sprintf(rs->dataValueFormatted, "{ \"numEvents\": %u, "
-								  "\"Inverter Faults 1 (0x%04X)\": \"0x%08X\","
-								  "\"Inverter Faults 2 (0x%04X)\": \"0x%08X\""
+				if (!beginAggregateEventsJson(rs->dataValueFormatted, sizeof(rs->dataValueFormatted), count) ||
+				    !appendAggregateHexField(rs->dataValueFormatted, sizeof(rs->dataValueFormatted),
+				                             "Inverter Faults 1",
+				                             REG_INVERTER_HOME_R_INVERTER_FAULT_1_1,
+				                             if1) ||
+				    !appendAggregateHexField(rs->dataValueFormatted, sizeof(rs->dataValueFormatted),
+				                             "Inverter Faults 2",
+				                             REG_INVERTER_HOME_R_INVERTER_FAULT_2_1,
+				                             if2)
 #ifdef EMS_35_36
-								  ", \"Inverter Faults Extended 1 (0x%04X)\": \"0x%08X\""
-								  ", \"Inverter Faults Extended 2 (0x%04X)\": \"0x%08X\""
-								  ", \"Inverter Faults Extended 3 (0x%04X)\": \"0x%08X\""
-								  ", \"Inverter Faults Extended 4 (0x%04X)\": \"0x%08X\""
+				    || !appendAggregateHexField(rs->dataValueFormatted, sizeof(rs->dataValueFormatted),
+				                                "Inverter Faults Extended 1",
+				                                REG_INVERTER_HOME_R_INVERTER_FAULT_EXTEND_1_1,
+				                                ife1) ||
+				    !appendAggregateHexField(rs->dataValueFormatted, sizeof(rs->dataValueFormatted),
+				                             "Inverter Faults Extended 2",
+				                             REG_INVERTER_HOME_R_INVERTER_FAULT_EXTEND_2_1,
+				                             ife2) ||
+				    !appendAggregateHexField(rs->dataValueFormatted, sizeof(rs->dataValueFormatted),
+				                             "Inverter Faults Extended 3",
+				                             REG_INVERTER_HOME_R_INVERTER_FAULT_EXTEND_3_1,
+				                             ife3) ||
+				    !appendAggregateHexField(rs->dataValueFormatted, sizeof(rs->dataValueFormatted),
+				                             "Inverter Faults Extended 4",
+				                             REG_INVERTER_HOME_R_INVERTER_FAULT_EXTEND_4_1,
+				                             ife4)
 #endif // EMS_35_36
-								  " }",
-					count, REG_INVERTER_HOME_R_INVERTER_FAULT_1_1, if1, REG_INVERTER_HOME_R_INVERTER_FAULT_2_1, if2
-#ifdef EMS_35_36
-					, REG_INVERTER_HOME_R_INVERTER_FAULT_EXTEND_1_1, ife1, REG_INVERTER_HOME_R_INVERTER_FAULT_EXTEND_2_1, ife2,
-					REG_INVERTER_HOME_R_INVERTER_FAULT_EXTEND_3_1, ife3, REG_INVERTER_HOME_R_INVERTER_FAULT_EXTEND_4_1, ife4
-#endif // EMS_35_36
-					);
+				    || !finishAggregateEventsJson(rs->dataValueFormatted, sizeof(rs->dataValueFormatted))) {
+					result = modbusRequestAndResponseStatusValues::payloadExceededCapacity;
+				}
 			}
 		}
 		break;
@@ -10022,10 +10503,18 @@ readEntity(const mqttState *singleEntity, modbusRequestAndResponse* rs)
 #endif // DEBUG_NO_RS485
 			if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
 				count = popcount(iw1) + popcount(iw2);
-				sprintf(rs->dataValueFormatted, "{ \"numEvents\": %u, "
-								  "\"Inverter Warnings 1 (0x%04X)\": \"0x%08X\","
-								  "\"Inverter Warnings 2 (0x%04X)\": \"0x%08X\" }",
-					count, REG_INVERTER_HOME_R_INVERTER_WARNING_1_1, iw1, REG_INVERTER_HOME_R_INVERTER_WARNING_2_1, iw2);
+				if (!beginAggregateEventsJson(rs->dataValueFormatted, sizeof(rs->dataValueFormatted), count) ||
+				    !appendAggregateHexField(rs->dataValueFormatted, sizeof(rs->dataValueFormatted),
+				                             "Inverter Warnings 1",
+				                             REG_INVERTER_HOME_R_INVERTER_WARNING_1_1,
+				                             iw1) ||
+				    !appendAggregateHexField(rs->dataValueFormatted, sizeof(rs->dataValueFormatted),
+				                             "Inverter Warnings 2",
+				                             REG_INVERTER_HOME_R_INVERTER_WARNING_2_1,
+				                             iw2) ||
+				    !finishAggregateEventsJson(rs->dataValueFormatted, sizeof(rs->dataValueFormatted))) {
+					result = modbusRequestAndResponseStatusValues::payloadExceededCapacity;
+				}
 			}
 		}
 		break;
@@ -10045,10 +10534,18 @@ readEntity(const mqttState *singleEntity, modbusRequestAndResponse* rs)
 #endif // DEBUG_NO_RS485
 			if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
 				count = popcount(sf) + popcount(sf1);
-				sprintf(rs->dataValueFormatted, "{ \"numEvents\": %u, "
-								  "\"System Faults (0x%04X)\": \"0x%08X\","
-								  "\"System Faults 1 (0x%04X)\": \"0x%08X\" }",
-					count, REG_SYSTEM_INFO_R_SYSTEM_FAULT, sf, REG_SYSTEM_OP_R_SYSTEM_FAULT_1, sf1);
+				if (!beginAggregateEventsJson(rs->dataValueFormatted, sizeof(rs->dataValueFormatted), count) ||
+				    !appendAggregateHexField(rs->dataValueFormatted, sizeof(rs->dataValueFormatted),
+				                             "System Faults",
+				                             REG_SYSTEM_INFO_R_SYSTEM_FAULT,
+				                             sf) ||
+				    !appendAggregateHexField(rs->dataValueFormatted, sizeof(rs->dataValueFormatted),
+				                             "System Faults 1",
+				                             REG_SYSTEM_OP_R_SYSTEM_FAULT_1,
+				                             sf1) ||
+				    !finishAggregateEventsJson(rs->dataValueFormatted, sizeof(rs->dataValueFormatted))) {
+					result = modbusRequestAndResponseStatusValues::payloadExceededCapacity;
+				}
 			}
 		}
 		break;
@@ -10081,7 +10578,9 @@ readEntity(const mqttState *singleEntity, modbusRequestAndResponse* rs)
 		result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
 		break;
 	case mqttEntityId::entityDispatchRequestStatus:
-		strlcpy(rs->dataValueFormatted, dispatchRequestStatus, sizeof(rs->dataValueFormatted));
+		strlcpy(rs->dataValueFormatted,
+		        (g_dispatchRequestStatus != nullptr) ? g_dispatchRequestStatus : "",
+		        sizeof(rs->dataValueFormatted));
 		result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
 		break;
 	case mqttEntityId::entitySocTarget:
@@ -10407,20 +10906,324 @@ readEntity(const mqttState *singleEntity, modbusRequestAndResponse* rs)
 modbusRequestAndResponseStatusValues
 addState(const mqttState *singleEntity, modbusRequestAndResponseStatusValues *resultAddedToPayload)
 {
-	modbusRequestAndResponse response;
+	modbusRequestAndResponse *response = runtimeModbusReadScratch();
+	if (response == nullptr) {
+		if (resultAddedToPayload != nullptr) {
+			*resultAddedToPayload = modbusRequestAndResponseStatusValues::preProcessing;
+		}
+		return modbusRequestAndResponseStatusValues::preProcessing;
+	}
 	modbusRequestAndResponseStatusValues result;
 
 	// Read the register(s)/data
-	result = readEntity(singleEntity, &response);
+	*response = modbusRequestAndResponse{};
+	result = readEntity(singleEntity, response);
 
 	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
 		// Let the onward process also know if the buffer failed.
-		*resultAddedToPayload = addToPayload(response.dataValueFormatted);
+		*resultAddedToPayload = addToPayload(response->dataValueFormatted);
 	} else {
 		*resultAddedToPayload = modbusRequestAndResponseStatusValues::preProcessing;
 	}
 	return result;
 }
+
+static void __attribute__((noinline))
+populateStatusPollSnapshot(StatusPollSnapshot &poll, bool includeEssSnapshot)
+{
+	const bool essSnapshotOkNow = includeEssSnapshot && essSnapshotValid;
+	poll.wifiStatus = wifiStatusLabel(WiFi.status());
+	poll.wifiStatusCode = static_cast<int>(WiFi.status());
+	poll.wifiReconnects = wifiReconnectCount;
+	poll.inverterReady = inverterReady;
+	poll.essSnapshotOk = essSnapshotOkNow;
+	poll.pollOkCount = pollOkCount;
+	{
+		const MemSample sample = readMemSample();
+		const MemLevel runtimeLevel = evaluateRuntimeMem(sample);
+		poll.heapFreeB = sample.freeB;
+		poll.heapMaxBlockB = sample.maxBlockB;
+		poll.heapFragPct = sample.fragPct;
+		poll.memLevel = static_cast<uint8_t>(runtimeLevel);
+		poll.bootHeapLevel = static_cast<uint8_t>(bootMemWorst.level);
+		poll.bootHeapStage = static_cast<uint8_t>(bootMemWorst.stage);
+		poll.bootHeapFreeB = bootMemWorst.sample.freeB;
+		poll.bootHeapMaxBlockB = bootMemWorst.sample.maxBlockB;
+		poll.bootHeapFragPct = bootMemWorst.sample.fragPct;
+	}
+	poll.pollErrCount = pollErrCount;
+	poll.rs485ErrorCount = rs485Errors;
+	poll.rs485TransportErrorCount = rs485TransportErrors;
+	poll.rs485OtherErrorCount = rs485OtherErrors;
+	poll.lastPollMs = lastPollMs;
+	poll.lastOkTsMs = lastOkTsMs;
+	poll.lastErrTsMs = lastErrTsMs;
+	poll.lastErrCode = lastErrCode;
+	poll.rs485ProbeLastAttemptMs = rs485ProbeLastAttemptMs;
+	poll.rs485ProbeBackoffMs = (rs485ConnectState == Rs485ConnectState::Connected) ? 0 : rs485CycleBackoffMs;
+	poll.rs485Backend =
+#if RS485_STUB
+		"stub";
+#else
+		"real";
+#endif
+	poll.essSnapshotLastOk = essSnapshotLastOk;
+	poll.essSnapshotAttempts = essSnapshotAttemptCount;
+	poll.essPowerSnapshotLastBuildMs = essPowerSnapshotLastBuildMs;
+	poll.snapshotPublishSkipCount = snapshotPublishSkipCount;
+#if RS485_STUB
+	poll.rs485StubMode = _modBus ? _modBus->stubModeLabel() : "uninit";
+	poll.rs485StubFailRemaining = _modBus ? _modBus->stubFailRemaining() : 0;
+	poll.rs485StubWriteCount = _modBus ? _modBus->stubWriteCount() : 0;
+	poll.rs485StubLastWriteStartReg = _modBus ? _modBus->stubLastWriteStartReg() : 0;
+	poll.rs485StubLastWriteRegCount = _modBus ? _modBus->stubLastWriteRegCount() : 0;
+	poll.rs485StubLastWriteMs = _modBus ? _modBus->stubLastWriteMs() : 0;
+#else
+	poll.rs485StubMode = "";
+	poll.rs485StubFailRemaining = 0;
+	poll.rs485StubWriteCount = 0;
+	poll.rs485StubLastWriteStartReg = 0;
+	poll.rs485StubLastWriteRegCount = 0;
+	poll.rs485StubLastWriteMs = 0;
+#endif
+	poll.dispatchRequestQueuedMs = dispatchRequestQueuedMs;
+	poll.dispatchLastRunMs = dispatchLastRunMs;
+	poll.dispatchWaitDueToSnapshotMs = dispatchWaitDueToSnapshotMs;
+	poll.dispatchQueueCoalesceCount = dispatchQueueCoalesceCount;
+	poll.dispatchBlockCacheHitCount = dispatchBlockCacheHitCount;
+	poll.pvBlockCacheHitCount = pvBlockCacheHitCount;
+	poll.pvMeterCacheHitCount = pvMeterCacheHitCount;
+	poll.dispatchLastSkipReason = dispatchLastSkipReason;
+	poll.worstPhase = runtimeDiagPhaseName(runtimeDiag.worstValid ? runtimeDiag.worstPhase : RuntimeDiagPhase::None);
+	poll.worstFreeHeapB = runtimeDiag.worstValid ? runtimeDiag.worstSample.freeB : 0;
+	poll.worstMaxBlockB = runtimeDiag.worstValid ? runtimeDiag.worstSample.maxBlockB : 0;
+	poll.worstFragPct = runtimeDiag.worstValid ? runtimeDiag.worstSample.fragPct : 0;
+	poll.mqttMaxPayloadSeen = runtimeDiag.mqttMaxPayloadSeen;
+	poll.mqttMaxPayloadKind = runtimeDiag.mqttMaxPayloadKind;
+	poll.schedTenSecLastRunMs = schedTenSecLastRunMs;
+	poll.schedOneMinLastRunMs = schedOneMinLastRunMs;
+	poll.schedFiveMinLastRunMs = schedFiveMinLastRunMs;
+	poll.schedOneHourLastRunMs = schedOneHourLastRunMs;
+	poll.schedOneDayLastRunMs = schedOneDayLastRunMs;
+	poll.pollIntervalSeconds = pollIntervalSeconds;
+	poll.schedUserLastRunMs = schedUserLastRunMs;
+	poll.schedTenSecCount = schedTenSecCount;
+	poll.schedOneMinCount = schedOneMinCount;
+	poll.schedFiveMinCount = schedFiveMinCount;
+	poll.schedOneHourCount = schedOneHourCount;
+	poll.schedOneDayCount = schedOneDayCount;
+	poll.schedUserCount = schedUserCount;
+	poll.persistLoadOk = persistLoadOk;
+	poll.persistLoadErr = persistLoadErr;
+	poll.persistUnknownEntityCount = persistUnknownEntityCount;
+	poll.persistInvalidBucketCount = persistInvalidBucketCount;
+	poll.persistDuplicateEntityCount = persistDuplicateEntityCount;
+	poll.pollingBudgetExceeded = pollingBudgetExceeded();
+	poll.pollingBudgetOverrunCount = pollingBudgetOverrunCount;
+	const uint32_t nowMs = millis();
+	for (size_t bucketIdx = 0; bucketIdx < (sizeof(kRuntimeBuckets) / sizeof(kRuntimeBuckets[0])); ++bucketIdx) {
+		const BucketRuntimeBudgetState &budgetState = schedBudgetState[bucketIdx];
+		poll.pollingBudgetUsedMs[bucketIdx] = budgetState.usedMsLast;
+		poll.pollingBudgetLimitMs[bucketIdx] = budgetState.limitMsLast;
+		poll.pollingBacklogCount[bucketIdx] = budgetState.backlogCount;
+		poll.pollingBacklogOldestAgeMs[bucketIdx] = bucketBacklogOldestAgeMs(budgetState, nowMs);
+		poll.pollingLastFullCycleAgeMs[bucketIdx] = bucketLastFullCycleAgeMs(budgetState, nowMs);
+	}
+}
+
+#if RS485_STUB
+static bool __attribute__((noinline))
+populateStatusStubSnapshot(StatusStubSnapshot &stub)
+{
+	if (_modBus == nullptr) {
+		return false;
+	}
+	stub.stubReads = _modBus->stubReadCount();
+	stub.stubWrites = _modBus->stubWriteCount();
+	stub.stubUnknownReads = _modBus->stubUnknownRegisterReads();
+	stub.socX10 = _modBus->stubBatterySocX10();
+	stub.lastReadStartReg = _modBus->stubLastReadStartReg();
+	stub.lastReadRegCount = _modBus->stubLastReadRegCount();
+	stub.lastFn = _modBus->stubLastFn();
+	stub.lastFailStartReg = _modBus->stubLastFailStartReg();
+	stub.lastFailFn = _modBus->stubLastFailFn();
+	stub.lastFailType = _modBus->stubLastFailTypeLabel();
+	stub.lastWriteFailStartReg = _modBus->stubLastWriteFailStartReg();
+	stub.lastWriteFailFn = _modBus->stubLastWriteFailFn();
+	stub.lastWriteFailType = _modBus->stubLastWriteFailTypeLabel();
+	stub.failRegister = _modBus->stubFailRegister();
+	stub.failType = _modBus->stubFailTypeLabel();
+	stub.latencyMs = _modBus->stubLatencyMs();
+	stub.strictUnknown = _modBus->stubStrictUnknown();
+	stub.failReads = _modBus->stubFailReads();
+	stub.failWrites = _modBus->stubFailWrites();
+	stub.failEveryN = _modBus->stubFailEveryN();
+	stub.failForMs = _modBus->stubFailForMs();
+	stub.flapOnlineMs = _modBus->stubFlapOnlineMs();
+	stub.flapOfflineMs = _modBus->stubFlapOfflineMs();
+	stub.probeAttempts = _modBus->stubProbeAttempts();
+	stub.probeSuccessAfterN = _modBus->stubProbeSuccessAfterN();
+	stub.socStepX10PerSnapshot = _modBus->stubSocStepX10PerSnapshot();
+	return true;
+}
+#endif
+
+static bool __attribute__((noinline))
+publishStatusPollSnapshot(const StatusPollSnapshot &poll)
+{
+	if (!ensureStatusJsonScratch()) {
+		return false;
+	}
+	char pollTopic[160];
+	snprintf(pollTopic, sizeof(pollTopic), "%s/poll", statusTopic);
+	bool pollBuilt = buildStatusPollJson(poll, g_statusJsonScratch, kStatusJsonScratchSize);
+	bool usedCompactPoll = false;
+	if (!pollBuilt) {
+		pollBuilt = buildStatusPollJsonCompact(poll, g_statusJsonScratch, kStatusJsonScratchSize);
+		usedCompactPoll = pollBuilt;
+	}
+	if (!pollBuilt) {
+		return false;
+	}
+	RuntimeDiagScope diagScope(RuntimeDiagPhase::StatusPublish, "poll");
+	bool published = publishTrackedTextPayload(pollTopic, g_statusJsonScratch, MQTT_RETAIN);
+	if (!published && !usedCompactPoll &&
+	    buildStatusPollJsonCompact(poll, g_statusJsonScratch, kStatusJsonScratchSize)) {
+		published = publishTrackedTextPayload(pollTopic, g_statusJsonScratch, MQTT_RETAIN);
+	}
+#ifdef DEBUG_OVER_SERIAL
+	if (!published) {
+		Serial.println("status/poll publish failed (full+compact)");
+	}
+#endif
+	maybeYield();
+	return published;
+}
+
+#if RS485_STUB
+static bool __attribute__((noinline))
+publishStatusStubSnapshot(const StatusStubSnapshot &stub)
+{
+	if (!ensureStatusJsonScratch()) {
+		return false;
+	}
+	char stubTopic[160];
+	snprintf(stubTopic, sizeof(stubTopic), "%s/stub", statusTopic);
+	if (!buildStatusStubJson(stub, g_statusJsonScratch, kStatusJsonScratchSize)) {
+		return false;
+	}
+	if (_mqtt.publish(stubTopic, g_statusJsonScratch, MQTT_RETAIN)) {
+		noteMqttActivityPulse();
+		maybeYield();
+		return true;
+	}
+	maybeYield();
+	return false;
+}
+
+static bool
+publishStubControlStatusNow(bool includeEssSnapshot)
+{
+	if (!_mqtt.connected() || !ensureStatusJsonScratch()) {
+		return false;
+	}
+	// Stub-control acknowledgements avoid the full status builders because the extra locals and
+	// Wi-Fi status path can trip the ESP8266 watchdog/stack guard during control transitions.
+	const bool essSnapshotOkNow = includeEssSnapshot && essSnapshotValid;
+	const char *stubMode = _modBus ? _modBus->stubModeLabel() : "uninit";
+	const char *skipReason = dispatchLastSkipReason ? dispatchLastSkipReason : "";
+	const int pollWritten = snprintf(
+		g_statusJsonScratch,
+		kStatusJsonScratchSize,
+		"{"
+		"\"rs485_backend\":\"stub\","
+		"\"rs485_stub_mode\":\"%s\","
+		"\"rs485_stub_fail_remaining\":%lu,"
+		"\"rs485_stub_writes\":%lu,"
+		"\"rs485_stub_last_write_reg\":%u,"
+		"\"rs485_stub_last_write_reg_count\":%u,"
+		"\"rs485_stub_last_write_ms\":%lu,"
+		"\"dispatch_request_queued_ms\":%lu,"
+		"\"inverter_ready\":%s,"
+		"\"ess_snapshot_ok\":%s,"
+		"\"ess_snapshot_last_ok\":%s,"
+		"\"ess_snapshot_attempts\":%lu,"
+		"\"dispatch_last_run_ms\":%lu,"
+		"\"dispatch_last_skip_reason\":\"%s\","
+		"\"poll_interval_s\":%lu,"
+		"\"last_poll_ms\":%lu,"
+		"\"poll_ok_count\":%lu,"
+		"\"poll_err_count\":%lu,"
+		"\"rs485_error_count\":%lu,"
+		"\"rs485_transport_error_count\":%lu,"
+		"\"rs485_other_error_count\":%lu,"
+		"\"rs485_probe_last_attempt_ms\":%lu,"
+		"\"rs485_probe_backoff_ms\":%lu"
+		"}",
+		stubMode,
+		static_cast<unsigned long>(_modBus ? _modBus->stubFailRemaining() : 0),
+		static_cast<unsigned long>(_modBus ? _modBus->stubWriteCount() : 0),
+		static_cast<unsigned>(_modBus ? _modBus->stubLastWriteStartReg() : 0),
+		static_cast<unsigned>(_modBus ? _modBus->stubLastWriteRegCount() : 0),
+		static_cast<unsigned long>(_modBus ? _modBus->stubLastWriteMs() : 0),
+		static_cast<unsigned long>(dispatchRequestQueuedMs),
+		inverterReady ? "true" : "false",
+		essSnapshotOkNow ? "true" : "false",
+		essSnapshotLastOk ? "true" : "false",
+		static_cast<unsigned long>(essSnapshotAttemptCount),
+		static_cast<unsigned long>(dispatchLastRunMs),
+		skipReason,
+		static_cast<unsigned long>(pollIntervalSeconds),
+		static_cast<unsigned long>(lastPollMs),
+		static_cast<unsigned long>(pollOkCount),
+		static_cast<unsigned long>(pollErrCount),
+		static_cast<unsigned long>(rs485Errors),
+		static_cast<unsigned long>(rs485TransportErrors),
+		static_cast<unsigned long>(rs485OtherErrors),
+		static_cast<unsigned long>(rs485ProbeLastAttemptMs),
+		static_cast<unsigned long>((rs485ConnectState == Rs485ConnectState::Connected) ? 0 : rs485CycleBackoffMs));
+	if (pollWritten <= 0 || static_cast<size_t>(pollWritten) >= kStatusJsonScratchSize) {
+		return false;
+	}
+	char pollTopic[160];
+	snprintf(pollTopic, sizeof(pollTopic), "%s/poll", statusTopic);
+	const bool pollPublished = publishTrackedTextPayload(pollTopic, g_statusJsonScratch, MQTT_RETAIN);
+	maybeYield();
+
+	const int stubWritten = snprintf(
+		g_statusJsonScratch,
+		kStatusJsonScratchSize,
+		"{"
+		"\"strict_unknown\":%s,"
+		"\"fail_reads\":%s,"
+		"\"fail_writes\":%s,"
+		"\"fail_every_n\":%lu,"
+		"\"fail_for_ms\":%lu,"
+		"\"flap_online_ms\":%lu,"
+		"\"flap_offline_ms\":%lu,"
+		"\"probe_success_after_n\":%lu"
+		"}",
+		(_modBus && _modBus->stubStrictUnknown()) ? "true" : "false",
+		(_modBus && _modBus->stubFailReads()) ? "true" : "false",
+		(_modBus && _modBus->stubFailWrites()) ? "true" : "false",
+		static_cast<unsigned long>(_modBus ? _modBus->stubFailEveryN() : 0),
+		static_cast<unsigned long>(_modBus ? _modBus->stubFailForMs() : 0),
+		static_cast<unsigned long>(_modBus ? _modBus->stubFlapOnlineMs() : 0),
+		static_cast<unsigned long>(_modBus ? _modBus->stubFlapOfflineMs() : 0),
+		static_cast<unsigned long>(_modBus ? _modBus->stubProbeSuccessAfterN() : 0));
+	if (stubWritten <= 0 || static_cast<size_t>(stubWritten) >= kStatusJsonScratchSize) {
+		return false;
+	}
+	char stubTopic[160];
+	snprintf(stubTopic, sizeof(stubTopic), "%s/stub", statusTopic);
+	const bool stubPublished = _mqtt.publish(stubTopic, g_statusJsonScratch, MQTT_RETAIN);
+	if (stubPublished) {
+		noteMqttActivityPulse();
+	}
+	maybeYield();
+	return pollPublished && stubPublished;
+}
+#endif
 
 void
 sendStatus(bool includeEssSnapshot)
@@ -10496,93 +11299,7 @@ sendStatus(bool includeEssSnapshot)
 	net.wifiStatusCode = static_cast<int>(WiFi.status());
 	net.wifiReconnects = wifiReconnectCount;
 
-	poll.inverterReady = inverterReady;
-	poll.essSnapshotOk = essSnapshotOkNow;
-	poll.pollOkCount = pollOkCount;
-	{
-		const MemSample sample = readMemSample();
-		const MemLevel runtimeLevel = evaluateRuntimeMem(sample);
-		poll.heapFreeB = sample.freeB;
-		poll.heapMaxBlockB = sample.maxBlockB;
-		poll.heapFragPct = sample.fragPct;
-		poll.memLevel = static_cast<uint8_t>(runtimeLevel);
-		poll.bootHeapLevel = static_cast<uint8_t>(bootMemWorst.level);
-		poll.bootHeapStage = static_cast<uint8_t>(bootMemWorst.stage);
-		poll.bootHeapFreeB = bootMemWorst.sample.freeB;
-		poll.bootHeapMaxBlockB = bootMemWorst.sample.maxBlockB;
-		poll.bootHeapFragPct = bootMemWorst.sample.fragPct;
-	}
-	poll.pollErrCount = pollErrCount;
-	poll.rs485ErrorCount = rs485Errors;
-	poll.rs485TransportErrorCount = rs485TransportErrors;
-	poll.rs485OtherErrorCount = rs485OtherErrors;
-	poll.lastPollMs = lastPollMs;
-	poll.lastOkTsMs = lastOkTsMs;
-	poll.lastErrTsMs = lastErrTsMs;
-	poll.lastErrCode = lastErrCode;
-	poll.rs485ProbeLastAttemptMs = rs485ProbeLastAttemptMs;
-	poll.rs485ProbeBackoffMs = (rs485ConnectState == Rs485ConnectState::Connected) ? 0 : rs485CycleBackoffMs;
-	poll.rs485Backend =
-#if RS485_STUB
-		"stub";
-#else
-		"real";
-#endif
-	poll.essSnapshotLastOk = essSnapshotLastOk;
-	poll.essSnapshotAttempts = essSnapshotAttemptCount;
-#if RS485_STUB
-	poll.rs485StubMode = _modBus ? _modBus->stubModeLabel() : "uninit";
-	poll.rs485StubFailRemaining = _modBus ? _modBus->stubFailRemaining() : 0;
-	poll.rs485StubWriteCount = _modBus ? _modBus->stubWriteCount() : 0;
-	poll.rs485StubLastWriteStartReg = _modBus ? _modBus->stubLastWriteStartReg() : 0;
-	poll.rs485StubLastWriteRegCount = _modBus ? _modBus->stubLastWriteRegCount() : 0;
-	poll.rs485StubLastWriteMs = _modBus ? _modBus->stubLastWriteMs() : 0;
-#else
-	poll.rs485StubMode = "";
-	poll.rs485StubFailRemaining = 0;
-	poll.rs485StubWriteCount = 0;
-	poll.rs485StubLastWriteStartReg = 0;
-	poll.rs485StubLastWriteRegCount = 0;
-	poll.rs485StubLastWriteMs = 0;
-#endif
-	poll.dispatchRequestQueuedMs = dispatchRequestQueuedMs;
-	poll.dispatchLastRunMs = dispatchLastRunMs;
-	poll.dispatchLastSkipReason = dispatchLastSkipReason;
-	poll.worstPhase = runtimeDiagPhaseName(runtimeDiag.worstValid ? runtimeDiag.worstPhase : RuntimeDiagPhase::None);
-	poll.worstFreeHeapB = runtimeDiag.worstValid ? runtimeDiag.worstSample.freeB : 0;
-	poll.worstMaxBlockB = runtimeDiag.worstValid ? runtimeDiag.worstSample.maxBlockB : 0;
-	poll.worstFragPct = runtimeDiag.worstValid ? runtimeDiag.worstSample.fragPct : 0;
-	poll.mqttMaxPayloadSeen = runtimeDiag.mqttMaxPayloadSeen;
-	poll.mqttMaxPayloadKind = runtimeDiag.mqttMaxPayloadKind;
-	poll.schedTenSecLastRunMs = schedTenSecLastRunMs;
-	poll.schedOneMinLastRunMs = schedOneMinLastRunMs;
-	poll.schedFiveMinLastRunMs = schedFiveMinLastRunMs;
-	poll.schedOneHourLastRunMs = schedOneHourLastRunMs;
-	poll.schedOneDayLastRunMs = schedOneDayLastRunMs;
-	poll.pollIntervalSeconds = pollIntervalSeconds;
-	poll.schedUserLastRunMs = schedUserLastRunMs;
-	poll.schedTenSecCount = schedTenSecCount;
-	poll.schedOneMinCount = schedOneMinCount;
-	poll.schedFiveMinCount = schedFiveMinCount;
-	poll.schedOneHourCount = schedOneHourCount;
-	poll.schedOneDayCount = schedOneDayCount;
-	poll.schedUserCount = schedUserCount;
-	poll.persistLoadOk = persistLoadOk;
-	poll.persistLoadErr = persistLoadErr;
-	poll.persistUnknownEntityCount = persistUnknownEntityCount;
-	poll.persistInvalidBucketCount = persistInvalidBucketCount;
-	poll.persistDuplicateEntityCount = persistDuplicateEntityCount;
-	poll.pollingBudgetExceeded = pollingBudgetExceeded();
-	poll.pollingBudgetOverrunCount = pollingBudgetOverrunCount;
-	const uint32_t nowMs = millis();
-	for (size_t bucketIdx = 0; bucketIdx < (sizeof(kRuntimeBuckets) / sizeof(kRuntimeBuckets[0])); ++bucketIdx) {
-		const BucketRuntimeBudgetState &budgetState = schedBudgetState[bucketIdx];
-		poll.pollingBudgetUsedMs[bucketIdx] = budgetState.usedMsLast;
-		poll.pollingBudgetLimitMs[bucketIdx] = budgetState.limitMsLast;
-		poll.pollingBacklogCount[bucketIdx] = budgetState.backlogCount;
-		poll.pollingBacklogOldestAgeMs[bucketIdx] = bucketBacklogOldestAgeMs(budgetState, nowMs);
-		poll.pollingLastFullCycleAgeMs[bucketIdx] = bucketLastFullCycleAgeMs(budgetState, nowMs);
-	}
+	populateStatusPollSnapshot(poll, includeEssSnapshot);
 
 	if (!buildStatusCoreJson(core, g_statusJsonScratch, kStatusJsonScratchSize)) {
 		return;
@@ -10608,66 +11325,11 @@ sendStatus(bool includeEssSnapshot)
 		maybeYield();
 	}
 
-	char pollTopic[160];
-	snprintf(pollTopic, sizeof(pollTopic), "%s/poll", statusTopic);
-	bool pollBuilt = buildStatusPollJson(poll, g_statusJsonScratch, kStatusJsonScratchSize);
-	bool usedCompactPoll = false;
-	if (!pollBuilt) {
-		pollBuilt = buildStatusPollJsonCompact(poll, g_statusJsonScratch, kStatusJsonScratchSize);
-		usedCompactPoll = pollBuilt;
-	}
-	if (pollBuilt) {
-		RuntimeDiagScope diagScope(RuntimeDiagPhase::StatusPublish, "poll");
-		bool published = publishTrackedTextPayload(pollTopic, g_statusJsonScratch, MQTT_RETAIN);
-		if (!published && !usedCompactPoll &&
-		    buildStatusPollJsonCompact(poll, g_statusJsonScratch, kStatusJsonScratchSize)) {
-			published = publishTrackedTextPayload(pollTopic, g_statusJsonScratch, MQTT_RETAIN);
-			usedCompactPoll = true;
-		}
-#ifdef DEBUG_OVER_SERIAL
-		if (!published) {
-			Serial.println("status/poll publish failed (full+compact)");
-		}
-#endif
-		maybeYield();
-	}
+	publishStatusPollSnapshot(poll);
 
 #if RS485_STUB
-	if (_modBus != nullptr) {
-		stub.stubReads = _modBus->stubReadCount();
-		stub.stubWrites = _modBus->stubWriteCount();
-		stub.stubUnknownReads = _modBus->stubUnknownRegisterReads();
-		stub.socX10 = _modBus->stubBatterySocX10();
-		stub.lastReadStartReg = _modBus->stubLastReadStartReg();
-		stub.lastFn = _modBus->stubLastFn();
-		stub.lastFailStartReg = _modBus->stubLastFailStartReg();
-		stub.lastFailFn = _modBus->stubLastFailFn();
-		stub.lastFailType = _modBus->stubLastFailTypeLabel();
-		stub.lastWriteFailStartReg = _modBus->stubLastWriteFailStartReg();
-		stub.lastWriteFailFn = _modBus->stubLastWriteFailFn();
-		stub.lastWriteFailType = _modBus->stubLastWriteFailTypeLabel();
-		stub.failRegister = _modBus->stubFailRegister();
-		stub.failType = _modBus->stubFailTypeLabel();
-		stub.latencyMs = _modBus->stubLatencyMs();
-		stub.strictUnknown = _modBus->stubStrictUnknown();
-		stub.failReads = _modBus->stubFailReads();
-		stub.failWrites = _modBus->stubFailWrites();
-		stub.failEveryN = _modBus->stubFailEveryN();
-		stub.failForMs = _modBus->stubFailForMs();
-		stub.flapOnlineMs = _modBus->stubFlapOnlineMs();
-		stub.flapOfflineMs = _modBus->stubFlapOfflineMs();
-		stub.probeAttempts = _modBus->stubProbeAttempts();
-		stub.probeSuccessAfterN = _modBus->stubProbeSuccessAfterN();
-		stub.socStepX10PerSnapshot = _modBus->stubSocStepX10PerSnapshot();
-
-		char stubTopic[160];
-		snprintf(stubTopic, sizeof(stubTopic), "%s/stub", statusTopic);
-		if (buildStatusStubJson(stub, g_statusJsonScratch, kStatusJsonScratchSize)) {
-			if (_mqtt.publish(stubTopic, g_statusJsonScratch, MQTT_RETAIN)) {
-				noteMqttActivityPulse();
-			}
-			maybeYield();
-		}
+	if (populateStatusStubSnapshot(stub)) {
+		publishStatusStubSnapshot(stub);
 	}
 #else
 	static bool clearedRetainedStubStatus = false;
@@ -11334,6 +11996,555 @@ sendHaData()
 	resendHaNextEntityIndex = 0;
 }
 
+static void
+beginSchedulerPass(void)
+{
+	schedulerPassSequence++;
+	schedulerPassCache = SchedulerPassSourceCache{};
+	schedulerPassCache.passId = schedulerPassSequence;
+	schedulerPassCache.active = true;
+}
+
+static void
+endSchedulerPass(void)
+{
+	schedulerPassCache.active = false;
+	schedulerPassCache.snapshotBuildInProgress = false;
+}
+
+static uint16_t
+decodeRegisterWord(const modbusRequestAndResponse &response, size_t wordOffset)
+{
+	const size_t byteOffset = wordOffset * 2U;
+	return static_cast<uint16_t>((response.data[byteOffset] << 8) | response.data[byteOffset + 1]);
+}
+
+static uint32_t
+decodeRegisterUnsignedInt(const modbusRequestAndResponse &response, size_t wordOffset)
+{
+	const size_t byteOffset = wordOffset * 2U;
+	return (static_cast<uint32_t>(response.data[byteOffset]) << 24) |
+	       (static_cast<uint32_t>(response.data[byteOffset + 1]) << 16) |
+	       (static_cast<uint32_t>(response.data[byteOffset + 2]) << 8) |
+	       static_cast<uint32_t>(response.data[byteOffset + 3]);
+}
+
+static int32_t
+decodeRegisterSignedInt(const modbusRequestAndResponse &response, size_t wordOffset)
+{
+	return static_cast<int32_t>(decodeRegisterUnsignedInt(response, wordOffset));
+}
+
+static void
+prepareUnsignedShortResponse(uint16_t value, modbusRequestAndResponse &prepared)
+{
+	prepared = modbusRequestAndResponse{};
+	prepared.dataSize = 2;
+	prepared.returnDataType = modbusReturnDataType::unsignedShort;
+	prepared.unsignedShortValue = value;
+	prepared.data[0] = static_cast<uint8_t>((value >> 8) & 0xff);
+	prepared.data[1] = static_cast<uint8_t>(value & 0xff);
+	snprintf(prepared.dataValueFormatted, sizeof(prepared.dataValueFormatted), "%u", value);
+}
+
+static void
+prepareScaledUnsignedShortResponse(uint16_t rawValue,
+                                   float scaledValue,
+                                   uint8_t decimalPlaces,
+                                   modbusRequestAndResponse &prepared)
+{
+	prepareUnsignedShortResponse(rawValue, prepared);
+	snprintf(prepared.dataValueFormatted,
+	         sizeof(prepared.dataValueFormatted),
+	         decimalPlaces == 1 ? "%0.1f" : "%0.02f",
+	         scaledValue);
+}
+
+static void
+prepareUnsignedIntResponse(uint32_t value, modbusRequestAndResponse &prepared)
+{
+	prepared = modbusRequestAndResponse{};
+	prepared.dataSize = 4;
+	prepared.returnDataType = modbusReturnDataType::unsignedInt;
+	prepared.unsignedIntValue = value;
+	prepared.data[0] = static_cast<uint8_t>((value >> 24) & 0xff);
+	prepared.data[1] = static_cast<uint8_t>((value >> 16) & 0xff);
+	prepared.data[2] = static_cast<uint8_t>((value >> 8) & 0xff);
+	prepared.data[3] = static_cast<uint8_t>(value & 0xff);
+	snprintf(prepared.dataValueFormatted,
+	         sizeof(prepared.dataValueFormatted),
+	         "%lu",
+	         static_cast<unsigned long>(value));
+}
+
+static void
+prepareSignedIntResponse(int32_t value, modbusRequestAndResponse &prepared)
+{
+	prepared = modbusRequestAndResponse{};
+	prepared.dataSize = 4;
+	prepared.returnDataType = modbusReturnDataType::signedInt;
+	prepared.signedIntValue = value;
+	prepared.data[0] = static_cast<uint8_t>((static_cast<uint32_t>(value) >> 24) & 0xff);
+	prepared.data[1] = static_cast<uint8_t>((static_cast<uint32_t>(value) >> 16) & 0xff);
+	prepared.data[2] = static_cast<uint8_t>((static_cast<uint32_t>(value) >> 8) & 0xff);
+	prepared.data[3] = static_cast<uint8_t>(static_cast<uint32_t>(value) & 0xff);
+	snprintf(prepared.dataValueFormatted,
+	         sizeof(prepared.dataValueFormatted),
+	         "%ld",
+	         static_cast<long>(value));
+}
+
+static bool
+fetchDispatchBlockSnapshot(DispatchBlockSnapshot &out,
+                           modbusRequestAndResponseStatusValues *resultOut)
+{
+	if (schedulerPassCache.active &&
+	    sourceGroupCacheReusableForPass(schedulerPassCache.dispatch.meta, schedulerPassCache.passId)) {
+		schedulerPassCache.dispatchCacheHitCount++;
+		dispatchBlockCacheHitCount++;
+		out = schedulerPassCache.dispatch;
+		if (resultOut != nullptr) {
+			*resultOut = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
+		}
+		return true;
+	}
+
+	modbusRequestAndResponse *response = runtimeModbusReadScratch();
+	if (response == nullptr) {
+		if (resultOut != nullptr) {
+			*resultOut = modbusRequestAndResponseStatusValues::preProcessing;
+		}
+		return false;
+	}
+	*response = modbusRequestAndResponse{};
+	response->returnDataType = modbusReturnDataType::unsignedShort;
+	const uint32_t startedMs = millis();
+	const modbusRequestAndResponseStatusValues result =
+		(_registerHandler != nullptr)
+			? _registerHandler->readRawRegisterBlock(kDispatchBlockStartReg, kDispatchBlockRegisterCount, response)
+			: modbusRequestAndResponseStatusValues::preProcessing;
+	const uint32_t completedMs = millis();
+	if (resultOut != nullptr) {
+		*resultOut = result;
+	}
+	if (result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess ||
+	    response->dataSize < (kDispatchBlockRegisterCount * 2U)) {
+		return false;
+	}
+
+	DispatchBlockSnapshot snapshot{};
+	snapshot.meta.passId = schedulerPassCache.active ? schedulerPassCache.passId : 0;
+	snapshot.meta.readStartedMs = startedMs;
+	snapshot.meta.readCompletedMs = completedMs;
+	snapshot.meta.valid = true;
+	snapshot.dispatchStart = decodeRegisterWord(*response, 0);
+	snapshot.dispatchActivePower = decodeRegisterSignedInt(*response, 1);
+	snapshot.dispatchMode = decodeRegisterWord(*response, 5);
+	snapshot.dispatchSocRaw = decodeRegisterWord(*response, 6);
+	snapshot.dispatchTimeRaw = decodeRegisterUnsignedInt(*response, 7);
+	out = snapshot;
+	if (schedulerPassCache.active) {
+		schedulerPassCache.dispatch = snapshot;
+	}
+	return true;
+}
+
+static void
+invalidateDispatchBlockSnapshotCache(void)
+{
+	schedulerPassCache.dispatch.meta = SourceGroupReadMeta{};
+}
+
+static bool
+fetchPvStringBlockSnapshot(PvStringBlockSnapshot &out,
+                           modbusRequestAndResponseStatusValues *resultOut)
+{
+	if (schedulerPassCache.active &&
+	    sourceGroupCacheReusableForPass(schedulerPassCache.pvBlock.meta, schedulerPassCache.passId)) {
+		schedulerPassCache.pvBlockCacheHitCount++;
+		pvBlockCacheHitCount++;
+		out = schedulerPassCache.pvBlock;
+		if (resultOut != nullptr) {
+			*resultOut = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
+		}
+		return true;
+	}
+
+	modbusRequestAndResponse *response = runtimeModbusReadScratch();
+	if (response == nullptr) {
+		if (resultOut != nullptr) {
+			*resultOut = modbusRequestAndResponseStatusValues::preProcessing;
+		}
+		return false;
+	}
+	*response = modbusRequestAndResponse{};
+	response->returnDataType = modbusReturnDataType::unsignedShort;
+	const uint32_t startedMs = millis();
+	const modbusRequestAndResponseStatusValues result =
+		(_registerHandler != nullptr)
+			? _registerHandler->readRawRegisterBlock(kPvStringBlockStartReg, kPvStringBlockRegisterCount, response)
+			: modbusRequestAndResponseStatusValues::preProcessing;
+	const uint32_t completedMs = millis();
+	if (resultOut != nullptr) {
+		*resultOut = result;
+	}
+	if (result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess ||
+	    response->dataSize < (kPvStringBlockRegisterCount * 2U)) {
+		return false;
+	}
+
+	PvStringBlockSnapshot snapshot{};
+	snapshot.meta.passId = schedulerPassCache.active ? schedulerPassCache.passId : 0;
+	snapshot.meta.readStartedMs = startedMs;
+	snapshot.meta.readCompletedMs = completedMs;
+	snapshot.meta.valid = true;
+	for (size_t pv = 0; pv < kPvStringCount; ++pv) {
+		const size_t wordOffset = pv * 4U;
+		snapshot.voltage[pv] = decodeRegisterWord(*response, wordOffset);
+		snapshot.current[pv] = decodeRegisterWord(*response, wordOffset + 1U);
+		snapshot.power[pv] = decodeRegisterSignedInt(*response, wordOffset + 2U);
+	}
+	out = snapshot;
+	if (schedulerPassCache.active) {
+		schedulerPassCache.pvBlock = snapshot;
+	}
+	return true;
+}
+
+static bool
+fetchPvMeterTotalSnapshot(PvMeterTotalSnapshot &out,
+                          modbusRequestAndResponseStatusValues *resultOut)
+{
+	if (schedulerPassCache.active &&
+	    sourceGroupCacheReusableForPass(schedulerPassCache.pvMeter.meta, schedulerPassCache.passId)) {
+		schedulerPassCache.pvMeterCacheHitCount++;
+		pvMeterCacheHitCount++;
+		out = schedulerPassCache.pvMeter;
+		if (resultOut != nullptr) {
+			*resultOut = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
+		}
+		return true;
+	}
+
+	modbusRequestAndResponse *response = runtimeModbusReadScratch();
+	if (response == nullptr) {
+		if (resultOut != nullptr) {
+			*resultOut = modbusRequestAndResponseStatusValues::preProcessing;
+		}
+		return false;
+	}
+	*response = modbusRequestAndResponse{};
+	response->returnDataType = modbusReturnDataType::signedInt;
+	const uint32_t startedMs = millis();
+	const modbusRequestAndResponseStatusValues result =
+		(_registerHandler != nullptr)
+			? _registerHandler->readRawRegisterBlock(REG_PV_METER_R_TOTAL_ACTIVE_POWER_1, 2, response)
+			: modbusRequestAndResponseStatusValues::preProcessing;
+	const uint32_t completedMs = millis();
+	if (resultOut != nullptr) {
+		*resultOut = result;
+	}
+	if (result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess || response->dataSize < 4U) {
+		return false;
+	}
+
+	PvMeterTotalSnapshot snapshot{};
+	snapshot.meta.passId = schedulerPassCache.active ? schedulerPassCache.passId : 0;
+	snapshot.meta.readStartedMs = startedMs;
+	snapshot.meta.readCompletedMs = completedMs;
+	snapshot.meta.valid = true;
+	snapshot.totalPower = decodeRegisterSignedInt(*response, 0);
+	out = snapshot;
+	if (schedulerPassCache.active) {
+		schedulerPassCache.pvMeter = snapshot;
+	}
+	return true;
+}
+
+static bool
+prepareDispatchBlockResponse(mqttEntityId entityId,
+                             const DispatchBlockSnapshot &snapshot,
+                             modbusRequestAndResponse &prepared)
+{
+	switch (entityId) {
+	case mqttEntityId::entityDispatchStart:
+		prepareUnsignedShortResponse(snapshot.dispatchStart, prepared);
+		return formatDispatchStartValue(prepared.dataValueFormatted,
+		                                sizeof(prepared.dataValueFormatted),
+		                                snapshot.dispatchStart);
+	case mqttEntityId::entityDispatchMode:
+		prepareUnsignedShortResponse(snapshot.dispatchMode, prepared);
+		return formatDispatchModeValue(prepared.dataValueFormatted,
+		                               sizeof(prepared.dataValueFormatted),
+		                               snapshot.dispatchMode);
+	case mqttEntityId::entityDispatchPower:
+		prepareSignedIntResponse(dispatchActivePowerRawToWatts(snapshot.dispatchActivePower), prepared);
+		return true;
+	case mqttEntityId::entityDispatchSoc:
+		prepareScaledUnsignedShortResponse(snapshot.dispatchSocRaw,
+		                                   dispatchSocPercentFromRaw(snapshot.dispatchSocRaw),
+		                                   2,
+		                                   prepared);
+		return true;
+	case mqttEntityId::entityDispatchTime:
+		prepareUnsignedIntResponse(snapshot.dispatchTimeRaw, prepared);
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool
+preparePvBlockResponse(const mqttState &entity,
+                       const PvStringBlockSnapshot &snapshot,
+                       modbusRequestAndResponse &prepared)
+{
+	if (!isPvStringBlockReadKey(entity.readKey)) {
+		return false;
+	}
+	const uint16_t relative = static_cast<uint16_t>(entity.readKey - kPvStringBlockStartReg);
+	const size_t pvIndex = relative / 4U;
+	const uint16_t fieldOffset = static_cast<uint16_t>(relative % 4U);
+	if (pvIndex >= kPvStringCount) {
+		return false;
+	}
+	switch (fieldOffset) {
+	case 0:
+		prepareScaledUnsignedShortResponse(snapshot.voltage[pvIndex],
+		                                   pvVoltageCurrentFromRaw(snapshot.voltage[pvIndex]),
+		                                   1,
+		                                   prepared);
+		return true;
+	case 1:
+		prepareScaledUnsignedShortResponse(snapshot.current[pvIndex],
+		                                   pvVoltageCurrentFromRaw(snapshot.current[pvIndex]),
+		                                   1,
+		                                   prepared);
+		return true;
+	case 2:
+		prepareUnsignedIntResponse(static_cast<uint32_t>(snapshot.power[pvIndex]), prepared);
+		return true;
+	default:
+		return false;
+	}
+}
+
+static void
+noteSnapshotReadFailure(const char *name,
+                        uint16_t reg,
+                        modbusRequestAndResponseStatusValues result,
+                        const char *detail)
+{
+#ifdef DEBUG_OVER_SERIAL
+	snprintf(_debugOutput,
+	         sizeof(_debugOutput),
+	         "snapshot read fail: %s reg=%u result=%u detail=%s",
+	         name,
+	         static_cast<unsigned>(reg),
+	         static_cast<unsigned>(result),
+	         detail != nullptr ? detail : "");
+	Serial.println(_debugOutput);
+#else
+	(void)name;
+	(void)reg;
+	(void)result;
+	(void)detail;
+#endif
+}
+
+static void
+recordSnapshotReadFailure(const char *name,
+                          uint16_t reg,
+                          modbusRequestAndResponseStatusValues result,
+                          const char *detail,
+                          bool &rs485TimedOut,
+                          int &gotError)
+{
+	rs485TimedOut = rs485TimedOut || (result == modbusRequestAndResponseStatusValues::noResponse);
+	noteSnapshotReadFailure(name, reg, result, detail);
+	recordRs485Error(result);
+	noteRs485Error(result, detail != nullptr ? detail : "");
+	gotError++;
+}
+
+static void __attribute__((noinline))
+refreshSnapshotDispatchFields(bool &rs485TimedOut, int &gotError)
+{
+	DispatchBlockSnapshot dispatchSnapshot{};
+	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
+	if (fetchDispatchBlockSnapshot(dispatchSnapshot, &result)) {
+		opData.essDispatchStart = dispatchSnapshot.dispatchStart;
+		opData.essDispatchMode = dispatchSnapshot.dispatchMode;
+		opData.essDispatchActivePower = dispatchSnapshot.dispatchActivePower;
+		opData.essDispatchSoc = dispatchSnapshot.dispatchSocRaw;
+		opData.essDispatchTime = dispatchSnapshot.dispatchTimeRaw;
+		return;
+	}
+
+	opData.essDispatchStart = UINT16_MAX;
+	opData.essDispatchMode = UINT16_MAX;
+	opData.essDispatchActivePower = INT32_MAX;
+	opData.essDispatchSoc = UINT16_MAX;
+	opData.essDispatchTime = UINT32_MAX;
+	recordSnapshotReadFailure("dispatch_block",
+	                          kDispatchBlockStartReg,
+	                          result,
+	                          "",
+	                          rs485TimedOut,
+	                          gotError);
+}
+
+static void __attribute__((noinline))
+refreshSnapshotBatterySoc(bool &rs485TimedOut, int &gotError)
+{
+	modbusRequestAndResponse *response = runtimeModbusReadScratch();
+	if (response == nullptr) {
+		opData.essBatterySoc = UINT16_MAX;
+		recordSnapshotReadFailure("battery_soc",
+		                          REG_BATTERY_HOME_R_SOC,
+		                          modbusRequestAndResponseStatusValues::preProcessing,
+		                          "",
+		                          rs485TimedOut,
+		                          gotError);
+		return;
+	}
+	*response = modbusRequestAndResponse{};
+	const modbusRequestAndResponseStatusValues result =
+		_registerHandler->readHandledRegister(REG_BATTERY_HOME_R_SOC, response);
+	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
+		opData.essBatterySoc = response->unsignedShortValue;
+		return;
+	}
+
+	opData.essBatterySoc = UINT16_MAX;
+	recordSnapshotReadFailure("battery_soc",
+	                          REG_BATTERY_HOME_R_SOC,
+	                          result,
+	                          response->statusMqttMessage,
+	                          rs485TimedOut,
+	                          gotError);
+}
+
+static void __attribute__((noinline))
+refreshSnapshotBatteryPower(bool &rs485TimedOut, int &gotError)
+{
+	modbusRequestAndResponse *response = runtimeModbusReadScratch();
+	if (response == nullptr) {
+		opData.essBatteryPower = INT16_MAX;
+		recordSnapshotReadFailure("battery_power",
+		                          REG_BATTERY_HOME_R_BATTERY_POWER,
+		                          modbusRequestAndResponseStatusValues::preProcessing,
+		                          "",
+		                          rs485TimedOut,
+		                          gotError);
+		return;
+	}
+	*response = modbusRequestAndResponse{};
+	const modbusRequestAndResponseStatusValues result =
+		_registerHandler->readHandledRegister(REG_BATTERY_HOME_R_BATTERY_POWER, response);
+	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
+		opData.essBatteryPower = response->signedShortValue;
+		return;
+	}
+
+	opData.essBatteryPower = INT16_MAX;
+	recordSnapshotReadFailure("battery_power",
+	                          REG_BATTERY_HOME_R_BATTERY_POWER,
+	                          result,
+	                          response->statusMqttMessage,
+	                          rs485TimedOut,
+	                          gotError);
+}
+
+static void __attribute__((noinline))
+refreshSnapshotGridPower(bool &rs485TimedOut, int &gotError)
+{
+	modbusRequestAndResponse *response = runtimeModbusReadScratch();
+	if (response == nullptr) {
+		opData.essGridPower = INT32_MAX;
+		recordSnapshotReadFailure("grid_power",
+		                          REG_GRID_METER_R_TOTAL_ACTIVE_POWER_1,
+		                          modbusRequestAndResponseStatusValues::preProcessing,
+		                          "",
+		                          rs485TimedOut,
+		                          gotError);
+		return;
+	}
+	*response = modbusRequestAndResponse{};
+	const modbusRequestAndResponseStatusValues result =
+		_registerHandler->readHandledRegister(REG_GRID_METER_R_TOTAL_ACTIVE_POWER_1, response);
+	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
+		opData.essGridPower = response->signedIntValue;
+		return;
+	}
+
+	opData.essGridPower = INT32_MAX;
+	recordSnapshotReadFailure("grid_power",
+	                          REG_GRID_METER_R_TOTAL_ACTIVE_POWER_1,
+	                          result,
+	                          response->statusMqttMessage,
+	                          rs485TimedOut,
+	                          gotError);
+}
+
+static void __attribute__((noinline))
+refreshSnapshotSolarPower(bool &rs485TimedOut, int &gotError)
+{
+	PvMeterTotalSnapshot pvMeterSnapshot{};
+	PvStringBlockSnapshot pvBlockSnapshot{};
+	modbusRequestAndResponseStatusValues pvMeterResult = modbusRequestAndResponseStatusValues::preProcessing;
+	modbusRequestAndResponseStatusValues pvBlockResult = modbusRequestAndResponseStatusValues::preProcessing;
+	const bool pvMeterOk = fetchPvMeterTotalSnapshot(pvMeterSnapshot, &pvMeterResult);
+	const bool pvBlockOk = fetchPvStringBlockSnapshot(pvBlockSnapshot, &pvBlockResult);
+	if (pvMeterOk && pvBlockOk) {
+		int32_t solarPower = pvMeterSnapshot.totalPower;
+		for (size_t pv = 0; pv < kPvStringCount; ++pv) {
+			solarPower += pvBlockSnapshot.power[pv];
+		}
+		opData.essPvPower = solarPower;
+		return;
+	}
+
+	opData.essPvPower = INT32_MAX;
+	recordSnapshotReadFailure("pv_power",
+	                          REG_CUSTOM_TOTAL_SOLAR_POWER,
+	                          pvMeterOk ? pvBlockResult : pvMeterResult,
+	                          "",
+	                          rs485TimedOut,
+	                          gotError);
+}
+
+static void __attribute__((noinline))
+refreshSnapshotWorkingMode(bool &rs485TimedOut, int &gotError)
+{
+	modbusRequestAndResponse *response = runtimeModbusReadScratch();
+	if (response == nullptr) {
+		opData.essInverterMode = UINT16_MAX;
+		recordSnapshotReadFailure("working_mode",
+		                          REG_INVERTER_HOME_R_WORKING_MODE,
+		                          modbusRequestAndResponseStatusValues::preProcessing,
+		                          "",
+		                          rs485TimedOut,
+		                          gotError);
+		return;
+	}
+	*response = modbusRequestAndResponse{};
+	const modbusRequestAndResponseStatusValues result =
+		_registerHandler->readHandledRegister(REG_INVERTER_HOME_R_WORKING_MODE, response);
+	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
+		opData.essInverterMode = response->unsignedShortValue;
+		return;
+	}
+
+	opData.essInverterMode = UINT16_MAX;
+	recordSnapshotReadFailure("working_mode",
+	                          REG_INVERTER_HOME_R_WORKING_MODE,
+	                          result,
+	                          response->statusMqttMessage,
+	                          rs485TimedOut,
+	                          gotError);
+}
+
 /*
  * refreshEssSnapshot
  *
@@ -11344,7 +12555,10 @@ bool
 refreshEssSnapshot(void)
 {
 	int gotError = 0;
+	int powerSnapshotErrors = 0;
 	uint32_t pollStartMs = millis();
+	uint32_t powerSnapshotStartedMs = pollStartMs;
+	uint32_t powerSnapshotCompletedMs = pollStartMs;
 	bool rs485TimedOut = false;
 	struct SnapshotDiagGuard {
 		~SnapshotDiagGuard()
@@ -11359,16 +12573,25 @@ refreshEssSnapshot(void)
 	// Inverter identity may be known from persisted metadata, but that is not proof of a live bus.
 	if (rs485ConnectState != Rs485ConnectState::Connected || _registerHandler == NULL) {
 		essSnapshotValid = false;
+		essPowerSnapshotValid = false;
+		essPowerSnapshotLastBuildMs = 0;
 		essSnapshotLastOk = false;
+		if (schedulerPassCache.active) {
+			populateEssSnapshotMeta(schedulerPassCache.essSnapshot,
+			                        schedulerPassCache.passId,
+			                        pollStartMs,
+			                        pollStartMs,
+			                        false);
+		}
 		lastErrCode = static_cast<int>(MqttEventCode::Rs485Timeout);
 		diag_rs485_poll_end(millis(), false);
 		return false;
 	}
 
 #if RS485_STUB
-		if (_modBus != nullptr) {
-			_modBus->beginSnapshotAttempt();
-		}
+	if (_modBus != nullptr) {
+		_modBus->beginSnapshotAttempt();
+	}
 #endif
 
 #ifdef DEBUG_NO_RS485
@@ -11402,6 +12625,7 @@ refreshEssSnapshot(void)
 		opData.essGridPower = -1368;
 		opData.essPvPower = -1379;
 		opData.essInverterMode = essInverterMode;
+		essPowerSnapshotValid = true;
 	} else {
 		opData.essDispatchStart = UINT16_MAX;
 		opData.essDispatchMode = UINT16_MAX;
@@ -11413,6 +12637,7 @@ refreshEssSnapshot(void)
 		opData.essGridPower = INT32_MAX;
 		opData.essPvPower = INT32_MAX;
 		opData.essInverterMode = UINT16_MAX;
+		essPowerSnapshotValid = false;
 		lastErrCode = static_cast<int>(MqttEventCode::Rs485Timeout);
 		gotError = 9;
 	}
@@ -11429,154 +12654,48 @@ refreshEssSnapshot(void)
 		opData.essPvPower = INT32_MAX;
 		opData.essInverterMode = UINT16_MAX;
 		opData.essRs485Connected = false;
+		essPowerSnapshotValid = false;
 		lastErrCode = static_cast<int>(MqttEventCode::Rs485Timeout);
 		gotError = 1;
 	} else {
-		modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
-		modbusRequestAndResponse response;
-#ifdef DEBUG_OVER_SERIAL
-		auto logSnapshotReadFailure = [&](const char *name, uint16_t reg, modbusRequestAndResponseStatusValues readResult, const char *detail) {
-			snprintf(_debugOutput,
-			         sizeof(_debugOutput),
-			         "snapshot read fail: %s reg=%u result=%u detail=%s",
-			         name,
-			         static_cast<unsigned>(reg),
-			         static_cast<unsigned>(readResult),
-			         detail != nullptr ? detail : "");
-			Serial.println(_debugOutput);
-		};
-#endif
-
-	result = _registerHandler->readHandledRegister(REG_DISPATCH_RW_DISPATCH_START, &response);
-	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
-		opData.essDispatchStart = response.unsignedShortValue;
-	} else {
-		opData.essDispatchStart = UINT16_MAX;
-		rs485TimedOut = rs485TimedOut || (result == modbusRequestAndResponseStatusValues::noResponse);
-#ifdef DEBUG_OVER_SERIAL
-		logSnapshotReadFailure("dispatch_start", REG_DISPATCH_RW_DISPATCH_START, result, response.statusMqttMessage);
-#endif
-		recordRs485Error(result);
-		noteRs485Error(result, response.statusMqttMessage);
-		gotError++;
-	}
-	result = _registerHandler->readHandledRegister(REG_DISPATCH_RW_DISPATCH_MODE, &response);
-	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
-		opData.essDispatchMode = response.unsignedShortValue;
-	} else {
-		opData.essDispatchMode = UINT16_MAX;
-		rs485TimedOut = rs485TimedOut || (result == modbusRequestAndResponseStatusValues::noResponse);
-#ifdef DEBUG_OVER_SERIAL
-		logSnapshotReadFailure("dispatch_mode", REG_DISPATCH_RW_DISPATCH_MODE, result, response.statusMqttMessage);
-#endif
-		recordRs485Error(result);
-		noteRs485Error(result, response.statusMqttMessage);
-		gotError++;
-	}
-	result = _registerHandler->readHandledRegister(REG_DISPATCH_RW_ACTIVE_POWER_1, &response);
-	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
-		opData.essDispatchActivePower = response.signedIntValue;
-	} else {
-		opData.essDispatchActivePower = INT32_MAX;
-		rs485TimedOut = rs485TimedOut || (result == modbusRequestAndResponseStatusValues::noResponse);
-#ifdef DEBUG_OVER_SERIAL
-		logSnapshotReadFailure("active_power", REG_DISPATCH_RW_ACTIVE_POWER_1, result, response.statusMqttMessage);
-#endif
-		recordRs485Error(result);
-		noteRs485Error(result, response.statusMqttMessage);
-		gotError++;
-	}
-	result = _registerHandler->readHandledRegister(REG_DISPATCH_RW_DISPATCH_SOC, &response);
-	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
-		opData.essDispatchSoc = response.unsignedShortValue;
-	} else {
-		opData.essDispatchSoc = UINT16_MAX;
-		rs485TimedOut = rs485TimedOut || (result == modbusRequestAndResponseStatusValues::noResponse);
-#ifdef DEBUG_OVER_SERIAL
-		logSnapshotReadFailure("dispatch_soc", REG_DISPATCH_RW_DISPATCH_SOC, result, response.statusMqttMessage);
-#endif
-		recordRs485Error(result);
-		noteRs485Error(result, response.statusMqttMessage);
-		gotError++;
-	}
-	result = _registerHandler->readHandledRegister(REG_DISPATCH_RW_DISPATCH_TIME_1, &response);
-	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
-		opData.essDispatchTime = response.unsignedIntValue;
-	} else {
-		opData.essDispatchTime = UINT32_MAX;
-		rs485TimedOut = rs485TimedOut || (result == modbusRequestAndResponseStatusValues::noResponse);
-#ifdef DEBUG_OVER_SERIAL
-		logSnapshotReadFailure("dispatch_time", REG_DISPATCH_RW_DISPATCH_TIME_1, result, response.statusMqttMessage);
-#endif
-		recordRs485Error(result);
-		noteRs485Error(result, response.statusMqttMessage);
-		gotError++;
-	}
-	result = _registerHandler->readHandledRegister(REG_BATTERY_HOME_R_SOC, &response);
-	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
-		opData.essBatterySoc = response.unsignedShortValue;
-	} else {
-		opData.essBatterySoc = UINT16_MAX;
-		rs485TimedOut = rs485TimedOut || (result == modbusRequestAndResponseStatusValues::noResponse);
-#ifdef DEBUG_OVER_SERIAL
-		logSnapshotReadFailure("battery_soc", REG_BATTERY_HOME_R_SOC, result, response.statusMqttMessage);
-#endif
-		recordRs485Error(result);
-		noteRs485Error(result, response.statusMqttMessage);
-		gotError++;
-	}
-	result = _registerHandler->readHandledRegister(REG_BATTERY_HOME_R_BATTERY_POWER, &response);
-	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
-		opData.essBatteryPower = response.signedShortValue;
-	} else {
-		opData.essBatteryPower = INT16_MAX;
-		rs485TimedOut = rs485TimedOut || (result == modbusRequestAndResponseStatusValues::noResponse);
-#ifdef DEBUG_OVER_SERIAL
-		logSnapshotReadFailure("battery_power", REG_BATTERY_HOME_R_BATTERY_POWER, result, response.statusMqttMessage);
-#endif
-		recordRs485Error(result);
-		noteRs485Error(result, response.statusMqttMessage);
-		gotError++;
-	}
-	result = _registerHandler->readHandledRegister(REG_GRID_METER_R_TOTAL_ACTIVE_POWER_1, &response);
-	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
-		opData.essGridPower = response.signedIntValue;
-	} else {
-		opData.essGridPower = INT32_MAX;
-		rs485TimedOut = rs485TimedOut || (result == modbusRequestAndResponseStatusValues::noResponse);
-#ifdef DEBUG_OVER_SERIAL
-		logSnapshotReadFailure("grid_power", REG_GRID_METER_R_TOTAL_ACTIVE_POWER_1, result, response.statusMqttMessage);
-#endif
-		recordRs485Error(result);
-		noteRs485Error(result, response.statusMqttMessage);
-		gotError++;
-	}
-	result = _registerHandler->readHandledRegister(REG_CUSTOM_TOTAL_SOLAR_POWER, &response);
-	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
-		opData.essPvPower = response.signedIntValue;
-	} else {
-		opData.essPvPower = INT32_MAX;
-		rs485TimedOut = rs485TimedOut || (result == modbusRequestAndResponseStatusValues::noResponse);
-#ifdef DEBUG_OVER_SERIAL
-		logSnapshotReadFailure("pv_power", REG_CUSTOM_TOTAL_SOLAR_POWER, result, response.statusMqttMessage);
-#endif
-		recordRs485Error(result);
-		noteRs485Error(result, response.statusMqttMessage);
-		gotError++;
-	}
-	result = _registerHandler->readHandledRegister(REG_INVERTER_HOME_R_WORKING_MODE, &response);
-	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
-		opData.essInverterMode = response.unsignedShortValue;
-	} else {
-		opData.essInverterMode = UINT16_MAX;
-		rs485TimedOut = rs485TimedOut || (result == modbusRequestAndResponseStatusValues::noResponse);
-#ifdef DEBUG_OVER_SERIAL
-		logSnapshotReadFailure("working_mode", REG_INVERTER_HOME_R_WORKING_MODE, result, response.statusMqttMessage);
-#endif
-		recordRs485Error(result);
-		noteRs485Error(result, response.statusMqttMessage);
-		gotError++;
-	}
+		refreshSnapshotDispatchFields(rs485TimedOut, gotError);
+		refreshSnapshotBatterySoc(rs485TimedOut, gotError);
+		struct SnapshotBuildGuard {
+			SnapshotBuildGuard()
+			{
+				essSnapshotBuildInProgress = true;
+				if (schedulerPassCache.active) {
+					schedulerPassCache.snapshotBuildInProgress = true;
+				}
+			}
+			~SnapshotBuildGuard()
+			{
+				essSnapshotBuildInProgress = false;
+				if (schedulerPassCache.active) {
+					schedulerPassCache.snapshotBuildInProgress = false;
+				}
+			}
+		} snapshotBuildGuard;
+		powerSnapshotStartedMs = millis();
+		const int powerErrorsBeforeBattery = gotError;
+		refreshSnapshotBatteryPower(rs485TimedOut, gotError);
+		if (gotError != powerErrorsBeforeBattery) {
+			powerSnapshotErrors++;
+		}
+		const int powerErrorsBeforeGrid = gotError;
+		refreshSnapshotGridPower(rs485TimedOut, gotError);
+		if (gotError != powerErrorsBeforeGrid) {
+			powerSnapshotErrors++;
+		}
+		const int powerErrorsBeforeSolar = gotError;
+		refreshSnapshotSolarPower(rs485TimedOut, gotError);
+		if (gotError != powerErrorsBeforeSolar) {
+			powerSnapshotErrors++;
+		}
+		powerSnapshotCompletedMs = millis();
+		essPowerSnapshotValid = (powerSnapshotErrors == 0);
+		essPowerSnapshotLastBuildMs = powerSnapshotCompletedMs - powerSnapshotStartedMs;
+		refreshSnapshotWorkingMode(rs485TimedOut, gotError);
 		{
 			bool essRs485WasConnected = opData.essRs485Connected;
 			opData.essRs485Connected = _modBus->isRs485Online();
@@ -11600,14 +12719,21 @@ refreshEssSnapshot(void)
 		dispatchLastSkipReason[0] = '\0';
 	}
 	essSnapshotLastOk = essSnapshotValid;
+	if (schedulerPassCache.active) {
+		populateEssSnapshotMeta(schedulerPassCache.essSnapshot,
+		                        schedulerPassCache.passId,
+		                        powerSnapshotStartedMs,
+		                        powerSnapshotCompletedMs,
+		                        essPowerSnapshotValid);
+	}
 	if (lastPollMs > kPollOverrunMs) {
 		publishEvent(MqttEventCode::PollOverrun, "");
 	}
 
 #if RS485_STUB
-		if (_modBus != nullptr) {
-			_modBus->endSnapshotAttempt();
-		}
+	if (_modBus != nullptr) {
+		_modBus->endSnapshotAttempt();
+	}
 #endif
 	diag_rs485_poll_end(millis(), rs485TimedOut);
 
@@ -11699,6 +12825,28 @@ bootstrapPublishComplete(size_t entityCount)
 	return true;
 }
 
+static bool
+snapshotPublishAllowedForEntityIndex(size_t idx)
+{
+	mqttState entity{};
+	if (!mqttEntityCopyByIndex(idx, &entity)) {
+		return false;
+	}
+	if (!entity.needsEssSnapshot) {
+		return true;
+	}
+	if (isEssPowerSnapshotEntityId(entity.entityId)) {
+		if (!essPowerSnapshotValid) {
+			return false;
+		}
+		if (!schedulerPassCache.active) {
+			return true;
+		}
+		return snapshotPublishAllowedForPass(schedulerPassCache.essSnapshot, schedulerPassCache.passId);
+	}
+	return essSnapshotValid;
+}
+
 static void
 serviceBootstrapPublishPass(void)
 {
@@ -11743,7 +12891,7 @@ serviceBootstrapPublishPass(void)
 			markBootstrapEntityPublished(idx);
 			continue;
 		}
-		if (mqttEntityNeedsEssSnapshotByIndex(idx) && !essSnapshotValid) {
+		if (!snapshotPublishAllowedForEntityIndex(idx)) {
 			markBootstrapEntityPublished(idx);
 			continue;
 		}
@@ -11842,10 +12990,108 @@ formatPollingBudgetEntityValue(mqttEntityId entityId, char *out, size_t outSize)
 }
 
 static void
+__attribute__((noinline))
+executeDispatchBlockTransaction(const MqttEntityActiveBucket &bucketPlan,
+                                const MqttPollTransaction &transaction)
+{
+	DispatchBlockSnapshot dispatchSnapshot{};
+	modbusRequestAndResponseStatusValues dispatchResult = modbusRequestAndResponseStatusValues::preProcessing;
+	if (!fetchDispatchBlockSnapshot(dispatchSnapshot, &dispatchResult)) {
+		recordRs485Error(dispatchResult);
+		return;
+	}
+	modbusRequestAndResponse *prepared = runtimeModbusReadScratch();
+	if (prepared == nullptr) {
+		return;
+	}
+
+	for (size_t member = 0; member < transaction.entityCount; ++member) {
+		const size_t offset = static_cast<size_t>(transaction.firstMemberOffset) + member;
+		if (offset >= bucketPlan.count) {
+			break;
+		}
+		mqttState entity{};
+		*prepared = modbusRequestAndResponse{};
+		if (!mqttEntityCopyByIndex(bucketPlan.members[offset], &entity) ||
+		    !prepareDispatchBlockResponse(entity.entityId, dispatchSnapshot, *prepared)) {
+			continue;
+		}
+		sendDataFromMqttState(&entity, false, prepared);
+	}
+}
+
+static void
+__attribute__((noinline))
+executePvBlockTransaction(const MqttEntityActiveBucket &bucketPlan,
+                          const MqttPollTransaction &transaction)
+{
+	PvStringBlockSnapshot pvBlockSnapshot{};
+	modbusRequestAndResponseStatusValues pvResult = modbusRequestAndResponseStatusValues::preProcessing;
+	if (!fetchPvStringBlockSnapshot(pvBlockSnapshot, &pvResult)) {
+		recordRs485Error(pvResult);
+		return;
+	}
+	modbusRequestAndResponse *prepared = runtimeModbusReadScratch();
+	if (prepared == nullptr) {
+		return;
+	}
+
+	for (size_t member = 0; member < transaction.entityCount; ++member) {
+		const size_t offset = static_cast<size_t>(transaction.firstMemberOffset) + member;
+		if (offset >= bucketPlan.count) {
+			break;
+		}
+		mqttState entity{};
+		*prepared = modbusRequestAndResponse{};
+		if (!mqttEntityCopyByIndex(bucketPlan.members[offset], &entity) ||
+		    !preparePvBlockResponse(entity, pvBlockSnapshot, *prepared)) {
+			continue;
+		}
+		sendDataFromMqttState(&entity, false, prepared);
+	}
+}
+
+static void
+__attribute__((noinline))
+executeGenericPollTransaction(const MqttEntityActiveBucket &bucketPlan,
+                              const MqttPollTransaction &transaction,
+                              const mqttState &leader)
+{
+	if (shouldSkipScheduledEntityRead(mqttEntityScope(leader.entityId),
+	                                  inverterReady,
+	                                  inverterSerialKnown())) {
+		return;
+	}
+
+	modbusRequestAndResponse *response = runtimeModbusReadScratch();
+	if (response == nullptr) {
+		return;
+	}
+	*response = modbusRequestAndResponse{};
+	const modbusRequestAndResponseStatusValues result = readEntity(&leader, response);
+	if (result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
+		return;
+	}
+
+	for (size_t member = 0; member < transaction.entityCount; ++member) {
+		const size_t offset = static_cast<size_t>(transaction.firstMemberOffset) + member;
+		if (offset >= bucketPlan.count) {
+			break;
+		}
+		mqttState entity{};
+		if (!mqttEntityCopyByIndex(bucketPlan.members[offset], &entity)) {
+			continue;
+		}
+		sendDataFromMqttState(&entity, false, response);
+	}
+}
+
+static void
 executePollTransaction(const MqttEntityActiveBucket &bucketPlan,
                        const MqttPollTransaction &transaction,
                        bool snapshotOkThisBucket)
 {
+	(void)snapshotOkThisBucket;
 	if (transaction.entityCount == 0 || bucketPlan.members == nullptr) {
 		return;
 	}
@@ -11857,9 +13103,6 @@ executePollTransaction(const MqttEntityActiveBucket &bucketPlan,
 
 	switch (transaction.kind) {
 	case MqttPollTransactionKind::SnapshotFanout:
-		if (!snapshotOkThisBucket) {
-			return;
-		}
 		for (size_t member = 0; member < transaction.entityCount; ++member) {
 			const size_t offset = static_cast<size_t>(transaction.firstMemberOffset) + member;
 			if (offset >= bucketPlan.count) {
@@ -11888,23 +13131,134 @@ executePollTransaction(const MqttEntityActiveBucket &bucketPlan,
 	                                  inverterSerialKnown())) {
 		return;
 	}
-	modbusRequestAndResponse response;
-	const modbusRequestAndResponseStatusValues result = readEntity(&leader, &response);
-	if (result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
+	if (leader.readKind == MqttEntityReadKind::Register && isDispatchBlockReadKey(leader.readKey)) {
+		executeDispatchBlockTransaction(bucketPlan, transaction);
 		return;
 	}
+	if (leader.readKind == MqttEntityReadKind::Register && isPvStringBlockReadKey(leader.readKey)) {
+		executePvBlockTransaction(bucketPlan, transaction);
+		return;
+	}
+	executeGenericPollTransaction(bucketPlan, transaction, leader);
+}
 
-	for (size_t member = 0; member < transaction.entityCount; ++member) {
-		const size_t offset = static_cast<size_t>(transaction.firstMemberOffset) + member;
-		if (offset >= bucketPlan.count) {
+static bool __attribute__((noinline))
+ensureSnapshotForBucketPass(bool bucketNeedsSnapshot,
+                            bool &snapshotAttemptedThisPass,
+                            bool &snapshotOkThisPass)
+{
+	if (shouldReusePrimedEssSnapshotForBucket(bucketNeedsSnapshot,
+	                                          bootPlan.inverter,
+	                                          inverterReady,
+	                                          snapshotAttemptedThisPass,
+	                                          essSnapshotPrimedForSendDataLoop == loopSequence)) {
+		snapshotAttemptedThisPass = true;
+		snapshotOkThisPass = essSnapshotValid;
+		if (schedulerPassCache.active) {
+			const uint32_t primedSnapshotMs = millis();
+			populateEssSnapshotMeta(schedulerPassCache.essSnapshot,
+			                        schedulerPassCache.passId,
+			                        primedSnapshotMs,
+			                        primedSnapshotMs,
+			                        essPowerSnapshotValid);
+		}
+	} else if (shouldAttemptEssSnapshotRefreshForBucket(bucketNeedsSnapshot,
+	                                                    bootPlan.inverter,
+	                                                    inverterReady,
+	                                                    snapshotAttemptedThisPass)) {
+		snapshotAttemptedThisPass = true;
+		snapshotOkThisPass = refreshEssSnapshot();
+	}
+
+	const bool snapshotOkThisBucket = snapshotPrereqSatisfiedForBucket(bucketNeedsSnapshot,
+	                                                                  bootPlan.inverter,
+	                                                                  inverterReady,
+	                                                                  snapshotOkThisPass);
+	if (!snapshotOkThisBucket) {
+		essSnapshotValid = false;
+	}
+	return snapshotOkThisBucket;
+}
+
+static bool __attribute__((noinline))
+runBucketTransactionsForPlan(BucketId bucketId,
+                             const MqttEntityActiveBucket &bucketPlan,
+                             bool snapshotOkThisBucket,
+                             uint32_t pollIntervalSecondsLocal)
+{
+	BucketRuntimeBudgetState *budgetState = bucketBudgetStateFor(bucketId);
+	const uint32_t budgetMs = bucketBudgetMs(bucketId, pollIntervalSecondsLocal * 1000UL, kPollOverrunMs);
+	const uint32_t bucketStartMs = millis();
+
+	if (bucketPlan.transactionCount == 0) {
+		if (budgetState != nullptr) {
+			updateBucketRuntimeBudgetState(*budgetState, millis(), 0, budgetMs, 0, 0, false);
+		}
+		return false;
+	}
+	size_t *cursorPtr = bucketCursorFor(bucketId);
+	if (cursorPtr == nullptr) {
+		return false;
+	}
+	const size_t startCursor = normalizeDeferredCursor(*cursorPtr, bucketPlan.transactionCount);
+	size_t processed = 0;
+	bool truncated = false;
+	RuntimeDiagScope diagScope(RuntimeDiagPhase::BucketPublish, "entity");
+
+	while (processed < bucketPlan.transactionCount) {
+		const size_t txnIndex = (startCursor + processed) % bucketPlan.transactionCount;
+#ifdef DEBUG_OVER_SERIAL
+		if (pollIntervalSecondsLocal <= 1) {
+			const size_t leaderIdx = bucketPlan.members[bucketPlan.transactions[txnIndex].firstMemberOffset];
+			mqttState leader{};
+			if (mqttEntityCopyByIndex(leaderIdx, &leader)) {
+				char leaderName[64];
+				mqttEntityNameCopy(&leader, leaderName, sizeof(leaderName));
+				Serial.printf("bucket txn start: bucket=%s idx=%u kind=%u entity=%s reg=%u free=%u max=%u frag=%u\r\n",
+				              bucketIdToString(bucketId),
+				              static_cast<unsigned>(txnIndex),
+				              static_cast<unsigned>(bucketPlan.transactions[txnIndex].kind),
+				              leaderName,
+				              static_cast<unsigned>(leader.readKey),
+				              ESP.getFreeHeap(),
+				              ESP.getMaxFreeBlockSize(),
+				              ESP.getHeapFragmentation());
+			}
+		}
+#endif
+		executePollTransaction(bucketPlan, bucketPlan.transactions[txnIndex], snapshotOkThisBucket);
+#ifdef DEBUG_OVER_SERIAL
+		if (pollIntervalSecondsLocal <= 1) {
+			Serial.printf("bucket txn done: bucket=%s idx=%u free=%u max=%u frag=%u\r\n",
+			              bucketIdToString(bucketId),
+			              static_cast<unsigned>(txnIndex),
+			              ESP.getFreeHeap(),
+			              ESP.getMaxFreeBlockSize(),
+			              ESP.getHeapFragmentation());
+		}
+#endif
+		processed++;
+		if (processed < bucketPlan.transactionCount && timedOut(bucketStartMs, millis(), budgetMs)) {
+			truncated = true;
 			break;
 		}
-		mqttState entity{};
-		if (!mqttEntityCopyByIndex(bucketPlan.members[offset], &entity)) {
-			continue;
-		}
-		sendDataFromMqttState(&entity, false, &response);
 	}
+
+	const uint32_t bucketEndMs = millis();
+	if (budgetState != nullptr) {
+		updateBucketRuntimeBudgetState(*budgetState,
+		                               bucketEndMs,
+		                               static_cast<uint32_t>(bucketEndMs - bucketStartMs),
+		                               budgetMs,
+		                               bucketPlan.transactionCount,
+		                               processed,
+		                               truncated);
+	}
+	if (truncated) {
+		pollingBudgetOverrunCount++;
+	}
+	*cursorPtr = nextDeferredCursor(startCursor, processed, bucketPlan.transactionCount, truncated);
+	return truncated;
 }
 
 /*
@@ -11950,6 +13304,11 @@ sendData()
 	const bool dueOneHour = checkTimer(&lastRunOneHour, STATUS_INTERVAL_ONE_HOUR);
 	const bool dueOneDay = checkTimer(&lastRunOneDay, STATUS_INTERVAL_ONE_DAY);
 	const bool dueUser = checkTimer(&lastRunUser, pollIntervalSeconds * 1000UL);
+#if RS485_STUB
+	const bool rs485StubRecentOnlineControl =
+		(rs485StubLastOnlineControlMs != 0) &&
+		(static_cast<uint32_t>(millis() - rs485StubLastOnlineControlMs) < 20000U);
+#endif
 	if (pendingImmediateStatusPass) {
 		lastRunTenSeconds = nowMillis();
 		dueTenSeconds = true;
@@ -12010,144 +13369,78 @@ sendData()
 		return;
 	}
 
+	beginSchedulerPass();
+
 	// Bucket processing is runtime-driven: due buckets iterate their pre-built membership list.
 	// ESS snapshot is a bucket-scoped prerequisite and is refreshed once per scheduler pass
 	// (even if multiple buckets are due at the same time).
 	bool snapshotAttemptedThisPass = false;
 	bool snapshotOkThisPass = essSnapshotValid;
-	auto ensureSnapshotForBucket = [&](bool bucketNeedsSnapshot) -> bool {
-		if (shouldReusePrimedEssSnapshotForBucket(bucketNeedsSnapshot,
-		                                          bootPlan.inverter,
-		                                          inverterReady,
-		                                          snapshotAttemptedThisPass,
-		                                          essSnapshotPrimedForSendDataLoop == loopSequence)) {
-			snapshotAttemptedThisPass = true;
-			snapshotOkThisPass = essSnapshotValid;
-		} else if (shouldAttemptEssSnapshotRefreshForBucket(bucketNeedsSnapshot,
-		                                                    bootPlan.inverter,
-		                                                    inverterReady,
-		                                                    snapshotAttemptedThisPass)) {
-			snapshotAttemptedThisPass = true;
-			snapshotOkThisPass = refreshEssSnapshot();
-		}
-		const bool snapshotOkThisBucket = snapshotPrereqSatisfiedForBucket(bucketNeedsSnapshot,
-		                                                                  bootPlan.inverter,
-		                                                                  inverterReady,
-		                                                                  snapshotOkThisPass);
-		if (!snapshotOkThisBucket) {
-			essSnapshotValid = false;
-		}
-		return snapshotOkThisBucket;
-	};
-
-	auto runBucketTransactions = [&](BucketId bucketId,
-	                                 const MqttEntityActiveBucket &bucketPlan,
-	                                 bool snapshotOkThisBucket) -> bool {
-		BucketRuntimeBudgetState *budgetState = bucketBudgetStateFor(bucketId);
-		const uint32_t budgetMs = bucketBudgetMs(bucketId, pollIntervalSeconds * 1000UL, kPollOverrunMs);
-		const uint32_t bucketStartMs = millis();
-
-		if (bucketPlan.transactionCount == 0) {
-			if (budgetState != nullptr) {
-				updateBucketRuntimeBudgetState(*budgetState, millis(), 0, budgetMs, 0, 0, false);
-			}
-			return false;
-		}
-		size_t *cursorPtr = bucketCursorFor(bucketId);
-		if (cursorPtr == nullptr) {
-			return false;
-		}
-		const size_t startCursor = normalizeDeferredCursor(*cursorPtr, bucketPlan.transactionCount);
-		size_t processed = 0;
-		bool truncated = false;
-		RuntimeDiagScope diagScope(RuntimeDiagPhase::BucketPublish, "entity");
-
-		while (processed < bucketPlan.transactionCount) {
-			const size_t txnIndex = (startCursor + processed) % bucketPlan.transactionCount;
-#ifdef DEBUG_OVER_SERIAL
-			if (pollIntervalSeconds <= 1) {
-				const size_t leaderIdx = bucketPlan.members[bucketPlan.transactions[txnIndex].firstMemberOffset];
-				mqttState leader{};
-				if (mqttEntityCopyByIndex(leaderIdx, &leader)) {
-					char leaderName[64];
-					mqttEntityNameCopy(&leader, leaderName, sizeof(leaderName));
-					Serial.printf("bucket txn start: bucket=%s idx=%u kind=%u entity=%s reg=%u free=%u max=%u frag=%u\r\n",
-					              bucketIdToString(bucketId),
-					              static_cast<unsigned>(txnIndex),
-					              static_cast<unsigned>(bucketPlan.transactions[txnIndex].kind),
-					              leaderName,
-					              static_cast<unsigned>(leader.readKey),
-					              ESP.getFreeHeap(),
-					              ESP.getMaxFreeBlockSize(),
-					              ESP.getHeapFragmentation());
-				}
-			}
-#endif
-			executePollTransaction(bucketPlan, bucketPlan.transactions[txnIndex], snapshotOkThisBucket);
-#ifdef DEBUG_OVER_SERIAL
-			if (pollIntervalSeconds <= 1) {
-				Serial.printf("bucket txn done: bucket=%s idx=%u free=%u max=%u frag=%u\r\n",
-				              bucketIdToString(bucketId),
-				              static_cast<unsigned>(txnIndex),
-				              ESP.getFreeHeap(),
-				              ESP.getMaxFreeBlockSize(),
-				              ESP.getHeapFragmentation());
-			}
-#endif
-			processed++;
-			if (processed < bucketPlan.transactionCount && timedOut(bucketStartMs, millis(), budgetMs)) {
-				truncated = true;
-				break;
-			}
-		}
-
-		const uint32_t bucketEndMs = millis();
-		if (budgetState != nullptr) {
-			updateBucketRuntimeBudgetState(*budgetState,
-			                               bucketEndMs,
-			                               static_cast<uint32_t>(bucketEndMs - bucketStartMs),
-			                               budgetMs,
-			                               bucketPlan.transactionCount,
-			                               processed,
-			                               truncated);
-		}
-		if (truncated) {
-			pollingBudgetOverrunCount++;
-		}
-		*cursorPtr = nextDeferredCursor(startCursor, processed, bucketPlan.transactionCount, truncated);
-		return truncated;
-	};
 
 	if (dueTenSeconds) {
-		const bool snapshotOkThisBucket = ensureSnapshotForBucket(plan->tenSec.hasEssSnapshot);
+		const bool snapshotOkThisBucket =
+			ensureSnapshotForBucketPass(plan->tenSec.hasEssSnapshot,
+			                            snapshotAttemptedThisPass,
+			                            snapshotOkThisPass);
+		maybeYield();
+#if RS485_STUB
+		if (rs485StubSkipNextScheduledStatusPublish) {
+			rs485StubSkipNextScheduledStatusPublish = false;
+		} else {
+			sendStatus(snapshotOkThisBucket);
+		}
+#else
 		sendStatus(snapshotOkThisBucket);
-		runBucketTransactions(BucketId::TenSec, plan->tenSec, snapshotOkThisBucket);
+#endif
+		runBucketTransactionsForPlan(BucketId::TenSec, plan->tenSec, snapshotOkThisBucket, pollIntervalSeconds);
 	}
 
 	if (dueOneMinute) {
-		const bool snapshotOkThisBucket = ensureSnapshotForBucket(plan->oneMin.hasEssSnapshot);
-		runBucketTransactions(BucketId::OneMin, plan->oneMin, snapshotOkThisBucket);
+		const bool snapshotOkThisBucket =
+			ensureSnapshotForBucketPass(plan->oneMin.hasEssSnapshot,
+			                            snapshotAttemptedThisPass,
+			                            snapshotOkThisPass);
+		maybeYield();
+		runBucketTransactionsForPlan(BucketId::OneMin, plan->oneMin, snapshotOkThisBucket, pollIntervalSeconds);
 	}
 
 	if (dueFiveMinutes) {
-		const bool snapshotOkThisBucket = ensureSnapshotForBucket(plan->fiveMin.hasEssSnapshot);
-		runBucketTransactions(BucketId::FiveMin, plan->fiveMin, snapshotOkThisBucket);
+		const bool snapshotOkThisBucket =
+			ensureSnapshotForBucketPass(plan->fiveMin.hasEssSnapshot,
+			                            snapshotAttemptedThisPass,
+			                            snapshotOkThisPass);
+		maybeYield();
+		runBucketTransactionsForPlan(BucketId::FiveMin, plan->fiveMin, snapshotOkThisBucket, pollIntervalSeconds);
 	}
 
 	if (dueOneHour) {
-		const bool snapshotOkThisBucket = ensureSnapshotForBucket(plan->oneHour.hasEssSnapshot);
-		runBucketTransactions(BucketId::OneHour, plan->oneHour, snapshotOkThisBucket);
+		const bool snapshotOkThisBucket =
+			ensureSnapshotForBucketPass(plan->oneHour.hasEssSnapshot,
+			                            snapshotAttemptedThisPass,
+			                            snapshotOkThisPass);
+		maybeYield();
+		runBucketTransactionsForPlan(BucketId::OneHour, plan->oneHour, snapshotOkThisBucket, pollIntervalSeconds);
 	}
 
 	if (dueOneDay) {
-		const bool snapshotOkThisBucket = ensureSnapshotForBucket(plan->oneDay.hasEssSnapshot);
-		runBucketTransactions(BucketId::OneDay, plan->oneDay, snapshotOkThisBucket);
+		const bool snapshotOkThisBucket =
+			ensureSnapshotForBucketPass(plan->oneDay.hasEssSnapshot,
+			                            snapshotAttemptedThisPass,
+			                            snapshotOkThisPass);
+		maybeYield();
+		runBucketTransactionsForPlan(BucketId::OneDay, plan->oneDay, snapshotOkThisBucket, pollIntervalSeconds);
 	}
 
 	if (dueUser) {
-		const bool snapshotOkThisBucket = ensureSnapshotForBucket(plan->user.hasEssSnapshot);
-		runBucketTransactions(BucketId::User, plan->user, snapshotOkThisBucket);
+		const bool snapshotOkThisBucket =
+			ensureSnapshotForBucketPass(plan->user.hasEssSnapshot,
+			                            snapshotAttemptedThisPass,
+			                            snapshotOkThisPass);
+		maybeYield();
+		runBucketTransactionsForPlan(BucketId::User, plan->user, snapshotOkThisBucket, pollIntervalSeconds);
 	}
+
+	endSchedulerPass();
 }
 
 bool
@@ -12156,26 +13449,31 @@ sendDataFromMqttState(const mqttState *singleEntity,
                       const modbusRequestAndResponse *preparedResponse,
                       bool forcePublish)
 {
-	char topic[256];
-	char topicBase[200];
+	MqttPublishTopicScratch *publishScratch = runtimePublishTopicScratch();
+	if (publishScratch == nullptr) {
+		return false;
+	}
+	char *const topic = publishScratch->topic;
+	char *const topicBase = publishScratch->topicBase;
+	char *const entityKey = publishScratch->entityKey;
 	modbusRequestAndResponseStatusValues result;
 	modbusRequestAndResponseStatusValues resultAddedToPayload;
 	DiscoveryDeviceScope scope = DiscoveryDeviceScope::Controller;
 	const char *deviceId = "";
 
 	if (singleEntity == NULL)
-		return true;
+		return !forcePublish;
 	if (!includeEntityInPublicSurfaces(*singleEntity) && !doHomeAssistant) {
-		return true;
+		return !forcePublish;
 	}
 	scope = mqttEntityScope(singleEntity->entityId);
 	deviceId = discoveryDeviceIdForScope(scope);
 	if (!mqttEntitiesRtAvailable()) {
-		return true;
+		return !forcePublish;
 	}
 	size_t idx = 0;
 	if (!lookupEntityIndex(singleEntity->entityId, &idx)) {
-		return true;
+		return !forcePublish;
 	}
 	mqttUpdateFreq effectiveFreq = mqttEntityEffectiveFreqByIndex(idx);
 	if (!doHomeAssistant && !forcePublish &&
@@ -12184,21 +13482,21 @@ sendDataFromMqttState(const mqttState *singleEntity,
 		return true;
 	}
 	if (deviceId[0] == '\0') {
-		return true;
+		return !forcePublish;
 	}
-	char entityKey[64];
-	mqttEntityNameCopy(singleEntity, entityKey, sizeof(entityKey));
+	mqttEntityNameCopy(singleEntity, entityKey, sizeof(publishScratch->entityKey));
 	if (!buildEntityTopicBase(deviceName,
 	                          scope,
 	                          controllerIdentifier,
 	                          deviceSerialNumber,
 	                          entityKey,
 	                          topicBase,
-	                          sizeof(topicBase))) {
-		return true;
+	                          sizeof(publishScratch->topicBase))) {
+		return !forcePublish;
 	}
-	if (!doHomeAssistant && mqttEntityNeedsEssSnapshotByIndex(idx) && !essSnapshotValid) {
-		return true;
+	if (!doHomeAssistant && !snapshotPublishAllowedForEntityIndex(idx)) {
+		snapshotPublishSkipCount++;
+		return !forcePublish;
 	}
 
 	emptyPayload();
@@ -12221,7 +13519,7 @@ sendDataFromMqttState(const mqttState *singleEntity,
 			break;
 		}
 
-		snprintf(topic, sizeof(topic), "homeassistant/%s/%s/%s/config", entityType, deviceId, entityKey);
+		snprintf(topic, sizeof(publishScratch->topic), "homeassistant/%s/%s/%s/config", entityType, deviceId, entityKey);
 		EntityDiscoveryPayloadContext discoveryPayload{ singleEntity, scope, topicBase };
 		return publishCountedMqttPayload(topic, singleEntity->retain ? MQTT_RETAIN : false, emitEntityDiscoveryPayload, &discoveryPayload);
 	} else {
@@ -12242,13 +13540,13 @@ sendDataFromMqttState(const mqttState *singleEntity,
 			skip = true;
 		}
 		if (!skip) {
-			snprintf(topic, sizeof(topic), "%s/state", topicBase);
-			if (preparedResponse != nullptr) {
-				result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
-				resultAddedToPayload = addToPayload(preparedResponse->dataValueFormatted);
-			} else {
-				result = addState(singleEntity, &resultAddedToPayload);
-			}
+			snprintf(topic, sizeof(publishScratch->topic), "%s/state", topicBase);
+				if (preparedResponse != nullptr) {
+					result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
+					resultAddedToPayload = addToPayload(preparedResponse->dataValueFormatted);
+				} else {
+					result = addState(singleEntity, &resultAddedToPayload);
+				}
 		} else {
 			result = modbusRequestAndResponseStatusValues::preProcessing;
 		}
@@ -12256,14 +13554,14 @@ sendDataFromMqttState(const mqttState *singleEntity,
 
 	if ((resultAddedToPayload != modbusRequestAndResponseStatusValues::payloadExceededCapacity) &&
 	    (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess)) {
-		// And send
-		const bool published = sendMqtt(topic, singleEntity->retain ? MQTT_RETAIN : false);
-		if (published && !doHomeAssistant) {
-			markBootstrapEntityPublished(idx);
-		}
+			// And send
+			const bool published = sendMqtt(topic, singleEntity->retain ? MQTT_RETAIN : false);
+			if (published && !doHomeAssistant) {
+				markBootstrapEntityPublished(idx);
+			}
 		return published;
 	}
-	return true;
+	return !forcePublish;
 }
 
 static bool
@@ -12283,17 +13581,21 @@ publishManualRegisterValueState(const mqttState *valueEntity,
 	    effectiveFreq == mqttUpdateFreq::freqDisabled)) {
 		return false;
 	}
-	char topicBase[200];
-	char topic[256];
-	char entityKey[64];
-	mqttEntityNameCopy(valueEntity, entityKey, sizeof(entityKey));
+	MqttPublishTopicScratch *publishScratch = runtimePublishTopicScratch();
+	if (publishScratch == nullptr) {
+		return false;
+	}
+	char *const topicBase = publishScratch->topicBase;
+	char *const topic = publishScratch->topic;
+	char *const entityKey = publishScratch->entityKey;
+	mqttEntityNameCopy(valueEntity, entityKey, sizeof(publishScratch->entityKey));
 	if (!buildEntityTopicBase(deviceName,
 	                          mqttEntityScope(valueEntity->entityId),
 	                          controllerIdentifier,
 	                          deviceSerialNumber,
 	                          entityKey,
 	                          topicBase,
-	                          sizeof(topicBase))) {
+	                          sizeof(publishScratch->topicBase))) {
 		return false;
 	}
 	emptyPayload();
@@ -12301,7 +13603,7 @@ publishManualRegisterValueState(const mqttState *valueEntity,
 	if (resultAddedToPayload == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
 		return false;
 	}
-	snprintf(topic, sizeof(topic), "%s/state", topicBase);
+	snprintf(topic, sizeof(publishScratch->topic), "%s/state", topicBase);
 	sendMqtt(topic, valueEntity->retain ? MQTT_RETAIN : false);
 	return true;
 }
@@ -12352,8 +13654,12 @@ publishManualRegisterReadState(int32_t requestedReg)
 #endif
 		return;
 	}
-	modbusRequestAndResponse response;
-	const modbusRequestAndResponseStatusValues result = readEntity(&valueEntity, &response);
+	modbusRequestAndResponse *response = runtimeModbusReadScratch();
+	if (response == nullptr) {
+		return;
+	}
+	*response = modbusRequestAndResponse{};
+	const modbusRequestAndResponseStatusValues result = readEntity(&valueEntity, response);
 	if (result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
 #ifdef DEBUG_OVER_SERIAL
 		snprintf(_debugOutput,
@@ -12373,14 +13679,14 @@ publishManualRegisterReadState(int32_t requestedReg)
 	         sizeof(_debugOutput),
 	         "manual read value: reg=%ld observed='%s' free=%u max=%u frag=%u",
 	         static_cast<long>(requestedReg),
-	         response.dataValueFormatted,
+	         response->dataValueFormatted,
 	         ESP.getFreeHeap(),
 	         ESP.getMaxFreeBlockSize(),
 	         ESP.getHeapFragmentation());
 	Serial.println(_debugOutput);
 #endif
-	publishManualRegisterValueState(&valueEntity, response, true);
-	publishManualRegisterReadStatus(requestedReg, response);
+	publishManualRegisterValueState(&valueEntity, *response, true);
+	publishManualRegisterReadStatus(requestedReg, *response);
 #ifdef DEBUG_OVER_SERIAL
 	snprintf(_debugOutput,
 	         sizeof(_debugOutput),
@@ -12411,17 +13717,21 @@ publishRegisterNumberStateValue(int32_t requestedReg)
 	if (effectiveFreq == mqttUpdateFreq::freqNever || effectiveFreq == mqttUpdateFreq::freqDisabled) {
 		return false;
 	}
-	char topicBase[200];
-	char topic[256];
-	char entityKey[64];
-	mqttEntityNameCopy(&regEntity, entityKey, sizeof(entityKey));
+	MqttPublishTopicScratch *publishScratch = runtimePublishTopicScratch();
+	if (publishScratch == nullptr) {
+		return false;
+	}
+	char *const topicBase = publishScratch->topicBase;
+	char *const topic = publishScratch->topic;
+	char *const entityKey = publishScratch->entityKey;
+	mqttEntityNameCopy(&regEntity, entityKey, sizeof(publishScratch->entityKey));
 	if (!buildEntityTopicBase(deviceName,
 	                          mqttEntityScope(regEntity.entityId),
 	                          controllerIdentifier,
 	                          deviceSerialNumber,
 	                          entityKey,
 	                          topicBase,
-	                          sizeof(topicBase))) {
+	                          sizeof(publishScratch->topicBase))) {
 		return false;
 	}
 	emptyPayload();
@@ -12433,7 +13743,7 @@ publishRegisterNumberStateValue(int32_t requestedReg)
 	if (addToPayload(valueBuf) == modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
 		return false;
 	}
-	snprintf(topic, sizeof(topic), "%s/state", topicBase);
+	snprintf(topic, sizeof(publishScratch->topic), "%s/state", topicBase);
 	return sendMqtt(topic, regEntity.retain ? MQTT_RETAIN : false);
 }
 
@@ -12642,9 +13952,10 @@ processPendingEntityCommand(void)
 				opData.a2mReadyToUseOpMode = true;
 				dispatchRelevantChange = true;
 				if (tempOpMode == opMode::opModeNormal) {
-					if (_registerHandler != NULL) {
-						modbusRequestAndResponse response;
-						modbusRequestAndResponseStatusValues result = _registerHandler->writeDispatchStop(&response);
+					modbusRequestAndResponse *response = runtimeModbusReadScratch();
+					if (_registerHandler != NULL && response != nullptr) {
+						*response = modbusRequestAndResponse{};
+						modbusRequestAndResponseStatusValues result = _registerHandler->writeDispatchStop(response);
 						if (result == modbusRequestAndResponseStatusValues::writeDataRegisterSuccess) {
 							opData.essDispatchStart = DISPATCH_START_STOP;
 							refreshEssSnapshotAfterDispatch(true);
@@ -12744,47 +14055,86 @@ applyMaxFeedinPercentCommand(const mqttState *entity, int32_t requestedPercent)
 		return false;
 	}
 
-	modbusRequestAndResponse writeResponse{};
+	modbusRequestAndResponse *response = runtimeModbusReadScratch();
+	if (response == nullptr) {
+		return false;
+	}
+	*response = modbusRequestAndResponse{};
 	const modbusRequestAndResponseStatusValues writeResult =
 		_registerHandler->writeRawSingleRegister(
 			REG_SYSTEM_CONFIG_RW_MAX_FEED_INTO_GRID_PERCENT,
 			static_cast<uint16_t>(requestedPercent),
-			&writeResponse);
+			response);
 	if (writeResult != modbusRequestAndResponseStatusValues::writeSingleRegisterSuccess) {
 		recordRs485Error(writeResult);
-		noteRs485Error(writeResult, writeResponse.statusMqttMessage);
+		noteRs485Error(writeResult, response->statusMqttMessage);
 		return false;
 	}
 
-	modbusRequestAndResponse readResponse{};
-	readResponse.functionCode = MODBUS_FN_READDATAREGISTER;
-	readResponse.registerCount = 1;
-	readResponse.returnDataType = modbusReturnDataType::unsignedShort;
-	strlcpy(readResponse.returnDataTypeDesc,
+	*response = modbusRequestAndResponse{};
+	response->functionCode = MODBUS_FN_READDATAREGISTER;
+	response->registerCount = 1;
+	response->returnDataType = modbusReturnDataType::unsignedShort;
+	strlcpy(response->returnDataTypeDesc,
 	        MODBUS_RETURN_DATA_TYPE_UNSIGNED_SHORT_DESC,
-	        sizeof(readResponse.returnDataTypeDesc));
+	        sizeof(response->returnDataTypeDesc));
 	const modbusRequestAndResponseStatusValues readResult =
-		_registerHandler->readRawRegister(REG_SYSTEM_CONFIG_RW_MAX_FEED_INTO_GRID_PERCENT, &readResponse);
+		_registerHandler->readRawRegister(REG_SYSTEM_CONFIG_RW_MAX_FEED_INTO_GRID_PERCENT, response);
 	if (readResult != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
 		recordRs485Error(readResult);
-		noteRs485Error(readResult, readResponse.statusMqttMessage);
+		noteRs485Error(readResult, response->statusMqttMessage);
 		return false;
 	}
-	if (readResponse.unsignedShortValue != static_cast<uint16_t>(requestedPercent)) {
+	if (response->unsignedShortValue != static_cast<uint16_t>(requestedPercent)) {
 #ifdef DEBUG_OVER_SERIAL
 		snprintf(_debugOutput,
 		         sizeof(_debugOutput),
 		         "Max_Feedin_Percent readback mismatch requested=%ld readback=%u",
 		         static_cast<long>(requestedPercent),
-		         static_cast<unsigned>(readResponse.unsignedShortValue));
+		         static_cast<unsigned>(response->unsignedShortValue));
 		Serial.println(_debugOutput);
 #endif
 		return false;
 	}
-	return sendDataFromMqttState(entity, false, &readResponse, true);
+	return sendDataFromMqttState(entity, false, response, true);
 }
 
-static void
+static void __attribute__((noinline))
+servicePendingRs485StubControl(void)
+{
+#if RS485_STUB
+	Rs485StubControlRequest *request = ensureRs485StubControlRequestScratch();
+	if (request == nullptr) {
+		return;
+	}
+	applyParsedRs485StubControl(*request);
+#endif
+}
+
+static bool __attribute__((noinline))
+servicePendingRs485StubControlInLoop(void)
+{
+	if (!pendingRs485StubControlSet) {
+		return false;
+	}
+
+	pendingRs485StubControlSet = false;
+	servicePendingRs485StubControl();
+#if RS485_STUB
+	if (rs485StubStatusAckPending) {
+		(void)publishStubControlStatusNow(false);
+		(void)publishStatusCoreNow();
+		rs485StubStatusAckPending = false;
+	}
+	#ifdef DEBUG_OVER_SERIAL
+	Serial.println(F("RS485 stub control helper complete"));
+	#endif
+	rs485StubControlProcessedThisLoop = true;
+#endif
+	return true;
+}
+
+static void __attribute__((noinline))
 serviceDeferredMqttWork(void)
 {
 	for (uint8_t iteration = 0; iteration < kDeferredMqttDrainMaxIterations; ++iteration) {
@@ -12801,12 +14151,8 @@ serviceDeferredMqttWork(void)
 			didWork = true;
 		}
 		if (pendingRs485StubControlSet) {
-			pendingRs485StubControlSet = false;
-			if (pendingDeferredControlPayload != nullptr) {
-				applyRs485StubControlPayload(pendingDeferredControlPayload);
-				pendingDeferredControlPayload[0] = '\0';
-			}
-			didWork = true;
+			// Process deferred stub-control publishes from loop() on a dedicated smaller frame.
+			return;
 		}
 		if (pendingEntityCommandSet) {
 			processPendingEntityCommand();
@@ -12869,6 +14215,22 @@ struct Rs485StubControlRequest {
 	uint16_t virtualDispatchSoc = 0;
 	uint32_t virtualDispatchTime = 0;
 };
+
+// ESP8266 loop stack is tight once deferred MQTT control handling, stub state mutation,
+// and reconnect/bootstrap logic share the same frame. Keep the parsed request off the
+// loop stack, but allocate it lazily after boot so it does not count against boot heap
+// checkpoints in NORMAL startup.
+static Rs485StubControlRequest *g_rs485StubControlRequestScratch = nullptr;
+
+static Rs485StubControlRequest *
+ensureRs485StubControlRequestScratch(void)
+{
+	if (g_rs485StubControlRequestScratch != nullptr) {
+		return g_rs485StubControlRequestScratch;
+	}
+	g_rs485StubControlRequestScratch = new (std::nothrow) Rs485StubControlRequest();
+	return g_rs485StubControlRequestScratch;
+}
 
 static bool
 payloadHasToken(const char *payload, const char *lower, const char *upper)
@@ -13005,23 +14367,10 @@ parseRs485StubControlPayload(const char *payload, Rs485StubControlRequest &reque
 	return true;
 }
 
-static void
-applyRs485StubControlPayload(const char *payload)
+static void __attribute__((noinline))
+applyParsedRs485StubControl(const Rs485StubControlRequest &request)
 {
-	if (payload == nullptr || _modBus == nullptr) {
-		return;
-	}
-
-	// Chose a helper-based parser here because ESP8266 loop stack is tight and the
-	// earlier monolithic local-heavy parser triggered watchdog resets on control publish.
-	Rs485StubControlRequest request{};
-	if (!parseRs485StubControlPayload(payload, request)) {
-		return;
-	}
-	maybeYield();
-
 	_modBus->applyStubControl(request.mode, request.failN, request.failReg, request.failType, request.latencyMs);
-	maybeYield();
 	_modBus->applyAdvancedControl(
 		request.strictUnknown,
 		request.failEveryN,
@@ -13032,7 +14381,6 @@ applyRs485StubControlPayload(const char *payload)
 		request.flapOfflineMs,
 		request.probeSuccessAfterN,
 		request.socStepX10PerSnapshot);
-	maybeYield();
 	if (request.hasVirtualEss) {
 		_modBus->applyVirtualInverterState(
 			request.virtualSocPct,
@@ -13040,7 +14388,6 @@ applyRs485StubControlPayload(const char *payload)
 			request.virtualGridPowerW,
 			request.virtualPvCtPowerW,
 			request.virtualInverterMode);
-		maybeYield();
 	}
 	if (request.hasVirtualDispatch) {
 		_modBus->applyVirtualDispatchState(
@@ -13049,28 +14396,55 @@ applyRs485StubControlPayload(const char *payload)
 			request.virtualDispatchActivePower,
 			request.virtualDispatchSoc,
 			request.virtualDispatchTime);
-		maybeYield();
 	}
 	rs485ApplyStubConnectivityMode(request.mode);
 #ifdef DEBUG_OVER_SERIAL
-	snprintf(_debugOutput,
-	         sizeof(_debugOutput),
-	         "RS485 stub control applied: mode=%s fail_n=%lu fail_reg=%u strict=%u failEveryN=%lu failReads=%u failWrites=%u failForMs=%lu failType=%u hasEss=%u hasDispatch=%u",
-	         _modBus->stubModeLabel(),
-	         static_cast<unsigned long>(request.failN),
-	         static_cast<unsigned>(request.failReg),
-	         static_cast<unsigned>(request.strictUnknown ? 1 : 0),
-	         static_cast<unsigned long>(request.failEveryN),
-	         static_cast<unsigned>(request.failReads ? 1 : 0),
-	         static_cast<unsigned>(request.failWrites ? 1 : 0),
-	         static_cast<unsigned long>(request.failForMs),
-	         static_cast<unsigned>(request.failType),
-	         static_cast<unsigned>(request.hasVirtualEss ? 1 : 0),
-	         static_cast<unsigned>(request.hasVirtualDispatch ? 1 : 0));
-	Serial.println(_debugOutput);
+	Serial.print(F("RS485 stub control applied: mode="));
+	Serial.print(_modBus->stubModeLabel());
+	Serial.print(F(" ess="));
+	Serial.print(request.hasVirtualEss ? 1 : 0);
+	Serial.print(F(" dispatch="));
+	Serial.println(request.hasVirtualDispatch ? 1 : 0);
 #endif
-	// Force the next schedule pass to run ASAP so E2E tests can observe outcomes quickly.
-	resendAllData = true;
+	if (rs485StubModeUsesProbeLifecycle(request.mode)) {
+		// Offline/probe-style stub transitions can publish status immediately because they do not
+		// also trigger inverter subscription setup and the first live snapshot path.
+		rs485StubStatusAckPending = false;
+		publishStatusNow();
+	} else {
+		// Online-like stub transitions still get a lightweight immediate control acknowledgement.
+		// Keep the scheduler cooldown and skip the next full 10 s status pass so the immediate
+		// poll/stub/core acknowledgement does not stack with a second publish burst on the same
+		// transition.
+		rs485StubStatusAckPending = true;
+		rs485StubSkipNextScheduledStatusPublish = true;
+		rs485StubControlSchedulerCooldownUntilMs = millis() + 5000U;
+		rs485StubLastOnlineControlMs = millis();
+#ifdef DEBUG_OVER_SERIAL
+		Serial.println(F("RS485 stub control online cooldown armed"));
+#endif
+	}
+}
+
+static void __attribute__((noinline))
+applyRs485StubControlPayload(const char *payload)
+{
+	if (payload == nullptr || _modBus == nullptr) {
+		return;
+	}
+	Rs485StubControlRequest *request = ensureRs485StubControlRequestScratch();
+	if (request == nullptr) {
+		return;
+	}
+
+	// Chose a helper-based parser here because ESP8266 loop stack is tight and the
+	// earlier monolithic local-heavy parser triggered watchdog resets on control publish.
+	*request = Rs485StubControlRequest{};
+	if (!parseRs485StubControlPayload(payload, *request)) {
+		return;
+	}
+	maybeYield();
+	applyParsedRs485StubControl(*request);
 }
 #else
 static void
@@ -13096,10 +14470,6 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 	mqttCallbackSequence++;
 	noteMqttActivityPulse();
 
-	char mqttIncomingPayload[512] = ""; // Should be enough to cover command requests
-	mqttState mqttEntity{};
-	bool haveMqttEntity = false;
-
 #ifdef DEBUG_OVER_SERIAL
 	sprintf(_debugOutput, "Topic: %s", topic);
 	Serial.println(_debugOutput);
@@ -13119,7 +14489,7 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 	receivedCallbacks++;
 #endif // DEBUG_CALLBACKS
 
-	if (strcmp(topic, configSetTopic) == 0) {
+	if (topicEqualsDeviceSuffix(topic, "/config/set")) {
 		// Defer config/set out of callback context without pinning a 2 KB global scratch
 		// in NORMAL mode. Queue an exact-size copy and let loop() parse/free it later.
 		if (!queuePendingPollingConfigPayload(reinterpret_cast<const char *>(message), length)) {
@@ -13136,10 +14506,51 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 		return;
 	}
 
-	if (!copyLengthDelimitedString(reinterpret_cast<const char *>(message),
-	                               length,
-	                               mqttIncomingPayload,
-	                               sizeof(mqttIncomingPayload))) {
+#if RS485_STUB
+	if (topicEqualsDeviceSuffix(topic, "/debug/rs485_stub/set")) {
+		Rs485StubControlRequest *request = ensureRs485StubControlRequestScratch();
+		if (request == nullptr ||
+		    !ensureDeferredControlPayload() ||
+		    !copyLengthDelimitedString(reinterpret_cast<const char *>(message),
+		                              length,
+		                              pendingDeferredControlPayload,
+		                              kPendingDeferredControlPayloadSize)) {
+#ifdef DEBUG_OVER_SERIAL
+			sprintf(_debugOutput, "mqttCallback: bad stub control length: %d", length);
+			Serial.println(_debugOutput);
+#endif
+#ifdef DEBUG_CALLBACKS
+			badCallbacks++;
+#endif // DEBUG_CALLBACKS
+			return;
+		}
+		*request = Rs485StubControlRequest{};
+		if (!parseRs485StubControlPayload(pendingDeferredControlPayload, *request)) {
+#ifdef DEBUG_OVER_SERIAL
+			sprintf(_debugOutput, "mqttCallback: bad stub control payload");
+			Serial.println(_debugOutput);
+#endif
+#ifdef DEBUG_CALLBACKS
+			badCallbacks++;
+#endif // DEBUG_CALLBACKS
+			pendingDeferredControlPayload[0] = '\0';
+			return;
+		}
+		pendingDeferredControlPayload[0] = '\0';
+#ifdef DEBUG_OVER_SERIAL
+		sprintf(_debugOutput, "Stub control payload: %d", length);
+		Serial.println(_debugOutput);
+#endif
+		pendingRs485StubControlSet = true;
+		return;
+	}
+#endif
+
+	if (!ensureDeferredControlPayload() ||
+	    !copyLengthDelimitedString(reinterpret_cast<const char *>(message),
+	                              length,
+	                              pendingDeferredControlPayload,
+	                              kPendingDeferredControlPayloadSize)) {
 #ifdef DEBUG_OVER_SERIAL
 		sprintf(_debugOutput, "mqttCallback: bad length: %d", length);
 		Serial.println(_debugOutput);
@@ -13149,6 +14560,7 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 #endif // DEBUG_CALLBACKS
 		return; // We won't be doing anything
 	}
+	char *mqttIncomingPayload = pendingDeferredControlPayload;
 #ifdef DEBUG_OVER_SERIAL
 	sprintf(_debugOutput, "Payload: %d", length);
 	Serial.println(_debugOutput);
@@ -13167,35 +14579,28 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 #endif
 		}
 		return; // No further processing needed.
-	} else if (strcmp(topic, configSetTopic) == 0) {
+	} else if (topicEqualsDeviceSuffix(topic, "/config/set")) {
 		return; // handled above
-#if RS485_STUB
-		} else if (strcmp(topic, rs485StubControlTopic) == 0) {
-			// Runtime RS485 stub control is intentionally deferred out of callback context.
-			// The stub JSON parser + state application can be large enough to trigger ESP8266
-			// watchdog resets if it runs while PubSubClient is inside loop().
-			if (!ensureDeferredControlPayload() ||
-			    !copyLengthDelimitedString(reinterpret_cast<const char *>(message),
-			                              length,
-			                              pendingDeferredControlPayload,
-			                              kPendingDeferredControlPayloadSize)) {
-#ifdef DEBUG_CALLBACKS
-				badCallbacks++;
-#endif // DEBUG_CALLBACKS
-				return;
-			}
-			pendingRs485StubControlSet = true;
-		return;
-	#endif
 	} else {
+		mqttState mqttEntity{};
+		bool haveMqttEntity = false;
 		const char *inverterDeviceId = discoveryDeviceIdForScope(DiscoveryDeviceScope::Inverter);
-		char matchPrefix[64];
+		const size_t deviceNameLen = strlen(deviceName);
+		const size_t topicLen = strlen(topic);
+		const bool topicUnderDevice =
+			(deviceNameLen > 0) &&
+			(strncmp(topic, deviceName, deviceNameLen) == 0) &&
+			(topic[deviceNameLen] == '/');
+		const size_t inverterDeviceIdLen = strlen(inverterDeviceId);
 
-		snprintf(matchPrefix, sizeof(matchPrefix), "%s/", deviceName);
-		if (inverterReady && inverterDeviceId[0] != '\0') {
-			char dispatchSetTopic[96];
-			snprintf(dispatchSetTopic, sizeof(dispatchSetTopic), "%s/dispatch/set", inverterDeviceId);
-			if (strcmp(topic, dispatchSetTopic) == 0) {
+		if (inverterReady &&
+		    inverterDeviceId[0] != '\0' &&
+		    topicLen == inverterDeviceIdLen + strlen("/dispatch/set") &&
+		    strncmp(topic, inverterDeviceId, inverterDeviceIdLen) == 0 &&
+		    strcmp(topic + inverterDeviceIdLen, "/dispatch/set") == 0) {
+#ifdef DEBUG_OVER_SERIAL
+				Serial.println(F("dq:cb:hit"));
+#endif
 				if (mqttCommandWarmupActive()) {
 #ifdef DEBUG_OVER_SERIAL
 					snprintf(_debugOutput,
@@ -13206,8 +14611,16 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 #endif
 					return;
 				}
-				if (dispatchRequestShouldRejectNewRequest(pendingDispatchRequestSet,
+				const bool coalesceDuringSnapshot =
+					shouldQueueDispatchRequest(pendingDispatchRequestSet,
+					                           atomicDispatchState.inFlight,
+					                           essSnapshotBuildInProgress);
+				if (!coalesceDuringSnapshot &&
+				    dispatchRequestShouldRejectNewRequest(pendingDispatchRequestSet,
 				                                        atomicDispatchState.inFlight)) {
+#ifdef DEBUG_OVER_SERIAL
+					Serial.println(F("dq:cb:reject"));
+#endif
 					setDispatchRequestStatus("dispatch request already in progress");
 					return;
 				}
@@ -13219,17 +14632,31 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 #ifdef DEBUG_CALLBACKS
 					badCallbacks++;
 #endif // DEBUG_CALLBACKS
+#ifdef DEBUG_OVER_SERIAL
+					Serial.println(F("dq:cb:bad-payload"));
+#endif
 					setDispatchRequestStatus("invalid mode");
 					return;
 				}
 				dispatchRequestQueuedMs = millis();
+				if (essSnapshotBuildInProgress) {
+					schedulerPassCache.dispatchQueuedDuringSnapshot = true;
+					if (coalesceDuringSnapshot) {
+						schedulerPassCache.dispatchQueueCoalesceCount++;
+						dispatchQueueCoalesceCount++;
+					}
+				}
 				pendingDispatchRequestSet = true;
+#ifdef DEBUG_OVER_SERIAL
+				Serial.print(F("dq:cb:queued:"));
+				Serial.println(static_cast<unsigned long>(dispatchRequestQueuedMs));
+#endif
 				return;
-			}
 		}
 #ifdef DEBUG_OVER_SERIAL
-		if (!strncmp(topic, matchPrefix, strlen(matchPrefix)) &&
-		    !strcmp(&topic[strlen(topic) - strlen("/command")], "/command")) {
+		if (topicUnderDevice &&
+		    topicLen >= strlen("/command") &&
+		    !strcmp(&topic[topicLen - strlen("/command")], "/command")) {
 			snprintf(_debugOutput,
 			         sizeof(_debugOutput),
 			         "MQTT command gate: ready=%u inverter='%s' topic=%s",
@@ -13241,8 +14668,9 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 #endif
 		if (inverterReady &&
 		    inverterDeviceId[0] != '\0' &&
-		    !strncmp(topic, matchPrefix, strlen(matchPrefix)) &&
-		    !strcmp(&topic[strlen(topic) - strlen("/command")], "/command")) {
+		    topicUnderDevice &&
+		    topicLen >= strlen("/command") &&
+		    !strcmp(&topic[topicLen - strlen("/command")], "/command")) {
 			if (mqttCommandWarmupActive()) {
 #ifdef DEBUG_OVER_SERIAL
 				snprintf(_debugOutput,
@@ -13254,47 +14682,26 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 #endif
 				return;
 			}
-			const char *topicAfterDevice = &topic[strlen(matchPrefix)];
+			const char *topicAfterDevice = &topic[deviceNameLen + 1];
 			const char *entitySep = strchr(topicAfterDevice, '/');
 			if (entitySep != nullptr) {
-				char topicDeviceId[64];
-				char topicEntityName[64];
 				size_t topicDeviceIdLen = static_cast<size_t>(entitySep - topicAfterDevice);
-				int topicEntityLen = strlen(topic) - strlen(matchPrefix) - static_cast<int>(topicDeviceIdLen) - 1 - strlen("/command");
-				if (topicDeviceIdLen < sizeof(topicDeviceId) && topicEntityLen > 0 && topicEntityLen < static_cast<int>(sizeof(topicEntityName))) {
-					strlcpy(topicDeviceId, topicAfterDevice, topicDeviceIdLen + 1);
-					strlcpy(topicEntityName, entitySep + 1, topicEntityLen + 1);
-#ifdef DEBUG_OVER_SERIAL
-					snprintf(_debugOutput,
-					         sizeof(_debugOutput),
-					         "MQTT command parsed: ready=%u topic_device=%s inverter=%s entity=%s",
-					         inverterReady ? 1U : 0U,
-					         topicDeviceId,
-					         inverterDeviceId,
-					         topicEntityName);
-					Serial.println(_debugOutput);
-#endif
-					if (!strcmp(topicDeviceId, inverterDeviceId)) {
-						haveMqttEntity = lookupSubscription(topicEntityName, &mqttEntity);
+				const char *entityNameStart = entitySep + 1;
+				const char *entityNameEnd = &topic[topicLen - strlen("/command")];
+				if (entityNameEnd > entityNameStart &&
+				    topicDeviceIdLen == inverterDeviceIdLen &&
+				    strncmp(topicAfterDevice, inverterDeviceId, inverterDeviceIdLen) == 0) {
+						haveMqttEntity = lookupSubscriptionSpan(entityNameStart,
+						                                        static_cast<size_t>(entityNameEnd - entityNameStart),
+						                                        &mqttEntity);
 #ifdef DEBUG_OVER_SERIAL
 						snprintf(_debugOutput,
 						         sizeof(_debugOutput),
-						         "MQTT command lookup: entity=%s have=%u",
-						         topicEntityName,
+						         "MQTT command lookup len=%u have=%u",
+						         static_cast<unsigned>(entityNameEnd - entityNameStart),
 						         haveMqttEntity ? 1U : 0U);
 						Serial.println(_debugOutput);
 #endif
-					} else {
-#ifdef DEBUG_OVER_SERIAL
-						snprintf(_debugOutput,
-						         sizeof(_debugOutput),
-						         "MQTT command device mismatch: topic=%s inverter=%s entity=%s",
-						         topicDeviceId,
-						         inverterDeviceId,
-						         topicEntityName);
-						Serial.println(_debugOutput);
-#endif
-					}
 				}
 			}
 		}
@@ -13317,15 +14724,13 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 
 		// Defer command application out of callback context to avoid deep call chains while PubSubClient
 		// is executing loop() and to keep RS485 writes on the main loop path.
-		if (!ensureDeferredControlPayload() ||
-		    strlen(mqttIncomingPayload) >= kPendingDeferredControlPayloadSize) {
+		if (strlen(mqttIncomingPayload) >= kPendingDeferredControlPayloadSize) {
 	#ifdef DEBUG_CALLBACKS
 			badCallbacks++;
 	#endif // DEBUG_CALLBACKS
 			return;
 		}
 		pendingEntityCommandId = mqttEntity.entityId;
-		strlcpy(pendingDeferredControlPayload, mqttIncomingPayload, kPendingDeferredControlPayloadSize);
 		pendingEntityCommandSet = true;
 		return;
 	}
@@ -13343,6 +14748,138 @@ noteMqttActivityPulse(void)
 {
 	const uint32_t nowMs = millis();
 	mqttActivityPulseUntilMs = nowMs + kMqttActivityPulseMs;
+}
+
+static bool
+subscribeMqttReconnectTopic(bool current, const char *topic)
+{
+	if (topic == nullptr || topic[0] == '\0') {
+		return false;
+	}
+	return current && _mqtt.subscribe(topic, MQTT_SUBSCRIBE_QOS);
+}
+
+#if defined(MP_ESP8266)
+static void
+guardPendingAsyncWifiScanBeforeMqttReconnect(void)
+{
+	// Guard any in-flight async scan before reconnect. This is kept out of
+	// mqttReconnect() so the reconnect frame stays small on ESP8266.
+	const int8_t scanState = WiFi.scanComplete();
+#ifdef DEBUG_OVER_SERIAL
+	Serial.printf("WiFi guard scan state %d\r\n", scanState);
+#endif
+	const WifiScanGuardAction action = classifyWifiScanGuard(scanState);
+	if (action == WifiScanGuardAction::RebindNoopCallback) {
+		WiFi.scanNetworksAsync(wifiScanCompleteNoop, false);
+		return;
+	}
+	if (action == WifiScanGuardAction::DeleteResults) {
+		WiFi.scanDelete();
+	}
+}
+#endif
+
+#ifdef DEBUG_OVER_SERIAL
+static void
+debugLogMqttReconnectProbe(void)
+{
+	const char *mqttHost = appConfig.mqttSrvr.c_str();
+	const uint16_t mqttPort = static_cast<uint16_t>(appConfig.mqttPort);
+	const size_t mqttHostLen = strlen(mqttHost);
+	const size_t mqttUserLen = appConfig.mqttUser.length();
+	const size_t mqttPassLen = appConfig.mqttPass.length();
+
+	Serial.printf("MQTT diag: host_len=%u user_len=%u pass_len=%u port=%u wifi=%d ip=%s rssi=%d\r\n",
+	              static_cast<unsigned>(mqttHostLen),
+	              static_cast<unsigned>(mqttUserLen),
+	              static_cast<unsigned>(mqttPassLen),
+	              static_cast<unsigned>(mqttPort),
+	              static_cast<int>(WiFi.status()),
+	              WiFi.localIP().toString().c_str(),
+	              WiFi.RSSI());
+
+	Serial.print("MQTT host bytes:");
+	for (size_t i = 0; i < mqttHostLen; i++) {
+		Serial.printf(" %02X", static_cast<unsigned>(static_cast<uint8_t>(mqttHost[i])));
+	}
+	Serial.println();
+
+	WiFiClient mqttProbe;
+	mqttProbe.setTimeout(2000);
+	const unsigned long probeStartMs = millis();
+	const bool probeOk = mqttProbe.connect(mqttHost, mqttPort);
+	const unsigned long probeElapsedMs = millis() - probeStartMs;
+	Serial.printf("MQTT TCP probe: ok=%d elapsed_ms=%lu\r\n", probeOk ? 1 : 0, probeElapsedMs);
+	if (probeOk) {
+		mqttProbe.stop();
+	}
+}
+#endif
+
+static bool __attribute__((noinline))
+subscribeMqttReconnectTopics(bool *inverterSubscriptionsAdded)
+{
+	char subscription[kRuntimeTopicScratchSize] = "";
+	if (inverterSubscriptionsAdded != nullptr) {
+		*inverterSubscriptionsAdded = false;
+	}
+
+	snprintf(subscription,
+	         sizeof(subscription),
+	         "%s",
+	         MQTT_SUB_HOMEASSISTANT);
+	bool subscribed = subscribeMqttReconnectTopic(true, subscription);
+#ifdef DEBUG_OVER_SERIAL
+	snprintf(_debugOutput,
+	         sizeof(_debugOutput),
+	         "Subscribed to \"%s\" : %d",
+	         subscription,
+	         subscribed);
+	Serial.println(_debugOutput);
+#endif
+
+	snprintf(subscription,
+	         sizeof(subscription),
+	         "%s/config/set",
+	         deviceName);
+	subscribed = subscribeMqttReconnectTopic(subscribed, subscription);
+#ifdef DEBUG_OVER_SERIAL
+	snprintf(_debugOutput,
+	         sizeof(_debugOutput),
+	         "Subscribed to \"%s\" : %d",
+	         subscription,
+	         subscribed);
+	Serial.println(_debugOutput);
+#endif
+
+#if RS485_STUB
+	snprintf(subscription,
+	         sizeof(subscription),
+	         "%s/debug/rs485_stub/set",
+	         deviceName);
+	subscribed = subscribeMqttReconnectTopic(subscribed, subscription);
+#ifdef DEBUG_OVER_SERIAL
+	snprintf(_debugOutput, sizeof(_debugOutput), "Subscribed to \"%s\" : %d", subscription, subscribed);
+	Serial.println(_debugOutput);
+#endif
+#endif
+
+	return subscribed;
+}
+
+static void __attribute__((noinline))
+completeSuccessfulMqttReconnect(unsigned long attemptStart, int tries, bool inverterSubscriptionsAdded)
+{
+#ifdef DEBUG_OVER_SERIAL
+	Serial.printf("mqttReconnect attempt %d succeeded after %lu ms\r\n", tries, millis() - attemptStart);
+#endif
+	(void)inverterSubscriptionsAdded;
+	setStatusLedColor(0, 255, 0);
+	updateRunstate();
+	handleMqttReconnectDispatchReset();
+	requestHaDataResend();
+	pendingPollingConfigPublish = true;
 }
 
 
@@ -13423,10 +14960,6 @@ bool sendMqtt(const char *topic, bool retain)
 		emptyPayload();
 		return false;
 	} else {
-#ifdef DEBUG_OVER_SERIAL
-		//sprintf(_debugOutput, "MQTT publish success");
-		//Serial.println(_debugOutput);
-#endif
 	}
 
 	// Empty payload for next use.
@@ -13613,22 +15146,60 @@ publishDispatchRequestStatus(void)
 	if (!loopSequenceReached(dispatchRequestStatusPublishEarliestLoop)) {
 		return false;
 	}
-	if (!dispatchRequestStatusShouldPublish(dispatchRequestStatus)) {
+	if (!dispatchRequestStatusShouldPublish(
+	        (g_dispatchRequestStatus != nullptr) ? g_dispatchRequestStatus : "")) {
 		dispatchRequestStatusDirty = false;
+		A2M_DEBUG_LINE("dq:stat:skip-empty");
 		return true;
 	}
 	if (!inverterReady || !inverterSerialKnown()) {
+		A2M_DEBUG_LINE("dq:stat:wait-ready");
 		return false;
 	}
 	mqttState entity{};
 	if (!lookupEntity(mqttEntityId::entityDispatchRequestStatus, &entity)) {
+		A2M_DEBUG_LINE("dq:stat:no-entity");
+		return false;
+	}
+	MqttPublishTopicScratch *publishScratch = runtimePublishTopicScratch();
+	if (publishScratch == nullptr) {
+		A2M_DEBUG_LINE("dq:stat:no-scratch");
+		return false;
+	}
+	const DiscoveryDeviceScope scope = mqttEntityScope(entity.entityId);
+	const char *deviceId = discoveryDeviceIdForScope(scope);
+	if (deviceId == nullptr || deviceId[0] == '\0') {
+		A2M_DEBUG_LINE("dq:stat:no-device");
+		return false;
+	}
+	mqttEntityNameCopy(&entity, publishScratch->entityKey, sizeof(publishScratch->entityKey));
+	if (!buildEntityTopicBase(deviceName,
+	                          scope,
+	                          controllerIdentifier,
+	                          deviceSerialNumber,
+	                          publishScratch->entityKey,
+	                          publishScratch->topicBase,
+	                          sizeof(publishScratch->topicBase))) {
+		A2M_DEBUG_LINE("dq:stat:topic-fail");
+		return false;
+	}
+	snprintf(publishScratch->topic,
+	         sizeof(publishScratch->topic),
+	         "%s/state",
+	         publishScratch->topicBase);
+	emptyPayload();
+	if (addToPayload((g_dispatchRequestStatus != nullptr) ? g_dispatchRequestStatus : "") ==
+	    modbusRequestAndResponseStatusValues::payloadExceededCapacity) {
+		A2M_DEBUG_LINE("dq:stat:payload-too-large");
 		return false;
 	}
 	RuntimeDiagScope diagScope(RuntimeDiagPhase::StatusPublish, "req");
-	if (!sendDataFromMqttState(&entity, false, nullptr, true)) {
+	if (!sendMqtt(publishScratch->topic, entity.retain ? MQTT_RETAIN : false)) {
+		A2M_DEBUG_LINE("dq:stat:pub-fail");
 		return false;
 	}
 	dispatchRequestStatusDirty = false;
+	A2M_DEBUG_LINE("dq:stat:pub-ok");
 	return true;
 }
 
@@ -13761,16 +15332,20 @@ publishPendingDispatchMirror(void)
 		mqttEntityId::entityDispatchSoc,
 		mqttEntityId::entityDispatchTime,
 	};
+	modbusRequestAndResponse *prepared = runtimeModbusReadScratch();
+	if (prepared == nullptr) {
+		return false;
+	}
 	for (mqttEntityId entityId : mirrorIds) {
 		mqttState entity{};
-		modbusRequestAndResponse prepared{};
+		*prepared = modbusRequestAndResponse{};
 		if (!lookupEntity(entityId, &entity)) {
 			return false;
 		}
-		if (!prepareDispatchMirrorResponse(entityId, dispatchMirrorPublishReadback, prepared)) {
+		if (!prepareDispatchMirrorResponse(entityId, dispatchMirrorPublishReadback, *prepared)) {
 			return false;
 		}
-		if (!sendDataFromMqttState(&entity, false, &prepared, true)) {
+		if (!sendDataFromMqttState(&entity, false, prepared, true)) {
 			return false;
 		}
 	}
@@ -13788,72 +15363,20 @@ readDispatchRegisterReadback(const DispatchRequestPlan &plan,
                             char *error,
                             size_t errorSize)
 {
+	(void)plan;
 	readback = DispatchRegisterReadback{};
-	modbusRequestAndResponse response{};
-	auto readRegister = [&](uint16_t reg, const char *readError, bool required, bool &updated) -> bool {
-		updated = false;
-		if (_registerHandler == nullptr) {
-			if (required) {
-				strlcpy(error, "readback timeout", errorSize);
-				return false;
-			}
-			return true;
-		}
-		const modbusRequestAndResponseStatusValues result = _registerHandler->readHandledRegister(reg, &response);
-		if (result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
-			recordRs485Error(result);
-			if (required) {
-				strlcpy(error, readError, errorSize);
-				return false;
-			}
-			return true;
-		}
-		updated = true;
-		return true;
-	};
-
-	bool updated = false;
-	if (!readRegister(REG_DISPATCH_RW_DISPATCH_START, "readback timeout", true, updated)) {
+	DispatchBlockSnapshot snapshot{};
+	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
+	if (!fetchDispatchBlockSnapshot(snapshot, &result)) {
+		recordRs485Error(result);
+		strlcpy(error, "readback timeout", errorSize);
 		return false;
 	}
-	if (updated) {
-		readback.dispatchStart = response.unsignedShortValue;
-	}
-
-	// The confirmed readback snapshot is reused for next-tick mirror publishes, so
-	// all dispatch fields must come from one fresh read sequence rather than a mix
-	// of newly-read and previously-cached controller state.
-	updated = false;
-	if (!readRegister(REG_DISPATCH_RW_DISPATCH_MODE, "readback timeout", true, updated)) {
-		return false;
-	}
-	if (updated) {
-		readback.dispatchMode = response.unsignedShortValue;
-	}
-
-	updated = false;
-	if (!readRegister(REG_DISPATCH_RW_ACTIVE_POWER_1, "readback timeout", true, updated)) {
-		return false;
-	}
-	if (updated) {
-		readback.dispatchActivePower = response.signedIntValue;
-	}
-
-	updated = false;
-	if (!readRegister(REG_DISPATCH_RW_DISPATCH_SOC, "readback timeout", true, updated)) {
-		return false;
-	}
-	if (updated) {
-		readback.dispatchSocRaw = response.unsignedShortValue;
-	}
-
-	updated = false;
-	if (!readRegister(REG_DISPATCH_RW_DISPATCH_TIME_1, "readback timeout", true, updated)) {
-		return false;
-	}
-	if (updated) {
-		readback.dispatchTimeRaw = response.unsignedIntValue;
-	}
+	readback.dispatchStart = snapshot.dispatchStart;
+	readback.dispatchMode = snapshot.dispatchMode;
+	readback.dispatchActivePower = snapshot.dispatchActivePower;
+	readback.dispatchSocRaw = snapshot.dispatchSocRaw;
+	readback.dispatchTimeRaw = snapshot.dispatchTimeRaw;
 
 	opData.essDispatchStart = readback.dispatchStart;
 	opData.essDispatchMode = readback.dispatchMode;
@@ -13869,8 +15392,14 @@ processPendingDispatchRequest(void)
 	if (!pendingDispatchRequestSet) {
 		return;
 	}
+#ifdef DEBUG_OVER_SERIAL
+	Serial.println(F("dq:proc:begin"));
+#endif
 	if (pendingDispatchPayload == nullptr) {
 		pendingDispatchRequestSet = false;
+#ifdef DEBUG_OVER_SERIAL
+		Serial.println(F("dq:proc:no-buf"));
+#endif
 		setDispatchRequestStatus("dispatch request buffer unavailable");
 		return;
 	}
@@ -13888,15 +15417,30 @@ processPendingDispatchRequest(void)
 	char error[64] = "";
 	if (!parseDispatchRequestPayload(pendingDispatchPayload, payload, error, sizeof(error)) ||
 	    !buildDispatchRequestPlan(payload, plan, error, sizeof(error))) {
+#ifdef DEBUG_OVER_SERIAL
+		Serial.print(F("dq:proc:bad:"));
+		Serial.println(error);
+#endif
 		setDispatchRequestStatus(error);
 		return;
 	}
+	if (schedulerPassCache.dispatchQueuedDuringSnapshot) {
+		schedulerPassCache.dispatchWaitDueToSnapshotMs =
+			(dispatchRequestQueuedMs != 0) ? (millis() - dispatchRequestQueuedMs) : 0;
+		dispatchWaitDueToSnapshotMs = schedulerPassCache.dispatchWaitDueToSnapshotMs;
+		schedulerPassCache.dispatchQueuedDuringSnapshot = false;
+	}
 
-	modbusRequestAndResponse response{};
+	modbusRequestAndResponse *response = runtimeModbusReadScratch();
+	if (response == nullptr) {
+		setDispatchRequestStatus("dispatch scratch unavailable");
+		return;
+	}
+	*response = modbusRequestAndResponse{};
 	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
 	if (plan.stop) {
 		result = (_registerHandler != nullptr)
-		             ? _registerHandler->writeDispatchStop(&response)
+		             ? _registerHandler->writeDispatchStop(response)
 		             : modbusRequestAndResponseStatusValues::preProcessing;
 	} else {
 		result = (_registerHandler != nullptr)
@@ -13904,16 +15448,23 @@ processPendingDispatchRequest(void)
 		                                                        plan.dispatchMode,
 		                                                        plan.dispatchSocRaw,
 		                                                        plan.dispatchTimeRaw,
-		                                                        &response)
+		                                                        response)
 		             : modbusRequestAndResponseStatusValues::preProcessing;
 	}
 	noteRuntimePhaseObservation(RuntimeDiagPhase::DispatchWrite);
 	dispatchLastRunMs = millis();
 	if (result != modbusRequestAndResponseStatusValues::writeDataRegisterSuccess) {
 		recordRs485Error(result);
+#ifdef DEBUG_OVER_SERIAL
+		Serial.println(F("dq:proc:write-fail"));
+#endif
 		setDispatchRequestStatus("modbus write failed");
 		return;
 	}
+#ifdef DEBUG_OVER_SERIAL
+	Serial.println(F("dq:proc:write-ok"));
+#endif
+	invalidateDispatchBlockSnapshotCache();
 
 	atomicDispatchState = AtomicDispatchRuntimeState{};
 	atomicDispatchState.inFlight = true;
@@ -13939,12 +15490,19 @@ serviceAtomicDispatchRequest(void)
 	if (static_cast<int32_t>(nowMs - atomicDispatchState.nextReadbackAtMs) < 0) {
 		return;
 	}
+#ifdef DEBUG_OVER_SERIAL
+	Serial.println(F("dq:rb:tick"));
+#endif
 
 	char error[64] = "";
 	DispatchRegisterReadback readback{};
 	atomicDispatchState.readbackAttempts++;
 	if (!readDispatchRegisterReadback(atomicDispatchState.plan, readback, error, sizeof(error))) {
 		noteRuntimePhaseObservation(RuntimeDiagPhase::DispatchReadback);
+#ifdef DEBUG_OVER_SERIAL
+		Serial.print(F("dq:rb:read-fail:"));
+		Serial.println(error);
+#endif
 		const uint32_t retryDecisionMs = millis();
 		if ((retryDecisionMs - atomicDispatchState.readbackStartedMs) >= kDispatchReadbackTimeoutMs) {
 			setDispatchRequestStatus(error[0] != '\0' ? error : "readback timeout");
@@ -13957,6 +15515,10 @@ serviceAtomicDispatchRequest(void)
 	noteRuntimePhaseObservation(RuntimeDiagPhase::DispatchReadback);
 
 	if (!dispatchRequestReadbackMatches(atomicDispatchState.plan, readback, error, sizeof(error))) {
+#ifdef DEBUG_OVER_SERIAL
+		Serial.print(F("dq:rb:mismatch:"));
+		Serial.println(error);
+#endif
 		const uint32_t retryDecisionMs = millis();
 		if ((retryDecisionMs - atomicDispatchState.readbackStartedMs) >= kDispatchReadbackTimeoutMs) {
 			setDispatchRequestStatus(error);
@@ -13989,6 +15551,9 @@ serviceAtomicDispatchRequest(void)
 	dispatchMirrorPublishEarliestLoop = loopSequence + 1;
 	refreshEssSnapshotAfterDispatch(true);
 
+#ifdef DEBUG_OVER_SERIAL
+	Serial.println(F("dq:rb:ok"));
+#endif
 	setDispatchRequestStatus("ok");
 	atomicDispatchState = AtomicDispatchRuntimeState{};
 }
@@ -14121,8 +15686,12 @@ dispatchService(void)
 	}
 
 	auto writeStop = [&](const char *reason, bool restartAfterStop) -> bool {
-		modbusRequestAndResponse response;
-		const modbusRequestAndResponseStatusValues result = _registerHandler->writeDispatchStop(&response);
+		modbusRequestAndResponse *response = runtimeModbusReadScratch();
+		if (response == nullptr) {
+			return false;
+		}
+		*response = modbusRequestAndResponse{};
+		const modbusRequestAndResponseStatusValues result = _registerHandler->writeDispatchStop(response);
 		dispatchLastRunMs = millis();
 		if (result != modbusRequestAndResponseStatusValues::writeDataRegisterSuccess) {
 			recordRs485Error(result);
@@ -14141,9 +15710,13 @@ dispatchService(void)
 	};
 
 	auto writeStart = [&](uint16_t mode, int32_t activePower, uint16_t soc, uint32_t rawTime) -> bool {
-		modbusRequestAndResponse response;
+		modbusRequestAndResponse *response = runtimeModbusReadScratch();
+		if (response == nullptr) {
+			return false;
+		}
+		*response = modbusRequestAndResponse{};
 		const modbusRequestAndResponseStatusValues result =
-			_registerHandler->writeDispatchRegisters(activePower, mode, soc, rawTime, &response);
+			_registerHandler->writeDispatchRegisters(activePower, mode, soc, rawTime, response);
 		dispatchLastRunMs = millis();
 		if (result != modbusRequestAndResponseStatusValues::writeDataRegisterSuccess) {
 			recordRs485Error(result);
@@ -14372,8 +15945,6 @@ getA2mOpDataFromEss(void)
 	opData.a2mPwrCharge = INVERTER_POWER_MAX;
 	opData.a2mPwrDischarge = INVERTER_POWER_MAX;
 #else // DEBUG_NO_RS485
-	modbusRequestAndResponseStatusValues result;
-	modbusRequestAndResponse response;
 	// Defaults keep control logic in a safe, bounded state if ESS reads fail repeatedly.
 	opData.a2mOpMode = opMode::opModeNormal;
 	opData.a2mSocTarget = SOC_TARGET_MAX;
@@ -14381,40 +15952,37 @@ getA2mOpDataFromEss(void)
 	opData.a2mPwrDischarge = INVERTER_POWER_MAX;
 
 	const uint8_t kMaxReadAttempts = 4;
-	auto readWithRetries = [&](uint16_t reg, const char *name) -> bool {
-		for (uint8_t attempt = 0; attempt < kMaxReadAttempts; attempt++) {
-			result = _registerHandler->readHandledRegister(reg, &response);
-			if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
-				return true;
-			}
-			recordRs485Error(result);
-#ifdef DEBUG_OVER_SERIAL
-			if (attempt == 0 || (attempt + 1) == kMaxReadAttempts) {
-				snprintf(_debugOutput, sizeof(_debugOutput),
-					 "getA2mOpDataFromEss: %s read failed (%u/%u)",
-					 name,
-					 static_cast<unsigned>(attempt + 1),
-					 static_cast<unsigned>(kMaxReadAttempts));
-				Serial.println(_debugOutput);
-			}
-#endif // DEBUG_OVER_SERIAL
-			diagDelay(10);
-		}
-		return false;
-	};
-
+	DispatchBlockSnapshot dispatchSnapshot{};
 	bool dispatchActive = false;
-	if (readWithRetries(REG_DISPATCH_RW_DISPATCH_START, "dispatch_start")) {
-		opData.essDispatchStart = response.unsignedShortValue;
-		dispatchActive = (response.unsignedShortValue == DISPATCH_START_START);
-		if (!dispatchActive) {
-			opData.a2mOpMode = opMode::opModeNormal;
+	bool dispatchReadOk = false;
+	for (uint8_t attempt = 0; attempt < kMaxReadAttempts; attempt++) {
+		modbusRequestAndResponseStatusValues dispatchResult = modbusRequestAndResponseStatusValues::preProcessing;
+		if (fetchDispatchBlockSnapshot(dispatchSnapshot, &dispatchResult)) {
+			dispatchReadOk = true;
+			break;
 		}
+		recordRs485Error(dispatchResult);
+#ifdef DEBUG_OVER_SERIAL
+		if (attempt == 0 || (attempt + 1) == kMaxReadAttempts) {
+			snprintf(_debugOutput, sizeof(_debugOutput),
+			         "getA2mOpDataFromEss: dispatch_block read failed (%u/%u)",
+			         static_cast<unsigned>(attempt + 1),
+			         static_cast<unsigned>(kMaxReadAttempts));
+			Serial.println(_debugOutput);
+		}
+#endif // DEBUG_OVER_SERIAL
+		diagDelay(10);
 	}
 
-	if (readWithRetries(REG_DISPATCH_RW_DISPATCH_MODE, "dispatch_mode")) {
-		if (dispatchActive) {
-			switch (response.unsignedShortValue) {
+	if (dispatchReadOk) {
+		opData.essDispatchStart = dispatchSnapshot.dispatchStart;
+		opData.essDispatchMode = dispatchSnapshot.dispatchMode;
+		opData.essDispatchTime = dispatchSnapshot.dispatchTimeRaw;
+		dispatchActive = (dispatchSnapshot.dispatchStart == DISPATCH_START_START);
+		if (!dispatchActive) {
+			opData.a2mOpMode = opMode::opModeNormal;
+		} else {
+			switch (dispatchSnapshot.dispatchMode) {
 			case DISPATCH_MODE_BATTERY_ONLY_CHARGED_VIA_PV:
 				opData.a2mOpMode = opMode::opModePvCharge;
 				break;
@@ -14437,29 +16005,23 @@ getA2mOpDataFromEss(void)
 				break;
 			default:
 #ifdef DEBUG_OVER_SERIAL
-				snprintf(_debugOutput, sizeof(_debugOutput), "getA2mOpDataFromEss: Unhandled Dispatch Mode: %u/", response.unsignedShortValue);
-				Serial.print(_debugOutput);
-				Serial.println(response.dataValueFormatted);
+				snprintf(_debugOutput,
+				         sizeof(_debugOutput),
+				         "getA2mOpDataFromEss: Unhandled Dispatch Mode: %u",
+				         static_cast<unsigned>(dispatchSnapshot.dispatchMode));
+				Serial.println(_debugOutput);
 #endif
 				opData.a2mOpMode = opMode::opModeLoadFollow;
 				break;
 			}
 		}
-	}
 
-	if (readWithRetries(REG_DISPATCH_RW_DISPATCH_SOC, "dispatch_soc")) {
-		opData.a2mSocTarget = response.unsignedShortValue * DISPATCH_SOC_MULTIPLIER;
-	}
-	if (readWithRetries(REG_DISPATCH_RW_DISPATCH_TIME_1, "dispatch_time")) {
-		opData.essDispatchTime = response.unsignedIntValue;
-	}
-
-	if (readWithRetries(REG_DISPATCH_RW_ACTIVE_POWER_1, "active_power")) {
-		if (response.signedIntValue > DISPATCH_ACTIVE_POWER_OFFSET) {
+		opData.a2mSocTarget = dispatchSnapshot.dispatchSocRaw * DISPATCH_SOC_MULTIPLIER;
+		if (dispatchSnapshot.dispatchActivePower > DISPATCH_ACTIVE_POWER_OFFSET) {
 			opData.a2mPwrCharge = INVERTER_POWER_MAX;
-			opData.a2mPwrDischarge = response.signedIntValue - DISPATCH_ACTIVE_POWER_OFFSET;
-		} else if (response.signedIntValue < DISPATCH_ACTIVE_POWER_OFFSET) {
-			opData.a2mPwrCharge = DISPATCH_ACTIVE_POWER_OFFSET - response.signedIntValue;
+			opData.a2mPwrDischarge = dispatchSnapshot.dispatchActivePower - DISPATCH_ACTIVE_POWER_OFFSET;
+		} else if (dispatchSnapshot.dispatchActivePower < DISPATCH_ACTIVE_POWER_OFFSET) {
+			opData.a2mPwrCharge = DISPATCH_ACTIVE_POWER_OFFSET - dispatchSnapshot.dispatchActivePower;
 			opData.a2mPwrDischarge = INVERTER_POWER_MAX;
 		} else {
 			opData.a2mPwrCharge = INVERTER_POWER_MAX;

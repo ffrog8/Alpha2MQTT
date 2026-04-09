@@ -45,7 +45,7 @@ fi
 OUTFILE_REAL="${OUTDIR}/Alpha2MQTT_${BUILD_TS_MS}_real.bin"
 OUTFILE_STUB="${OUTDIR}/Alpha2MQTT_${BUILD_TS_MS}_stub.bin"
 ESP8266_INDEX_URL="https://arduino.esp8266.com/stable/package_esp8266com_index.json"
-ESP8266_FQBN="esp8266:esp8266:d1_mini"
+ESP8266_FQBN="esp8266:esp8266:d1_mini:stacksmash=enabled"
 BUILD_SUBDIR="esp8266.esp8266.d1_mini"
 
 mkdir -p "${OUTDIR}"

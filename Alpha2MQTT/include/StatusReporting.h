@@ -91,6 +91,8 @@ struct StatusPollSnapshot {
 	const char *rs485Backend;
 	bool essSnapshotLastOk;
 	uint32_t essSnapshotAttempts;
+	uint32_t essPowerSnapshotLastBuildMs;
+	uint32_t snapshotPublishSkipCount;
 	const char *rs485StubMode;
 	uint32_t rs485StubFailRemaining;
 	uint32_t rs485StubWriteCount;
@@ -99,6 +101,11 @@ struct StatusPollSnapshot {
 	uint32_t rs485StubLastWriteMs;
 	uint32_t dispatchRequestQueuedMs;
 	uint32_t dispatchLastRunMs;
+	uint32_t dispatchWaitDueToSnapshotMs;
+	uint32_t dispatchQueueCoalesceCount;
+	uint32_t dispatchBlockCacheHitCount;
+	uint32_t pvBlockCacheHitCount;
+	uint32_t pvMeterCacheHitCount;
 	const char *dispatchLastSkipReason;
 	const char *worstPhase;
 	uint32_t worstFreeHeapB;
@@ -139,6 +146,7 @@ struct StatusStubSnapshot {
 	uint32_t stubUnknownReads;
 	uint16_t socX10;
 	uint16_t lastReadStartReg;
+	uint16_t lastReadRegCount;
 	uint8_t lastFn;
 	uint16_t lastFailStartReg;
 	uint8_t lastFailFn;

@@ -161,6 +161,10 @@ Following the send, kicks off a synchronous listen for response
 */
 modbusRequestAndResponseStatusValues RS485Handler::sendModbus(uint8_t frame[], byte actualFrameSize, modbusRequestAndResponse* resp)
 {
+	if (frame == nullptr || resp == nullptr) {
+		return modbusRequestAndResponseStatusValues::invalidFrame;
+	}
+
 	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
 	int tries = 0;
 	struct TxnGuard {
@@ -294,6 +298,11 @@ Returns data in a stucture and returns a result to guide onward processing.
 */
 modbusRequestAndResponseStatusValues RS485Handler::listenResponse(modbusRequestAndResponse* resp)
 {
+	if (!resp)
+	{
+		return modbusRequestAndResponseStatusValues::invalidFrame;
+	}
+
 	uint8_t inFrame[MAX_FRAME_SIZE];
 	uint8_t inByteNumZeroIndexed = 0;
 	uint8_t inExpectedTotalBytesZeroIndexed = 0;
@@ -304,13 +313,7 @@ modbusRequestAndResponseStatusValues RS485Handler::listenResponse(modbusRequestA
 	bool breakOut = false;
 	bool frameTooLarge = false;
 
-	modbusRequestAndResponse dummy;
 	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
-
-	if (!resp)
-	{
-		resp = &dummy;
-	}
 
 	resp->dataSize = 0;
 

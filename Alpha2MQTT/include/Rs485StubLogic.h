@@ -119,34 +119,37 @@ rs485StubParseModeField(const char *payload, Rs485StubMode &mode)
 		return false;
 	}
 	pos++;
-
-	char modeBuf[24] = { 0 };
-	size_t idx = 0;
-	while (*pos != '\0' && *pos != '"' && idx + 1 < sizeof(modeBuf)) {
-		modeBuf[idx++] = *pos++;
+	const char *modeStart = pos;
+	while (*pos != '\0' && *pos != '"') {
+		pos++;
 	}
 	if (*pos != '"') {
 		return false;
 	}
-	modeBuf[idx] = '\0';
+	const size_t modeLen = static_cast<size_t>(pos - modeStart);
+	const auto matches = [modeStart, modeLen](const char *value) -> bool {
+		const size_t valueLen = strlen(value);
+		return modeLen == valueLen && memcmp(modeStart, value, modeLen) == 0;
+	};
 
-	if (!strcmp(modeBuf, "online")) {
+	// Compare in place so the ESP8266 stub-control path does not need a temporary stack buffer.
+	if (matches("online")) {
 		mode = Rs485StubMode::OnlineAlways;
 		return true;
 	}
-	if (!strcmp(modeBuf, "offline")) {
+	if (matches("offline")) {
 		mode = Rs485StubMode::OfflineForever;
 		return true;
 	}
-	if (!strcmp(modeBuf, "fail") || !strcmp(modeBuf, "fail_then_recover")) {
+	if (matches("fail") || matches("fail_then_recover")) {
 		mode = Rs485StubMode::FailFirstNThenRecover;
 		return true;
 	}
-	if (!strcmp(modeBuf, "flap")) {
+	if (matches("flap")) {
 		mode = Rs485StubMode::FlapTime;
 		return true;
 	}
-	if (!strcmp(modeBuf, "probe_delayed")) {
+	if (matches("probe_delayed")) {
 		mode = Rs485StubMode::ProbeDelayedOnline;
 		return true;
 	}
