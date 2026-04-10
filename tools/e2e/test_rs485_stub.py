@@ -5102,11 +5102,13 @@ def main() -> int:
         baseline_poll = _fetch_poll(mqtt, poll_topic)
         baseline_epoch = int(baseline_poll.get("rs485_connection_epoch", 0))
         baseline_configured = int(baseline_poll.get("rs485_baud_configured", 0))
-        restore_baud = baseline_configured
-        if restore_baud not in supported_bauds:
-            raise E2EError(
-                "portal rs485 case requires an existing persisted baud because there is no public clear path for rs485_baud"
-            )
+        baseline_actual = int(baseline_poll.get("rs485_baud_actual", 0))
+        restore_baud = (
+            baseline_configured
+            if baseline_configured in supported_bauds
+            else baseline_actual if baseline_actual in supported_bauds else 9600
+        )
+        seeded_restore_baseline = baseline_configured not in supported_bauds
 
         def load_rs485_portal(path_suffix: str = "") -> str:
             status, body = _http_request_full("GET", base + "/config/rs485" + path_suffix, headers={}, body=b"", timeout_s=20)
@@ -5149,6 +5151,9 @@ def main() -> int:
             raise E2EError("portal rs485 page missing status summary")
         if "value=\"115200\"" not in rs485_html:
             raise E2EError("portal rs485 page missing 115200 option")
+        if seeded_restore_baseline:
+            print(f"[e2e] seeding deterministic rs485 baud baseline via portal to {restore_baud}")
+            save_rs485_baud_via_portal(restore_baud)
         save_rs485_baud_via_portal(115200)
 
         reboot_normal_url = base + portal_reboot_normal_path
