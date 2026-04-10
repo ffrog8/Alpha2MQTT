@@ -60,6 +60,7 @@ class RS485Handler
 
 			uint16_t inverterWorkingMode = INVERTER_OPERATION_MODE_UPS_MODE;
 			uint16_t maxFeedinPercent = 100;
+			uint16_t modbusBaudRateEnum = MODBUS_BAUD_RATE_9600;
 		};
 
 		void (*_serviceHook)() = nullptr;
@@ -266,6 +267,10 @@ class RS485Handler
 				*outWord = _state.maxFeedinPercent;
 				return true;
 			}
+			if (reg == REG_SYSTEM_CONFIG_RW_MODBUS_BAUD_RATE) {
+				*outWord = _state.modbusBaudRateEnum;
+				return true;
+			}
 
 			return false;
 		}
@@ -348,6 +353,11 @@ class RS485Handler
 			_state.gridPowerW = gridPowerW;
 			_state.pvCtPowerW = pvCtPowerW;
 			_state.inverterWorkingMode = inverterWorkingMode;
+		}
+
+		void applyVirtualModbusBaud(uint16_t modbusBaudRateEnum)
+		{
+			_state.modbusBaudRateEnum = modbusBaudRateEnum;
 		}
 
 		void applyVirtualDispatchState(uint16_t start,
@@ -702,6 +712,9 @@ class RS485Handler
 					const uint8_t *data = &frame[7];
 					if (startRegister == REG_DISPATCH_RW_DISPATCH_START && usableWords >= 1) {
 						_state.dispatchStart = static_cast<uint16_t>((data[0] << 8) | data[1]);
+					}
+					if (startRegister == REG_SYSTEM_CONFIG_RW_MODBUS_BAUD_RATE && usableWords >= 1) {
+						_state.modbusBaudRateEnum = static_cast<uint16_t>((data[0] << 8) | data[1]);
 					}
 					// Special-case dispatch block write, as used by writeDispatchRegisters().
 					if (startRegister == REG_DISPATCH_RW_DISPATCH_START && usableWords >= 9) {

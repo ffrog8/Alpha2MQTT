@@ -20,10 +20,12 @@ constexpr const char *kPortalMenuIds[] = {
 };
 constexpr char kPortalMenuPolling[] =
 	"<form action='/config/mqtt' method='get'><button type='submit'>MQTT Setup</button></form>\n"
+	"<form action='/config/rs485' method='get'><button type='submit'>RS485</button></form>\n"
 	"<form action='/config/polling' method='get'><button type='submit'>Polling</button></form>\n";
 constexpr char kPortalMenuSta[] =
 	"<form action='/0wifi' method='get'><button type='submit'>WiFi Setup</button></form>\n"
 	"<form action='/config/mqtt' method='get'><button type='submit'>MQTT Setup</button></form>\n"
+	"<form action='/config/rs485' method='get'><button type='submit'>RS485</button></form>\n"
 	"<form action='/config/polling' method='get'><button type='submit'>Polling</button></form>\n";
 #if !defined(MP_ESP8266) || !defined(ARDUINO)
 constexpr char kPortalRebootNormal[] =
@@ -278,6 +280,28 @@ portalRebootToNormalHtml(void)
 #else
 	return kPortalRebootNormal;
 #endif
+}
+
+bool
+portalRs485BaudLabel(uint32_t baud, const char **labelOut)
+{
+	if (labelOut == nullptr) {
+		return false;
+	}
+	switch (baud) {
+	case 9600UL:
+		*labelOut = "9600";
+		return true;
+	case 115200UL:
+		*labelOut = "115200";
+		return true;
+	case 19200UL:
+		*labelOut = "19200";
+		return true;
+	default:
+		*labelOut = nullptr;
+		return false;
+	}
 }
 
 bool

@@ -125,6 +125,7 @@ CASE_ORDER: tuple[str, ...] = (
     "soc_drift_e2e",
     "load_power_formula",
     "polling_config",
+    "portal_rs485_baud_reconcile",
     "runtime_polling_reset_without_page",
     "portal_polling_ui",
     "polling_profile_export_import",
@@ -5091,6 +5092,113 @@ def main() -> int:
             republish_every_s=5.0,
         )
 
+    def case_portal_rs485_baud_reconcile() -> None:
+        reboot_url = _discover_reboot_wifi_path_from_code()
+        if not reboot_url:
+            raise E2EError("Could not discover /reboot/wifi endpoint from firmware source")
+        base = _resolve_device_http_base(mqtt, device_root)
+
+        print(f"[e2e] rebooting into wifi portal via {reboot_url} (rs485 baud portal check)")
+        reboot_wifi_status, reboot_wifi_body = _http_request_full(
+            "POST", base + reboot_url, headers={}, body=b"", timeout_s=20
+        )
+        if reboot_wifi_status != 200:
+            raise E2EError(f"{reboot_url} returned unexpected status={reboot_wifi_status}")
+        if reboot_wifi_body:
+            _assert_reboot_handoff_html(
+                reboot_wifi_body.decode("utf-8", errors="replace"),
+                expected_heading="Rebooting to Wi-Fi config",
+                expected_target_mode="wifi",
+                expected_probe_kind="fetch",
+            )
+        _wait_for_http_ok(base + "/", timeout_s=40)
+        _assert_portal_root_menu(base, timeout_s=20, required_mode="wifi")
+
+        rs485_status, rs485_body = _http_request_full("GET", base + "/config/rs485", headers={}, body=b"", timeout_s=20)
+        if rs485_status != 200:
+            raise E2EError(f"/config/rs485 returned unexpected status={rs485_status}")
+        rs485_html = rs485_body.decode("utf-8", errors="replace")
+        if "Configured:" not in rs485_html or "Sync:" not in rs485_html:
+            raise E2EError("portal rs485 page missing status summary")
+        if "value=\"115200\"" not in rs485_html:
+            raise E2EError("portal rs485 page missing 115200 option")
+        csrf = _extract_input_value(rs485_html, "csrf")
+        if not csrf:
+            raise E2EError("portal rs485 page missing csrf token")
+
+        save_status = _http_post_form(base + "/config/rs485/save", {"baud": "115200", "csrf": csrf}, timeout_s=20)
+        if save_status not in (200, 302):
+            raise E2EError(f"/config/rs485/save failed status={save_status}")
+
+        confirm_status, confirm_body = _http_request_full(
+            "GET", base + "/config/rs485?saved=1", headers={}, body=b"", timeout_s=20
+        )
+        if confirm_status != 200:
+            raise E2EError(f"/config/rs485?saved=1 returned unexpected status={confirm_status}")
+        confirm_html = confirm_body.decode("utf-8", errors="replace")
+        if "Saved." not in confirm_html:
+            raise E2EError("portal rs485 saved page missing confirmation")
+
+        reboot_normal_url = base + portal_reboot_normal_path
+        reboot_status, reboot_body = _http_request_full("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
+        if reboot_status != 200:
+            raise E2EError(f"{portal_reboot_normal_path} returned unexpected status={reboot_status}")
+        if reboot_body:
+            _assert_reboot_handoff_html(
+                reboot_body.decode("utf-8", errors="replace"),
+                expected_heading="Rebooting to normal mode",
+                expected_target_mode="normal",
+                expected_probe_kind="fetch",
+            )
+
+        def runtime_root_ready() -> Tuple[bool, str]:
+            try:
+                root_status, root_body = _http_request_full("GET", base + "/", headers={}, body=b"", timeout_s=20)
+            except Exception as e:
+                return False, f"err={e}"
+            if root_status != 200:
+                return False, f"status={root_status}"
+            html = root_body.decode("utf-8", errors="replace")
+            if "Alpha2MQTT Control" not in html:
+                return False, "waiting for runtime root"
+            if "MQTT connected: 1" not in html:
+                return False, "waiting for runtime mqtt reconnect"
+            return True, "ok"
+
+        _assert_eventually("runtime root page after portal rs485 save reboot", runtime_root_ready, timeout_s=60, poll_s=2.0)
+
+        baseline_poll = _fetch_poll(mqtt, poll_topic)
+        baseline_epoch = int(baseline_poll.get("rs485_connection_epoch", 0))
+        set_mode_and_wait('{"mode":"online","modbus_baud":9600}', ("online",))
+
+        def pred() -> Tuple[bool, str]:
+            cur_poll = _fetch_poll(mqtt, poll_topic)
+            configured = int(cur_poll.get("rs485_baud_configured", 0))
+            actual = int(cur_poll.get("rs485_baud_actual", 0))
+            sync = str(cur_poll.get("rs485_baud_sync", ""))
+            epoch = int(cur_poll.get("rs485_connection_epoch", 0))
+            last_write_reg = int(cur_poll.get("rs485_stub_last_write_reg", 0))
+            writes = int(cur_poll.get("rs485_stub_writes", 0))
+            detail = (
+                f"configured={configured} actual={actual} sync={sync!r} "
+                f"epoch={epoch} last_write_reg={last_write_reg} writes={writes}"
+            )
+            return (
+                configured == 115200
+                and actual == 115200
+                and sync == "synced"
+                and epoch > baseline_epoch
+                and last_write_reg == 2064
+                and writes >= 1
+            ), detail
+
+        _assert_eventually(
+            "portal-configured RS485 baud is reconciled and confirmed after reprobe",
+            pred,
+            timeout_s=90,
+            poll_s=3.0,
+        )
+
     def case_runtime_polling_reset_without_page() -> None:
         print("[e2e] case: runtime root resets polling defaults without loading polling page")
         ensure_stub_online_backend(
@@ -6163,6 +6271,7 @@ def main() -> int:
         ("soc_drift_e2e", case_soc_drift_e2e),
         ("load_power_formula", case_load_power_snapshot_formula),
         ("polling_config", case_polling_config_persistence),
+        ("portal_rs485_baud_reconcile", case_portal_rs485_baud_reconcile),
         ("runtime_polling_reset_without_page", case_runtime_polling_reset_without_page),
         ("portal_polling_ui", case_portal_polling_ui),
         ("polling_profile_export_import", case_polling_profile_export_import),

@@ -155,6 +155,9 @@ TEST_CASE("status poll JSON builder includes required keys")
 	snapshot.rs485ProbeLastAttemptMs = 12345;
 	snapshot.rs485ProbeBackoffMs = 15000;
 	snapshot.rs485ConnectionEpoch = 6;
+	snapshot.rs485BaudConfigured = 115200;
+	snapshot.rs485BaudActual = 9600;
+	snapshot.rs485BaudSync = "mismatch";
 	snapshot.rs485Backend = "stub";
 	snapshot.inverterReady = true;
 	snapshot.essSnapshotOk = false;
@@ -222,6 +225,9 @@ TEST_CASE("status poll JSON builder includes required keys")
 	CHECK(payload.find("\"dispatch_request_queued_ms\":4000") != std::string::npos);
 	CHECK(payload.find("\"inverter_ready\":true") != std::string::npos);
 	CHECK(payload.find("\"ess_snapshot_ok\":false") != std::string::npos);
+	CHECK(payload.find("\"rs485_baud_configured\":115200") != std::string::npos);
+	CHECK(payload.find("\"rs485_baud_actual\":9600") != std::string::npos);
+	CHECK(payload.find("\"rs485_baud_sync\":\"mismatch\"") != std::string::npos);
 	CHECK(payload.find("\"mem\":{\"f\":5555") != std::string::npos);
 	CHECK(payload.find("\"mem\":{\"f\":5555,\"m\":4444,\"g\":12,\"l\":1}") != std::string::npos);
 	CHECK(payload.find("\"boot_mem\":{\"l\":2,\"s\":3,\"f\":3333,\"m\":2222,\"g\":34}") != std::string::npos);
@@ -353,6 +359,9 @@ TEST_CASE("status poll compact JSON includes snapshot/dispatch and stub schedule
 	snapshot.rs485ProbeLastAttemptMs = 5000;
 	snapshot.rs485ProbeBackoffMs = 15000;
 	snapshot.rs485ConnectionEpoch = 9;
+	snapshot.rs485BaudConfigured = 19200;
+	snapshot.rs485BaudActual = 19200;
+	snapshot.rs485BaudSync = "synced";
 	snapshot.pollingBudgetExceeded = false;
 	snapshot.pollingBudgetOverrunCount = 3;
 	snapshot.pollingBudgetUsedMs[1] = 321;
@@ -381,6 +390,9 @@ TEST_CASE("status poll compact JSON includes snapshot/dispatch and stub schedule
 	CHECK(payload.find("\"rs485_transport_error_count\":7") != std::string::npos);
 	CHECK(payload.find("\"rs485_other_error_count\":5") != std::string::npos);
 	CHECK(payload.find("\"rs485_connection_epoch\":9") != std::string::npos);
+	CHECK(payload.find("\"rs485_baud_configured\":19200") != std::string::npos);
+	CHECK(payload.find("\"rs485_baud_actual\":19200") != std::string::npos);
+	CHECK(payload.find("\"rs485_baud_sync\":\"synced\"") != std::string::npos);
 
 #if RS485_STUB
 	CHECK(payload.find("\"s10_ms\":10") != std::string::npos);
