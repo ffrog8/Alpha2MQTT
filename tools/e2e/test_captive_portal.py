@@ -40,6 +40,9 @@ class PortalTestError(Exception):
     pass
 
 
+ESP8266_SERIAL_BAUD = 115200
+
+
 VERBOSE = False
 TRACE_HTTP = False
 TRACE_SSH = False
@@ -696,7 +699,7 @@ deadline = time.time() + TIMEOUT_S
 buffer = ""
 while time.time() < deadline:
     try:
-        ser = serial.Serial(PORT, 9600, timeout=0.25)
+        ser = serial.Serial(PORT, {ESP8266_SERIAL_BAUD}, timeout=0.25)
     except Exception as exc:
         time.sleep(0.5)
         continue
@@ -743,7 +746,7 @@ TIMEOUT_S = {int(timeout_s)}
 deadline = time.time() + TIMEOUT_S
 while time.time() < deadline:
     try:
-        ser = serial.Serial(PORT, 9600, timeout=0.25)
+        ser = serial.Serial(PORT, {ESP8266_SERIAL_BAUD}, timeout=0.25)
         break
     except Exception:
         time.sleep(0.5)

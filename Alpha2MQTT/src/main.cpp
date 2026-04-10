@@ -286,6 +286,10 @@ const uint32_t kMqttCommandWarmupMs = 3000;
 uint32_t wifiReconnectCount = 0;
 uint32_t mqttReconnectCount = 0;
 uint32_t lastMqttConnectMs = 0;
+#if defined(DEBUG_OVER_SERIAL)
+static uint32_t bootWifiReadyTelemetryMs = 0;
+static bool bootWifiReadyTelemetryPending = false;
+#endif
 uint32_t pollOkCount = 0;
 uint32_t pollErrCount = 0;
 uint32_t lastPollMs = 0;
@@ -1455,30 +1459,75 @@ publishBootMemEventOncePerBoot(void)
 }
 
 	#if defined(DEBUG_OVER_SERIAL)
-void
-logHeap(const char *label)
+static void
+buildHeapTag(const char *label, char *out, size_t outSize)
 {
-	Serial.print("Heap ");
-	Serial.print(label);
-	Serial.print(": free=");
-	Serial.print(ESP.getFreeHeap());
+	if (out == nullptr || outSize == 0) {
+		return;
+	}
+	if (label == nullptr) {
+		out[0] = '\0';
+		return;
+	}
+
+	size_t writeIdx = 0;
+	bool lastUnderscore = false;
+	for (size_t i = 0; label[i] != '\0' && writeIdx + 1 < outSize; ++i) {
+		const char ch = label[i];
+		if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) {
+			out[writeIdx++] = ch;
+			lastUnderscore = false;
+			continue;
+		}
+		if (ch >= 'A' && ch <= 'Z') {
+			out[writeIdx++] = static_cast<char>(ch - 'A' + 'a');
+			lastUnderscore = false;
+			continue;
+		}
+		if (!lastUnderscore) {
+			out[writeIdx++] = '_';
+			lastUnderscore = true;
+		}
+	}
+	if (writeIdx > 0 && out[writeIdx - 1] == '_') {
+		--writeIdx;
+	}
+	out[writeIdx] = '\0';
+}
+
+static void
+logHeapAt(const char *label, unsigned long uptimeMs)
+{
+	const size_t freeHeap = ESP.getFreeHeap();
+	size_t maxBlock = 0;
+	unsigned int fragPct = 0;
 #if defined(MP_ESP8266)
-	Serial.print(" max=");
-	Serial.print(ESP.getMaxFreeBlockSize());
-	Serial.print(" frag=");
-	Serial.print(ESP.getHeapFragmentation());
+	maxBlock = ESP.getMaxFreeBlockSize();
+	fragPct = ESP.getHeapFragmentation();
 #endif
-	Serial.println();
+
+	char tag[48];
+	buildHeapTag(label, tag, sizeof(tag));
+
+	char line[176];
+	snprintf(
+		line,
+		sizeof(line),
+		"%lu Heap %s: free=%u max=%u frag=%u tag=%s at_ms=%lu",
+		uptimeMs,
+		label,
+		static_cast<unsigned int>(freeHeap),
+		static_cast<unsigned int>(maxBlock),
+		fragPct,
+		tag,
+		uptimeMs);
+	Serial.println(line);
 }
 
 void
-logHeapFreeOnly(const char *label)
+logHeap(const char *label)
 {
-	Serial.print("Heap ");
-	Serial.print(label);
-	Serial.print(": free=");
-	Serial.print(ESP.getFreeHeap());
-	Serial.println();
+	logHeapAt(label, millis());
 }
 #endif
 
@@ -1849,7 +1898,7 @@ rs485ProbeTick(void)
 #ifdef DEBUG_OVER_SERIAL
 	snprintf(_debugOutput, sizeof(_debugOutput), "About To Try: %lu", baud);
 	Serial.println(_debugOutput);
-	logHeapFreeOnly("before RS485 probe");
+	logHeap("before RS485 probe");
 #endif
 	recordBootMemStage(BootMemStage::Boot4);
 
@@ -1868,7 +1917,7 @@ rs485ProbeTick(void)
 #endif
 
 #ifdef DEBUG_OVER_SERIAL
-	logHeapFreeOnly("after RS485 probe");
+	logHeap("after RS485 probe");
 #endif
 
 	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
@@ -6697,14 +6746,14 @@ handlePortalPollingClear(WiFiManager &wifiManager)
  */
 void setup()
 {
-	Serial.begin(9600);
+	Serial.begin(115200);
 #if defined(DEBUG_OVER_SERIAL) || defined(DEBUG_LEVEL2) || defined(DEBUG_OUTPUT_TX_RX)
 	// Boot prints below are unconditional, so keep the serial port initialized even when
 	// higher debug levels are off. This remains a diagnostics-only channel.
 #ifdef DEBUG_OVER_SERIAL
-	logHeapFreeOnly("very-early");
+	logHeap("very-early");
 	diagDelay(100);
-	logHeapFreeOnly("boot");
+	logHeap("boot");
 #endif
 #endif // DEBUG_OVER_SERIAL || DEBUG_LEVEL2 || DEBUG_OUTPUT_TX_RX
 
@@ -6825,7 +6874,7 @@ void setup()
 #ifdef DEBUG_OVER_SERIAL
 	Serial.printf("Stored boot intent='%s' -> %s\r\n", storedIntent, bootIntentToString(currentBootIntent));
 	Serial.printf("Stored boot mode='%s' -> %s\r\n", storedMode, bootModeToString(currentBootMode));
-	logHeapFreeOnly("after-pref-read");
+	logHeap("after-pref-read");
 #endif
 
 	appConfig.wifiSSID = wifiSsid;
@@ -6918,13 +6967,17 @@ void setup()
 	if (bootPlan.wifiSta) {
 		// Configure WIFI
 #ifdef DEBUG_OVER_SERIAL
-		logHeapFreeOnly("pre-wifi");
+		logHeap("pre-wifi");
 #endif
 		recordBootMemPublishCheckpoint(BootMemPublishCheckpoint::PreWifi);
 		setupWifi(true);
 		lastWifiConnected = true;
 #ifdef DEBUG_OVER_SERIAL
-		logHeapFreeOnly("after WiFi");
+		const unsigned long wifiReadyMs = millis();
+		bootWifiReadyTelemetryMs = wifiReadyMs;
+		bootWifiReadyTelemetryPending = true;
+		logHeapAt("after WiFi", wifiReadyMs);
+		Serial.flush();
 #endif
 		recordBootMemPublishCheckpoint(BootMemPublishCheckpoint::PostWifi);
 		(void)ensureNormalRuntimeBuffers();
@@ -6966,7 +7019,7 @@ void setup()
 			if (_mqttPayload != NULL) {
 				emptyPayload();
 #ifdef DEBUG_OVER_SERIAL
-					logHeapFreeOnly("after MQTT payload");
+					logHeap("after MQTT payload");
 #endif
 					recordBootMemPublishCheckpoint(BootMemPublishCheckpoint::PostMqtt);
 					recordBootMemStage(BootMemStage::Boot2);
@@ -6996,7 +7049,7 @@ void setup()
 		if (bootPlan.inverter) {
 		// Set up the serial for communicating with the MAX
 #if defined(DEBUG_OVER_SERIAL)
-		logHeapFreeOnly("before RS485 init");
+		logHeap("before RS485 init");
 #endif
 		recordBootMemPublishCheckpoint(BootMemPublishCheckpoint::PreRs485);
 		_modBus = new RS485Handler;
@@ -7026,7 +7079,7 @@ void setup()
 			}
 #endif
 #if defined(DEBUG_OVER_SERIAL)
-			logHeapFreeOnly("after RS485 init");
+			logHeap("after RS485 init");
 #endif
 			recordBootMemPublishCheckpoint(BootMemPublishCheckpoint::PostRs485);
 			recordBootMemStage(BootMemStage::Boot3);
@@ -7062,7 +7115,7 @@ configHandlerSta(void)
 
 #ifdef DEBUG_OVER_SERIAL
 	portalLog("STA portal: connecting to saved WiFi (ssid=%s)", appConfig.wifiSSID.c_str());
-	logHeapFreeOnly("sta-portal-entry");
+	logHeap("sta-portal-entry");
 #endif
 
 	if (appConfig.wifiSSID == "") {
@@ -7300,7 +7353,7 @@ configHandler(void)
 	updateOLED(false, "Web", "config", "active");
 
 #ifdef DEBUG_OVER_SERIAL
-	logHeapFreeOnly("ap-portal-entry");
+	logHeap("ap-portal-entry");
 #endif
 
 #ifdef MP_XIAO_ESP32C6
@@ -9968,7 +10021,7 @@ mqttReconnect(void)
 
 #if defined(MP_ESP8266)
 #ifdef DEBUG_OVER_SERIAL
-		logHeapFreeOnly("before WiFi guard");
+		logHeap("before WiFi guard");
 #endif
 		guardPendingAsyncWifiScanBeforeMqttReconnect();
 		if (!shouldStartWifiScan(currentBootMode)) {
@@ -9977,7 +10030,7 @@ mqttReconnect(void)
 #endif
 		}
 #ifdef DEBUG_OVER_SERIAL
-		logHeapFreeOnly("after WiFi guard");
+		logHeap("after WiFi guard");
 #endif
 #endif
 
@@ -10013,6 +10066,8 @@ mqttReconnect(void)
 			if (mqttConnected) {
 #ifdef DEBUG_OVER_SERIAL
 			Serial.println("Connected MQTT");
+			logHeap("after MQTT connect");
+			Serial.flush();
 #endif
 			// Publish boot intent early; RS485 init can stall before periodic status messages.
 			publishBootEventOncePerBoot();
@@ -10031,6 +10086,15 @@ mqttReconnect(void)
 			}
 
 			subscribed = subscribeMqttReconnectTopics(&inverterSubscriptionsAdded);
+
+#ifdef DEBUG_OVER_SERIAL
+			if (bootWifiReadyTelemetryPending) {
+				logHeapAt("after WiFi", bootWifiReadyTelemetryMs);
+				bootWifiReadyTelemetryPending = false;
+			}
+			logHeapAt("after MQTT connect", lastMqttConnectMs);
+			Serial.flush();
+#endif
 
 			// Subscribe or resubscribe to topics.
 			if (subscribed) {
