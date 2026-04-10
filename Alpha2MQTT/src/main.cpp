@@ -710,7 +710,6 @@ static uint32_t rs485ProbeLastAttemptMs = 0;
 static Rs485RuntimeReconnectTracker rs485RuntimeReconnect{};
 static Rs485BaudTracker rs485BaudTracker{};
 static uint32_t rs485BaudNextActionAtMs = 0;
-static constexpr uint32_t kRs485BaudSetupSeedTimeoutMs = 12000;
 
 static bool rs485TryReadIdentityOnce(void);
 static void rs485ProbeTick(void);
@@ -718,10 +717,10 @@ static void resetRs485ProbeState(unsigned long now);
 static void noteRs485ConnectedEpoch(void);
 static void beginRs485RuntimeRediscovery(const char *reason);
 static void serviceRs485BaudReconcile(void);
-static void seedMissingRs485BaudDuringSetup(void);
 static bool readLiveRs485Baud(uint32_t &baudOut,
                               modbusRequestAndResponseStatusValues *resultOut,
                               const char **detailOut);
+static void seedMissingConfiguredRs485BaudAfterProbe(void);
 #if RS485_STUB
 static void rs485ApplyStubConnectivityMode(Rs485StubMode mode);
 struct Rs485StubControlRequest;
@@ -1921,6 +1920,7 @@ rs485ProbeTick(void)
 			rs485ConnectState = Rs485ConnectState::Connected;
 			rs485AttemptsInCycle = 0;
 			rs485CycleBackoffMs = kRs485ProbeAttemptDelayMs;
+			seedMissingConfiguredRs485BaudAfterProbe();
 			noteRs485ConnectedEpoch();
 
 			// Now that inverter identity is known, discovery/config can be published under the real HA unique id.
@@ -2563,33 +2563,23 @@ persist_defaults_if_missing_rs485_baud(uint32_t baud)
 }
 
 static void
-seedMissingRs485BaudDuringSetup(void)
+seedMissingConfiguredRs485BaudAfterProbe(void)
 {
 	if (rs485BaudTracker.hasConfiguredBaud || _registerHandler == nullptr || _modBus == nullptr) {
 		return;
 	}
-
-	const uint32_t deadline = millis() + kRs485BaudSetupSeedTimeoutMs;
-	while (static_cast<int32_t>(deadline - millis()) >= 0) {
-		rs485ProbeTick();
-		if (_mqtt.connected()) {
-			(void)_mqtt.loop();
+	uint32_t liveBaud = 0;
+	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
+	const char *detail = "";
+	if (!readLiveRs485Baud(liveBaud, &result, &detail)) {
+		if (result != modbusRequestAndResponseStatusValues::preProcessing) {
+			recordRs485Error(result);
+			noteRs485Error(result, detail);
 		}
-		if (rs485ConnectState == Rs485ConnectState::Connected && inverterReady && opData.essRs485Connected) {
-			uint32_t liveBaud = 0;
-			modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
-			const char *detail = "";
-			if (readLiveRs485Baud(liveBaud, &result, &detail)) {
-				(void)persist_defaults_if_missing_rs485_baud(liveBaud);
-				rs485BaudTrackerMarkSeeded(rs485BaudTracker, liveBaud);
-				return;
-			}
-			if (result != modbusRequestAndResponseStatusValues::preProcessing) {
-				recordRs485Error(result);
-				noteRs485Error(result, detail);
-			}
-		}
-		diagDelay(50);
+		return;
+	}
+	if (persist_defaults_if_missing_rs485_baud(liveBaud)) {
+		rs485BaudTrackerMarkSeeded(rs485BaudTracker, liveBaud);
 	}
 }
 
@@ -2711,7 +2701,8 @@ serviceRs485BaudReconcile(void)
 	rs485BaudNextActionAtMs = now + kRs485BaudRetryMs;
 
 	if (!rs485BaudTracker.hasConfiguredBaud) {
-		rs485BaudTrackerMarkSeeded(rs485BaudTracker, liveBaud);
+		rs485BaudTracker.actualBaud = liveBaud;
+		rs485BaudTracker.syncState = Rs485BaudSyncState::Unknown;
 		return;
 	}
 
@@ -7493,7 +7484,6 @@ void setup()
 			rs485RuntimeReconnectOnRediscoveryStart(rs485RuntimeReconnect);
 			rs485ConnectState = Rs485ConnectState::ProbingBaud;
 			resetRs485ProbeState(millis());
-			seedMissingRs485BaudDuringSetup();
 
 			// The scheduler owns ESS snapshot refresh and publishing cadence. Do not block setup() waiting
 			// for inverter connectivity; the inverter may be offline and MQTT must still operate.
