@@ -89,6 +89,7 @@ CASE_ORDER: tuple[str, ...] = (
     "two_device_discovery",
     "offline",
     "fail_then_recover",
+    "runtime_loss_reprobe",
     "online",
     "boot_mem_publish",
     "scheduler_idle_no_extra_reads",
@@ -3353,6 +3354,67 @@ def main() -> int:
 
         _assert_eventually("fail_then_recover eventually succeeds", pred, timeout_s=60)
 
+    def case_runtime_loss_reprobe() -> None:
+        print("[e2e] case: runtime RS485 loss clears identity and reprobes")
+        inverter_id = _ensure_online_inverter_identity("runtime loss baseline")
+        baseline_poll = _fetch_poll(mqtt, poll_topic)
+        baseline_epoch = int(baseline_poll.get("rs485_connection_epoch", 0))
+        baseline_core = _fetch_status_core(mqtt, status_core_topic)
+        baseline_ha_unique = str(baseline_core.get("ha_unique_id", ""))
+        if not baseline_ha_unique.startswith("A2M-"):
+            raise E2EError(f"baseline HA identity is not live: {baseline_ha_unique!r}")
+
+        set_mode_and_wait('{"mode":"fail","fail_n":3}', ("fail_then_recover", "fail"))
+
+        def fell_back_to_probe() -> Tuple[bool, str]:
+            cur_poll = _fetch_poll(mqtt, poll_topic)
+            cur_core = _fetch_status_core(mqtt, status_core_topic)
+            inverter_ready = bool(cur_poll.get("inverter_ready", False))
+            probe_backoff_ms = int(cur_poll.get("rs485_probe_backoff_ms", 0))
+            epoch = int(cur_poll.get("rs485_connection_epoch", 0))
+            ha_unique = str(cur_core.get("ha_unique_id", ""))
+            detail = (
+                f"inverter_ready={inverter_ready} probe_backoff_ms={probe_backoff_ms} "
+                f"epoch={epoch} ha_unique_id={ha_unique!r}"
+            )
+            return (not inverter_ready and probe_backoff_ms > 0 and ha_unique == "A2M-UNKNOWN"), detail
+
+        _assert_eventually(
+            "runtime loss falls back to probing and clears live identity",
+            fell_back_to_probe,
+            timeout_s=80,
+            poll_s=3.0,
+        )
+
+        def recovered_after_reprobe() -> Tuple[bool, str]:
+            cur_poll = _fetch_poll(mqtt, poll_topic)
+            cur_core = _fetch_status_core(mqtt, status_core_topic)
+            inverter_ready = bool(cur_poll.get("inverter_ready", False))
+            snapshot_ok = bool(cur_poll.get("ess_snapshot_last_ok", False))
+            probe_backoff_ms = int(cur_poll.get("rs485_probe_backoff_ms", 0))
+            epoch = int(cur_poll.get("rs485_connection_epoch", 0))
+            ha_unique = str(cur_core.get("ha_unique_id", ""))
+            current_inverter_id = _inverter_id_from_ha_unique(ha_unique)
+            detail = (
+                f"inverter_ready={inverter_ready} snapshot_ok={snapshot_ok} "
+                f"probe_backoff_ms={probe_backoff_ms} epoch={epoch} "
+                f"ha_unique_id={ha_unique!r} inverter_id={current_inverter_id!r}"
+            )
+            return (
+                inverter_ready
+                and snapshot_ok
+                and probe_backoff_ms == 0
+                and epoch > baseline_epoch
+                and current_inverter_id == inverter_id
+            ), detail
+
+        _assert_eventually(
+            "runtime loss recovery starts a new RS485 connection epoch",
+            recovered_after_reprobe,
+            timeout_s=90,
+            poll_s=3.0,
+        )
+
     def case_online() -> None:
         print("[e2e] case: stub online")
         set_mode_and_wait('{"mode":"online"}', ("online",))
@@ -6065,6 +6127,7 @@ def main() -> int:
         ("two_device_discovery", case_two_device_discovery),
         ("offline", case_offline),
         ("fail_then_recover", case_fail_then_recover),
+        ("runtime_loss_reprobe", case_runtime_loss_reprobe),
         ("online", case_online),
         ("boot_mem_publish", case_boot_mem_publish),
         ("scheduler_idle_no_extra_reads", case_scheduler_idle_does_not_add_reads),

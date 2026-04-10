@@ -81,6 +81,10 @@ compile_one() {
 	local out_map="${OUTDIR}/Alpha2MQTT_${BUILD_TS_MS}_${label}.map"
 	local out_report="${OUTDIR}/Alpha2MQTT_${BUILD_TS_MS}_${label}_ram_symbols.txt"
 
+	# The linker writes the map file during the first compile pass, so ensure
+	# the board-specific build directory exists before passing the map path.
+	mkdir -p "${build_dir}"
+
 	echo "[build] Building ${label}..."
 	echo "[build] build.extra_flags=${extra_flags}"
 
