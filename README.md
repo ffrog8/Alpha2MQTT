@@ -213,6 +213,8 @@ When boot mode is `normal`, the firmware exposes a lightweight HTTP page for req
 The device publishes lightweight retained/status topics for observability:
 
 - `DEVICE_NAME/HA_UNIQUE_ID/boot` (retained): `{"boot_intent":"...","reset_reason":"...","ts_ms":...}`
+- `DEVICE_NAME/HA_UNIQUE_ID/boot/mem` (retained): one-shot boot heap checkpoints for pre/post WiFi, MQTT, and RS485 init.
+- `DEVICE_NAME/HA_UNIQUE_ID/boot/net` (retained): one-shot boot network timings and retry diagnostics: `wifi_connect_ms`, `http_started_ms`, `mqtt_connect_ms`, `wifi_begin_calls`, `wifi_disconnects_boot`, `wifi_last_disconnect_reason_boot`.
 - `DEVICE_NAME/HA_UNIQUE_ID/status` (retained, ~10s): core fields `presence`, `a2mStatus`, `rs485Status`, `gridStatus`, `boot_intent`.
 - `DEVICE_NAME/HA_UNIQUE_ID/status/net` (retained, ~10s): uptime, heap, WiFi RSSI/SSID/IP, WiFi/MQTT state + reconnect counters.
 - `DEVICE_NAME/HA_UNIQUE_ID/status/poll` (retained, ~10s): poll ok/err counts, last poll duration, last ok/err timestamps, last error code, and polling-pressure diagnostics such as backlog and budget exhaustion.

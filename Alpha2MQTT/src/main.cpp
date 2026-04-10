@@ -168,6 +168,16 @@ struct BootMemPublishState {
 	uint8_t validMask = 0;
 };
 
+struct BootNetDiagState {
+	uint32_t wifiConnectMs = 0;
+	uint32_t httpStartedMs = 0;
+	uint32_t mqttConnectMs = 0;
+	uint32_t wifiBeginCalls = 0;
+	uint32_t wifiDisconnectsBoot = 0;
+	uint32_t wifiLastDisconnectReasonBoot = 0;
+	bool published = false;
+};
+
 enum PortalStatus : uint8_t {
 	portalStatusIdle = 0,
 	portalStatusConnecting,
@@ -269,6 +279,7 @@ bool mqttConfigComplete = false;
 bool mqttRuntimeEnabled = false;
 bool bootEventPublished = false;
 bool bootMemEventPublished = false;
+static BootNetDiagState bootNetDiagState;
 bool inverterReady = false;
 static char g_rediscoveryPreviousSerial[sizeof(deviceSerialNumber)] = "";
 static char g_rediscoveryPreviousHaUniqueId[sizeof(haUniqueId)] = "";
@@ -894,6 +905,7 @@ void updateStatusLed(void);
 void buildDeviceName(void);
 void publishBootEventOncePerBoot(void);
 void publishBootMemEventOncePerBoot(void);
+void publishBootNetEventOncePerBoot(void);
 void setMqttIdentifiersFromSerial(const char *serial);
 void queueStaleInverterDiscoveryClear(const char *deviceId);
 void queueStaleControllerDiscoveryClear(const char *deviceId);
@@ -1540,6 +1552,33 @@ publishBootMemEventOncePerBoot(void)
 	snprintf(bootMemTopic, sizeof(bootMemTopic), "%s/boot/mem", deviceName);
 	if (publishTrackedTextPayload(bootMemTopic, payload, MQTT_RETAIN)) {
 		bootMemEventPublished = true;
+	}
+}
+
+void
+publishBootNetEventOncePerBoot(void)
+{
+	if (bootNetDiagState.published || !_mqtt.connected() || bootNetDiagState.mqttConnectMs == 0) {
+		return;
+	}
+
+	char bootNetTopic[160];
+	char payload[192];
+	StatusBootNetSnapshot snapshot{};
+	snapshot.wifiConnectMs = bootNetDiagState.wifiConnectMs;
+	snapshot.httpStartedMs = bootNetDiagState.httpStartedMs;
+	snapshot.mqttConnectMs = bootNetDiagState.mqttConnectMs;
+	snapshot.wifiBeginCalls = bootNetDiagState.wifiBeginCalls;
+	snapshot.wifiDisconnectsBoot = bootNetDiagState.wifiDisconnectsBoot;
+	snapshot.wifiLastDisconnectReasonBoot = bootNetDiagState.wifiLastDisconnectReasonBoot;
+
+	if (!buildStatusBootNetJson(snapshot, payload, sizeof(payload))) {
+		return;
+	}
+
+	snprintf(bootNetTopic, sizeof(bootNetTopic), "%s/boot/net", deviceName);
+	if (publishTrackedTextPayload(bootNetTopic, payload, MQTT_RETAIN)) {
+		bootNetDiagState.published = true;
 	}
 }
 
@@ -2196,6 +2235,9 @@ setupHttpControlPlane(void)
 	httpServerRef().on("/reboot/wifi", HTTP_POST, handleRebootWifi);
 	httpServerRef().begin();
 	httpControlPlaneEnabled = true;
+	if (bootNetDiagState.httpStartedMs == 0) {
+		bootNetDiagState.httpStartedMs = millis();
+	}
 #ifdef DEBUG_OVER_SERIAL
 	Serial.println("HTTP control plane started on port 80.");
 #endif
@@ -2635,6 +2677,9 @@ beginWifiStationWithStoredCredentials(void)
 {
 	// Always connect using the firmware-owned credentials rather than any SDK-
 	// persisted station config.
+	if (bootNetDiagState.mqttConnectMs == 0) {
+		bootNetDiagState.wifiBeginCalls++;
+	}
 	WiFi.persistent(false);
 	clearSdkWifiCredentials();
 	WiFi.mode(WIFI_STA);
@@ -6908,6 +6953,10 @@ void setup()
 		strlcpy(wifiLastDisconnectLabel,
 		        wifiDisconnectReasonLabel(wifiLastDisconnectReason),
 		        sizeof(wifiLastDisconnectLabel));
+		if (bootNetDiagState.mqttConnectMs == 0) {
+			bootNetDiagState.wifiDisconnectsBoot++;
+			bootNetDiagState.wifiLastDisconnectReasonBoot = static_cast<uint32_t>(event.reason);
+		}
 #ifdef DEBUG_OVER_SERIAL
 		if (currentBootMode == BootMode::Normal) {
 			Serial.printf("WiFi disconnect reason=%d (%s)\r\n",
@@ -7133,6 +7182,7 @@ void setup()
 			// Connect to MQTT before any RS485 probing so boot intent is observable even if RS485 stalls.
 			mqttReconnect();
 			publishBootEventOncePerBoot();
+			publishBootNetEventOncePerBoot();
 		}
 
 		if (bootPlan.inverter) {
@@ -9438,6 +9488,9 @@ setupWifi(bool initialConnect)
 	}
 
 	clearWifiFailureTracking();
+	if (bootNetDiagState.wifiConnectMs == 0) {
+		bootNetDiagState.wifiConnectMs = millis();
+	}
 
 	// Output some debug information
 #ifdef DEBUG_OVER_SERIAL
@@ -10155,11 +10208,16 @@ mqttReconnect(void)
 			logHeap("after MQTT connect");
 			Serial.flush();
 #endif
+			const uint32_t connectedMs = millis();
+			lastMqttConnectMs = connectedMs;
+			if (bootNetDiagState.mqttConnectMs == 0) {
+				bootNetDiagState.mqttConnectMs = connectedMs;
+			}
 			// Publish boot intent early; RS485 init can stall before periodic status messages.
 			publishBootEventOncePerBoot();
 			publishBootMemEventOncePerBoot();
+			publishBootNetEventOncePerBoot();
 			mqttReconnectCount++;
-			lastMqttConnectMs = millis();
 			lastMqttConnected = true;
 			resendAllData = true;
 			if (pendingWifiDisconnectEvent) {

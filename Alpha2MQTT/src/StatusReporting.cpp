@@ -851,3 +851,32 @@ buildStatusBootMemJson(const StatusBootMemSnapshot &snapshot, char *out, size_t 
 	}
 	return true;
 }
+
+bool
+buildStatusBootNetJson(const StatusBootNetSnapshot &snapshot, char *out, size_t outSize)
+{
+	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+	const int written = A2M_SNPRINTF(
+		out,
+		outSize,
+		A2M_FMT("{"
+		        "\"wifi_connect_ms\":%lu,"
+		        "\"http_started_ms\":%lu,"
+		        "\"mqtt_connect_ms\":%lu,"
+		        "\"wifi_begin_calls\":%lu,"
+		        "\"wifi_disconnects_boot\":%lu,"
+		        "\"wifi_last_disconnect_reason_boot\":%lu"
+		        "}"),
+		static_cast<unsigned long>(snapshot.wifiConnectMs),
+		static_cast<unsigned long>(snapshot.httpStartedMs),
+		static_cast<unsigned long>(snapshot.mqttConnectMs),
+		static_cast<unsigned long>(snapshot.wifiBeginCalls),
+		static_cast<unsigned long>(snapshot.wifiDisconnectsBoot),
+		static_cast<unsigned long>(snapshot.wifiLastDisconnectReasonBoot));
+	if (written < 0 || static_cast<size_t>(written) >= outSize) {
+		return false;
+	}
+	return true;
+}

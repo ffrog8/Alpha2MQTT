@@ -3864,8 +3864,27 @@ def main() -> int:
                         expected_probe_kind="fetch",
                     )
                 _record_reboot_serial_phases(label, previous_boot_count)
-                _wait_for_topic_change(mqtt, boot_topic, previous_boot, timeout_s=60, label=f"boot after {label} reboot")
                 _wait_for_topic_change(mqtt, poll_topic, previous_poll, timeout_s=60, label=f"poll after {label} reboot")
+                current_boot = _fetch_latest_text(mqtt, boot_topic, label=f"boot_after_{label}_reboot")
+                if current_boot != previous_boot:
+                    return
+                current_boot_count = SERIAL_MONITOR.boot_count() if SERIAL_MONITOR is not None else previous_boot_count
+                if current_boot_count > previous_boot_count:
+                    _emit_event(
+                        "reboot_boot_topic_reused",
+                        reboot_label=label,
+                        previous_boot_count=previous_boot_count,
+                        current_boot_count=current_boot_count,
+                        boot_payload=current_boot,
+                    )
+                    return
+                _wait_for_topic_change(
+                    mqtt,
+                    boot_topic,
+                    previous_boot,
+                    timeout_s=60,
+                    label=f"boot after {label} reboot",
+                )
     
         def _assert_unknown_inverter_identity(label: str, *, timeout_s: int = 60) -> None:
             def pred() -> Tuple[bool, str]:
@@ -4158,9 +4177,11 @@ def main() -> int:
             _assert_eventually("online succeeds and dispatch not suppressed", pred, timeout_s=45)
     
         def case_boot_mem_publish() -> None:
-            print("[e2e] case: boot/mem retained publish captures boot heap checkpoints")
+            print("[e2e] case: boot/mem and boot/net retained publish capture boot diagnostics")
             boot_mem_topic = f"{device_root}/boot/mem"
+            boot_net_topic = f"{device_root}/boot/net"
             previous_boot_mem = mqtt.latest_payload(boot_mem_topic) or ""
+            mqtt.publish(boot_net_topic, "", retain=True)
             _reboot_normal_and_wait("boot_mem_publish")
             boot_mem_text = _wait_for_topic_change(
                 mqtt,
@@ -4169,7 +4190,15 @@ def main() -> int:
                 timeout_s=60,
                 label="boot/mem after reboot",
             )
+            boot_net_text = _wait_for_topic_change(
+                mqtt,
+                boot_net_topic,
+                "",
+                timeout_s=60,
+                label="boot/net after reboot",
+            )
             boot_mem = _parse_json(boot_mem_text)
+            boot_net = _parse_json(boot_net_text)
             if int(boot_mem.get("fw_build_ts_ms", 0)) != expected_ts:
                 raise E2EError(
                     f"boot/mem build mismatch: expected {expected_ts}, got {boot_mem.get('fw_build_ts_ms')!r}"
@@ -4193,7 +4222,47 @@ def main() -> int:
                 actual = checkpoints[key]
                 if actual < minimum:
                     raise E2EError(f"boot/mem {key} below threshold: actual={actual} minimum={minimum}")
-    
+
+            wifi_connect_ms = int(boot_net.get("wifi_connect_ms", 0))
+            http_started_ms = int(boot_net.get("http_started_ms", 0))
+            mqtt_connect_ms = int(boot_net.get("mqtt_connect_ms", 0))
+            wifi_begin_calls = int(boot_net.get("wifi_begin_calls", 0))
+            wifi_disconnects_boot = int(boot_net.get("wifi_disconnects_boot", 0))
+            wifi_last_disconnect_reason_boot = int(
+                boot_net.get("wifi_last_disconnect_reason_boot", 0)
+            )
+
+            if wifi_connect_ms <= 0:
+                raise E2EError(f"boot/net wifi_connect_ms invalid: {wifi_connect_ms}")
+            if http_started_ms <= 0:
+                raise E2EError(f"boot/net http_started_ms invalid: {http_started_ms}")
+            if mqtt_connect_ms <= 0:
+                raise E2EError(f"boot/net mqtt_connect_ms invalid: {mqtt_connect_ms}")
+            if wifi_begin_calls < 1:
+                raise E2EError(f"boot/net wifi_begin_calls invalid: {wifi_begin_calls}")
+            if http_started_ms < wifi_connect_ms:
+                raise E2EError(
+                    "boot/net HTTP started before WiFi connect: "
+                    f"wifi={wifi_connect_ms} http={http_started_ms}"
+                )
+            if mqtt_connect_ms < http_started_ms:
+                raise E2EError(
+                    "boot/net MQTT connected before HTTP started: "
+                    f"http={http_started_ms} mqtt={mqtt_connect_ms}"
+                )
+            if wifi_disconnects_boot < 0:
+                raise E2EError(f"boot/net wifi_disconnects_boot invalid: {wifi_disconnects_boot}")
+            if wifi_disconnects_boot == 0 and wifi_last_disconnect_reason_boot != 0:
+                raise E2EError(
+                    "boot/net disconnect reason set without disconnects: "
+                    f"disconnects={wifi_disconnects_boot} reason={wifi_last_disconnect_reason_boot}"
+                )
+            if wifi_disconnects_boot > 0 and wifi_last_disconnect_reason_boot <= 0:
+                raise E2EError(
+                    "boot/net disconnect reason missing despite disconnects: "
+                    f"disconnects={wifi_disconnects_boot} reason={wifi_last_disconnect_reason_boot}"
+                )
+
         def case_bucket_snapshot_skip_only() -> None:
             print("[e2e] case: bucket gating skips only ESS snapshot entities (and dispatch) when snapshot fails")
     
