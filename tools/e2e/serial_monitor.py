@@ -33,8 +33,11 @@ HEAP_TAGGED_RE = re.compile(
 MQTT_START_RE = re.compile(r"mqttReconnect attempt (?P<attempt>\d+) start @ (?P<start_ms>\d+) ms")
 MQTT_SUCCESS_RE = re.compile(r"mqttReconnect attempt (?P<attempt>\d+) succeeded after (?P<elapsed_ms>\d+) ms")
 PORT_OPEN_RETRY_S = 0.5
-BOOT_UPTIME_RESET_SLACK_MS = 1000
-BOOT_CANDIDATE_LABELS = {
+EXPLICIT_BOOT_LABEL_PHASES = {
+    "very-early": 0,
+    "boot": 1,
+}
+INITIAL_BOOT_CANDIDATE_LABELS = set(EXPLICIT_BOOT_LABEL_PHASES.keys()) | {
     "boot",
     "after-pref-read",
     "pre-wifi",
@@ -201,8 +204,7 @@ def main() -> int:
     mqtt_attempt_starts: dict[int, int] = {}
     open_count = 0
     last_open_error = ""
-    last_heap_uptime_ms: Optional[int] = None
-    current_boot_has_boot_label = False
+    current_boot_explicit_phase: Optional[int] = None
 
     with raw_log_path.open("a", encoding="utf-8", errors="replace") as raw_log:
         while True:
@@ -292,27 +294,21 @@ def main() -> int:
                                 max_block = _to_int(heap_tag_match.group("max"))
                                 frag = _to_int(heap_tag_match.group("frag"))
                             is_new_boot = False
-                            # The first boot-phase marker after an uptime reset starts a new
-                            # logical boot. A later "boot" marker only starts a new boot if
-                            # the previous logical boot already saw its own "boot" marker.
-                            if label == "boot":
-                                if current_boot_count == 0 or current_boot_has_boot_label:
+                            explicit_phase = EXPLICIT_BOOT_LABEL_PHASES.get(label)
+                            # Only explicit boot markers advance boot_count after startup.
+                            # Some later boot phases are replayed with earlier uptime_ms
+                            # values, so non-boot markers cannot safely imply a reboot.
+                            if current_boot_count == 0:
+                                if label in INITIAL_BOOT_CANDIDATE_LABELS:
                                     is_new_boot = True
-                            elif uptime_ms is not None:
-                                if current_boot_count == 0 and label in BOOT_CANDIDATE_LABELS:
-                                    is_new_boot = True
-                                elif (
-                                    last_heap_uptime_ms is not None
-                                    and uptime_ms + BOOT_UPTIME_RESET_SLACK_MS < last_heap_uptime_ms
-                                ):
+                            elif explicit_phase is not None:
+                                if current_boot_explicit_phase is None or explicit_phase <= current_boot_explicit_phase:
                                     is_new_boot = True
                             if is_new_boot:
                                 current_boot_count += 1
-                                current_boot_has_boot_label = False
-                            if label == "boot":
-                                current_boot_has_boot_label = True
-                            if uptime_ms is not None:
-                                last_heap_uptime_ms = uptime_ms
+                                current_boot_explicit_phase = None
+                            if explicit_phase is not None:
+                                current_boot_explicit_phase = explicit_phase
                             heap_payload = {
                                 "type": "heap",
                                 "label": label,
