@@ -5099,6 +5099,7 @@ def main() -> int:
         if not reboot_url:
             raise E2EError("Could not discover /reboot/wifi endpoint from firmware source")
         base = _resolve_device_http_base(mqtt, device_root)
+        reboot_wifi_url = base + reboot_url
         portal_reboot_normal_path = "/config/reboot-normal"
         supported_bauds = {9600, 115200, 19200}
         baseline_poll = _fetch_poll(mqtt, poll_topic)
@@ -5106,9 +5107,23 @@ def main() -> int:
         baseline_configured = int(baseline_poll.get("rs485_baud_configured", 0))
         baseline_actual = int(baseline_poll.get("rs485_baud_actual", 0))
         restore_to_auto = baseline_configured not in supported_bauds
-        if restore_to_auto and baseline_actual not in supported_bauds:
-            raise E2EError("portal rs485 case requires a supported live baud baseline when starting in auto mode")
-        restore_baud = baseline_configured if baseline_configured in supported_bauds else baseline_actual
+        restore_baud = baseline_configured if baseline_configured in supported_bauds else 0
+
+        if restore_to_auto:
+            def baseline_live_baud_ready() -> Tuple[bool, str]:
+                cur_poll = _fetch_poll(mqtt, poll_topic)
+                actual = int(cur_poll.get("rs485_baud_actual", 0))
+                detail = f"actual={actual}"
+                return actual in supported_bauds, detail
+
+            _assert_eventually(
+                "portal rs485 case waits for a supported live baud baseline in auto mode",
+                baseline_live_baud_ready,
+                timeout_s=60,
+                poll_s=3.0,
+            )
+            baseline_poll = _fetch_poll(mqtt, poll_topic)
+            restore_baud = int(baseline_poll.get("rs485_baud_actual", 0))
 
         def load_rs485_portal(path_suffix: str = "") -> str:
             status, body = _http_request_full("GET", base + "/config/rs485" + path_suffix, headers={}, body=b"", timeout_s=20)
@@ -5132,7 +5147,7 @@ def main() -> int:
 
         print(f"[e2e] rebooting into wifi portal via {reboot_url} (rs485 baud portal check)")
         reboot_wifi_status, reboot_wifi_body = _http_request_full(
-            "POST", base + reboot_url, headers={}, body=b"", timeout_s=20
+            "POST", reboot_wifi_url, headers={}, body=b"", timeout_s=20
         )
         if reboot_wifi_status != 200:
             raise E2EError(f"{reboot_url} returned unexpected status={reboot_wifi_status}")
@@ -5217,7 +5232,7 @@ def main() -> int:
             return
 
         print(f"[e2e] restoring persisted rs485 baud via portal to {restore_baud}")
-        _http_post_simple(reboot_url, timeout_s=10)
+        _http_post_simple(reboot_wifi_url, timeout_s=10)
         _assert_portal_root_menu(base, timeout_s=40, required_mode="wifi")
         save_rs485_baud_via_portal(restore_baud)
 
@@ -5254,7 +5269,7 @@ def main() -> int:
             return
 
         print("[e2e] clearing persisted rs485 baud back to auto/follow-live")
-        _http_post_simple(reboot_url, timeout_s=10)
+        _http_post_simple(reboot_wifi_url, timeout_s=10)
         _assert_portal_root_menu(base, timeout_s=40, required_mode="wifi")
         save_rs485_baud_via_portal(0)
 
