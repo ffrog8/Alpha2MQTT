@@ -2703,13 +2703,8 @@ serviceRs485BaudReconcile(void)
 	rs485BaudNextActionAtMs = now + kRs485BaudRetryMs;
 
 	if (!rs485BaudTracker.hasConfiguredBaud) {
-		if (!rs485BaudTrackerNeedsSeedAttempt(rs485BaudTracker, rs485RuntimeReconnect.connectionEpoch)) {
-			return;
-		}
-		rs485BaudTrackerMarkSeedAttempt(rs485BaudTracker, rs485RuntimeReconnect.connectionEpoch);
-		if (persist_defaults_if_missing_rs485_baud(liveBaud)) {
-			rs485BaudTrackerMarkSeeded(rs485BaudTracker, liveBaud);
-		}
+		rs485BaudTracker.actualBaud = liveBaud;
+		rs485BaudTracker.syncState = Rs485BaudSyncState::Unknown;
 		return;
 	}
 
@@ -4895,6 +4890,8 @@ handlePortalRs485Save(WiFiManager& wifiManager)
 
 	rs485BaudTracker.configuredBaud = parsedBaud;
 	rs485BaudTracker.hasConfiguredBaud = true;
+	rs485BaudTracker.pendingConfirmation = false;
+	rs485BaudTracker.lastWriteAttemptEpoch = 0;
 	if (rs485BaudTracker.actualBaud == parsedBaud) {
 		rs485BaudTracker.syncState = Rs485BaudSyncState::Synced;
 	} else if (rs485BaudTracker.actualBaud != 0) {
