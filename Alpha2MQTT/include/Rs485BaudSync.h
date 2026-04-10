@@ -21,6 +21,7 @@ struct Rs485BaudTracker {
 	uint32_t configuredBaud = 0;
 	uint32_t actualBaud = 0;
 	uint32_t lastWriteAttemptEpoch = 0;
+	uint32_t lastSeedAttemptEpoch = 0;
 	bool hasConfiguredBaud = false;
 	bool pendingConfirmation = false;
 	Rs485BaudSyncState syncState = Rs485BaudSyncState::Unknown;
@@ -46,6 +47,12 @@ static inline bool
 rs485BaudValueSupported(uint32_t baud)
 {
 	return baud == 9600UL || baud == 115200UL || baud == 19200UL;
+}
+
+static inline bool
+rs485BaudStoredValueUsable(bool hasKey, uint32_t storedBaud)
+{
+	return hasKey && rs485BaudValueSupported(storedBaud);
 }
 
 static inline bool
@@ -109,6 +116,18 @@ rs485BaudTrackerMarkSeeded(Rs485BaudTracker &tracker, uint32_t liveBaud)
 	tracker.hasConfiguredBaud = true;
 	tracker.pendingConfirmation = false;
 	tracker.syncState = Rs485BaudSyncState::Synced;
+}
+
+static inline bool
+rs485BaudTrackerNeedsSeedAttempt(const Rs485BaudTracker &tracker, uint32_t connectionEpoch)
+{
+	return !tracker.hasConfiguredBaud && tracker.actualBaud != 0 && tracker.lastSeedAttemptEpoch != connectionEpoch;
+}
+
+static inline void
+rs485BaudTrackerMarkSeedAttempt(Rs485BaudTracker &tracker, uint32_t connectionEpoch)
+{
+	tracker.lastSeedAttemptEpoch = connectionEpoch;
 }
 
 static inline void

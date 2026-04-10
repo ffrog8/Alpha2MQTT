@@ -28,6 +28,14 @@ TEST_CASE("rs485 baud sync: supported register enums map back to numeric baud va
 	CHECK_FALSE(rs485BaudRegisterToValue(MODBUS_BAUD_RATE_256000, baud));
 }
 
+TEST_CASE("rs485 baud sync: stored value is usable only when key exists and baud is supported")
+{
+	CHECK(rs485BaudStoredValueUsable(true, 9600));
+	CHECK(rs485BaudStoredValueUsable(true, 115200));
+	CHECK_FALSE(rs485BaudStoredValueUsable(false, 9600));
+	CHECK_FALSE(rs485BaudStoredValueUsable(true, 256000));
+}
+
 TEST_CASE("rs485 baud sync: first live baud can seed configured state")
 {
 	Rs485BaudTracker tracker{};
@@ -36,6 +44,17 @@ TEST_CASE("rs485 baud sync: first live baud can seed configured state")
 	CHECK(tracker.configuredBaud == 115200);
 	CHECK(tracker.actualBaud == 115200);
 	CHECK(tracker.syncState == Rs485BaudSyncState::Synced);
+}
+
+TEST_CASE("rs485 baud sync: missing config seeds at most once per connection epoch")
+{
+	Rs485BaudTracker tracker{};
+	rs485BaudTrackerMarkObserved(tracker, 9600);
+
+	CHECK(rs485BaudTrackerNeedsSeedAttempt(tracker, 3));
+	rs485BaudTrackerMarkSeedAttempt(tracker, 3);
+	CHECK_FALSE(rs485BaudTrackerNeedsSeedAttempt(tracker, 3));
+	CHECK(rs485BaudTrackerNeedsSeedAttempt(tracker, 4));
 }
 
 TEST_CASE("rs485 baud sync: mismatch triggers one write attempt per connection epoch")

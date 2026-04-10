@@ -2557,7 +2557,9 @@ persist_defaults_if_missing_rs485_baud(uint32_t baud)
 	Preferences preferences;
 	preferences.begin(DEVICE_NAME, false);
 	const bool hasKey = preferences.isKey(kPreferenceRs485Baud);
-	const bool ok = hasKey || preferences.putUInt(kPreferenceRs485Baud, baud) == sizeof(uint32_t);
+	const uint32_t storedBaud = preferences.getUInt(kPreferenceRs485Baud, 0);
+	const bool ok = rs485BaudStoredValueUsable(hasKey, storedBaud) ||
+	                preferences.putUInt(kPreferenceRs485Baud, baud) == sizeof(uint32_t);
 	preferences.end();
 	return ok;
 }
@@ -2591,7 +2593,7 @@ loadConfiguredRs485Baud(uint32_t &baudOut, bool &hasConfiguredOut)
 	const bool hasKey = preferences.isKey(kPreferenceRs485Baud);
 	const uint32_t storedBaud = preferences.getUInt(kPreferenceRs485Baud, 0);
 	preferences.end();
-	if (!hasKey || !rs485BaudValueSupported(storedBaud)) {
+	if (!rs485BaudStoredValueUsable(hasKey, storedBaud)) {
 		baudOut = 0;
 		hasConfiguredOut = false;
 		return false;
@@ -2701,8 +2703,13 @@ serviceRs485BaudReconcile(void)
 	rs485BaudNextActionAtMs = now + kRs485BaudRetryMs;
 
 	if (!rs485BaudTracker.hasConfiguredBaud) {
-		rs485BaudTracker.actualBaud = liveBaud;
-		rs485BaudTracker.syncState = Rs485BaudSyncState::Unknown;
+		if (!rs485BaudTrackerNeedsSeedAttempt(rs485BaudTracker, rs485RuntimeReconnect.connectionEpoch)) {
+			return;
+		}
+		rs485BaudTrackerMarkSeedAttempt(rs485BaudTracker, rs485RuntimeReconnect.connectionEpoch);
+		if (persist_defaults_if_missing_rs485_baud(liveBaud)) {
+			rs485BaudTrackerMarkSeeded(rs485BaudTracker, liveBaud);
+		}
 		return;
 	}
 
