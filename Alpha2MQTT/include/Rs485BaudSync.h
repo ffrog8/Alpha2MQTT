@@ -85,6 +85,9 @@ rs485BaudRegisterToValue(uint16_t regValue, uint32_t &baud)
 	case MODBUS_BAUD_RATE_19200:
 		baud = 19200UL;
 		return true;
+	case MODBUS_BAUD_RATE_256000:
+		baud = 256000UL;
+		return true;
 	default:
 		return false;
 	}

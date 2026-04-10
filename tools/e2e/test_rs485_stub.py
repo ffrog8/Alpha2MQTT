@@ -125,7 +125,6 @@ CASE_ORDER: tuple[str, ...] = (
     "soc_drift_e2e",
     "load_power_formula",
     "polling_config",
-    "portal_rs485_baud_reconcile",
     "runtime_polling_reset_without_page",
     "portal_polling_ui",
     "polling_profile_export_import",
@@ -5093,6 +5092,9 @@ def main() -> int:
         )
 
     def case_portal_rs485_baud_reconcile() -> None:
+        # This case is intentionally opt-in rather than part of CASE_ORDER. It
+        # exercises a real persisted RS485 config mutation path and may need to
+        # seed a supported baseline when no stored baud exists yet.
         reboot_url = _discover_reboot_wifi_path_from_code()
         if not reboot_url:
             raise E2EError("Could not discover /reboot/wifi endpoint from firmware source")
@@ -5214,7 +5216,7 @@ def main() -> int:
             poll_s=3.0,
         )
 
-        if restore_baud == 115200:
+        if restore_baud == 115200 and not seeded_restore_baseline:
             return
 
         print(f"[e2e] restoring persisted rs485 baud via portal to {restore_baud}")

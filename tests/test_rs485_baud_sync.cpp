@@ -25,7 +25,9 @@ TEST_CASE("rs485 baud sync: supported register enums map back to numeric baud va
 	CHECK(baud == 115200);
 	CHECK(rs485BaudRegisterToValue(MODBUS_BAUD_RATE_19200, baud));
 	CHECK(baud == 19200);
-	CHECK_FALSE(rs485BaudRegisterToValue(MODBUS_BAUD_RATE_256000, baud));
+	CHECK(rs485BaudRegisterToValue(MODBUS_BAUD_RATE_256000, baud));
+	CHECK(baud == 256000);
+	CHECK_FALSE(rs485BaudValueSupported(256000));
 }
 
 TEST_CASE("rs485 baud sync: stored value is usable only when key exists and baud is supported")

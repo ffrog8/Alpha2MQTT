@@ -710,6 +710,7 @@ static uint32_t rs485ProbeLastAttemptMs = 0;
 static Rs485RuntimeReconnectTracker rs485RuntimeReconnect{};
 static Rs485BaudTracker rs485BaudTracker{};
 static uint32_t rs485BaudNextActionAtMs = 0;
+static bool rs485BaudDefaultSeedAttempted = false;
 
 static bool rs485TryReadIdentityOnce(void);
 static void rs485ProbeTick(void);
@@ -2547,6 +2548,24 @@ persistConfiguredRs485Baud(uint32_t baud)
 }
 
 static bool
+persistDefaultsIfMissingRs485Baud(uint32_t baud)
+{
+	if (!rs485BaudValueSupported(baud)) {
+		return false;
+	}
+	Preferences preferences;
+	preferences.begin(DEVICE_NAME, false);
+	const bool hasKey = preferences.isKey(kPreferenceRs485Baud);
+	const uint32_t storedBaud = preferences.getUInt(kPreferenceRs485Baud, 0);
+	bool ok = true;
+	if (!rs485BaudStoredValueUsable(hasKey, storedBaud)) {
+		ok = preferences.putUInt(kPreferenceRs485Baud, baud) == sizeof(uint32_t);
+	}
+	preferences.end();
+	return ok;
+}
+
+static bool
 loadConfiguredRs485Baud(uint32_t &baudOut, bool &hasConfiguredOut)
 {
 	Preferences preferences;
@@ -2662,6 +2681,16 @@ serviceRs485BaudReconcile(void)
 	rs485BaudNextActionAtMs = now + kRs485BaudRetryMs;
 
 	if (!rs485BaudTracker.hasConfiguredBaud) {
+		// Treat the first successful live read as an upgrade-time default seed, but
+		// keep it bounded to one attempt per boot so reconnect churn cannot loop on
+		// flash writes when persistence fails.
+		if (!rs485BaudDefaultSeedAttempted) {
+			rs485BaudDefaultSeedAttempted = true;
+			if (persistDefaultsIfMissingRs485Baud(liveBaud)) {
+				rs485BaudTrackerMarkSeeded(rs485BaudTracker, liveBaud);
+				return;
+			}
+		}
 		rs485BaudTracker.actualBaud = liveBaud;
 		rs485BaudTracker.syncState = Rs485BaudSyncState::Unknown;
 		return;
@@ -14791,7 +14820,7 @@ parseRs485StubControlPayload(const char *payload, Rs485StubControlRequest &reque
 		request.hasVirtualEss = true;
 	}
 	if (parseStubControlInt(payload, "modbus_baud", value) && value >= 0 &&
-	    rs485BaudValueSupported(static_cast<uint32_t>(value))) {
+	    (rs485BaudValueSupported(static_cast<uint32_t>(value)) || static_cast<uint32_t>(value) == 256000UL)) {
 		request.virtualBaud = static_cast<uint32_t>(value);
 		request.hasVirtualBaud = true;
 	}
@@ -14844,7 +14873,10 @@ applyParsedRs485StubControl(const Rs485StubControlRequest &request)
 	}
 	if (request.hasVirtualBaud) {
 		uint16_t regValue = 0;
-		if (rs485BaudValueToRegister(request.virtualBaud, regValue)) {
+		const bool hasRegValue = (request.virtualBaud == 256000UL)
+			                         ? (regValue = MODBUS_BAUD_RATE_256000, true)
+			                         : rs485BaudValueToRegister(request.virtualBaud, regValue);
+		if (hasRegValue) {
 			_modBus->applyVirtualModbusBaud(regValue);
 		}
 	}
