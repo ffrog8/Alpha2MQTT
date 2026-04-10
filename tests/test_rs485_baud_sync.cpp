@@ -46,6 +46,18 @@ TEST_CASE("rs485 baud sync: first live baud can seed configured state")
 	CHECK(tracker.syncState == Rs485BaudSyncState::Synced);
 }
 
+TEST_CASE("rs485 baud sync: unconfigured tracker observes only once per connection epoch")
+{
+	Rs485BaudTracker tracker{};
+	CHECK(rs485BaudTrackerNeedsObservation(tracker, 2));
+
+	rs485BaudTrackerMarkObserved(tracker, 9600);
+	CHECK_FALSE(rs485BaudTrackerNeedsObservation(tracker, 2));
+
+	rs485BaudTrackerOnConnected(tracker);
+	CHECK(rs485BaudTrackerNeedsObservation(tracker, 3));
+}
+
 TEST_CASE("rs485 baud sync: mismatch triggers one write attempt per connection epoch")
 {
 	Rs485BaudTracker tracker{};

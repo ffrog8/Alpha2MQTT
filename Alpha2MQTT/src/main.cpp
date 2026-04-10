@@ -2636,10 +2636,8 @@ serviceRs485BaudReconcile(void)
 	    !opData.essRs485Connected) {
 		return;
 	}
-	const bool shouldObserveBaud = !rs485BaudTracker.hasConfiguredBaud || rs485BaudTracker.pendingConfirmation ||
-	                               rs485BaudTracker.actualBaud == 0 ||
-	                               rs485BaudTrackerNeedsWriteAttempt(rs485BaudTracker,
-	                                                                rs485RuntimeReconnect.connectionEpoch);
+	const bool shouldObserveBaud =
+		rs485BaudTrackerNeedsObservation(rs485BaudTracker, rs485RuntimeReconnect.connectionEpoch);
 	if (!shouldObserveBaud) {
 		return;
 	}

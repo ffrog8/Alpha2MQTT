@@ -107,6 +107,13 @@ rs485BaudTrackerNeedsWriteAttempt(const Rs485BaudTracker &tracker, uint32_t conn
 	       tracker.lastWriteAttemptEpoch != connectionEpoch;
 }
 
+static inline bool
+rs485BaudTrackerNeedsObservation(const Rs485BaudTracker &tracker, uint32_t connectionEpoch)
+{
+	return tracker.pendingConfirmation || tracker.actualBaud == 0 ||
+	       rs485BaudTrackerNeedsWriteAttempt(tracker, connectionEpoch);
+}
+
 static inline void
 rs485BaudTrackerMarkSeeded(Rs485BaudTracker &tracker, uint32_t liveBaud)
 {

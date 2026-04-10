@@ -5098,6 +5098,35 @@ def main() -> int:
             raise E2EError("Could not discover /reboot/wifi endpoint from firmware source")
         base = _resolve_device_http_base(mqtt, device_root)
         portal_reboot_normal_path = "/config/reboot-normal"
+        supported_bauds = {9600, 115200, 19200}
+        baseline_poll = _fetch_poll(mqtt, poll_topic)
+        baseline_epoch = int(baseline_poll.get("rs485_connection_epoch", 0))
+        baseline_configured = int(baseline_poll.get("rs485_baud_configured", 0))
+        restore_baud = baseline_configured
+        if restore_baud not in supported_bauds:
+            raise E2EError(
+                "portal rs485 case requires an existing persisted baud because there is no public clear path for rs485_baud"
+            )
+
+        def load_rs485_portal(path_suffix: str = "") -> str:
+            status, body = _http_request_full("GET", base + "/config/rs485" + path_suffix, headers={}, body=b"", timeout_s=20)
+            if status != 200:
+                raise E2EError(f"/config/rs485{path_suffix} returned unexpected status={status}")
+            return body.decode("utf-8", errors="replace")
+
+        def save_rs485_baud_via_portal(target_baud: int) -> None:
+            rs485_html = load_rs485_portal()
+            csrf = _extract_input_value(rs485_html, "csrf")
+            if not csrf:
+                raise E2EError("portal rs485 page missing csrf token")
+            save_status = _http_post_form(
+                base + "/config/rs485/save", {"baud": str(target_baud), "csrf": csrf}, timeout_s=20
+            )
+            if save_status not in (200, 302):
+                raise E2EError(f"/config/rs485/save failed status={save_status}")
+            confirm_html = load_rs485_portal("?saved=1")
+            if "Saved." not in confirm_html:
+                raise E2EError("portal rs485 saved page missing confirmation")
 
         print(f"[e2e] rebooting into wifi portal via {reboot_url} (rs485 baud portal check)")
         reboot_wifi_status, reboot_wifi_body = _http_request_full(
@@ -5115,30 +5144,12 @@ def main() -> int:
         _wait_for_http_ok(base + "/", timeout_s=40)
         _assert_portal_root_menu(base, timeout_s=20, required_mode="wifi")
 
-        rs485_status, rs485_body = _http_request_full("GET", base + "/config/rs485", headers={}, body=b"", timeout_s=20)
-        if rs485_status != 200:
-            raise E2EError(f"/config/rs485 returned unexpected status={rs485_status}")
-        rs485_html = rs485_body.decode("utf-8", errors="replace")
+        rs485_html = load_rs485_portal()
         if "Configured:" not in rs485_html or "Sync:" not in rs485_html:
             raise E2EError("portal rs485 page missing status summary")
         if "value=\"115200\"" not in rs485_html:
             raise E2EError("portal rs485 page missing 115200 option")
-        csrf = _extract_input_value(rs485_html, "csrf")
-        if not csrf:
-            raise E2EError("portal rs485 page missing csrf token")
-
-        save_status = _http_post_form(base + "/config/rs485/save", {"baud": "115200", "csrf": csrf}, timeout_s=20)
-        if save_status not in (200, 302):
-            raise E2EError(f"/config/rs485/save failed status={save_status}")
-
-        confirm_status, confirm_body = _http_request_full(
-            "GET", base + "/config/rs485?saved=1", headers={}, body=b"", timeout_s=20
-        )
-        if confirm_status != 200:
-            raise E2EError(f"/config/rs485?saved=1 returned unexpected status={confirm_status}")
-        confirm_html = confirm_body.decode("utf-8", errors="replace")
-        if "Saved." not in confirm_html:
-            raise E2EError("portal rs485 saved page missing confirmation")
+        save_rs485_baud_via_portal(115200)
 
         reboot_normal_url = base + portal_reboot_normal_path
         reboot_status, reboot_body = _http_request_full("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
@@ -5168,8 +5179,6 @@ def main() -> int:
 
         _assert_eventually("runtime root page after portal rs485 save reboot", runtime_root_ready, timeout_s=60, poll_s=2.0)
 
-        baseline_poll = _fetch_poll(mqtt, poll_topic)
-        baseline_epoch = int(baseline_poll.get("rs485_connection_epoch", 0))
         set_mode_and_wait('{"mode":"online","modbus_baud":9600}', ("online",))
 
         def pred() -> Tuple[bool, str]:
@@ -5196,6 +5205,43 @@ def main() -> int:
         _assert_eventually(
             "portal-configured RS485 baud is reconciled and confirmed after reprobe",
             pred,
+            timeout_s=90,
+            poll_s=3.0,
+        )
+
+        if restore_baud == 115200:
+            return
+
+        print(f"[e2e] restoring persisted rs485 baud via portal to {restore_baud}")
+        _http_post_simple(reboot_url, timeout_s=10)
+        _assert_portal_root_menu(base, timeout_s=40, required_mode="wifi")
+        save_rs485_baud_via_portal(restore_baud)
+
+        restore_reboot_status, restore_reboot_body = _http_request_full(
+            "POST", reboot_normal_url, headers={}, body=b"", timeout_s=20
+        )
+        if restore_reboot_status != 200:
+            raise E2EError(f"{portal_reboot_normal_path} restore returned unexpected status={restore_reboot_status}")
+        if restore_reboot_body:
+            _assert_reboot_handoff_html(
+                restore_reboot_body.decode("utf-8", errors="replace"),
+                expected_heading="Rebooting to normal mode",
+                expected_target_mode="normal",
+                expected_probe_kind="fetch",
+            )
+        _assert_eventually("runtime root page after rs485 restore reboot", runtime_root_ready, timeout_s=60, poll_s=2.0)
+
+        def restored_pred() -> Tuple[bool, str]:
+            cur_poll = _fetch_poll(mqtt, poll_topic)
+            configured = int(cur_poll.get("rs485_baud_configured", 0))
+            actual = int(cur_poll.get("rs485_baud_actual", 0))
+            sync = str(cur_poll.get("rs485_baud_sync", ""))
+            detail = f"configured={configured} actual={actual} sync={sync!r}"
+            return configured == restore_baud and actual == restore_baud and sync == "synced", detail
+
+        _assert_eventually(
+            "portal rs485 case restores the original persisted baud baseline",
+            restored_pred,
             timeout_s=90,
             poll_s=3.0,
         )
