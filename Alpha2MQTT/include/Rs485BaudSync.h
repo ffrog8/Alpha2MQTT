@@ -118,21 +118,11 @@ rs485BaudTrackerNeedsObservation(const Rs485BaudTracker &tracker, uint32_t conne
 }
 
 static inline void
-rs485BaudTrackerMarkSeeded(Rs485BaudTracker &tracker, uint32_t liveBaud)
-{
-	tracker.configuredBaud = liveBaud;
-	tracker.actualBaud = liveBaud;
-	tracker.hasConfiguredBaud = true;
-	tracker.pendingConfirmation = false;
-	tracker.syncState = Rs485BaudSyncState::Synced;
-}
-
-static inline void
 rs485BaudTrackerMarkObserved(Rs485BaudTracker &tracker, uint32_t liveBaud)
 {
 	tracker.actualBaud = liveBaud;
 	if (!tracker.hasConfiguredBaud) {
-		tracker.syncState = Rs485BaudSyncState::Unknown;
+		tracker.syncState = Rs485BaudSyncState::Synced;
 		return;
 	}
 	tracker.syncState =

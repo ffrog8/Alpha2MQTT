@@ -289,6 +289,9 @@ portalRs485BaudLabel(uint32_t baud, const char **labelOut)
 		return false;
 	}
 	switch (baud) {
+	case 0UL:
+		*labelOut = "Auto (follow live)";
+		return true;
 	case 9600UL:
 		*labelOut = "9600";
 		return true;

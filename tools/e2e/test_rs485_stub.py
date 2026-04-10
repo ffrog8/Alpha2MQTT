@@ -5093,8 +5093,8 @@ def main() -> int:
 
     def case_portal_rs485_baud_reconcile() -> None:
         # This case is intentionally opt-in rather than part of CASE_ORDER. It
-        # exercises a real persisted RS485 config mutation path and may need to
-        # seed a supported baseline when no stored baud exists yet.
+        # exercises a real persisted RS485 config mutation path, including the
+        # ability to clear back to auto/follow-live mode after testing.
         reboot_url = _discover_reboot_wifi_path_from_code()
         if not reboot_url:
             raise E2EError("Could not discover /reboot/wifi endpoint from firmware source")
@@ -5105,12 +5105,10 @@ def main() -> int:
         baseline_epoch = int(baseline_poll.get("rs485_connection_epoch", 0))
         baseline_configured = int(baseline_poll.get("rs485_baud_configured", 0))
         baseline_actual = int(baseline_poll.get("rs485_baud_actual", 0))
-        restore_baud = (
-            baseline_configured
-            if baseline_configured in supported_bauds
-            else baseline_actual if baseline_actual in supported_bauds else 9600
-        )
-        seeded_restore_baseline = baseline_configured not in supported_bauds
+        restore_to_auto = baseline_configured not in supported_bauds
+        if restore_to_auto and baseline_actual not in supported_bauds:
+            raise E2EError("portal rs485 case requires a supported live baud baseline when starting in auto mode")
+        restore_baud = baseline_configured if baseline_configured in supported_bauds else baseline_actual
 
         def load_rs485_portal(path_suffix: str = "") -> str:
             status, body = _http_request_full("GET", base + "/config/rs485" + path_suffix, headers={}, body=b"", timeout_s=20)
@@ -5151,11 +5149,10 @@ def main() -> int:
         rs485_html = load_rs485_portal()
         if "Configured:" not in rs485_html or "Sync:" not in rs485_html:
             raise E2EError("portal rs485 page missing status summary")
+        if "value=\"0\"" not in rs485_html:
+            raise E2EError("portal rs485 page missing auto option")
         if "value=\"115200\"" not in rs485_html:
             raise E2EError("portal rs485 page missing 115200 option")
-        if seeded_restore_baseline:
-            print(f"[e2e] seeding deterministic rs485 baud baseline via portal to {restore_baud}")
-            save_rs485_baud_via_portal(restore_baud)
         save_rs485_baud_via_portal(115200)
 
         reboot_normal_url = base + portal_reboot_normal_path
@@ -5216,7 +5213,7 @@ def main() -> int:
             poll_s=3.0,
         )
 
-        if restore_baud == 115200 and not seeded_restore_baseline:
+        if not restore_to_auto and restore_baud == 115200:
             return
 
         print(f"[e2e] restoring persisted rs485 baud via portal to {restore_baud}")
@@ -5238,7 +5235,7 @@ def main() -> int:
             )
         _assert_eventually("runtime root page after rs485 restore reboot", runtime_root_ready, timeout_s=60, poll_s=2.0)
 
-        def restored_pred() -> Tuple[bool, str]:
+        def restored_target_pred() -> Tuple[bool, str]:
             cur_poll = _fetch_poll(mqtt, poll_topic)
             configured = int(cur_poll.get("rs485_baud_configured", 0))
             actual = int(cur_poll.get("rs485_baud_actual", 0))
@@ -5247,8 +5244,45 @@ def main() -> int:
             return configured == restore_baud and actual == restore_baud and sync == "synced", detail
 
         _assert_eventually(
-            "portal rs485 case restores the original persisted baud baseline",
-            restored_pred,
+            "portal rs485 case restores the original runtime baud target",
+            restored_target_pred,
+            timeout_s=90,
+            poll_s=3.0,
+        )
+
+        if not restore_to_auto:
+            return
+
+        print("[e2e] clearing persisted rs485 baud back to auto/follow-live")
+        _http_post_simple(reboot_url, timeout_s=10)
+        _assert_portal_root_menu(base, timeout_s=40, required_mode="wifi")
+        save_rs485_baud_via_portal(0)
+
+        clear_reboot_status, clear_reboot_body = _http_request_full(
+            "POST", reboot_normal_url, headers={}, body=b"", timeout_s=20
+        )
+        if clear_reboot_status != 200:
+            raise E2EError(f"{portal_reboot_normal_path} auto-clear returned unexpected status={clear_reboot_status}")
+        if clear_reboot_body:
+            _assert_reboot_handoff_html(
+                clear_reboot_body.decode("utf-8", errors="replace"),
+                expected_heading="Rebooting to normal mode",
+                expected_target_mode="normal",
+                expected_probe_kind="fetch",
+            )
+        _assert_eventually("runtime root page after rs485 auto-clear reboot", runtime_root_ready, timeout_s=60, poll_s=2.0)
+
+        def restored_auto_pred() -> Tuple[bool, str]:
+            cur_poll = _fetch_poll(mqtt, poll_topic)
+            configured = int(cur_poll.get("rs485_baud_configured", 0))
+            actual = int(cur_poll.get("rs485_baud_actual", 0))
+            sync = str(cur_poll.get("rs485_baud_sync", ""))
+            detail = f"configured={configured} actual={actual} sync={sync!r}"
+            return configured == 0 and actual == restore_baud and sync == "synced", detail
+
+        _assert_eventually(
+            "portal rs485 case restores the original auto/follow-live state",
+            restored_auto_pred,
             timeout_s=90,
             poll_s=3.0,
         )

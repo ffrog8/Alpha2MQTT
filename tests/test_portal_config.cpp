@@ -140,9 +140,11 @@ TEST_CASE("portal config: sta custom menu html includes wifi, mqtt, and polling 
 	CHECK(strstr(html, "/config/polling") != nullptr);
 }
 
-TEST_CASE("portal config: rs485 labels only expose supported numeric baud values")
+TEST_CASE("portal config: rs485 labels expose auto plus supported numeric baud values")
 {
 	const char *label = nullptr;
+	CHECK(portalRs485BaudLabel(0, &label));
+	CHECK(std::string(label) == "Auto (follow live)");
 	CHECK(portalRs485BaudLabel(9600, &label));
 	CHECK(std::string(label) == "9600");
 	CHECK(portalRs485BaudLabel(115200, &label));

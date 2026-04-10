@@ -710,7 +710,6 @@ static uint32_t rs485ProbeLastAttemptMs = 0;
 static Rs485RuntimeReconnectTracker rs485RuntimeReconnect{};
 static Rs485BaudTracker rs485BaudTracker{};
 static uint32_t rs485BaudNextActionAtMs = 0;
-static bool rs485BaudDefaultSeedAttempted = false;
 
 static bool rs485TryReadIdentityOnce(void);
 static void rs485ProbeTick(void);
@@ -2535,7 +2534,7 @@ noteRs485BaudSyncFailure(const char *detail)
 }
 
 static bool
-persistConfiguredRs485Baud(uint32_t baud)
+persistUserConfiguredRs485Baud(uint32_t baud)
 {
 	if (!rs485BaudValueSupported(baud)) {
 		return false;
@@ -2548,18 +2547,13 @@ persistConfiguredRs485Baud(uint32_t baud)
 }
 
 static bool
-persistDefaultsIfMissingRs485Baud(uint32_t baud)
+clearUserConfiguredRs485Baud(void)
 {
-	if (!rs485BaudValueSupported(baud)) {
-		return false;
-	}
 	Preferences preferences;
 	preferences.begin(DEVICE_NAME, false);
-	const bool hasKey = preferences.isKey(kPreferenceRs485Baud);
-	const uint32_t storedBaud = preferences.getUInt(kPreferenceRs485Baud, 0);
 	bool ok = true;
-	if (!rs485BaudStoredValueUsable(hasKey, storedBaud)) {
-		ok = preferences.putUInt(kPreferenceRs485Baud, baud) == sizeof(uint32_t);
+	if (preferences.isKey(kPreferenceRs485Baud)) {
+		ok = preferences.remove(kPreferenceRs485Baud);
 	}
 	preferences.end();
 	return ok;
@@ -2681,18 +2675,6 @@ serviceRs485BaudReconcile(void)
 	rs485BaudNextActionAtMs = now + kRs485BaudRetryMs;
 
 	if (!rs485BaudTracker.hasConfiguredBaud) {
-		// Treat the first successful live read as an upgrade-time default seed, but
-		// keep it bounded to one attempt per boot so reconnect churn cannot loop on
-		// flash writes when persistence fails.
-		if (!rs485BaudDefaultSeedAttempted) {
-			rs485BaudDefaultSeedAttempted = true;
-			if (persistDefaultsIfMissingRs485Baud(liveBaud)) {
-				rs485BaudTrackerMarkSeeded(rs485BaudTracker, liveBaud);
-				return;
-			}
-		}
-		rs485BaudTracker.actualBaud = liveBaud;
-		rs485BaudTracker.syncState = Rs485BaudSyncState::Unknown;
 		return;
 	}
 
@@ -4781,7 +4763,11 @@ handlePortalRs485Page(WiFiManager& wifiManager)
 	const bool saved = wifiManager.server->hasArg("saved");
 	const bool err = wifiManager.server->hasArg("err");
 	const uint32_t selectedBaud =
-		rs485BaudTracker.hasConfiguredBaud ? rs485BaudTracker.configuredBaud : 9600UL;
+		rs485BaudTracker.hasConfiguredBaud ? rs485BaudTracker.configuredBaud : 0UL;
+	const char *configuredLabel = nullptr;
+	if (!portalRs485BaudLabel(selectedBaud, &configuredLabel) || configuredLabel == nullptr) {
+		configuredLabel = "0";
+	}
 	const char *syncLabel = rs485BaudSyncStateLabel(rs485BaudTracker.syncState);
 	char syncEscaped[24] = "";
 	htmlEscapeInto(syncLabel, syncEscaped, sizeof(syncEscaped));
@@ -4809,10 +4795,10 @@ handlePortalRs485Page(WiFiManager& wifiManager)
 		if (!writePortalUiPageStartP(writer, PSTR("Alpha2MQTT RS485"), PSTR("RS485"), uiMode)) {
 			return false;
 		}
-		if (saved && !writer.writeP(PSTR("<p><strong>Saved.</strong> Reboot Normal is not required; runtime will reconcile on the next live RS485 epoch.</p>"))) {
+		if (saved && !writer.writeP(PSTR("<p><strong>Saved.</strong> Auto follows live immediately; explicit targets reconcile on the next live RS485 epoch.</p>"))) {
 			return false;
 		}
-		if (err && !writer.writeP(PSTR("<p><strong>Invalid RS485 baud.</strong> Choose 9600, 115200, or 19200.</p>"))) {
+		if (err && !writer.writeP(PSTR("<p><strong>Invalid RS485 baud.</strong> Choose Auto, 9600, 115200, or 19200.</p>"))) {
 			return false;
 		}
 		if (!writePortalMenuButtonP(writer, PSTR("/"), PSTR("Menu"), PSTR("get")) ||
@@ -4820,15 +4806,15 @@ handlePortalRs485Page(WiFiManager& wifiManager)
 		    !writePortalMenuButtonP(writer, PSTR("/config/polling"), PSTR("Polling"), PSTR("get")) ||
 		    !writePortalMenuButtonP(
 			    writer, PSTR("/config/reboot-normal"), PSTR("Reboot Normal"), PSTR("post")) ||
-		    !writer.writeP(PSTR("<p>Configured baud is persisted as a numeric target and reconciled once per live RS485 connection epoch.</p>"))) {
+		    !writer.writeP(PSTR("<p>Auto follows the live inverter baud. Saved numeric targets reconcile once per live RS485 connection epoch.</p>"))) {
 			return false;
 		}
-		char statusLine[196];
+		char statusLine[224];
 		const int statusWritten = snprintf(
 			statusLine,
 			sizeof(statusLine),
-			"<p>Configured: %lu<br>Live: %lu<br>Sync: %s</p>",
-			static_cast<unsigned long>(rs485BaudTracker.hasConfiguredBaud ? rs485BaudTracker.configuredBaud : 0),
+			"<p>Configured: %s<br>Live: %lu<br>Sync: %s</p>",
+			configuredLabel,
 			static_cast<unsigned long>(rs485BaudTracker.actualBaud),
 			syncEscaped);
 		if (statusWritten <= 0 || static_cast<size_t>(statusWritten) >= sizeof(statusLine) ||
@@ -4839,7 +4825,7 @@ handlePortalRs485Page(WiFiManager& wifiManager)
 		    !writer.writeP(PSTR("\">"))) {
 			return false;
 		}
-		if (!emitBaudOption(writer, 9600UL) || !emitBaudOption(writer, 115200UL) ||
+		if (!emitBaudOption(writer, 0UL) || !emitBaudOption(writer, 9600UL) || !emitBaudOption(writer, 115200UL) ||
 		    !emitBaudOption(writer, 19200UL) ||
 		    !writer.writeP(PSTR("<p><button type=\"submit\">Save</button></p></form></body></html>"))) {
 			return false;
@@ -4864,14 +4850,29 @@ handlePortalRs485Save(WiFiManager& wifiManager)
 	char *endPtr = nullptr;
 	const unsigned long parsedBaud = strtoul(baudArg.c_str(), &endPtr, 10);
 	if (baudArg.length() == 0 || endPtr == nullptr || *endPtr != '\0' ||
-	    !rs485BaudValueSupported(parsedBaud)) {
+	    !(parsedBaud == 0 || rs485BaudValueSupported(parsedBaud))) {
 		wifiManager.server->sendHeader("Location", "/config/rs485?err=1");
 		wifiManager.server->send(302, "text/plain", "");
 		return;
 	}
 
-	if (!persistConfiguredRs485Baud(parsedBaud)) {
+	const bool persisted = (parsedBaud == 0) ? clearUserConfiguredRs485Baud()
+	                                        : persistUserConfiguredRs485Baud(parsedBaud);
+	if (!persisted) {
 		wifiManager.server->sendHeader("Location", "/config/rs485?err=1");
+		wifiManager.server->send(302, "text/plain", "");
+		return;
+	}
+
+	if (parsedBaud == 0) {
+		rs485BaudTracker.configuredBaud = 0;
+		rs485BaudTracker.hasConfiguredBaud = false;
+		rs485BaudTracker.pendingConfirmation = false;
+		rs485BaudTracker.lastWriteAttemptEpoch = 0;
+		rs485BaudTracker.syncState =
+			(rs485BaudTracker.actualBaud != 0) ? Rs485BaudSyncState::Synced : Rs485BaudSyncState::Unknown;
+		rs485BaudNextActionAtMs = millis();
+		wifiManager.server->sendHeader("Location", "/config/rs485?saved=1");
 		wifiManager.server->send(302, "text/plain", "");
 		return;
 	}

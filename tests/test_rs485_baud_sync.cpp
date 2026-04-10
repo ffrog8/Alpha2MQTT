@@ -38,12 +38,12 @@ TEST_CASE("rs485 baud sync: stored value is usable only when key exists and baud
 	CHECK_FALSE(rs485BaudStoredValueUsable(true, 256000));
 }
 
-TEST_CASE("rs485 baud sync: first live baud can seed configured state")
+TEST_CASE("rs485 baud sync: auto-follow mode treats observed live baud as synced")
 {
 	Rs485BaudTracker tracker{};
-	rs485BaudTrackerMarkSeeded(tracker, 115200);
-	CHECK(tracker.hasConfiguredBaud);
-	CHECK(tracker.configuredBaud == 115200);
+	rs485BaudTrackerMarkObserved(tracker, 115200);
+	CHECK_FALSE(tracker.hasConfiguredBaud);
+	CHECK(tracker.configuredBaud == 0);
 	CHECK(tracker.actualBaud == 115200);
 	CHECK(tracker.syncState == Rs485BaudSyncState::Synced);
 }
