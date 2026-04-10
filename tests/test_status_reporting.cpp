@@ -154,6 +154,7 @@ TEST_CASE("status poll JSON builder includes required keys")
 	snapshot.lastErrCode = 2;
 	snapshot.rs485ProbeLastAttemptMs = 12345;
 	snapshot.rs485ProbeBackoffMs = 15000;
+	snapshot.rs485ConnectionEpoch = 6;
 	snapshot.rs485Backend = "stub";
 	snapshot.inverterReady = true;
 	snapshot.essSnapshotOk = false;
@@ -264,6 +265,7 @@ TEST_CASE("status poll JSON builder includes required keys")
 	CHECK(payload.find("\"last_err_code\":2") != std::string::npos);
 	CHECK(payload.find("\"rs485_probe_last_attempt_ms\":12345") != std::string::npos);
 	CHECK(payload.find("\"rs485_probe_backoff_ms\":15000") != std::string::npos);
+	CHECK(payload.find("\"rs485_connection_epoch\":6") != std::string::npos);
 }
 
 TEST_CASE("status poll JSON builder escapes string fields")
@@ -350,6 +352,7 @@ TEST_CASE("status poll compact JSON includes snapshot/dispatch and stub schedule
 	snapshot.rs485OtherErrorCount = 5;
 	snapshot.rs485ProbeLastAttemptMs = 5000;
 	snapshot.rs485ProbeBackoffMs = 15000;
+	snapshot.rs485ConnectionEpoch = 9;
 	snapshot.pollingBudgetExceeded = false;
 	snapshot.pollingBudgetOverrunCount = 3;
 	snapshot.pollingBudgetUsedMs[1] = 321;
@@ -377,6 +380,7 @@ TEST_CASE("status poll compact JSON includes snapshot/dispatch and stub schedule
 	CHECK(payload.find("\"rs485_error_count\":12") != std::string::npos);
 	CHECK(payload.find("\"rs485_transport_error_count\":7") != std::string::npos);
 	CHECK(payload.find("\"rs485_other_error_count\":5") != std::string::npos);
+	CHECK(payload.find("\"rs485_connection_epoch\":9") != std::string::npos);
 
 #if RS485_STUB
 	CHECK(payload.find("\"s10_ms\":10") != std::string::npos);
@@ -417,6 +421,7 @@ TEST_CASE("status publishes liveness when inverter not ready and snapshot invali
 	poll.pollErrCount = 1;
 	poll.rs485ProbeLastAttemptMs = 2500;
 	poll.rs485ProbeBackoffMs = 15000;
+	poll.rs485ConnectionEpoch = 2;
 	poll.pollingBudgetExceeded = true;
 	poll.pollingBudgetOverrunCount = 2;
 
@@ -435,6 +440,7 @@ TEST_CASE("status publishes liveness when inverter not ready and snapshot invali
 	CHECK(pollPayload.find("\"poll_ok_count\":7") != std::string::npos);
 	CHECK(pollPayload.find("\"poll_err_count\":1") != std::string::npos);
 	CHECK(pollPayload.find("\"poll_budget\":{\"x\":true,\"c\":2") != std::string::npos);
+	CHECK(pollPayload.find("\"rs485_connection_epoch\":2") != std::string::npos);
 }
 
 TEST_CASE("status publishes liveness when inverter ready but snapshot failed")
@@ -459,6 +465,7 @@ TEST_CASE("status publishes liveness when inverter ready but snapshot failed")
 	poll.pollIntervalSeconds = 30;
 	poll.pollOkCount = 2;
 	poll.pollErrCount = 5;
+	poll.rs485ConnectionEpoch = 4;
 
 	char coreBuffer[256];
 	char pollBuffer[1536];
@@ -472,6 +479,7 @@ TEST_CASE("status publishes liveness when inverter ready but snapshot failed")
 	CHECK(pollPayload.find("\"inverter_ready\":true") != std::string::npos);
 	CHECK(pollPayload.find("\"ess_snapshot_ok\":false") != std::string::npos);
 	CHECK(pollPayload.find("\"ess_snapshot_attempts\":12") != std::string::npos);
+	CHECK(pollPayload.find("\"rs485_connection_epoch\":4") != std::string::npos);
 }
 
 TEST_CASE("status includes ess-derived fields when snapshot ok")
@@ -496,6 +504,7 @@ TEST_CASE("status includes ess-derived fields when snapshot ok")
 	poll.pollIntervalSeconds = 30;
 	poll.pollOkCount = 11;
 	poll.pollErrCount = 0;
+	poll.rs485ConnectionEpoch = 5;
 
 	char coreBuffer[256];
 	char pollBuffer[1536];
@@ -509,6 +518,7 @@ TEST_CASE("status includes ess-derived fields when snapshot ok")
 	CHECK(pollPayload.find("\"inverter_ready\":true") != std::string::npos);
 	CHECK(pollPayload.find("\"ess_snapshot_ok\":true") != std::string::npos);
 	CHECK(pollPayload.find("\"ess_snapshot_attempts\":44") != std::string::npos);
+	CHECK(pollPayload.find("\"rs485_connection_epoch\":5") != std::string::npos);
 }
 
 TEST_CASE("status stub JSON builder includes required keys")
