@@ -11208,7 +11208,8 @@ publishStubControlStatusNow(bool includeEssSnapshot)
 		"\"rs485_transport_error_count\":%lu,"
 		"\"rs485_other_error_count\":%lu,"
 		"\"rs485_probe_last_attempt_ms\":%lu,"
-		"\"rs485_probe_backoff_ms\":%lu"
+		"\"rs485_probe_backoff_ms\":%lu,"
+		"\"rs485_connection_epoch\":%lu"
 		"}",
 		stubMode,
 		static_cast<unsigned long>(_modBus ? _modBus->stubFailRemaining() : 0),
@@ -11231,7 +11232,8 @@ publishStubControlStatusNow(bool includeEssSnapshot)
 		static_cast<unsigned long>(rs485TransportErrors),
 		static_cast<unsigned long>(rs485OtherErrors),
 		static_cast<unsigned long>(rs485ProbeLastAttemptMs),
-		static_cast<unsigned long>((rs485ConnectState == Rs485ConnectState::Connected) ? 0 : rs485CycleBackoffMs));
+		static_cast<unsigned long>((rs485ConnectState == Rs485ConnectState::Connected) ? 0 : rs485CycleBackoffMs),
+		static_cast<unsigned long>(rs485RuntimeReconnect.connectionEpoch));
 	if (pollWritten <= 0 || static_cast<size_t>(pollWritten) >= kStatusJsonScratchSize) {
 		return false;
 	}
