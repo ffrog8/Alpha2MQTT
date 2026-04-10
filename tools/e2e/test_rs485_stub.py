@@ -2169,15 +2169,18 @@ def main() -> int:
     ap.add_argument("--trace-http", action="store_true", help="Trace HTTP requests and response status/size.")
     ap.add_argument("--trace-mqtt", action="store_true", help="Trace MQTT transport activity.")
     args = ap.parse_args()
+    optional_case_names = ("portal_rs485_baud_reconcile",)
     if args.list_cases:
         for name in CASE_ORDER:
+            print(name)
+        for name in optional_case_names:
             print(name)
         return 0
 
     selected_cases = args.case if args.case else default_cases
     from_case = args.from_case.strip() if args.from_case else default_from_case
     for name in selected_cases:
-        if name not in CASE_ORDER:
+        if name not in CASE_ORDER and name not in optional_case_names:
             raise E2EError(f"Unknown case in selection: {name!r}")
     if from_case and from_case not in CASE_ORDER:
         raise E2EError(f"Unknown from-case: {from_case!r}")
@@ -6374,7 +6377,6 @@ def main() -> int:
         ("soc_drift_e2e", case_soc_drift_e2e),
         ("load_power_formula", case_load_power_snapshot_formula),
         ("polling_config", case_polling_config_persistence),
-        ("portal_rs485_baud_reconcile", case_portal_rs485_baud_reconcile),
         ("runtime_polling_reset_without_page", case_runtime_polling_reset_without_page),
         ("portal_polling_ui", case_portal_polling_ui),
         ("polling_profile_export_import", case_polling_profile_export_import),
@@ -6382,14 +6384,18 @@ def main() -> int:
         ("portal_wifi_save_reboot_only", case_portal_wifi_save_reboot_only),
         ("portal_mqtt_save_reboot_handoff", case_portal_mqtt_save_reboot_handoff),
     ]
+    optional_cases: list[Tuple[str, Callable[[], None]]] = [
+        ("portal_rs485_baud_reconcile", case_portal_rs485_baud_reconcile),
+    ]
 
-    case_map = {name: fn for name, fn in cases}
+    case_map = {name: fn for name, fn in cases + optional_cases}
     ordered_names = [name for name, _ in cases]
     if from_case:
         ordered_names = ordered_names[ordered_names.index(from_case):]
     if selected_cases:
         selected_set = set(selected_cases)
-        ordered_names = [name for name in ordered_names if name in selected_set]
+        optional_names = [name for name, _ in optional_cases if name in selected_set]
+        ordered_names = [name for name in ordered_names if name in selected_set] + optional_names
     if not ordered_names:
         raise E2EError("No cases selected to run")
 
