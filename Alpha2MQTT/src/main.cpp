@@ -270,6 +270,8 @@ bool mqttRuntimeEnabled = false;
 bool bootEventPublished = false;
 bool bootMemEventPublished = false;
 bool inverterReady = false;
+static char g_rediscoveryPreviousSerial[sizeof(deviceSerialNumber)] = "";
+static char g_rediscoveryPreviousHaUniqueId[sizeof(haUniqueId)] = "";
 bool inverterSubscriptionsSet = false;
 bool inverterCommandSubscriptionsSet = false;
 bool inverterDispatchSubscriptionSet = false;
@@ -1277,6 +1279,18 @@ clearRuntimeInverterIdentity(void)
 	}
 }
 
+static void
+preserveRuntimeIdentityForRediscovery(void)
+{
+	if (deviceSerialNumber[0] == '\0' || !inverterSerialIsValid(deviceSerialNumber)) {
+		return;
+	}
+	strlcpy(g_rediscoveryPreviousSerial, deviceSerialNumber, sizeof(g_rediscoveryPreviousSerial));
+	if (haUniqueId[0] != '\0' && strcmp(haUniqueId, "A2M-UNKNOWN") != 0) {
+		strlcpy(g_rediscoveryPreviousHaUniqueId, haUniqueId, sizeof(g_rediscoveryPreviousHaUniqueId));
+	}
+}
+
 #if RS485_STUB
 static void
 primeStubRuntimeInverterIdentity(const char *serial)
@@ -1310,7 +1324,17 @@ applyLiveInverterIdentity(const char *serial)
 	}
 
 	char previousSerial[sizeof(deviceSerialNumber)];
-	strlcpy(previousSerial, deviceSerialNumber, sizeof(previousSerial));
+	if (deviceSerialNumber[0] != '\0') {
+		strlcpy(previousSerial, deviceSerialNumber, sizeof(previousSerial));
+	} else {
+		strlcpy(previousSerial, g_rediscoveryPreviousSerial, sizeof(previousSerial));
+	}
+	char previousHaUniqueId[sizeof(haUniqueId)];
+	if (haUniqueId[0] != '\0' && strcmp(haUniqueId, "A2M-UNKNOWN") != 0) {
+		strlcpy(previousHaUniqueId, haUniqueId, sizeof(previousHaUniqueId));
+	} else {
+		strlcpy(previousHaUniqueId, g_rediscoveryPreviousHaUniqueId, sizeof(previousHaUniqueId));
+	}
 	char staleInverterIdentifier[64];
 	const bool staleInverterNamespace = buildStaleInverterIdentifier(previousSerial,
 	                                                                 serial,
@@ -1343,19 +1367,22 @@ applyLiveInverterIdentity(const char *serial)
 	};
 
 	queueLegacyControllerClearIfNeeded(currentLegacyHaUniqueId);
-	queueLegacyControllerClearIfNeeded(haUniqueId);
+	queueLegacyControllerClearIfNeeded(previousHaUniqueId);
 
-	if (!inverterHaUniqueIdMatchesSerial(haUniqueId, deviceSerialNumber)) {
+	if (!inverterHaUniqueIdMatchesSerial(previousHaUniqueId, deviceSerialNumber)) {
 		if (staleInverterNamespace) {
 			queueStaleInverterDiscoveryClear(staleInverterIdentifier);
 		}
-		if (haUniqueId[0] != '\0' &&
-		    strcmp(haUniqueId, "A2M-UNKNOWN") != 0 &&
-		    strcmp(haUniqueId, currentLegacyHaUniqueId) != 0) {
-			queueStaleInverterDiscoveryClear(haUniqueId);
+		if (previousHaUniqueId[0] != '\0' &&
+		    strcmp(previousHaUniqueId, "A2M-UNKNOWN") != 0 &&
+		    strcmp(previousHaUniqueId, currentLegacyHaUniqueId) != 0) {
+			queueStaleInverterDiscoveryClear(previousHaUniqueId);
 		}
 		setMqttIdentifiersFromSerial(deviceSerialNumber);
 	}
+
+	g_rediscoveryPreviousSerial[0] = '\0';
+	g_rediscoveryPreviousHaUniqueId[0] = '\0';
 
 	return true;
 }
@@ -1389,6 +1416,7 @@ beginRs485RuntimeRediscovery(const char *reason)
 	(void)reason;
 #endif
 
+	preserveRuntimeIdentityForRediscovery();
 	clearRuntimeInverterIdentity();
 	strlcpy(deviceBatteryType, "UNKNOWN", sizeof(deviceBatteryType));
 	opData.essRs485Connected = false;
