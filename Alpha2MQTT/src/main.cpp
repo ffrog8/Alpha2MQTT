@@ -1342,6 +1342,8 @@ applyLiveInverterIdentity(const char *serial)
 	                                                                 sizeof(staleInverterIdentifier));
 	char currentLegacyHaUniqueId[sizeof(haUniqueId)];
 	buildInverterHaUniqueId(serial, currentLegacyHaUniqueId, sizeof(currentLegacyHaUniqueId));
+	const bool runtimeIdentityUnknown =
+		(haUniqueId[0] == '\0') || (strcmp(haUniqueId, "A2M-UNKNOWN") == 0);
 
 	strlcpy(deviceSerialNumber, serial, sizeof(deviceSerialNumber));
 	if (_registerHandler != NULL) {
@@ -1378,6 +1380,8 @@ applyLiveInverterIdentity(const char *serial)
 		    strcmp(previousHaUniqueId, currentLegacyHaUniqueId) != 0) {
 			queueStaleInverterDiscoveryClear(previousHaUniqueId);
 		}
+		setMqttIdentifiersFromSerial(deviceSerialNumber);
+	} else if (runtimeIdentityUnknown) {
 		setMqttIdentifiersFromSerial(deviceSerialNumber);
 	}
 
