@@ -94,6 +94,7 @@ CASE_ORDER: tuple[str, ...] = (
     "two_device_discovery",
     "offline",
     "fail_then_recover",
+    "runtime_loss_reprobe",
     "online",
     "boot_mem_publish",
     "scheduler_idle_no_extra_reads",
@@ -4016,9 +4017,133 @@ def main() -> int:
                 detail = f"ok={ok} remaining={remaining} mode={mode}"
                 # Success should occur once remaining reaches 0.
                 return (mode == "fail_then_recover" and remaining == 0 and ok), detail
-    
+
             _assert_eventually("fail_then_recover eventually succeeds", pred, timeout_s=60)
-    
+
+        def case_runtime_loss_reprobe() -> None:
+            print("[e2e] case: runtime RS485 loss clears identity and reprobes")
+            inverter_id = _ensure_online_inverter_identity("runtime loss baseline")
+            baseline_poll = _fetch_poll(mqtt, poll_topic)
+            baseline_epoch = int(baseline_poll.get("rs485_connection_epoch", 0))
+            baseline_core = _fetch_status_core(mqtt, status_core_topic)
+            baseline_ha_unique = str(baseline_core.get("ha_unique_id", ""))
+            if not baseline_ha_unique.startswith("A2M-"):
+                raise E2EError(f"baseline HA identity is not live: {baseline_ha_unique!r}")
+
+            set_mode_and_wait('{"mode":"fail","fail_n":3}', ("fail_then_recover", "fail"))
+
+            def wait_for_runtime_loss_transition(timeout_s: int = 40) -> None:
+                mqtt.subscribe(poll_topic)
+                mqtt.subscribe(status_core_topic)
+                mqtt._pending_publishes = []
+                saw_loss_poll = False
+                saw_unknown_core = False
+                last_poll_detail = ""
+                last_core_detail = ""
+                deadline = _monotonic() + timeout_s
+                wait = _WaitTracker(
+                    "runtime loss falls back to probing and clears live identity",
+                    timeout_s,
+                    kind="live",
+                )
+                while _monotonic() < deadline:
+                    remaining = max(0.1, min(5.0, deadline - _monotonic()))
+                    try:
+                        got_topic, payload, retained = mqtt.wait_for_publish_details(timeout_s=remaining)
+                    except E2EError as e:
+                        if "Timeout waiting for MQTT publish" not in str(e):
+                            raise
+                        detail = (
+                            f"loss_poll_seen={saw_loss_poll} unknown_core_seen={saw_unknown_core} "
+                            f"last_poll={last_poll_detail} last_core={last_core_detail}"
+                        )
+                        wait.pulse(detail)
+                        continue
+
+                    if retained:
+                        detail = (
+                            f"retain=1 topic={got_topic} loss_poll_seen={saw_loss_poll} "
+                            f"unknown_core_seen={saw_unknown_core}"
+                        )
+                        wait.pulse(detail)
+                        continue
+
+                    if got_topic == poll_topic:
+                        cur_poll = _parse_json(payload)
+                        inverter_ready = bool(cur_poll.get("inverter_ready", False))
+                        snapshot_ok = bool(cur_poll.get("ess_snapshot_last_ok", False))
+                        probe_backoff_ms = int(cur_poll.get("rs485_probe_backoff_ms", 0))
+                        epoch = int(cur_poll.get("rs485_connection_epoch", 0))
+                        skip_reason = str(cur_poll.get("dispatch_last_skip_reason", ""))
+                        last_poll_detail = (
+                            f"inverter_ready={inverter_ready} snapshot_ok={snapshot_ok} "
+                            f"probe_backoff_ms={probe_backoff_ms} epoch={epoch} "
+                            f"skip_reason={skip_reason!r}"
+                        )
+                        if (
+                            (not inverter_ready)
+                            and (not snapshot_ok)
+                            and probe_backoff_ms > 0
+                            and skip_reason == "rs485_runtime_loss"
+                        ):
+                            saw_loss_poll = True
+                    elif got_topic == status_core_topic:
+                        cur_core = _parse_json(payload)
+                        rs485_status = str(cur_core.get("rs485Status", ""))
+                        ha_unique = str(cur_core.get("ha_unique_id", ""))
+                        last_core_detail = f"rs485_status={rs485_status!r} ha_unique_id={ha_unique!r}"
+                        if rs485_status == "unknown" and ha_unique == "A2M-UNKNOWN":
+                            saw_unknown_core = True
+                    else:
+                        wait.pulse(f"topic={got_topic}")
+                        continue
+
+                    detail = (
+                        f"loss_poll_seen={saw_loss_poll} unknown_core_seen={saw_unknown_core} "
+                        f"last_poll={last_poll_detail} last_core={last_core_detail}"
+                    )
+                    if saw_loss_poll and saw_unknown_core:
+                        wait.done(detail)
+                        return
+                    wait.pulse(detail)
+
+                raise E2EError(
+                    "Timeout waiting for runtime loss live transition. "
+                    f"Last observed: loss_poll_seen={saw_loss_poll} unknown_core_seen={saw_unknown_core} "
+                    f"last_poll={last_poll_detail} last_core={last_core_detail}"
+                )
+
+            wait_for_runtime_loss_transition()
+
+            def recovered_after_reprobe() -> Tuple[bool, str]:
+                cur_poll = _fetch_poll(mqtt, poll_topic)
+                cur_core = _fetch_status_core(mqtt, status_core_topic)
+                inverter_ready = bool(cur_poll.get("inverter_ready", False))
+                snapshot_ok = bool(cur_poll.get("ess_snapshot_last_ok", False))
+                probe_backoff_ms = int(cur_poll.get("rs485_probe_backoff_ms", 0))
+                epoch = int(cur_poll.get("rs485_connection_epoch", 0))
+                ha_unique = str(cur_core.get("ha_unique_id", ""))
+                current_inverter_id = _inverter_id_from_ha_unique(ha_unique)
+                detail = (
+                    f"inverter_ready={inverter_ready} snapshot_ok={snapshot_ok} "
+                    f"probe_backoff_ms={probe_backoff_ms} epoch={epoch} "
+                    f"ha_unique_id={ha_unique!r} inverter_id={current_inverter_id!r}"
+                )
+                return (
+                    inverter_ready
+                    and snapshot_ok
+                    and probe_backoff_ms == 0
+                    and epoch > baseline_epoch
+                    and current_inverter_id == inverter_id
+                ), detail
+
+            _assert_eventually(
+                "runtime loss recovery starts a new RS485 connection epoch",
+                recovered_after_reprobe,
+                timeout_s=90,
+                poll_s=3.0,
+            )
+
         def case_online() -> None:
             print("[e2e] case: stub online")
             set_mode_and_wait('{"mode":"online"}', ("online",))
@@ -6286,6 +6411,7 @@ def main() -> int:
             ("two_device_discovery", case_two_device_discovery),
             ("offline", case_offline),
             ("fail_then_recover", case_fail_then_recover),
+            ("runtime_loss_reprobe", case_runtime_loss_reprobe),
             ("online", case_online),
             ("boot_mem_publish", case_boot_mem_publish),
             ("scheduler_idle_no_extra_reads", case_scheduler_idle_does_not_add_reads),

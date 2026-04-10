@@ -40,6 +40,7 @@ First, go and customise options at the top of Definitions.h!
 #include "../include/DispatchTiming.h"
 #include "../include/DispatchRequest.h"
 #include "../include/Rs485ProbeLogic.h"
+#include "../include/Rs485RuntimeReconnect.h"
 #include "../include/SchedulerReadPolicy.h"
 #include "../include/Scheduler.h"
 #include "../include/TimeProvider.h"
@@ -269,6 +270,8 @@ bool mqttRuntimeEnabled = false;
 bool bootEventPublished = false;
 bool bootMemEventPublished = false;
 bool inverterReady = false;
+static char g_rediscoveryPreviousSerial[sizeof(deviceSerialNumber)] = "";
+static char g_rediscoveryPreviousHaUniqueId[sizeof(haUniqueId)] = "";
 bool inverterSubscriptionsSet = false;
 bool inverterCommandSubscriptionsSet = false;
 bool inverterDispatchSubscriptionSet = false;
@@ -705,9 +708,13 @@ static unsigned long rs485NextAttemptAtMs = 0;
 static unsigned long rs485LockedBaud = 0;
 static const char *rs485UartInfo = nullptr;
 static uint32_t rs485ProbeLastAttemptMs = 0;
+static Rs485RuntimeReconnectTracker rs485RuntimeReconnect{};
 
 static bool rs485TryReadIdentityOnce(void);
 static void rs485ProbeTick(void);
+static void resetRs485ProbeState(unsigned long now);
+static void noteRs485ConnectedEpoch(void);
+static void beginRs485RuntimeRediscovery(const char *reason);
 #if RS485_STUB
 static void rs485ApplyStubConnectivityMode(Rs485StubMode mode);
 struct Rs485StubControlRequest;
@@ -1276,6 +1283,18 @@ clearRuntimeInverterIdentity(void)
 	}
 }
 
+static void
+preserveRuntimeIdentityForRediscovery(void)
+{
+	if (deviceSerialNumber[0] == '\0' || !inverterSerialIsValid(deviceSerialNumber)) {
+		return;
+	}
+	strlcpy(g_rediscoveryPreviousSerial, deviceSerialNumber, sizeof(g_rediscoveryPreviousSerial));
+	if (haUniqueId[0] != '\0' && strcmp(haUniqueId, "A2M-UNKNOWN") != 0) {
+		strlcpy(g_rediscoveryPreviousHaUniqueId, haUniqueId, sizeof(g_rediscoveryPreviousHaUniqueId));
+	}
+}
+
 #if RS485_STUB
 static void
 primeStubRuntimeInverterIdentity(const char *serial)
@@ -1309,7 +1328,17 @@ applyLiveInverterIdentity(const char *serial)
 	}
 
 	char previousSerial[sizeof(deviceSerialNumber)];
-	strlcpy(previousSerial, deviceSerialNumber, sizeof(previousSerial));
+	if (deviceSerialNumber[0] != '\0') {
+		strlcpy(previousSerial, deviceSerialNumber, sizeof(previousSerial));
+	} else {
+		strlcpy(previousSerial, g_rediscoveryPreviousSerial, sizeof(previousSerial));
+	}
+	char previousHaUniqueId[sizeof(haUniqueId)];
+	if (haUniqueId[0] != '\0' && strcmp(haUniqueId, "A2M-UNKNOWN") != 0) {
+		strlcpy(previousHaUniqueId, haUniqueId, sizeof(previousHaUniqueId));
+	} else {
+		strlcpy(previousHaUniqueId, g_rediscoveryPreviousHaUniqueId, sizeof(previousHaUniqueId));
+	}
 	char staleInverterIdentifier[64];
 	const bool staleInverterNamespace = buildStaleInverterIdentifier(previousSerial,
 	                                                                 serial,
@@ -1317,6 +1346,8 @@ applyLiveInverterIdentity(const char *serial)
 	                                                                 sizeof(staleInverterIdentifier));
 	char currentLegacyHaUniqueId[sizeof(haUniqueId)];
 	buildInverterHaUniqueId(serial, currentLegacyHaUniqueId, sizeof(currentLegacyHaUniqueId));
+	const bool runtimeIdentityUnknown =
+		(haUniqueId[0] == '\0') || (strcmp(haUniqueId, "A2M-UNKNOWN") == 0);
 
 	strlcpy(deviceSerialNumber, serial, sizeof(deviceSerialNumber));
 	if (_registerHandler != NULL) {
@@ -1342,21 +1373,75 @@ applyLiveInverterIdentity(const char *serial)
 	};
 
 	queueLegacyControllerClearIfNeeded(currentLegacyHaUniqueId);
-	queueLegacyControllerClearIfNeeded(haUniqueId);
+	queueLegacyControllerClearIfNeeded(previousHaUniqueId);
 
-	if (!inverterHaUniqueIdMatchesSerial(haUniqueId, deviceSerialNumber)) {
+	if (!inverterHaUniqueIdMatchesSerial(previousHaUniqueId, deviceSerialNumber)) {
 		if (staleInverterNamespace) {
 			queueStaleInverterDiscoveryClear(staleInverterIdentifier);
 		}
-		if (haUniqueId[0] != '\0' &&
-		    strcmp(haUniqueId, "A2M-UNKNOWN") != 0 &&
-		    strcmp(haUniqueId, currentLegacyHaUniqueId) != 0) {
-			queueStaleInverterDiscoveryClear(haUniqueId);
+		if (previousHaUniqueId[0] != '\0' &&
+		    strcmp(previousHaUniqueId, "A2M-UNKNOWN") != 0 &&
+		    strcmp(previousHaUniqueId, currentLegacyHaUniqueId) != 0) {
+			queueStaleInverterDiscoveryClear(previousHaUniqueId);
 		}
+		setMqttIdentifiersFromSerial(deviceSerialNumber);
+	} else if (runtimeIdentityUnknown) {
 		setMqttIdentifiersFromSerial(deviceSerialNumber);
 	}
 
+	g_rediscoveryPreviousSerial[0] = '\0';
+	g_rediscoveryPreviousHaUniqueId[0] = '\0';
+
 	return true;
+}
+
+static void
+resetRs485ProbeState(unsigned long now)
+{
+	rs485BaudIndex = -1;
+	rs485AttemptsInCycle = 0;
+	rs485CycleBackoffMs = kRs485ProbeAttemptDelayMs;
+	rs485NextAttemptAtMs = now;
+	rs485LockedBaud = 0;
+}
+
+static void
+noteRs485ConnectedEpoch(void)
+{
+	rs485RuntimeReconnectOnConnected(rs485RuntimeReconnect);
+}
+
+static void
+beginRs485RuntimeRediscovery(const char *reason)
+{
+#ifdef DEBUG_OVER_SERIAL
+	snprintf(_debugOutput,
+	         sizeof(_debugOutput),
+	         "RS485 runtime rediscovery: %s",
+	         reason != nullptr ? reason : "unknown");
+	Serial.println(_debugOutput);
+#else
+	(void)reason;
+#endif
+
+	preserveRuntimeIdentityForRediscovery();
+	clearRuntimeInverterIdentity();
+	strlcpy(deviceBatteryType, "UNKNOWN", sizeof(deviceBatteryType));
+	opData.essRs485Connected = false;
+	essSnapshotValid = false;
+	essSnapshotLastOk = false;
+	essPowerSnapshotValid = false;
+	essPowerSnapshotLastBuildMs = 0;
+	essSnapshotPrimedForSendDataLoop = 0;
+	strlcpy(dispatchLastSkipReason, "rs485_runtime_loss", sizeof(dispatchLastSkipReason));
+	rs485RuntimeReconnectOnRediscoveryStart(rs485RuntimeReconnect);
+	resetRs485ProbeState(millis());
+	rs485ConnectState = Rs485ConnectState::ProbingBaud;
+	resendAllData = true;
+	// Publish the cleared identity and probing state immediately. Waiting for the next
+	// scheduled status pass allows a fast reprobe to reconnect first, which leaves MQTT
+	// observers stuck on the stale live identity during the loss window.
+	sendStatus(false);
 }
 
 void
@@ -1816,13 +1901,11 @@ rs485ApplyStubConnectivityMode(Rs485StubMode mode)
 		return;
 	}
 
-	rs485AttemptsInCycle = 0;
-	rs485CycleBackoffMs = kRs485ProbeAttemptDelayMs;
-	rs485NextAttemptAtMs = millis();
+	resetRs485ProbeState(millis());
 	rs485ProbeLastAttemptMs = 0;
 
 	if (rs485StubModeUsesProbeLifecycle(mode)) {
-		rs485LockedBaud = 0;
+		rs485RuntimeReconnectOnRediscoveryStart(rs485RuntimeReconnect);
 		rs485ConnectState = Rs485ConnectState::ProbingBaud;
 		essSnapshotValid = false;
 		essSnapshotLastOk = false;
@@ -1840,8 +1923,12 @@ rs485ApplyStubConnectivityMode(Rs485StubMode mode)
 		primeStubRuntimeInverterIdentity("STUBSN000000000");
 	}
 	inverterReady = inverterSerialKnown();
+	if (rs485ConnectState != Rs485ConnectState::Connected || !opData.essRs485Connected) {
+		noteRs485ConnectedEpoch();
+	}
 	rs485ConnectState = Rs485ConnectState::Connected;
 	rs485LockedBaud = DEFAULT_BAUD_RATE;
+	opData.essRs485Connected = true;
 	essSnapshotValid = false;
 	essSnapshotLastOk = false;
 	rs485StubSkipNextScheduledStatusPublish = false;
@@ -1870,6 +1957,7 @@ rs485ProbeTick(void)
 			rs485ConnectState = Rs485ConnectState::Connected;
 			rs485AttemptsInCycle = 0;
 			rs485CycleBackoffMs = kRs485ProbeAttemptDelayMs;
+			noteRs485ConnectedEpoch();
 
 			// Now that inverter identity is known, discovery/config can be published under the real HA unique id.
 			// If a deferred config/set payload is already queued, let loop() apply that first instead of
@@ -7089,12 +7177,9 @@ void setup()
 			rs485UartInfo = _modBus->uartInfo();
 
 			// Start background probing; loop() will keep trying indefinitely with backoff capped at 15s.
+			rs485RuntimeReconnectOnRediscoveryStart(rs485RuntimeReconnect);
 			rs485ConnectState = Rs485ConnectState::ProbingBaud;
-			rs485BaudIndex = -1;
-			rs485AttemptsInCycle = 0;
-			rs485CycleBackoffMs = kRs485ProbeAttemptDelayMs;
-			rs485NextAttemptAtMs = millis();
-			rs485LockedBaud = 0;
+			resetRs485ProbeState(millis());
 
 			// The scheduler owns ESS snapshot refresh and publishing cadence. Do not block setup() waiting
 			// for inverter connectivity; the inverter may be offline and MQTT must still operate.
@@ -11026,6 +11111,7 @@ populateStatusPollSnapshot(StatusPollSnapshot &poll, bool includeEssSnapshot)
 	poll.lastErrCode = lastErrCode;
 	poll.rs485ProbeLastAttemptMs = rs485ProbeLastAttemptMs;
 	poll.rs485ProbeBackoffMs = (rs485ConnectState == Rs485ConnectState::Connected) ? 0 : rs485CycleBackoffMs;
+	poll.rs485ConnectionEpoch = rs485RuntimeReconnect.connectionEpoch;
 	poll.rs485Backend =
 #if RS485_STUB
 		"stub";
@@ -11223,7 +11309,8 @@ publishStubControlStatusNow(bool includeEssSnapshot)
 		"\"rs485_transport_error_count\":%lu,"
 		"\"rs485_other_error_count\":%lu,"
 		"\"rs485_probe_last_attempt_ms\":%lu,"
-		"\"rs485_probe_backoff_ms\":%lu"
+		"\"rs485_probe_backoff_ms\":%lu,"
+		"\"rs485_connection_epoch\":%lu"
 		"}",
 		stubMode,
 		static_cast<unsigned long>(_modBus ? _modBus->stubFailRemaining() : 0),
@@ -11246,7 +11333,8 @@ publishStubControlStatusNow(bool includeEssSnapshot)
 		static_cast<unsigned long>(rs485TransportErrors),
 		static_cast<unsigned long>(rs485OtherErrors),
 		static_cast<unsigned long>(rs485ProbeLastAttemptMs),
-		static_cast<unsigned long>((rs485ConnectState == Rs485ConnectState::Connected) ? 0 : rs485CycleBackoffMs));
+		static_cast<unsigned long>((rs485ConnectState == Rs485ConnectState::Connected) ? 0 : rs485CycleBackoffMs),
+		static_cast<unsigned long>(rs485RuntimeReconnect.connectionEpoch));
 	if (pollWritten <= 0 || static_cast<size_t>(pollWritten) >= kStatusJsonScratchSize) {
 		return false;
 	}
@@ -12423,9 +12511,12 @@ recordSnapshotReadFailure(const char *name,
                           modbusRequestAndResponseStatusValues result,
                           const char *detail,
                           bool &rs485TimedOut,
+                          bool &rs485TransportFailure,
                           int &gotError)
 {
 	rs485TimedOut = rs485TimedOut || (result == modbusRequestAndResponseStatusValues::noResponse);
+	rs485TransportFailure =
+		rs485TransportFailure || (classifyRs485Error(result) == Rs485ErrorClass::Transport);
 	noteSnapshotReadFailure(name, reg, result, detail);
 	recordRs485Error(result);
 	noteRs485Error(result, detail != nullptr ? detail : "");
@@ -12433,7 +12524,7 @@ recordSnapshotReadFailure(const char *name,
 }
 
 static void __attribute__((noinline))
-refreshSnapshotDispatchFields(bool &rs485TimedOut, int &gotError)
+refreshSnapshotDispatchFields(bool &rs485TimedOut, bool &rs485TransportFailure, int &gotError)
 {
 	DispatchBlockSnapshot dispatchSnapshot{};
 	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
@@ -12456,11 +12547,12 @@ refreshSnapshotDispatchFields(bool &rs485TimedOut, int &gotError)
 	                          result,
 	                          "",
 	                          rs485TimedOut,
+	                          rs485TransportFailure,
 	                          gotError);
 }
 
 static void __attribute__((noinline))
-refreshSnapshotBatterySoc(bool &rs485TimedOut, int &gotError)
+refreshSnapshotBatterySoc(bool &rs485TimedOut, bool &rs485TransportFailure, int &gotError)
 {
 	modbusRequestAndResponse *response = runtimeModbusReadScratch();
 	if (response == nullptr) {
@@ -12470,6 +12562,7 @@ refreshSnapshotBatterySoc(bool &rs485TimedOut, int &gotError)
 		                          modbusRequestAndResponseStatusValues::preProcessing,
 		                          "",
 		                          rs485TimedOut,
+		                          rs485TransportFailure,
 		                          gotError);
 		return;
 	}
@@ -12487,11 +12580,12 @@ refreshSnapshotBatterySoc(bool &rs485TimedOut, int &gotError)
 	                          result,
 	                          response->statusMqttMessage,
 	                          rs485TimedOut,
+	                          rs485TransportFailure,
 	                          gotError);
 }
 
 static void __attribute__((noinline))
-refreshSnapshotBatteryPower(bool &rs485TimedOut, int &gotError)
+refreshSnapshotBatteryPower(bool &rs485TimedOut, bool &rs485TransportFailure, int &gotError)
 {
 	modbusRequestAndResponse *response = runtimeModbusReadScratch();
 	if (response == nullptr) {
@@ -12501,6 +12595,7 @@ refreshSnapshotBatteryPower(bool &rs485TimedOut, int &gotError)
 		                          modbusRequestAndResponseStatusValues::preProcessing,
 		                          "",
 		                          rs485TimedOut,
+		                          rs485TransportFailure,
 		                          gotError);
 		return;
 	}
@@ -12518,11 +12613,12 @@ refreshSnapshotBatteryPower(bool &rs485TimedOut, int &gotError)
 	                          result,
 	                          response->statusMqttMessage,
 	                          rs485TimedOut,
+	                          rs485TransportFailure,
 	                          gotError);
 }
 
 static void __attribute__((noinline))
-refreshSnapshotGridPower(bool &rs485TimedOut, int &gotError)
+refreshSnapshotGridPower(bool &rs485TimedOut, bool &rs485TransportFailure, int &gotError)
 {
 	modbusRequestAndResponse *response = runtimeModbusReadScratch();
 	if (response == nullptr) {
@@ -12532,6 +12628,7 @@ refreshSnapshotGridPower(bool &rs485TimedOut, int &gotError)
 		                          modbusRequestAndResponseStatusValues::preProcessing,
 		                          "",
 		                          rs485TimedOut,
+		                          rs485TransportFailure,
 		                          gotError);
 		return;
 	}
@@ -12549,11 +12646,12 @@ refreshSnapshotGridPower(bool &rs485TimedOut, int &gotError)
 	                          result,
 	                          response->statusMqttMessage,
 	                          rs485TimedOut,
+	                          rs485TransportFailure,
 	                          gotError);
 }
 
 static void __attribute__((noinline))
-refreshSnapshotSolarPower(bool &rs485TimedOut, int &gotError)
+refreshSnapshotSolarPower(bool &rs485TimedOut, bool &rs485TransportFailure, int &gotError)
 {
 	PvMeterTotalSnapshot pvMeterSnapshot{};
 	PvStringBlockSnapshot pvBlockSnapshot{};
@@ -12576,11 +12674,12 @@ refreshSnapshotSolarPower(bool &rs485TimedOut, int &gotError)
 	                          pvMeterOk ? pvBlockResult : pvMeterResult,
 	                          "",
 	                          rs485TimedOut,
+	                          rs485TransportFailure,
 	                          gotError);
 }
 
 static void __attribute__((noinline))
-refreshSnapshotWorkingMode(bool &rs485TimedOut, int &gotError)
+refreshSnapshotWorkingMode(bool &rs485TimedOut, bool &rs485TransportFailure, int &gotError)
 {
 	modbusRequestAndResponse *response = runtimeModbusReadScratch();
 	if (response == nullptr) {
@@ -12590,6 +12689,7 @@ refreshSnapshotWorkingMode(bool &rs485TimedOut, int &gotError)
 		                          modbusRequestAndResponseStatusValues::preProcessing,
 		                          "",
 		                          rs485TimedOut,
+		                          rs485TransportFailure,
 		                          gotError);
 		return;
 	}
@@ -12607,6 +12707,7 @@ refreshSnapshotWorkingMode(bool &rs485TimedOut, int &gotError)
 	                          result,
 	                          response->statusMqttMessage,
 	                          rs485TimedOut,
+	                          rs485TransportFailure,
 	                          gotError);
 }
 
@@ -12625,6 +12726,7 @@ refreshEssSnapshot(void)
 	uint32_t powerSnapshotStartedMs = pollStartMs;
 	uint32_t powerSnapshotCompletedMs = pollStartMs;
 	bool rs485TimedOut = false;
+	bool rs485TransportFailure = false;
 	struct SnapshotDiagGuard {
 		~SnapshotDiagGuard()
 		{
@@ -12723,8 +12825,8 @@ refreshEssSnapshot(void)
 		lastErrCode = static_cast<int>(MqttEventCode::Rs485Timeout);
 		gotError = 1;
 	} else {
-		refreshSnapshotDispatchFields(rs485TimedOut, gotError);
-		refreshSnapshotBatterySoc(rs485TimedOut, gotError);
+		refreshSnapshotDispatchFields(rs485TimedOut, rs485TransportFailure, gotError);
+		refreshSnapshotBatterySoc(rs485TimedOut, rs485TransportFailure, gotError);
 		struct SnapshotBuildGuard {
 			SnapshotBuildGuard()
 			{
@@ -12743,24 +12845,24 @@ refreshEssSnapshot(void)
 		} snapshotBuildGuard;
 		powerSnapshotStartedMs = millis();
 		const int powerErrorsBeforeBattery = gotError;
-		refreshSnapshotBatteryPower(rs485TimedOut, gotError);
+		refreshSnapshotBatteryPower(rs485TimedOut, rs485TransportFailure, gotError);
 		if (gotError != powerErrorsBeforeBattery) {
 			powerSnapshotErrors++;
 		}
 		const int powerErrorsBeforeGrid = gotError;
-		refreshSnapshotGridPower(rs485TimedOut, gotError);
+		refreshSnapshotGridPower(rs485TimedOut, rs485TransportFailure, gotError);
 		if (gotError != powerErrorsBeforeGrid) {
 			powerSnapshotErrors++;
 		}
 		const int powerErrorsBeforeSolar = gotError;
-		refreshSnapshotSolarPower(rs485TimedOut, gotError);
+		refreshSnapshotSolarPower(rs485TimedOut, rs485TransportFailure, gotError);
 		if (gotError != powerErrorsBeforeSolar) {
 			powerSnapshotErrors++;
 		}
 		powerSnapshotCompletedMs = millis();
 		essPowerSnapshotValid = (powerSnapshotErrors == 0);
 		essPowerSnapshotLastBuildMs = powerSnapshotCompletedMs - powerSnapshotStartedMs;
-		refreshSnapshotWorkingMode(rs485TimedOut, gotError);
+		refreshSnapshotWorkingMode(rs485TimedOut, rs485TransportFailure, gotError);
 		{
 			bool essRs485WasConnected = opData.essRs485Connected;
 			opData.essRs485Connected = _modBus->isRs485Online();
@@ -12784,6 +12886,19 @@ refreshEssSnapshot(void)
 		dispatchLastSkipReason[0] = '\0';
 	}
 	essSnapshotLastOk = essSnapshotValid;
+	const Rs485RuntimeReconnectEvaluation reconnectEvaluation =
+		rs485EvaluateRuntimeReconnect(rs485ConnectState == Rs485ConnectState::Connected,
+		                              rs485RuntimeReconnect,
+		                              essSnapshotValid,
+		                              rs485TransportFailure,
+		                              opData.essRs485Connected);
+	rs485RuntimeReconnect.consecutiveTransportFailures =
+		reconnectEvaluation.consecutiveTransportFailures;
+	rs485RuntimeReconnect.liveSnapshotSeenInEpoch =
+		reconnectEvaluation.liveSnapshotSeenInEpoch;
+	if (reconnectEvaluation.triggerRediscovery) {
+		beginRs485RuntimeRediscovery("snapshot_transport_loss");
+	}
 	if (schedulerPassCache.active) {
 		populateEssSnapshotMeta(schedulerPassCache.essSnapshot,
 		                        schedulerPassCache.passId,

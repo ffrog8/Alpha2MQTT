@@ -20,6 +20,7 @@ add_executable(host_tests
     tests/test_status_reporting.cpp
     tests/test_power_snapshot.cpp
     tests/test_rs485_stub_logic.cpp
+    tests/test_rs485_runtime_reconnect.cpp
     tests/test_reboot_request.cpp
     tests/test_wifi_guard.cpp
     tests/test_wifi_recovery_policy.cpp

@@ -490,7 +490,8 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		    "\"last_err_ts_ms\":%lu,"
 		    "\"last_err_code\":%d,"
 		    "\"rs485_probe_last_attempt_ms\":%lu,"
-		    "\"rs485_probe_backoff_ms\":%lu",
+		    "\"rs485_probe_backoff_ms\":%lu,"
+		    "\"rs485_connection_epoch\":%lu",
 		    static_cast<unsigned long>(snapshot.pollOkCount),
 		    static_cast<unsigned long>(snapshot.pollErrCount),
 		    static_cast<unsigned long>(snapshot.rs485ErrorCount),
@@ -501,7 +502,8 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		    static_cast<unsigned long>(snapshot.lastErrTsMs),
 		    snapshot.lastErrCode,
 		    static_cast<unsigned long>(snapshot.rs485ProbeLastAttemptMs),
-		    static_cast<unsigned long>(snapshot.rs485ProbeBackoffMs))) {
+		    static_cast<unsigned long>(snapshot.rs485ProbeBackoffMs),
+		    static_cast<unsigned long>(snapshot.rs485ConnectionEpoch))) {
 		return false;
 	}
 #if defined(DEBUG_OVER_SERIAL)
@@ -635,9 +637,11 @@ buildStatusPollJsonCompact(const StatusPollSnapshot &snapshot, char *out, size_t
 		    outSize,
 		    used,
 		    ",\"rs485_probe_last_attempt_ms\":%lu,"
-		    "\"rs485_probe_backoff_ms\":%lu}",
+		    "\"rs485_probe_backoff_ms\":%lu,"
+		    "\"rs485_connection_epoch\":%lu}",
 		    static_cast<unsigned long>(snapshot.rs485ProbeLastAttemptMs),
-		    static_cast<unsigned long>(snapshot.rs485ProbeBackoffMs))) {
+		    static_cast<unsigned long>(snapshot.rs485ProbeBackoffMs),
+		    static_cast<unsigned long>(snapshot.rs485ConnectionEpoch))) {
 		return false;
 	}
 	return true;
