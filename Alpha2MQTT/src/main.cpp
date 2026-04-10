@@ -28,6 +28,7 @@ First, go and customise options at the top of Definitions.h!
 #include "../include/BucketScheduler.h"
 #include "../include/MqttEntities.h"
 #include "../include/PortalConfig.h"
+#include "../include/Rs485BaudSync.h"
 #include "../include/ConfigCodec.h"
 #include "../include/DebugLog.h"
 #include "../include/MemoryHealth.h"
@@ -236,6 +237,7 @@ const char kPreferenceBootMode[] = "Boot_Mode";
 const char kPreferenceInverterLabel[] = "Inverter_Label";
 const char kPreferenceBucketMap[] = "Bucket_Map";
 const char kPreferencePollInterval[] = "poll_interval_s";
+const char kPreferenceRs485Baud[] = "rs485_baud";
 const char kPreferenceBucketMapMigrated[] = "Bucket_Map_Migrated";
 // Persisted "last polling-config change" timestamp published as polling-config last_change.
 const char kPreferencePollingLastChange[] = "polling_last_change";
@@ -703,6 +705,7 @@ static bool essSnapshotValid = false;
 static const unsigned long kKnownBaudRates[] = { 9600, 115200, 19200, 57600, 38400, 14400, 4800 };
 static constexpr uint32_t kRs485ProbeAttemptDelayMs = 1000;
 static constexpr uint32_t kRs485ProbeMaxBackoffMs = 15000;
+static constexpr uint32_t kRs485BaudRetryMs = 5000;
 
 enum class Rs485ConnectState : uint8_t {
 	NotStarted = 0,
@@ -720,12 +723,18 @@ static unsigned long rs485LockedBaud = 0;
 static const char *rs485UartInfo = nullptr;
 static uint32_t rs485ProbeLastAttemptMs = 0;
 static Rs485RuntimeReconnectTracker rs485RuntimeReconnect{};
+static Rs485BaudTracker rs485BaudTracker{};
+static uint32_t rs485BaudNextActionAtMs = 0;
 
 static bool rs485TryReadIdentityOnce(void);
 static void rs485ProbeTick(void);
 static void resetRs485ProbeState(unsigned long now);
 static void noteRs485ConnectedEpoch(void);
 static void beginRs485RuntimeRediscovery(const char *reason);
+static void serviceRs485BaudReconcile(void);
+static bool readLiveRs485Baud(uint32_t &baudOut,
+                              modbusRequestAndResponseStatusValues *resultOut,
+                              const char **detailOut);
 #if RS485_STUB
 static void rs485ApplyStubConnectivityMode(Rs485StubMode mode);
 struct Rs485StubControlRequest;
@@ -963,6 +972,8 @@ static void handlePortalPollingSave(WiFiManager &wifiManager);
 static void handlePortalPollingClear(WiFiManager &wifiManager);
 static void handlePortalWifiPage(WiFiManager &wifiManager);
 static void handlePortalWifiSave(WiFiManager &wifiManager);
+static void handlePortalRs485Page(WiFiManager &wifiManager);
+static void handlePortalRs485Save(WiFiManager &wifiManager);
 static void handlePortalParamPage(WiFiManager &wifiManager);
 static void handlePortalParamSave(WiFiManager &wifiManager);
 static void handlePortalUpdatePage(WiFiManager &wifiManager);
@@ -1421,6 +1432,8 @@ static void
 noteRs485ConnectedEpoch(void)
 {
 	rs485RuntimeReconnectOnConnected(rs485RuntimeReconnect);
+	rs485BaudTrackerOnConnected(rs485BaudTracker);
+	rs485BaudNextActionAtMs = millis();
 }
 
 static void
@@ -1447,6 +1460,9 @@ beginRs485RuntimeRediscovery(const char *reason)
 	essSnapshotPrimedForSendDataLoop = 0;
 	strlcpy(dispatchLastSkipReason, "rs485_runtime_loss", sizeof(dispatchLastSkipReason));
 	rs485RuntimeReconnectOnRediscoveryStart(rs485RuntimeReconnect);
+	rs485BaudTracker.actualBaud = 0;
+	rs485BaudTracker.syncState = Rs485BaudSyncState::Unknown;
+	rs485BaudNextActionAtMs = 0;
 	resetRs485ProbeState(millis());
 	rs485ConnectState = Rs485ConnectState::ProbingBaud;
 	resendAllData = true;
@@ -2604,6 +2620,186 @@ noteRs485Error(modbusRequestAndResponseStatusValues result, const char *detail)
 	}
 	lastErrCode = static_cast<int>(code);
 	publishEvent(code, detail);
+}
+
+static void
+noteRs485BaudSyncFailure(const char *detail)
+{
+	lastErrCode = static_cast<int>(MqttEventCode::ModbusFrame);
+	publishEvent(MqttEventCode::ModbusFrame, detail != nullptr ? detail : "rs485_baud_sync_failed");
+}
+
+static bool
+persistUserConfiguredRs485Baud(uint32_t baud)
+{
+	if (!rs485BaudValueSupported(baud)) {
+		return false;
+	}
+	Preferences preferences;
+	preferences.begin(DEVICE_NAME, false);
+	const bool ok = preferences.putUInt(kPreferenceRs485Baud, baud) == sizeof(uint32_t);
+	preferences.end();
+	return ok;
+}
+
+static bool
+clearUserConfiguredRs485Baud(void)
+{
+	Preferences preferences;
+	preferences.begin(DEVICE_NAME, false);
+	bool ok = true;
+	if (preferences.isKey(kPreferenceRs485Baud)) {
+		ok = preferences.remove(kPreferenceRs485Baud);
+	}
+	preferences.end();
+	return ok;
+}
+
+static bool
+loadConfiguredRs485Baud(uint32_t &baudOut, bool &hasConfiguredOut)
+{
+	Preferences preferences;
+	preferences.begin(DEVICE_NAME, true);
+	const bool hasKey = preferences.isKey(kPreferenceRs485Baud);
+	const uint32_t storedBaud = preferences.getUInt(kPreferenceRs485Baud, 0);
+	preferences.end();
+	if (!rs485BaudStoredValueUsable(hasKey, storedBaud)) {
+		baudOut = 0;
+		hasConfiguredOut = false;
+		return false;
+	}
+	baudOut = storedBaud;
+	hasConfiguredOut = true;
+	return true;
+}
+
+static bool
+readLiveRs485Baud(uint32_t &baudOut, modbusRequestAndResponseStatusValues *resultOut, const char **detailOut)
+{
+	baudOut = 0;
+	if (resultOut != nullptr) {
+		*resultOut = modbusRequestAndResponseStatusValues::preProcessing;
+	}
+	if (detailOut != nullptr) {
+		*detailOut = "";
+	}
+	if (_registerHandler == nullptr) {
+		return false;
+	}
+	modbusRequestAndResponse *response = runtimeModbusReadScratch();
+	if (response == nullptr) {
+		return false;
+	}
+	*response = modbusRequestAndResponse{};
+	const modbusRequestAndResponseStatusValues result =
+		_registerHandler->readHandledRegister(REG_SYSTEM_CONFIG_RW_MODBUS_BAUD_RATE, response);
+	if (resultOut != nullptr) {
+		*resultOut = result;
+	}
+	if (detailOut != nullptr) {
+		*detailOut = response->statusMqttMessage;
+	}
+	if (result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
+		return false;
+	}
+	return rs485BaudRegisterToValue(response->unsignedShortValue, baudOut);
+}
+
+static bool
+writeConfiguredRs485Baud(uint32_t targetBaud, modbusRequestAndResponseStatusValues *resultOut, const char **detailOut)
+{
+	if (resultOut != nullptr) {
+		*resultOut = modbusRequestAndResponseStatusValues::preProcessing;
+	}
+	if (detailOut != nullptr) {
+		*detailOut = "";
+	}
+	if (_registerHandler == nullptr) {
+		return false;
+	}
+	uint16_t regValue = 0;
+	if (!rs485BaudValueToRegister(targetBaud, regValue)) {
+		return false;
+	}
+	modbusRequestAndResponse *response = runtimeModbusReadScratch();
+	if (response == nullptr) {
+		return false;
+	}
+	*response = modbusRequestAndResponse{};
+	response->registerCount = 1;
+	const modbusRequestAndResponseStatusValues result =
+		_registerHandler->writeRawDataRegister(REG_SYSTEM_CONFIG_RW_MODBUS_BAUD_RATE, regValue, response);
+	if (resultOut != nullptr) {
+		*resultOut = result;
+	}
+	if (detailOut != nullptr) {
+		*detailOut = response->statusMqttMessage;
+	}
+	return result == modbusRequestAndResponseStatusValues::writeDataRegisterSuccess;
+}
+
+static void
+serviceRs485BaudReconcile(void)
+{
+	if (_registerHandler == nullptr || rs485ConnectState != Rs485ConnectState::Connected || !inverterReady ||
+	    !opData.essRs485Connected) {
+		return;
+	}
+	const bool shouldObserveBaud =
+		rs485BaudTrackerNeedsObservation(rs485BaudTracker, rs485RuntimeReconnect.connectionEpoch);
+	if (!shouldObserveBaud) {
+		return;
+	}
+	const uint32_t now = millis();
+	if (static_cast<int32_t>(now - rs485BaudNextActionAtMs) < 0) {
+		return;
+	}
+
+	uint32_t liveBaud = 0;
+	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
+	const char *detail = "";
+	if (!readLiveRs485Baud(liveBaud, &result, &detail)) {
+		if (result != modbusRequestAndResponseStatusValues::preProcessing) {
+			recordRs485Error(result);
+			noteRs485Error(result, detail);
+		}
+		rs485BaudNextActionAtMs = now + kRs485BaudRetryMs;
+		return;
+	}
+
+	rs485BaudTrackerMarkObserved(rs485BaudTracker, liveBaud);
+	rs485BaudNextActionAtMs = now + kRs485BaudRetryMs;
+
+	if (!rs485BaudTracker.hasConfiguredBaud) {
+		return;
+	}
+
+	if (rs485BaudTracker.pendingConfirmation) {
+		const bool synced = liveBaud == rs485BaudTracker.configuredBaud;
+		rs485BaudTrackerMarkConfirmationResult(rs485BaudTracker, rs485RuntimeReconnect.connectionEpoch, synced);
+		if (!synced) {
+			noteRs485BaudSyncFailure("rs485_baud_reconcile_failed");
+		}
+		return;
+	}
+
+	if (!rs485BaudTrackerNeedsWriteAttempt(rs485BaudTracker, rs485RuntimeReconnect.connectionEpoch)) {
+		return;
+	}
+
+	if (!writeConfiguredRs485Baud(rs485BaudTracker.configuredBaud, &result, &detail)) {
+		if (result != modbusRequestAndResponseStatusValues::preProcessing) {
+			recordRs485Error(result);
+			noteRs485Error(result, detail);
+		}
+		rs485BaudTracker.syncState = Rs485BaudSyncState::Failed;
+		rs485BaudTracker.lastWriteAttemptEpoch = rs485RuntimeReconnect.connectionEpoch;
+		rs485BaudNextActionAtMs = now + kRs485BaudRetryMs;
+		return;
+	}
+
+	rs485BaudTrackerMarkWriteAttempt(rs485BaudTracker, rs485RuntimeReconnect.connectionEpoch);
+	beginRs485RuntimeRediscovery("baud_reconcile");
 }
 
 static void
@@ -4474,6 +4670,7 @@ handlePortalMenuPage(WiFiManager& wifiManager)
 		}
 		if (!writePortalMenuButtonP(writer, PSTR("/0wifi"), PSTR("WiFi Setup"), PSTR("get")) ||
 		    !writePortalMenuButtonP(writer, PSTR("/config/mqtt"), PSTR("MQTT Setup"), PSTR("get")) ||
+		    !writePortalMenuButtonP(writer, PSTR("/config/rs485"), PSTR("RS485"), PSTR("get")) ||
 		    !writePortalMenuButtonP(writer, PSTR("/config/polling"), PSTR("Polling"), PSTR("get")) ||
 		    !writePortalMenuButtonP(
 			    writer, PSTR("/config/polling/export"), PSTR("Download Polling Profile"), PSTR("get")) ||
@@ -4555,6 +4752,7 @@ handlePortalWifiPage(WiFiManager& wifiManager)
 		}
 			if (!writePortalMenuButtonP(writer, PSTR("/"), PSTR("Menu"), PSTR("get")) ||
 			    !writePortalMenuButtonP(writer, PSTR("/config/mqtt"), PSTR("MQTT Setup"), PSTR("get")) ||
+			    !writePortalMenuButtonP(writer, PSTR("/config/rs485"), PSTR("RS485"), PSTR("get")) ||
 			    !writePortalMenuButtonP(writer, PSTR("/config/polling"), PSTR("Polling"), PSTR("get")) ||
 			    !writePortalMenuButtonP(
 				    writer, PSTR("/config/reboot-normal"), PSTR("Reboot Normal"), PSTR("post")) ||
@@ -4655,6 +4853,147 @@ handlePortalWifiSave(WiFiManager& wifiManager)
 }
 
 static void
+handlePortalRs485Page(WiFiManager& wifiManager)
+{
+	if (!wifiManager.server) {
+		return;
+	}
+
+	const bool saved = wifiManager.server->hasArg("saved");
+	const bool err = wifiManager.server->hasArg("err");
+	const uint32_t selectedBaud =
+		rs485BaudTracker.hasConfiguredBaud ? rs485BaudTracker.configuredBaud : 0UL;
+	const char *configuredLabel = nullptr;
+	if (!portalRs485BaudLabel(selectedBaud, &configuredLabel) || configuredLabel == nullptr) {
+		configuredLabel = "0";
+	}
+	const char *syncLabel = rs485BaudSyncStateLabel(rs485BaudTracker.syncState);
+	char syncEscaped[24] = "";
+	htmlEscapeInto(syncLabel, syncEscaped, sizeof(syncEscaped));
+	refreshPortalUpdateCsrfToken();
+
+	auto emitBaudOption = [&](PortalResponseWriter &writer, uint32_t baud) -> bool {
+		const char *label = nullptr;
+		if (!portalRs485BaudLabel(baud, &label) || label == nullptr) {
+			return false;
+		}
+		const bool checked = selectedBaud == baud;
+		char line[128];
+		const int written = snprintf(line,
+		                             sizeof(line),
+		                             "<p><label><input type=\"radio\" name=\"baud\" value=\"%lu\"%s> %s</label></p>",
+		                             static_cast<unsigned long>(baud),
+		                             checked ? " checked" : "",
+		                             label);
+		return written > 0 && static_cast<size_t>(written) < sizeof(line) && writer.write(line);
+	};
+
+	auto emitPage = [&](PortalResponseWriter &writer) -> bool {
+		const PortalUiMode uiMode =
+			(currentBootMode == BootMode::WifiConfig) ? PortalUiMode::Wifi : PortalUiMode::Ap;
+		if (!writePortalUiPageStartP(writer, PSTR("Alpha2MQTT RS485"), PSTR("RS485"), uiMode)) {
+			return false;
+		}
+		if (saved && !writer.writeP(PSTR("<p><strong>Saved.</strong> Auto follows live immediately; explicit targets reconcile on the next live RS485 epoch.</p>"))) {
+			return false;
+		}
+		if (err && !writer.writeP(PSTR("<p><strong>Invalid RS485 baud.</strong> Choose Auto, 9600, 115200, or 19200.</p>"))) {
+			return false;
+		}
+		if (!writePortalMenuButtonP(writer, PSTR("/"), PSTR("Menu"), PSTR("get")) ||
+		    !writePortalMenuButtonP(writer, PSTR("/config/mqtt"), PSTR("MQTT Setup"), PSTR("get")) ||
+		    !writePortalMenuButtonP(writer, PSTR("/config/polling"), PSTR("Polling"), PSTR("get")) ||
+		    !writePortalMenuButtonP(
+			    writer, PSTR("/config/reboot-normal"), PSTR("Reboot Normal"), PSTR("post")) ||
+		    !writer.writeP(PSTR("<p>Auto follows the live inverter baud. Saved numeric targets reconcile once per live RS485 connection epoch.</p>"))) {
+			return false;
+		}
+		char statusLine[224];
+		const int statusWritten = snprintf(
+			statusLine,
+			sizeof(statusLine),
+			"<p>Configured: %s<br>Live: %lu<br>Sync: %s</p>",
+			configuredLabel,
+			static_cast<unsigned long>(rs485BaudTracker.actualBaud),
+			syncEscaped);
+		if (statusWritten <= 0 || static_cast<size_t>(statusWritten) >= sizeof(statusLine) ||
+		    !writer.write(statusLine) ||
+		    !writer.writeP(PSTR("<form method=\"POST\" action=\"/config/rs485/save\">"
+		                        "<input type=\"hidden\" name=\"csrf\" value=\"")) ||
+		    !writer.write(portalUpdateCsrfToken) ||
+		    !writer.writeP(PSTR("\">"))) {
+			return false;
+		}
+		if (!emitBaudOption(writer, 0UL) || !emitBaudOption(writer, 9600UL) || !emitBaudOption(writer, 115200UL) ||
+		    !emitBaudOption(writer, 19200UL) ||
+		    !writer.writeP(PSTR("<p><button type=\"submit\">Save</button></p></form></body></html>"))) {
+			return false;
+		}
+		return true;
+	};
+	(void)sendPortalHtmlResponse(wifiManager.server.get(), emitPage, "rs485 config unavailable");
+}
+
+static void
+handlePortalRs485Save(WiFiManager& wifiManager)
+{
+	if (!wifiManager.server) {
+		return;
+	}
+	if (!portalUpdateRequestHasValidToken(&wifiManager)) {
+		wifiManager.server->send(403, "text/plain", "invalid csrf");
+		return;
+	}
+
+	const String baudArg = wifiManager.server->arg("baud");
+	char *endPtr = nullptr;
+	const unsigned long parsedBaud = strtoul(baudArg.c_str(), &endPtr, 10);
+	if (baudArg.length() == 0 || endPtr == nullptr || *endPtr != '\0' ||
+	    !(parsedBaud == 0 || rs485BaudValueSupported(parsedBaud))) {
+		wifiManager.server->sendHeader("Location", "/config/rs485?err=1");
+		wifiManager.server->send(302, "text/plain", "");
+		return;
+	}
+
+	const bool persisted = (parsedBaud == 0) ? clearUserConfiguredRs485Baud()
+	                                        : persistUserConfiguredRs485Baud(parsedBaud);
+	if (!persisted) {
+		wifiManager.server->sendHeader("Location", "/config/rs485?err=1");
+		wifiManager.server->send(302, "text/plain", "");
+		return;
+	}
+
+	if (parsedBaud == 0) {
+		rs485BaudTracker.configuredBaud = 0;
+		rs485BaudTracker.hasConfiguredBaud = false;
+		rs485BaudTracker.pendingConfirmation = false;
+		rs485BaudTracker.lastWriteAttemptEpoch = 0;
+		rs485BaudTracker.syncState =
+			(rs485BaudTracker.actualBaud != 0) ? Rs485BaudSyncState::Synced : Rs485BaudSyncState::Unknown;
+		rs485BaudNextActionAtMs = millis();
+		wifiManager.server->sendHeader("Location", "/config/rs485?saved=1");
+		wifiManager.server->send(302, "text/plain", "");
+		return;
+	}
+
+	rs485BaudTracker.configuredBaud = parsedBaud;
+	rs485BaudTracker.hasConfiguredBaud = true;
+	rs485BaudTracker.pendingConfirmation = false;
+	rs485BaudTracker.lastWriteAttemptEpoch = 0;
+	if (rs485BaudTracker.actualBaud == parsedBaud) {
+		rs485BaudTracker.syncState = Rs485BaudSyncState::Synced;
+	} else if (rs485BaudTracker.actualBaud != 0) {
+		rs485BaudTracker.syncState = Rs485BaudSyncState::Mismatch;
+	} else {
+		rs485BaudTracker.syncState = Rs485BaudSyncState::Unknown;
+	}
+	rs485BaudNextActionAtMs = millis();
+
+	wifiManager.server->sendHeader("Location", "/config/rs485?saved=1");
+	wifiManager.server->send(302, "text/plain", "");
+}
+
+static void
 handlePortalParamPage(WiFiManager& wifiManager)
 {
 	if (!wifiManager.server) {
@@ -4685,6 +5024,7 @@ handlePortalParamPage(WiFiManager& wifiManager)
 			return false;
 		}
 		if (!writePortalMenuButtonP(writer, PSTR("/"), PSTR("Menu"), PSTR("get")) ||
+		    !writePortalMenuButtonP(writer, PSTR("/config/rs485"), PSTR("RS485"), PSTR("get")) ||
 		    !writePortalMenuButtonP(writer, PSTR("/config/polling"), PSTR("Polling"), PSTR("get")) ||
 		    !writePortalMenuButtonP(
 			    writer, PSTR("/config/reboot-normal"), PSTR("Reboot Normal"), PSTR("post")) ||
@@ -5397,6 +5737,10 @@ bindPortalRoutes(WiFiManager &wifiManager)
 #endif
 		handlePortalParamPage(wifiManager);
 	});
+	wifiManager.server->on("/config/rs485", HTTP_GET, [&]() {
+		notePortalActivity();
+		handlePortalRs485Page(wifiManager);
+	});
 	wifiManager.server->on("/param", HTTP_GET, [&]() {
 		notePortalActivity();
 		handlePortalParamPage(wifiManager);
@@ -5404,6 +5748,10 @@ bindPortalRoutes(WiFiManager &wifiManager)
 	wifiManager.server->on("/config/mqtt/save", HTTP_POST, [&]() {
 		notePortalActivity();
 		handlePortalParamSave(wifiManager);
+	});
+	wifiManager.server->on("/config/rs485/save", HTTP_POST, [&]() {
+		notePortalActivity();
+		handlePortalRs485Save(wifiManager);
 	});
 	wifiManager.server->on("/paramsave", HTTP_POST, [&]() {
 		notePortalActivity();
@@ -6281,6 +6629,7 @@ handlePortalPollingPage(WiFiManager &wifiManager)
 		if (!writePortalUiPageStartP(
 			    writer, PSTR("Polling Schedule"), PSTR("Polling schedule"), uiMode, kPollingPageExtraHead) ||
 		    !writer.writeP(PSTR("<p><a href=\"/\">Menu</a> | <a href=\"/config/mqtt\">MQTT Setup</a> | "
+		                        "<a href=\"/config/rs485\">RS485</a> | "
 		                        "<a href=\"/config/polling/import\">Restore Profile</a></p>")) ||
 		    !writePortalMenuButtonP(
 			    writer, PSTR("/config/polling/export"), PSTR("Download Polling Profile"), PSTR("get")) ||
@@ -6979,6 +7328,8 @@ void setup()
 	char mqttServer[kPrefMqttServerMaxLen] = "";
 	char mqttUser[kPrefMqttUsernameMaxLen] = "";
 	char mqttPass[kPrefMqttPasswordMaxLen] = "";
+	uint32_t storedRs485Baud = 0;
+	bool hasStoredRs485Baud = false;
 
 	preferences.begin(DEVICE_NAME, true); // RO
 	preferences.getString(kPreferenceBootIntent, storedIntent, sizeof(storedIntent));
@@ -6997,6 +7348,7 @@ void setup()
 	appConfig.extAntenna = preferences.getBool("Ext_Antenna", false);
 #endif // MP_XIAO_ESP32C6
 	preferences.end();
+	loadConfiguredRs485Baud(storedRs485Baud, hasStoredRs485Baud);
 	persistDefaultsIfMissing();
 
 	currentBootIntent = bootIntentFromString(storedIntent);
@@ -7021,6 +7373,9 @@ void setup()
 	appConfig.mqttUser = mqttUser;
 	appConfig.mqttPass = mqttPass;
 	appConfig.inverterLabel = storedInverterLabel;
+	rs485BaudTracker.configuredBaud = storedRs485Baud;
+	rs485BaudTracker.hasConfiguredBaud = hasStoredRs485Baud;
+	rs485BaudTracker.syncState = hasStoredRs485Baud ? Rs485BaudSyncState::Unknown : Rs485BaudSyncState::Unknown;
 	clearRuntimeInverterIdentity();
 	bootPlan = planForBootMode(currentBootMode);
 	BootMode startupMode = currentBootMode;
@@ -7918,6 +8273,7 @@ loop()
 	// and the scheduler remain responsive even when RS485 is disconnected.
 	if (bootPlan.inverter) {
 		rs485ProbeTick();
+		serviceRs485BaudReconcile();
 	}
 
 	updateStatusLed();
@@ -11170,6 +11526,9 @@ populateStatusPollSnapshot(StatusPollSnapshot &poll, bool includeEssSnapshot)
 	poll.rs485ProbeLastAttemptMs = rs485ProbeLastAttemptMs;
 	poll.rs485ProbeBackoffMs = (rs485ConnectState == Rs485ConnectState::Connected) ? 0 : rs485CycleBackoffMs;
 	poll.rs485ConnectionEpoch = rs485RuntimeReconnect.connectionEpoch;
+	poll.rs485BaudConfigured = rs485BaudTracker.hasConfiguredBaud ? rs485BaudTracker.configuredBaud : 0;
+	poll.rs485BaudActual = rs485BaudTracker.actualBaud;
+	poll.rs485BaudSync = rs485BaudSyncStateLabel(rs485BaudTracker.syncState);
 	poll.rs485Backend =
 #if RS485_STUB
 		"stub";
@@ -11368,7 +11727,10 @@ publishStubControlStatusNow(bool includeEssSnapshot)
 		"\"rs485_other_error_count\":%lu,"
 		"\"rs485_probe_last_attempt_ms\":%lu,"
 		"\"rs485_probe_backoff_ms\":%lu,"
-		"\"rs485_connection_epoch\":%lu"
+		"\"rs485_connection_epoch\":%lu,"
+		"\"rs485_baud_configured\":%lu,"
+		"\"rs485_baud_actual\":%lu,"
+		"\"rs485_baud_sync\":\"%s\""
 		"}",
 		stubMode,
 		static_cast<unsigned long>(_modBus ? _modBus->stubFailRemaining() : 0),
@@ -11392,7 +11754,10 @@ publishStubControlStatusNow(bool includeEssSnapshot)
 		static_cast<unsigned long>(rs485OtherErrors),
 		static_cast<unsigned long>(rs485ProbeLastAttemptMs),
 		static_cast<unsigned long>((rs485ConnectState == Rs485ConnectState::Connected) ? 0 : rs485CycleBackoffMs),
-		static_cast<unsigned long>(rs485RuntimeReconnect.connectionEpoch));
+		static_cast<unsigned long>(rs485RuntimeReconnect.connectionEpoch),
+		static_cast<unsigned long>(rs485BaudTracker.hasConfiguredBaud ? rs485BaudTracker.configuredBaud : 0),
+		static_cast<unsigned long>(rs485BaudTracker.actualBaud),
+		rs485BaudSyncStateLabel(rs485BaudTracker.syncState));
 	if (pollWritten <= 0 || static_cast<size_t>(pollWritten) >= kStatusJsonScratchSize) {
 		return false;
 	}
@@ -14445,6 +14810,8 @@ struct Rs485StubControlRequest {
 	int32_t virtualGridPowerW = 0;
 	int32_t virtualPvCtPowerW = 0;
 	uint16_t virtualInverterMode = INVERTER_OPERATION_MODE_UPS_MODE;
+	bool hasVirtualBaud = false;
+	uint32_t virtualBaud = 9600;
 
 	bool hasVirtualDispatch = false;
 	uint16_t virtualDispatchStart = 0;
@@ -14580,6 +14947,11 @@ parseRs485StubControlPayload(const char *payload, Rs485StubControlRequest &reque
 		request.virtualInverterMode = static_cast<uint16_t>(value);
 		request.hasVirtualEss = true;
 	}
+	if (parseStubControlInt(payload, "modbus_baud", value) && value >= 0 &&
+	    (rs485BaudValueSupported(static_cast<uint32_t>(value)) || static_cast<uint32_t>(value) == 256000UL)) {
+		request.virtualBaud = static_cast<uint32_t>(value);
+		request.hasVirtualBaud = true;
+	}
 
 	if (parseStubControlInt(payload, "dispatch_start", value) && value >= 0) {
 		request.virtualDispatchStart = static_cast<uint16_t>(value);
@@ -14626,6 +14998,15 @@ applyParsedRs485StubControl(const Rs485StubControlRequest &request)
 			request.virtualGridPowerW,
 			request.virtualPvCtPowerW,
 			request.virtualInverterMode);
+	}
+	if (request.hasVirtualBaud) {
+		uint16_t regValue = 0;
+		const bool hasRegValue = (request.virtualBaud == 256000UL)
+			                         ? (regValue = MODBUS_BAUD_RATE_256000, true)
+			                         : rs485BaudValueToRegister(request.virtualBaud, regValue);
+		if (hasRegValue) {
+			_modBus->applyVirtualModbusBaud(regValue);
+		}
 	}
 	if (request.hasVirtualDispatch) {
 		_modBus->applyVirtualDispatchState(
