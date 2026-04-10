@@ -1833,9 +1833,9 @@ rs485ApplyStubConnectivityMode(Rs485StubMode mode)
 
 	// Online-like stub modes are intended to exercise snapshot and publish behavior directly.
 	// Do not make them depend on the separate baud-probe state machine or issue Modbus reads
-	// from the MQTT callback path. Also avoid forcing the full resend/bootstrap path here:
-	// the immediate status refresh is enough for control acknowledgement, and the first normal
-	// scheduler pass should avoid stacking a second full status burst onto the same transition.
+	// from the MQTT callback path. Instead, mark the runtime for the normal resend path so the
+	// next loop turn can publish one fresh full status/snapshot pass without waiting for the
+	// later scheduled cadence that E2E setup previously had to sit through.
 	if (!inverterSerialKnown()) {
 		primeStubRuntimeInverterIdentity("STUBSN000000000");
 	}
@@ -1844,7 +1844,8 @@ rs485ApplyStubConnectivityMode(Rs485StubMode mode)
 	rs485LockedBaud = DEFAULT_BAUD_RATE;
 	essSnapshotValid = false;
 	essSnapshotLastOk = false;
-	rs485StubSkipNextScheduledStatusPublish = true;
+	rs485StubSkipNextScheduledStatusPublish = false;
+	resendAllData = true;
 }
 #endif
 
@@ -14476,16 +14477,17 @@ applyParsedRs485StubControl(const Rs485StubControlRequest &request)
 		rs485StubStatusAckPending = false;
 		publishStatusNow();
 	} else {
-		// Online-like stub transitions still get a lightweight immediate control acknowledgement.
-		// Keep the scheduler cooldown and skip the next full 10 s status pass so the immediate
-		// poll/stub/core acknowledgement does not stack with a second publish burst on the same
-		// transition.
+		// Online-like stub transitions still get a lightweight immediate control acknowledgement,
+		// but E2E and config/set callers should not have to wait for the later scheduled status
+		// cadence. Let the next loop turn run the existing resend/immediate-status path instead
+		// of arming a cooldown that suppresses the fresh full snapshot publish.
 		rs485StubStatusAckPending = true;
-		rs485StubSkipNextScheduledStatusPublish = true;
-		rs485StubControlSchedulerCooldownUntilMs = millis() + 5000U;
+		rs485StubSkipNextScheduledStatusPublish = false;
+		rs485StubControlSchedulerCooldownUntilMs = 0;
 		rs485StubLastOnlineControlMs = millis();
+		resendAllData = true;
 #ifdef DEBUG_OVER_SERIAL
-		Serial.println(F("RS485 stub control online cooldown armed"));
+		Serial.println(F("RS485 stub control online immediate resend armed"));
 #endif
 	}
 }

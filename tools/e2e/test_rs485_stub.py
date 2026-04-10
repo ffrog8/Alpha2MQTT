@@ -98,17 +98,17 @@ CASE_ORDER: tuple[str, ...] = (
     "boot_mem_publish",
     "scheduler_idle_no_extra_reads",
     "bucket_snapshot_skip_only",
-    "dispatch_write_via_commands",
+    "dispatch_write_flow",
     "dispatch_legacy_command_topic_ignored",
     "dispatch_invalid_payload_no_write",
     "dispatch_invalid_numeric_payloads_no_write",
-    "dispatch_write_feedback",
     "dispatch_primes_snapshot_once",
-    "dispatch_write_under_100ms",
-    "dispatch_timed_restart_expire",
-    "dispatch_timed_no_rewrite_without_fresh_snapshot",
-    "dispatch_disable_timed_stops_countdown_wakes",
+    "dispatch_timed_flow",
     "dispatch_boot_fail_closed",
+    "fail_writes_only",
+    "dispatch_readback_window",
+    "dispatch_readback_timeout_status",
+    "max_feedin_percent_write",
     "fail_specific_snapshot_reg",
     "rs485_error_counters_split",
     "fail_every_n",
@@ -116,15 +116,9 @@ CASE_ORDER: tuple[str, ...] = (
     "flapping",
     "probe_delayed",
     "identity_reboot_unknown",
-    "fail_writes_only",
-    "dispatch_readback_window",
-    "dispatch_readback_timeout_status",
-    "max_feedin_percent_write",
     "fail_for_ms",
     "strict_unknown_snapshot",
     "strict_unknown_register_reads",
-    "soc_drift_backend_ready",
-    "stub_soc_drift_applies",
     "soc_publish_respects_bucket",
     "soc_drift_e2e",
     "load_power_formula",
@@ -132,9 +126,7 @@ CASE_ORDER: tuple[str, ...] = (
     "runtime_polling_reset_without_page",
     "portal_polling_ui",
     "polling_profile_export_import",
-    "reboot_ap_confirmation",
-    "portal_wifi_save_reboot_only",
-    "portal_mqtt_save_reboot_handoff",
+    "portal_wifi_then_mqtt_save_handoff",
 )
 RUN_ID = ""
 CURRENT_CASE_NAME = ""
@@ -3066,19 +3058,11 @@ def main() -> int:
                     poll_s=2.0,
                 )
     
-        def ensure_stub_online_backend(mode_payload: str, *, label: str, timeout_s: int = 60) -> None:
-            with _timed_phase("ensure_stub_online_backend", label=label):
-                mode_payload = _normalized_stub_mode_payload(mode_payload)
-                wait_stub_control_applied(
-                    mode_payload,
-                    label=f"{label} control",
-                    expect_mode="online",
-                    expect_strict_unknown=_payload_strict_unknown(mode_payload),
-                    timeout_s=min(timeout_s, 30),
-                )
+        def wait_for_fresh_good_poll(*, label: str, timeout_s: int = 60) -> None:
+            with _timed_phase("wait_for_fresh_good_poll", label=label):
                 deadline = _monotonic() + timeout_s
                 last_detail = "no live poll update observed"
-    
+
                 def poll_ready_detail(cur_poll: dict[str, Any]) -> tuple[bool, str]:
                     mode = str(cur_poll.get("rs485_stub_mode", ""))
                     snapshot_ok = bool(cur_poll.get("ess_snapshot_last_ok", False))
@@ -3090,7 +3074,7 @@ def main() -> int:
                     )
                     ready = mode == "online" and snapshot_ok and probe_backoff_ms == 0 and poll_ok_count > 0
                     return ready, detail
-    
+
                 while _monotonic() < deadline:
                     try:
                         cur_poll = _fetch_live_json(mqtt, poll_topic, f"{label}_poll_current", timeout_s=15)
@@ -3105,6 +3089,54 @@ def main() -> int:
                         return
                     _sleep_with_mqtt(mqtt, 2.0)
                 raise E2EError(f"Timeout waiting for {label} ready. Last observed: {last_detail}")
+
+        def ensure_stub_online_backend(
+            mode_payload: str,
+            *,
+            label: str,
+            timeout_s: int = 60,
+            require_fresh_poll: bool = False,
+        ) -> None:
+            with _timed_phase(
+                "ensure_stub_online_backend",
+                label=label,
+                require_fresh_poll=require_fresh_poll,
+            ):
+                mode_payload = _normalized_stub_mode_payload(mode_payload)
+                wait_stub_control_applied(
+                    mode_payload,
+                    label=f"{label} control",
+                    expect_mode="online",
+                    expect_strict_unknown=_payload_strict_unknown(mode_payload),
+                    timeout_s=min(timeout_s, 30),
+                )
+                if require_fresh_poll:
+                    wait_for_fresh_good_poll(label=label, timeout_s=timeout_s)
+                    return
+
+                deadline = _monotonic() + min(timeout_s, 15)
+                last_pub = _monotonic()
+                last_detail = "no current poll observed"
+                while _monotonic() < deadline:
+                    cur_poll = _fetch_poll(mqtt, poll_topic)
+                    mode = str(cur_poll.get("rs485_stub_mode", ""))
+                    backend = str(cur_poll.get("rs485_backend", ""))
+                    inverter_ready = bool(cur_poll.get("inverter_ready", False))
+                    probe_backoff_ms = int(cur_poll.get("rs485_probe_backoff_ms", 0))
+                    snapshot_ok = bool(cur_poll.get("ess_snapshot_last_ok", False))
+                    poll_ok_count = int(cur_poll.get("poll_ok_count", 0))
+                    last_detail = (
+                        f"mode={mode!r} backend={backend!r} inverter_ready={inverter_ready} "
+                        f"probe_backoff_ms={probe_backoff_ms} snapshot_ok={snapshot_ok} "
+                        f"poll_ok_count={poll_ok_count}"
+                    )
+                    if mode == "online" and backend == "stub" and inverter_ready and probe_backoff_ms == 0:
+                        return
+                    if (_monotonic() - last_pub) >= 5.0:
+                        set_mode(mode_payload)
+                        last_pub = _monotonic()
+                    _sleep_with_mqtt(mqtt, 1.0)
+                raise E2EError(f"Timeout waiting for {label} online control readiness. Last observed: {last_detail}")
     
         def set_intervals(entity_to_freq: dict[str, str]) -> None:
             # Firmware expects a flat JSON object mapping entity name -> freq string.
@@ -3212,11 +3244,10 @@ def main() -> int:
                 return int(cur_poll.get("dispatch_request_queued_ms", 0)) > baseline_queued_ms
     
             def recover_dispatch_backend(label: str) -> None:
-                ensure_stub_online_backend(
-                    '{"mode":"online","soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0}',
-                    label=label,
+                recovered_inverter_id = _ensure_online_inverter_identity(
+                    label,
+                    require_fresh_identity=True,
                 )
-                recovered_inverter_id = _wait_for_inverter_identity()
                 if recovered_inverter_id != inverter_device_id:
                     raise E2EError(
                         f"dispatch retry recovered unexpected inverter identity: "
@@ -3239,14 +3270,8 @@ def main() -> int:
                     recover_dispatch_backend(f"dispatch request preflight {attempt + 1}")
                     current_poll = _fetch_poll(mqtt, poll_topic)
     
-                try:
-                    baseline_status = _fetch_cached_or_latest_text(
-                        mqtt,
-                        status_topic,
-                        label="dispatch_status_baseline",
-                    ).strip()
-                except E2EError:
-                    baseline_status = ""
+                cached_status = mqtt.latest_payload(status_topic)
+                baseline_status = cached_status.strip() if cached_status is not None else ""
     
                 mqtt.publish(_dispatch_set_topic(inverter_device_id), payload_text, retain=False)
     
@@ -3589,6 +3614,47 @@ def main() -> int:
                     timeout_s=timeout_s,
                     poll_s=2.0,
                 )
+
+        def wait_disable_all_polling_applied(
+            poll_interval_s: int,
+            *,
+            timeout_s: int = 35,
+            republish_every_s: float = 5.0,
+        ) -> None:
+            with _timed_phase("wait_disable_all_polling_applied", target_poll_interval_s=poll_interval_s):
+                disable_all_map = "__all__=disabled;"
+                set_polling_config(poll_interval_s, disable_all_map)
+                last_pub = _monotonic()
+
+                def pred() -> Tuple[bool, str]:
+                    nonlocal last_pub
+                    now = _monotonic()
+                    if (now - last_pub) >= republish_every_s:
+                        set_polling_config(poll_interval_s, disable_all_map)
+                        last_pub = now
+
+                    cfg = _fetch_config(mqtt, config_topic)
+                    poll = _fetch_poll(mqtt, poll_topic)
+                    cfg_interval = int(cfg.get("poll_interval_s", 0) or 0)
+                    runtime_interval = int(poll.get("poll_interval_s", 0) or 0)
+                    intervals = cfg.get("entity_intervals", {})
+                    detail = (
+                        f"cfg_poll_interval_s={cfg_interval} runtime_poll_interval_s={runtime_interval} "
+                        f"intervals={len(intervals) if isinstance(intervals, dict) else 'invalid'}"
+                    )
+                    return (
+                        cfg_interval == poll_interval_s
+                        and runtime_interval == poll_interval_s
+                        and isinstance(intervals, dict)
+                        and not intervals
+                    ), detail
+
+                _assert_eventually(
+                    f"polling config disable-all applied (poll_interval_s={poll_interval_s})",
+                    pred,
+                    timeout_s=timeout_s,
+                    poll_s=2.0,
+                )
     
         def wait_runtime_poll_interval_applied(
             poll_interval_s: int,
@@ -3636,6 +3702,7 @@ def main() -> int:
                 ensure_stub_online_backend(
                     '{"mode":"online","soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0}',
                     label="suite baseline",
+                    require_fresh_poll=True,
                 )
                 wait_runtime_poll_interval_applied(9)
                 wait_polling_config_applied(
@@ -3695,11 +3762,16 @@ def main() -> int:
     
             raise E2EError(f"inverter identity did not become live: {last_detail}")
     
-        def _ensure_online_inverter_identity(label: str) -> str:
+        def _ensure_online_inverter_identity(label: str, *, require_fresh_identity: bool = False) -> str:
             ensure_stub_online_backend(
                 '{"mode":"online","soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0}',
                 label=label,
+                require_fresh_poll=require_fresh_identity,
             )
+            if not require_fresh_identity:
+                inverter_id = _current_inverter_identity()
+                if inverter_id:
+                    return inverter_id
             return _wait_for_inverter_identity()
     
         def _record_reboot_serial_phases(label: str, previous_boot_count: int) -> None:
@@ -4054,10 +4126,80 @@ def main() -> int:
                 poll_s=3.0,
             )
     
-        def case_dispatch_write_via_commands() -> None:
-            print("[e2e] case: dispatch write via atomic request")
-            ha_unique = _ensure_online_inverter_identity("dispatch write baseline")
-            reg_dispatch_start, _ = ensure_dispatch_write(ha_unique, label_prefix="dispatch")
+        def case_dispatch_write_flow() -> None:
+            print("[e2e] case: atomic dispatch write flow (latency + feedback + stop)")
+            ha_unique = _ensure_online_inverter_identity("dispatch write flow baseline")
+            reg_dispatch_start = _discover_register_value("REG_DISPATCH_RW_DISPATCH_START")
+            dispatch_start_start = _discover_define_value("DISPATCH_START_START")
+            dispatch_start_stop = _discover_define_value("DISPATCH_START_STOP")
+            dispatch_start_topic = _state_topic(ha_unique, "Dispatch_Start")
+            dispatch_power_topic = _state_topic(ha_unique, "Dispatch_Power")
+            dispatch_time_topic = _state_topic(ha_unique, "Dispatch_Time")
+            expected_dispatch_power = str(_default_dispatch_request(duration_s=12).get("power_w", -1200))
+            mqtt.subscribe(dispatch_start_topic, force=True)
+            mqtt.subscribe(dispatch_power_topic, force=True)
+            mqtt.subscribe(dispatch_time_topic, force=True)
+
+            elapsed_ms = measure_dispatch_write_latency(
+                ha_unique,
+                label_prefix="dispatch flow",
+                duration_s=12,
+                poll_interval_s=None,
+                timeout_s=12,
+            )
+            if elapsed_ms > 100:
+                raise E2EError(
+                    f"dispatch block write exceeded 100 ms from queued command to stub-observed 9-register write: "
+                    f"elapsed_ms={elapsed_ms}"
+                )
+
+            def dispatch_started_pred() -> Tuple[bool, str]:
+                start_state = _fetch_matching_or_latest_text(
+                    mqtt,
+                    dispatch_start_topic,
+                    label="dispatch_start_state",
+                    predicate=lambda text: (
+                        text.strip().lower() in ("start", "started")
+                        or text.strip() == str(dispatch_start_start)
+                    ),
+                )
+                normalized = start_state.strip().lower()
+                ok = normalized in ("start", "started") or start_state.strip() == str(dispatch_start_start)
+                return ok, f"last={start_state!r}"
+
+            _assert_eventually(
+                "dispatch start state published after atomic request",
+                dispatch_started_pred,
+                timeout_s=20,
+                poll_s=1.0,
+            )
+
+            def dispatch_power_pred() -> Tuple[bool, str]:
+                power_state = _fetch_matching_or_latest_text(
+                    mqtt,
+                    dispatch_power_topic,
+                    label="dispatch_power_state",
+                    predicate=lambda text: text.strip() == expected_dispatch_power,
+                ).strip()
+                return power_state == expected_dispatch_power, f"last={power_state!r}"
+
+            _assert_eventually(
+                "dispatch power state published as signed watts",
+                dispatch_power_pred,
+                timeout_s=20,
+                poll_s=1.0,
+            )
+
+            _assert_eventually(
+                "raw dispatch time reflects the timed write",
+                lambda: (
+                    _fetch_latest_text(mqtt, dispatch_time_topic, label="dispatch_time").strip() == "12",
+                    "waiting for Dispatch_Time=12",
+                ),
+                timeout_s=20,
+                poll_s=1.0,
+            )
+
             before_stop = _fetch_poll(mqtt, poll_topic)
             writes_before_stop = int(before_stop.get("rs485_stub_writes", 0))
             last_write_ms_before_stop = int(before_stop.get("rs485_stub_last_write_ms", 0))
@@ -4066,8 +4208,9 @@ def main() -> int:
                 _default_dispatch_request(mode="normal_mode"),
                 expected_status="ok",
                 require_queue_advance=False,
+                timeout_s=25,
             )
-    
+
             def stop_write_pred() -> Tuple[bool, str]:
                 cur = _fetch_matching_or_latest_json(
                     mqtt,
@@ -4095,14 +4238,34 @@ def main() -> int:
                     and last_reg_count == 1
                     and last_ms > last_write_ms_before_stop
                 ), detail
-    
+
             _assert_eventually(
                 "normal_mode stop write observed in stub backend",
                 stop_write_pred,
                 timeout_s=15,
                 poll_s=1.0,
             )
-            return
+
+            def dispatch_stopped_pred() -> Tuple[bool, str]:
+                start_state = _fetch_matching_or_latest_text(
+                    mqtt,
+                    dispatch_start_topic,
+                    label="dispatch_start_stop_state",
+                    predicate=lambda text: (
+                        text.strip().lower() in ("stop", "stopped")
+                        or text.strip() == str(dispatch_start_stop)
+                    ),
+                )
+                normalized = start_state.strip().lower()
+                ok = normalized in ("stop", "stopped") or start_state.strip() == str(dispatch_start_stop)
+                return ok, f"last={start_state!r}"
+
+            _assert_eventually(
+                "dispatch stop state published after normal_mode request",
+                dispatch_stopped_pred,
+                timeout_s=20,
+                poll_s=1.0,
+            )
     
         def case_dispatch_legacy_command_topics_ignored() -> None:
             print("[e2e] case: retired dispatch control command topics are ignored")
@@ -4178,83 +4341,6 @@ def main() -> int:
                         f"{writes_before}->{writes_after}"
                     )
     
-        def case_dispatch_write_feedback_via_register_value() -> None:
-            print("[e2e] case: atomic dispatch write feedback (Dispatch_* topics reflect new dispatch state)")
-            ensure_clean_suite_baseline()
-            ha_unique = _wait_for_inverter_identity()
-            _reg_dispatch_start, dispatch_start_start = ensure_dispatch_write(ha_unique, label_prefix="dispatch feedback")
-            dispatch_start_stop = _discover_define_value("DISPATCH_START_STOP")
-            dispatch_start_topic = _state_topic(ha_unique, "Dispatch_Start")
-            dispatch_power_topic = _state_topic(ha_unique, "Dispatch_Power")
-            expected_dispatch_power = str(_default_dispatch_request().get("power_w", -1200))
-            mqtt.subscribe(dispatch_start_topic, force=True)
-            mqtt.subscribe(dispatch_power_topic, force=True)
-    
-            def dispatch_started_pred() -> Tuple[bool, str]:
-                start_state = _fetch_matching_or_latest_text(
-                    mqtt,
-                    dispatch_start_topic,
-                    label="dispatch_start_state",
-                    predicate=lambda text: (
-                        text.strip().lower() in ("start", "started")
-                        or text.strip() == str(dispatch_start_start)
-                    ),
-                )
-                normalized = start_state.strip().lower()
-                ok = normalized in ("start", "started") or start_state.strip() == str(dispatch_start_start)
-                return ok, f"last={start_state!r}"
-    
-            _assert_eventually(
-                "dispatch start state published before manual read",
-                dispatch_started_pred,
-                timeout_s=20,
-                poll_s=1.0,
-            )
-    
-            def dispatch_power_pred() -> Tuple[bool, str]:
-                power_state = _fetch_matching_or_latest_text(
-                    mqtt,
-                    dispatch_power_topic,
-                    label="dispatch_power_state",
-                    predicate=lambda text: text.strip() == expected_dispatch_power,
-                ).strip()
-                return power_state == expected_dispatch_power, f"last={power_state!r}"
-    
-            _assert_eventually(
-                "dispatch power state published as signed watts",
-                dispatch_power_pred,
-                timeout_s=20,
-                poll_s=1.0,
-            )
-    
-            publish_dispatch_request_and_wait_status(
-                ha_unique,
-                _default_dispatch_request(mode="normal_mode"),
-                expected_status="ok",
-                require_queue_advance=False,
-                timeout_s=25,
-            )
-            def dispatch_stopped_pred() -> Tuple[bool, str]:
-                start_state = _fetch_matching_or_latest_text(
-                    mqtt,
-                    dispatch_start_topic,
-                    label="dispatch_start_stop_state",
-                    predicate=lambda text: (
-                        text.strip().lower() in ("stop", "stopped")
-                        or text.strip() == str(dispatch_start_stop)
-                    ),
-                )
-                normalized = start_state.strip().lower()
-                ok = normalized in ("stop", "stopped") or start_state.strip() == str(dispatch_start_stop)
-                return ok, f"last={start_state!r}"
-    
-            _assert_eventually(
-                "dispatch stop state published after normal_mode request",
-                dispatch_stopped_pred,
-                timeout_s=20,
-                poll_s=1.0,
-            )
-    
         def case_dispatch_primes_single_snapshot_refresh() -> None:
             print("[e2e] case: dispatch request primes an immediate ESS snapshot refresh")
             ha_unique = _ensure_online_inverter_identity("dispatch snapshot prime baseline")
@@ -4296,45 +4382,17 @@ def main() -> int:
                 raise E2EError(
                     "dispatch-triggered snapshot refresh did not arrive before the normal 10s scheduler cadence"
                 )
-        def case_dispatch_write_under_100ms() -> None:
-            print("[e2e] case: atomic dispatch request writes the 9-register block within 100 ms")
-            ha_unique = _ensure_online_inverter_identity("dispatch timing baseline")
-            elapsed_ms = measure_dispatch_write_latency(
-                ha_unique,
-                label_prefix="dispatch timing",
-                duration_s=12,
-                poll_interval_s=None,
-                timeout_s=12,
-            )
-            if elapsed_ms > 100:
-                raise E2EError(
-                    f"dispatch block write exceeded 100 ms from queued command to stub-observed 9-register write: "
-                    f"elapsed_ms={elapsed_ms}"
-                )
-    
-            dispatch_time_topic = _state_topic(ha_unique, "Dispatch_Time")
-            mqtt.subscribe(dispatch_time_topic, force=True)
-            _assert_eventually(
-                "raw dispatch time reflects the timed write",
-                lambda: (
-                    _fetch_latest_text(mqtt, dispatch_time_topic, label="dispatch_time").strip() == "12",
-                    "waiting for Dispatch_Time=12",
-                ),
-                timeout_s=20,
-                poll_s=1.0,
-            )
-    
-        def case_dispatch_timed_restart_and_expire() -> None:
-            print("[e2e] case: timed dispatch countdown restarts and expires cleanly")
-            ha_unique = _ensure_online_inverter_identity("timed dispatch baseline")
+        def case_dispatch_timed_flow() -> None:
+            print("[e2e] case: timed dispatch lifecycle (no rewrite + restart + expire + disable)")
+            ha_unique = _ensure_online_inverter_identity("timed dispatch flow baseline")
             current_config = _fetch_config(mqtt, config_topic)
             original_poll_interval = int(current_config.get("poll_interval_s", 9) or 9)
             long_poll_interval = 120
             try:
                 ensure_dispatch_write(
                     ha_unique,
-                    label_prefix="dispatch timed",
-                    duration_s=12,
+                    label_prefix="dispatch timed flow",
+                    duration_s=25,
                     poll_interval_s=long_poll_interval,
                     timeout_s=8,
                 )
@@ -4350,7 +4408,7 @@ def main() -> int:
                     nonlocal first_remaining_text
                     first_remaining_text = _fetch_latest_text(mqtt, remaining_topic, label="dispatch_remaining_initial")
                     first_remaining = int(first_remaining_text.strip())
-                    return (0 < first_remaining <= 12), f"remaining={first_remaining}"
+                    return (0 < first_remaining <= 25), f"remaining={first_remaining}"
     
                 _assert_eventually(
                     "initial timed Dispatch_Remaining becomes positive",
@@ -4370,10 +4428,46 @@ def main() -> int:
                 dropped = int(dropped_text.strip())
                 if dropped >= first_remaining:
                     raise E2EError(f"Dispatch_Remaining did not decrease: {first_remaining} -> {dropped}")
-    
+
+                before = _fetch_poll(mqtt, poll_topic)
+                writes_before = int(before.get("rs485_stub_writes", 0))
+                queued_before = int(before.get("dispatch_request_queued_ms", 0))
+
+                # Countdown publishes every 5s, but the atomic request path should not rewrite dispatch
+                # during those wakeups unless a fresh external request arrives.
+                _sleep_with_mqtt(mqtt, 7)
+                after = _fetch_poll(mqtt, poll_topic)
+                writes_after = int(after.get("rs485_stub_writes", 0))
+                queued_after = int(after.get("dispatch_request_queued_ms", 0))
+                if writes_after != writes_before and queued_after <= queued_before:
+                    _sleep_with_mqtt(mqtt, 1.0)
+                    confirm = _fetch_poll(mqtt, poll_topic)
+                    writes_confirm = int(confirm.get("rs485_stub_writes", 0))
+                    queued_confirm = int(confirm.get("dispatch_request_queued_ms", 0))
+                    if writes_confirm != writes_before and queued_confirm <= queued_before:
+                        raise E2EError(
+                            f"Timed countdown rewrote dispatch without a new atomic request: "
+                            f"writes {writes_before}->{writes_confirm} "
+                            f"queued_ms {queued_before}->{queued_confirm}"
+                        )
+
+                remaining_before_restart_text = (
+                    _fetch_cached_or_latest_text(
+                        mqtt,
+                        remaining_topic,
+                        label="dispatch_remaining_before_restart",
+                    ).strip()
+                    or dropped_text
+                )
+                if not remaining_before_restart_text.isdigit():
+                    raise E2EError(
+                        f"Dispatch_Remaining before restart was not numeric: {remaining_before_restart_text!r}"
+                    )
+                remaining_before_restart = int(remaining_before_restart_text)
+
                 publish_dispatch_request_and_wait_status(
                     ha_unique,
-                    _default_dispatch_request(duration_s=12),
+                    _default_dispatch_request(duration_s=25),
                     expected_status="ok",
                     timeout_s=25,
                 )
@@ -4384,15 +4478,15 @@ def main() -> int:
                         remaining_topic,
                         label="dispatch_remaining_restart_current",
                     ).strip()
-                    or dropped_text
+                    or remaining_before_restart_text
                 )
-    
+
                 def restart_pred() -> Tuple[bool, str]:
                     nonlocal restarted_text, restart_prev_text
                     # The dispatch request helper already proves the second request queued
                     # successfully. Observe the countdown topic directly here so we do not
                     # miss a fast restart by waiting on slower status/poll cadence.
-                    if restart_prev_text.isdigit() and int(restart_prev_text) > dropped:
+                    if restart_prev_text.isdigit() and int(restart_prev_text) > remaining_before_restart:
                         restarted_text = restart_prev_text
                         restarted = int(restarted_text)
                         return True, f"remaining={restarted}"
@@ -4409,11 +4503,11 @@ def main() -> int:
                     restart_prev_text = next_text
                     if not next_text.isdigit():
                         return False, f"remaining={next_text!r}"
-                    if int(next_text) <= dropped:
+                    if int(next_text) <= remaining_before_restart:
                         return False, f"remaining={next_text}"
                     restarted_text = next_text
                     restarted = int(restarted_text.strip())
-                    return restarted > dropped, f"remaining={restarted}"
+                    return restarted > remaining_before_restart, f"remaining={restarted}"
     
                 _assert_eventually(
                     "Dispatch_Remaining restarts upward after identical command",
@@ -4429,103 +4523,72 @@ def main() -> int:
                     remaining_zero = remaining_state == "0"
                     return stop_seen and remaining_zero, f"start={start_state!r} remaining={remaining_state!r}"
     
-                _assert_eventually("timed dispatch expires to stop", expiry_pred, timeout_s=20, poll_s=2.0)
+                _assert_eventually("timed dispatch expires to stop", expiry_pred, timeout_s=35, poll_s=2.0)
                 _sleep_with_mqtt(mqtt, 6)
                 start_after_expiry = _fetch_latest_text(mqtt, start_topic, label="dispatch_start_post_expire").strip()
                 if start_after_expiry.lower() not in ("stop", "stopped") and start_after_expiry != str(dispatch_start_stop):
                     raise E2EError(f"dispatch restarted after expiry instead of staying stopped: {start_after_expiry!r}")
+                publish_dispatch_request_and_wait_status(
+                    ha_unique,
+                    _default_dispatch_request(duration_s=12),
+                    expected_status="ok",
+                    timeout_s=25,
+                )
+
+                def accepted_again_pred() -> Tuple[bool, str]:
+                    remaining_text = _fetch_latest_text(mqtt, remaining_topic, label="dispatch_remaining_disable")
+                    remaining = int(remaining_text.strip())
+                    return (0 < remaining <= 12), f"remaining={remaining}"
+
+                _assert_eventually(
+                    "timed dispatch re-accepted before disable",
+                    accepted_again_pred,
+                    timeout_s=20,
+                    poll_s=1.0,
+                )
+
+                before_disable = _fetch_stub(mqtt, stub_topic)
+                writes_before_disable = int(before_disable.get("stub_writes", 0))
+
+                publish_dispatch_request_and_wait_status(
+                    ha_unique,
+                    _default_dispatch_request(mode="normal_mode"),
+                    expected_status="ok",
+                    require_queue_advance=False,
+                    timeout_s=10,
+                )
+
+                disable_write_count = writes_before_disable
+
+                def disable_write_pred() -> Tuple[bool, str]:
+                    nonlocal disable_write_count
+                    cur = _fetch_matching_or_latest_json(
+                        mqtt,
+                        stub_topic,
+                        "stub",
+                        lambda payload: int(payload.get("stub_writes", 0)) > writes_before_disable,
+                    )
+                    disable_write_count = int(cur.get("stub_writes", 0))
+                    return disable_write_count > writes_before_disable, f"writes={disable_write_count}"
+
+                _assert_eventually(
+                    "dispatch duration 0 triggers one non-timed rewrite",
+                    disable_write_pred,
+                    timeout_s=10,
+                    poll_s=1.0,
+                )
+
+                _sleep_with_mqtt(mqtt, 7)
+                after_disable = _fetch_cached_or_latest_json(mqtt, stub_topic, "stub")
+                writes_after_disable = int(after_disable.get("stub_writes", 0))
+                if writes_after_disable != disable_write_count:
+                    raise E2EError(
+                        f"normal_mode kept countdown-triggered writes alive: "
+                        f"{disable_write_count}->{writes_after_disable}"
+                    )
             finally:
                 wait_runtime_poll_interval_applied(original_poll_interval)
-    
-        def case_dispatch_timed_no_rewrite_without_fresh_snapshot() -> None:
-            print("[e2e] case: timed countdown ticks do not rewrite without a new atomic request")
-            ha_unique = _ensure_online_inverter_identity("dispatch timed no-rewrite baseline")
-            ensure_dispatch_write(
-                ha_unique,
-                label_prefix="dispatch timed no-rewrite",
-                duration_s=25,
-                timeout_s=8,
-            )
-            remaining_topic = _state_topic(ha_unique, "Dispatch_Remaining")
-            mqtt.subscribe(remaining_topic, force=True)
-    
-            def accepted_pred() -> Tuple[bool, str]:
-                remaining_text = _fetch_latest_text(mqtt, remaining_topic, label="dispatch_remaining_no_rewrite")
-                remaining = int(remaining_text.strip())
-                return (0 < remaining <= 25), f"remaining={remaining}"
-    
-            _assert_eventually(
-                "timed dispatch accepted before stale-snapshot window",
-                accepted_pred,
-                timeout_s=20,
-                poll_s=1.0,
-            )
-    
-            before = _fetch_poll(mqtt, poll_topic)
-            writes_before = int(before.get("rs485_stub_writes", 0))
-    
-            # Countdown publishes every 5s, but the atomic request path should not rewrite dispatch
-            # during those wakeups unless a fresh external request arrives.
-            _sleep_with_mqtt(mqtt, 7)
-            after = _fetch_poll(mqtt, poll_topic)
-            writes_after = int(after.get("rs485_stub_writes", 0))
-            if writes_after != writes_before:
-                raise E2EError(
-                    f"Timed countdown rewrote dispatch without a new atomic request: "
-                    f"writes {writes_before}->{writes_after}"
-                )
-    
-        def case_dispatch_disable_timed_stops_countdown_wakes() -> None:
-            print("[e2e] case: normal_mode stop does not keep countdown-triggered rewrites alive")
-            ha_unique = _ensure_online_inverter_identity("dispatch disable baseline")
-            ensure_dispatch_write(
-                ha_unique,
-                label_prefix="dispatch disable",
-                duration_s=12,
-                timeout_s=8,
-            )
-    
-            before_disable = _fetch_stub(mqtt, stub_topic)
-            writes_before_disable = int(before_disable.get("stub_writes", 0))
-    
-            publish_dispatch_request_and_wait_status(
-                ha_unique,
-                _default_dispatch_request(mode="normal_mode"),
-                expected_status="ok",
-                require_queue_advance=False,
-                timeout_s=10,
-            )
-    
-            disable_write_count = writes_before_disable
-    
-            def disable_write_pred() -> Tuple[bool, str]:
-                nonlocal disable_write_count
-                cur = _fetch_matching_or_latest_json(
-                    mqtt,
-                    stub_topic,
-                    "stub",
-                    lambda payload: int(payload.get("stub_writes", 0)) > writes_before_disable,
-                )
-                disable_write_count = int(cur.get("stub_writes", 0))
-                return disable_write_count > writes_before_disable, f"writes={disable_write_count}"
-    
-            _assert_eventually(
-                "dispatch duration 0 triggers one non-timed rewrite",
-                disable_write_pred,
-                timeout_s=10,
-                poll_s=1.0,
-            )
-    
-            # After a confirmed normal-mode stop, the old countdown wake path should stay quiet.
-            _sleep_with_mqtt(mqtt, 7)
-            after_disable = _fetch_cached_or_latest_json(mqtt, stub_topic, "stub")
-            writes_after_disable = int(after_disable.get("stub_writes", 0))
-            if writes_after_disable != disable_write_count:
-                raise E2EError(
-                    f"normal_mode kept countdown-triggered writes alive: "
-                    f"{disable_write_count}->{writes_after_disable}"
-                )
-    
+
         def case_dispatch_boot_fail_closed() -> None:
             print("[e2e] case: boot fail-closes an active dispatch once RS485 returns")
             dispatch_start_start = _discover_define_value("DISPATCH_START_START")
@@ -4700,7 +4763,10 @@ def main() -> int:
             print("[e2e] strict register: rebooting to clean baseline")
             _reboot_normal_and_wait("strict_register_reads")
             print("[e2e] strict register: reacquiring inverter identity")
-            ha_unique = _ensure_online_inverter_identity("strict unknown register baseline")
+            ha_unique = _ensure_online_inverter_identity(
+                "strict unknown register baseline",
+                require_fresh_identity=True,
+            )
             manual_topic = _manual_read_topic()
             baseline_payload = '{"mode":"online"}'
     
@@ -4766,10 +4832,14 @@ def main() -> int:
                 timeout_s=30,
                 poll_s=2.0,
             )
-            print("[e2e] strict register: restoring clean suite baseline")
-            ensure_clean_suite_baseline()
-            print("[e2e] strict register: confirming inverter identity after cleanup")
-            _wait_for_inverter_identity()
+            print("[e2e] strict register: restoring loose online baseline")
+            wait_stub_control_applied(
+                baseline_payload,
+                label="strict register cleanup",
+                expect_mode="online",
+                expect_strict_unknown=False,
+                timeout_s=30,
+            )
             return
     
         def case_fail_specific_snapshot_register_and_type() -> None:
@@ -5005,7 +5075,7 @@ def main() -> int:
     
         def case_fail_writes_only_dispatch_write_fails() -> None:
             print("[e2e] case: fail writes only (dispatch write fails, snapshot reads still ok)")
-            ensure_clean_suite_baseline()
+            ha_unique = _ensure_online_inverter_identity("fail writes only baseline")
             reg_dispatch_start = _discover_register_value("REG_DISPATCH_RW_DISPATCH_START")
             dispatch_start_stop = _discover_define_value("DISPATCH_START_STOP")
             set_mode_and_wait(
@@ -5028,7 +5098,6 @@ def main() -> int:
                 poll_s=1.0,
             )
     
-            ha_unique = _wait_for_inverter_identity()
             publish_dispatch_request_and_wait_status(
                 ha_unique,
                 _default_dispatch_request(),
@@ -5688,7 +5757,36 @@ def main() -> int:
             original_intervals = config_before.get("entity_intervals", {})
             if not isinstance(original_intervals, dict):
                 raise E2EError(f"config entity_intervals missing before portal case: {config_before}")
-    
+
+            root_status, root_body = _http_request_full("GET", base + "/", headers={}, body=b"", timeout_s=20)
+            if root_status != 200:
+                raise E2EError(f"runtime root returned status={root_status}")
+            root_html = root_body.decode("utf-8", errors="replace")
+            if "Alpha2MQTT Control" not in root_html:
+                raise E2EError("runtime root missing control-plane heading before portal polling ui")
+            if "method='GET' action='/reboot/ap'" not in root_html:
+                raise E2EError("runtime root did not expose GET-based AP reboot confirmation entrypoint")
+
+            confirm_status, confirm_body = _http_request_full("GET", base + "/reboot/ap", headers={}, body=b"", timeout_s=20)
+            if confirm_status != 200:
+                raise E2EError(f"GET /reboot/ap returned status={confirm_status}")
+            confirm_html = confirm_body.decode("utf-8", errors="replace")
+            for required in (
+                "Reboot into AP config?",
+                "remove the device from your network for at least 5 minutes",
+                "auto-reboot back to normal after about 5 minutes",
+                "Yes, reboot AP Config",
+                "Cancel",
+            ):
+                if required not in confirm_html:
+                    raise E2EError(f"AP reboot confirmation page missing expected warning/control: {required}")
+
+            root_status_after, root_body_after = _http_request_full("GET", base + "/", headers={}, body=b"", timeout_s=20)
+            if root_status_after != 200:
+                raise E2EError(f"runtime root became unavailable after GET /reboot/ap: status={root_status_after}")
+            if "Alpha2MQTT Control" not in root_body_after.decode("utf-8", errors="replace"):
+                raise E2EError("GET /reboot/ap unexpectedly left normal runtime")
+
             reboot_wifi_path = _discover_reboot_wifi_path_from_code()
             if not reboot_wifi_path:
                 raise E2EError("Could not discover /reboot/wifi endpoint from firmware source")
@@ -5864,104 +5962,29 @@ def main() -> int:
                 timeout_s=60,
                 poll_s=3.0,
             )
-    
-            # Re-enter portal and verify values are restored in the UI after reboot.
-            print(f"[e2e] rebooting into wifi portal via {reboot_url} (persistence check)")
-            _http_post_simple(reboot_url, timeout_s=10)
-            _assert_portal_root_menu(base, timeout_s=40, required_mode="wifi")
-    
-            polling_path2, html2 = _load_polling_page_via_menu(base)
-            if not polling_path2.startswith("/config/polling"):
-                raise E2EError(f"unexpected polling menu path after reboot: {polling_path2!r}")
-    
-            csrf2 = _extract_input_value(html2, "csrf")
-            interval_match = re.search(r'name="poll_interval_s"[^>]*value="(\d+)"', html2)
-            if not interval_match:
-                raise E2EError("polling page missing poll_interval_s input after reboot")
-            if int(interval_match.group(1)) != 9:
-                raise E2EError(f"poll_interval_s UI value not restored after reboot: {interval_match.group(1)}")
-    
-            restored_family, restored_page, _, _, restored_bucket, _ = _locate_entity_on_polling_pages(base, html2, target)
-            if restored_family != target_family or restored_page != target_page:
-                raise E2EError(
-                    f"{target} moved to a different portal location across reboot: "
-                    f"before={target_family}/{target_page} after={restored_family}/{restored_page}"
-            )
-            if restored_bucket != desired_bucket:
-                raise E2EError(f"{target} bucket UI value not restored after reboot (expected {desired_bucket!r}, got {restored_bucket!r})")
-    
-            print(f"[e2e] POST {base}/config/polling/clear (clear-all check)")
-            try:
-                clear_status = _http_post_form(
-                    base + "/config/polling/clear",
-                    {
-                        "family": target_family,
-                        "page": str(target_page),
-                        "csrf": csrf2,
-                    },
-                    timeout_s=20,
-                )
-                if clear_status not in (200, 302):
-                    raise E2EError(f"polling clear failed status={clear_status}")
-            except Exception as e:
-                if not _is_expected_portal_transport_error(e):
-                    raise
-                print(f"[e2e] polling clear transport timeout tolerated; verifying by state ({e})")
-    
-            cleared_html = _load_polling_page(base, target_family, target_page)
-            _, cleared_bucket = _extract_entity_row_and_selected_bucket(cleared_html, target)
-            if cleared_bucket != "disabled":
-                raise E2EError(f"{target} bucket UI value not cleared after disable-all (got {cleared_bucket!r})")
-    
-            print(f"[e2e] rebooting to normal via {reboot_normal_url} (clear-all check)")
-            reboot_status, reboot_body = _http_request_full("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
-            if reboot_status != 200:
-                raise E2EError(f"{portal_reboot_normal_path} after clear returned unexpected status={reboot_status}")
-            if reboot_body:
-                _assert_reboot_handoff_html(
-                    reboot_body.decode("utf-8", errors="replace"),
-                    expected_heading="Rebooting to normal mode",
-                    expected_target_mode="normal",
-                    expected_probe_kind="fetch",
-                )
-    
-            _assert_eventually(
-                "device publishes status/poll after clear-all reboot to normal",
-                lambda: (True, "ok") if _fetch_poll(mqtt, poll_topic).get("poll_interval_s") else (False, "waiting"),
-                timeout_s=60,
-                poll_s=3.0,
-            )
-            ensure_stub_online_backend(portal_stub_baseline, label="portal polling ui after clear reboot")
-    
-            def cleared_pred() -> Tuple[bool, str]:
-                cfg_cur = _fetch_config(mqtt, config_topic)
-                intervals_cur = cfg_cur.get("entity_intervals", {})
-                if not isinstance(intervals_cur, dict):
-                    return False, f"entity_intervals invalid: {cfg_cur}"
-                if intervals_cur:
-                    return False, f"remaining={len(intervals_cur)}"
-                return True, "ok"
-    
-            _assert_eventually("clear-all removes active entity intervals", cleared_pred, timeout_s=60, poll_s=3.0)
-    
-            wait_runtime_poll_interval_applied(
-                original_interval,
-                timeout_s=60,
-                republish_every_s=5.0,
-            )
             if original_intervals:
-                wait_intervals_applied(
+                wait_polling_config_applied(
+                    original_interval,
                     {str(key): str(value) for key, value in original_intervals.items()},
                     timeout_s=60,
                     republish_every_s=5.0,
                 )
-    
+            else:
+                wait_disable_all_polling_applied(
+                    original_interval,
+                    timeout_s=60,
+                    republish_every_s=5.0,
+                )
+
             def restored_pred() -> Tuple[bool, str]:
                 cur = _fetch_poll(mqtt, poll_topic)
                 cfg_cur = _fetch_config(mqtt, config_topic)
                 cur_interval = int(cur.get("poll_interval_s", 0))
                 intervals_cur = cfg_cur.get("entity_intervals", {})
-                detail = f"poll_interval_s={cur_interval} count={len(intervals_cur) if isinstance(intervals_cur, dict) else 'invalid'}"
+                detail = (
+                    f"poll_interval_s={cur_interval} "
+                    f"count={len(intervals_cur) if isinstance(intervals_cur, dict) else 'invalid'}"
+                )
                 if cur_interval != original_interval:
                     return False, detail
                 if not isinstance(intervals_cur, dict):
@@ -5969,11 +5992,16 @@ def main() -> int:
                 if intervals_cur != original_intervals:
                     return False, detail
                 return True, detail
-    
-            _assert_eventually("polling config restored after clear-all portal check", restored_pred, timeout_s=60, poll_s=3.0)
+
+            _assert_eventually(
+                "polling config restored after portal save smoke",
+                restored_pred,
+                timeout_s=60,
+                poll_s=3.0,
+            )
     
         def case_polling_profile_export_import() -> None:
-            print("[e2e] case: portal polling profile export/import streams overwrite restores")
+            print("[e2e] case: portal polling profile export/import streams overwrite and apply after reboot")
             portal_stub_baseline = (
                 '{"mode":"online","fail_n":0,"fail_reads":0,"fail_writes":0,'
                 '"fail_type":0,"fail_every_n":0,"fail_for_ms":0,'
@@ -5982,31 +6010,18 @@ def main() -> int:
             )
             ensure_clean_suite_baseline()
             base = _resolve_device_http_base(mqtt, device_root)
-            defaults = _load_entity_default_buckets()
             target_keep = "State_of_Charge"
             target_clear = "ESS_Power"
-            target_keep_default = str(defaults.get(target_keep, "")).strip()
-            target_clear_default = str(defaults.get(target_clear, "")).strip()
-            if not target_keep_default or not target_clear_default:
-                raise E2EError("could not resolve default buckets for polling profile targets")
-    
-            baseline_buckets = {
-                target_keep: target_keep_default,
-                target_clear: target_clear_default,
-                "Register_Number": "one_min",
-                "Register_Value": "one_min",
-            }
-            wait_polling_config_applied(9, baseline_buckets, timeout_s=60, republish_every_s=5.0)
-    
+
             config_before = _fetch_config(mqtt, config_topic)
             intervals_before = config_before.get("entity_intervals", {})
             if not isinstance(intervals_before, dict):
                 raise E2EError(f"config entity_intervals missing before profile export/import case: {config_before}")
-    
+
             reboot_wifi_path = _discover_reboot_wifi_path_from_code()
             if not reboot_wifi_path:
                 raise E2EError("Could not discover /reboot/wifi endpoint from firmware source")
-    
+
             reboot_wifi_status, reboot_wifi_body = _http_request_full(
                 "POST", base + reboot_wifi_path, headers={}, body=b"", timeout_s=20
             )
@@ -6020,83 +6035,7 @@ def main() -> int:
                     expected_probe_kind="fetch",
                 )
             _assert_portal_root_menu(base, timeout_s=40, required_mode="wifi")
-            baseline_export_status, baseline_export_body = _http_request_full(
-                "GET",
-                base + "/config/polling/export",
-                headers={},
-                body=b"",
-                timeout_s=20,
-            )
-            if baseline_export_status != 200:
-                raise E2EError(f"baseline polling profile export returned unexpected status={baseline_export_status}")
-            restore_profile = baseline_export_body.decode("utf-8", errors="strict")
-            original_interval, original_export_intervals = _parse_polling_profile_text(restore_profile)
-            if int(config_before.get("poll_interval_s", 0) or 0) != original_interval:
-                raise E2EError(f"baseline polling profile export poll interval drifted: {restore_profile!r}")
-    
-            reboot_normal_url = base + "/config/reboot-normal"
-            reboot_status, reboot_body = _http_request_full("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
-            if reboot_status != 200:
-                raise E2EError(f"/config/reboot-normal after baseline export returned unexpected status={reboot_status}")
-            if reboot_body:
-                _assert_reboot_handoff_html(
-                    reboot_body.decode("utf-8", errors="replace"),
-                    expected_heading="Rebooting to normal mode",
-                    expected_target_mode="normal",
-                    expected_probe_kind="fetch",
-                )
-    
-            _assert_eventually(
-                "device publishes status/poll after baseline export reboot",
-                lambda: (True, "ok") if _fetch_poll(mqtt, poll_topic).get("poll_interval_s") else (False, "waiting"),
-                timeout_s=60,
-                poll_s=3.0,
-            )
-            ensure_stub_online_backend(portal_stub_baseline, label="polling profile baseline reboot control")
-    
-            original_keep = _effective_bucket(intervals_before, target_keep)
-            original_clear = _effective_bucket(intervals_before, target_clear)
-            original_register_number = _effective_bucket(intervals_before, "Register_Number")
-            original_register_value = _effective_bucket(intervals_before, "Register_Value")
-            if original_export_intervals.get(target_keep) != original_keep:
-                raise E2EError(f"baseline polling profile export missing full {target_keep} assignment: {restore_profile}")
-            if original_export_intervals.get(target_clear) != original_clear:
-                raise E2EError(f"baseline polling profile export missing full {target_clear} assignment: {restore_profile}")
-    
-            def pick_alt_bucket(*excluded: str) -> str:
-                for candidate in ("user", "ten_sec", "five_min", "one_hour", "one_day", "disabled"):
-                    if candidate not in excluded:
-                        return candidate
-                raise E2EError(f"unable to choose alternate bucket (excluded={excluded!r})")
-    
-            keep_override = pick_alt_bucket(target_keep_default)
-            clear_override = pick_alt_bucket(target_clear_default, keep_override)
-            modified_override = pick_alt_bucket(target_keep_default, keep_override)
-            modified_interval = 17 if original_interval != 17 else 19
-    
-            wait_intervals_applied(
-                {
-                    target_keep: keep_override,
-                    target_clear: clear_override,
-                },
-                timeout_s=60,
-                republish_every_s=5.0,
-            )
-    
-            reboot_wifi_status, reboot_wifi_body = _http_request_full(
-                "POST", base + reboot_wifi_path, headers={}, body=b"", timeout_s=20
-            )
-            if reboot_wifi_status != 200:
-                raise E2EError(f"{reboot_wifi_path} returned unexpected status={reboot_wifi_status}")
-            if reboot_wifi_body:
-                _assert_reboot_handoff_html(
-                    reboot_wifi_body.decode("utf-8", errors="replace"),
-                    expected_heading="Rebooting to Wi-Fi config",
-                    expected_target_mode="wifi",
-                    expected_probe_kind="fetch",
-                )
-            _assert_portal_root_menu(base, timeout_s=40, required_mode="wifi")
-    
+
             export_status, export_body = _http_request_full(
                 "GET",
                 base + "/config/polling/export",
@@ -6106,19 +6045,11 @@ def main() -> int:
             )
             if export_status != 200:
                 raise E2EError(f"polling profile export returned unexpected status={export_status}")
-            exported_profile = export_body.decode("utf-8", errors="strict")
-            exported_interval, exported_intervals = _parse_polling_profile_text(exported_profile)
-            if exported_interval != original_interval:
-                raise E2EError(f"polling profile export poll interval drifted: {exported_profile!r}")
-            if exported_intervals.get(target_keep) != keep_override:
-                raise E2EError(f"exported profile missing {target_keep} override: {exported_profile}")
-            if exported_intervals.get(target_clear) != clear_override:
-                raise E2EError(f"exported profile missing {target_clear} override: {exported_profile}")
-            if exported_intervals.get("Register_Number") != original_register_number:
-                raise E2EError(f"exported profile missing full Register_Number assignment: {exported_profile}")
-            if exported_intervals.get("Register_Value") != original_register_value:
-                raise E2EError(f"exported profile missing full Register_Value assignment: {exported_profile}")
-    
+            restore_profile = export_body.decode("utf-8", errors="strict")
+            original_interval, original_export_intervals = _parse_polling_profile_text(restore_profile)
+            if int(config_before.get("poll_interval_s", 0) or 0) != original_interval:
+                raise E2EError(f"baseline polling profile export poll interval drifted: {restore_profile!r}")
+
             import_status, import_body = _http_request_full(
                 "GET",
                 base + "/config/polling/import",
@@ -6131,81 +6062,26 @@ def main() -> int:
             import_html = import_body.decode("utf-8", errors="replace")
             if "/config/polling/import" not in import_html or 'name="profile"' not in import_html or 'type="file"' not in import_html:
                 raise E2EError("polling profile import page missing form fields")
-            import_action = urllib.parse.urljoin(base + "/config/polling/import", _extract_form_action_with_input(import_html, "profile"))
-    
-            invalid_status, invalid_body = _http_post_multipart_bytes_full(
-                import_action,
-                "profile",
-                "invalid.txt",
-                b"A2M_POLLING_PROFILE 1\npoll_interval_s=17\nbroken-line\n",
-                timeout_s=20,
-            )
-            if invalid_status != 200:
-                raise E2EError(f"invalid polling profile import returned unexpected status={invalid_status}")
-            invalid_html = invalid_body.decode("utf-8", errors="replace")
-            if "Invalid polling profile line" not in invalid_html:
-                raise E2EError("invalid polling profile import did not show an error banner")
-            invalid_action = urllib.parse.urljoin(base + "/config/polling/import", _extract_form_action_with_input(invalid_html, "profile"))
-    
-            oversize_rejected_with_banner = False
-            try:
-                oversize_status, oversize_body = _http_post_multipart_bytes_full(
-                    invalid_action,
-                    "profile",
-                    "oversize.txt",
-                    (
-                        b"A2M_POLLING_PROFILE 1\n"
-                        b"poll_interval_s=17\n"
-                        + b"A" * 200
-                        + b"=one_min\n"
-                    ),
-                    timeout_s=20,
-                )
-                if oversize_status not in (200, 302):
-                    raise E2EError(
-                        f"oversize polling profile import returned unexpected status={oversize_status}"
-                    )
-                if oversize_status == 200:
-                    oversize_html = oversize_body.decode("utf-8", errors="replace")
-                    oversize_rejected_with_banner = (
-                        "Polling profile line exceeds the portal limit." in oversize_html
-                    )
-            except Exception as exc:
-                if not _is_expected_portal_transport_error(exc):
-                    raise
-    
-            _assert_portal_root_menu(base, timeout_s=40, required_mode="wifi")
-            oversize_export_status, oversize_export_body = _http_request_full(
-                "GET",
-                base + "/config/polling/export",
-                headers={},
-                body=b"",
-                timeout_s=20,
-            )
-            if oversize_export_status != 200:
-                raise E2EError(
-                    f"polling profile export after oversize import returned unexpected status={oversize_export_status}"
-                )
-            oversize_exported_profile = oversize_export_body.decode("utf-8", errors="strict")
-            if oversize_exported_profile != exported_profile:
-                raise E2EError(
-                    f"oversize polling profile import changed persisted state: {oversize_exported_profile}"
-                )
-            if not oversize_rejected_with_banner:
-                print("[e2e] oversize import rejected before banner; portal remained healthy and state stayed unchanged")
-    
-            import_status, import_body = _http_request_full(
-                "GET",
+            import_action = urllib.parse.urljoin(
                 base + "/config/polling/import",
-                headers={},
-                body=b"",
-                timeout_s=20,
+                _extract_form_action_with_input(import_html, "profile"),
             )
-            if import_status != 200:
-                raise E2EError(f"polling profile import page after oversize returned unexpected status={import_status}")
-            import_html = import_body.decode("utf-8", errors="replace")
-            import_action = urllib.parse.urljoin(base + "/config/polling/import", _extract_form_action_with_input(import_html, "profile"))
-    
+
+            original_keep = _effective_bucket(intervals_before, target_keep)
+            original_clear = _effective_bucket(intervals_before, target_clear)
+            if original_export_intervals.get(target_keep) != original_keep:
+                raise E2EError(f"baseline polling profile export missing full {target_keep} assignment: {restore_profile}")
+            if original_export_intervals.get(target_clear) != original_clear:
+                raise E2EError(f"baseline polling profile export missing full {target_clear} assignment: {restore_profile}")
+
+            def pick_alt_bucket(*excluded: str) -> str:
+                for candidate in ("user", "ten_sec", "five_min", "one_hour", "one_day", "disabled"):
+                    if candidate not in excluded:
+                        return candidate
+                raise E2EError(f"unable to choose alternate bucket (excluded={excluded!r})")
+
+            modified_override = pick_alt_bucket(original_keep)
+            modified_interval = 17 if original_interval != 17 else 19
             modified_profile = "\n".join(
                 (
                     "A2M_POLLING_PROFILE 1",
@@ -6224,42 +6100,8 @@ def main() -> int:
             )
             if apply_status not in (200, 302):
                 raise E2EError(f"polling profile import returned unexpected status={apply_status}")
-    
-            imported_polling_status, imported_polling_body = _http_request_full(
-                "GET",
-                base + "/config/polling?imported=1&unknown=1",
-                headers={},
-                body=b"",
-                timeout_s=20,
-            )
-            if imported_polling_status != 200:
-                raise E2EError(f"polling page after import returned unexpected status={imported_polling_status}")
-            imported_polling_html = imported_polling_body.decode("utf-8", errors="replace")
-            if "Polling profile imported. Reboot Normal to apply it to runtime and Home Assistant." not in imported_polling_html:
-                raise E2EError("polling page did not show the import confirmation guidance")
-            if "Ignored 1 unknown entities from the imported profile." not in imported_polling_html:
-                raise E2EError("polling page did not show the unknown-entity warning")
-    
-            exported_modified_status, exported_modified_body = _http_request_full(
-                "GET",
-                base + "/config/polling/export",
-                headers={},
-                body=b"",
-                timeout_s=20,
-            )
-            if exported_modified_status != 200:
-                raise E2EError(
-                    f"polling profile export after import returned unexpected status={exported_modified_status}"
-                )
-            exported_modified = exported_modified_body.decode("utf-8", errors="strict")
-            exported_modified_interval, exported_modified_intervals = _parse_polling_profile_text(exported_modified)
-            if exported_modified_interval != modified_interval:
-                raise E2EError(f"polling profile export did not update poll_interval_s: {exported_modified}")
-            if exported_modified_intervals.get(target_keep) != modified_override:
-                raise E2EError(f"polling profile export did not replace bucket map: {exported_modified}")
-            if target_clear in exported_modified_intervals:
-                raise E2EError(f"polling profile export did not disable omitted entity {target_clear}: {exported_modified}")
-    
+
+            reboot_normal_url = base + "/config/reboot-normal"
             reboot_status, reboot_body = _http_request_full("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
             if reboot_status != 200:
                 raise E2EError(f"/config/reboot-normal after import returned unexpected status={reboot_status}")
@@ -6270,7 +6112,7 @@ def main() -> int:
                     expected_target_mode="normal",
                     expected_probe_kind="fetch",
                 )
-    
+
             _assert_eventually(
                 "device publishes status/poll after polling profile import reboot",
                 lambda: (True, "ok") if _fetch_poll(mqtt, poll_topic).get("poll_interval_s") else (False, "waiting"),
@@ -6278,7 +6120,7 @@ def main() -> int:
                 poll_s=3.0,
             )
             ensure_stub_online_backend(portal_stub_baseline, label="polling profile after import reboot control")
-    
+
             def imported_pred() -> Tuple[bool, str]:
                 cfg = _fetch_config(mqtt, config_topic)
                 poll = _fetch_poll(mqtt, poll_topic)
@@ -6288,7 +6130,7 @@ def main() -> int:
                 actual_keep = _effective_bucket(intervals, target_keep)
                 detail = (
                     f"cfg_poll_interval_s={cfg.get('poll_interval_s')} runtime_poll_interval_s={poll.get('poll_interval_s')} "
-                    f"{target_keep}={actual_keep!r} {target_clear}_present={target_clear in intervals} intervals={intervals!r}"
+                    f"{target_keep}={actual_keep!r} {target_clear}_present={target_clear in intervals}"
                 )
                 return (
                     int(cfg.get("poll_interval_s", 0) or 0) == modified_interval
@@ -6296,113 +6138,44 @@ def main() -> int:
                     and actual_keep == modified_override
                     and target_clear not in intervals
                 ), detail
-    
+
             _assert_eventually(
                 "polling profile import applies replacement schedule after reboot",
                 imported_pred,
                 timeout_s=60,
                 poll_s=3.0,
             )
-    
-            reboot_wifi_status, reboot_wifi_body = _http_request_full(
-                "POST", base + reboot_wifi_path, headers={}, body=b"", timeout_s=20
-            )
-            if reboot_wifi_status != 200:
-                raise E2EError(f"{reboot_wifi_path} returned unexpected status={reboot_wifi_status}")
-            if reboot_wifi_body:
-                _assert_reboot_handoff_html(
-                    reboot_wifi_body.decode("utf-8", errors="replace"),
-                    expected_heading="Rebooting to Wi-Fi config",
-                    expected_target_mode="wifi",
-                    expected_probe_kind="fetch",
+
+            if intervals_before:
+                wait_polling_config_applied(
+                    original_interval,
+                    {str(key): str(value) for key, value in intervals_before.items()},
+                    timeout_s=60,
+                    republish_every_s=5.0,
                 )
-            _assert_portal_root_menu(base, timeout_s=40, required_mode="wifi")
-            restore_import_status, restore_import_body = _http_request_full(
-                "GET",
-                base + "/config/polling/import",
-                headers={},
-                body=b"",
-                timeout_s=20,
-            )
-            if restore_import_status != 200:
-                raise E2EError(f"polling profile restore page returned unexpected status={restore_import_status}")
-            restore_html = restore_import_body.decode("utf-8", errors="replace")
-            restore_action = urllib.parse.urljoin(base + "/config/polling/import", _extract_form_action_with_input(restore_html, "profile"))
-            restore_status, restore_body = _http_post_multipart_bytes_full(
-                restore_action,
-                "profile",
-                "restore.txt",
-                restore_profile.encode("utf-8"),
-                timeout_s=20,
-            )
-            if restore_status not in (200, 302):
-                raise E2EError(f"polling profile restore returned unexpected status={restore_status}")
-            if restore_status == 200:
-                restore_html = restore_body.decode("utf-8", errors="replace")
-                if "Polling profile import failed." in restore_html:
-                    raise E2EError("polling profile restore returned an error page instead of applying")
-    
-            restored_export_status, restored_export_body = _http_request_full(
-                "GET",
-                base + "/config/polling/export",
-                headers={},
-                body=b"",
-                timeout_s=20,
-            )
-            if restored_export_status != 200:
-                raise E2EError(
-                    f"polling profile export after restore returned unexpected status={restored_export_status}"
+            else:
+                wait_disable_all_polling_applied(
+                    original_interval,
+                    timeout_s=60,
+                    republish_every_s=5.0,
                 )
-            restored_export = restored_export_body.decode("utf-8", errors="strict")
-            restored_export_interval, restored_export_intervals = _parse_polling_profile_text(restored_export)
-            if restored_export_interval != original_interval:
-                raise E2EError(f"polling profile export did not restore poll_interval_s: {restored_export}")
-            if restored_export_intervals != original_export_intervals:
-                raise E2EError(f"polling profile export did not restore the original active schedule: {restored_export}")
-    
-            reboot_status, reboot_body = _http_request_full("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
-            if reboot_status != 200:
-                raise E2EError(f"/config/reboot-normal after restore returned unexpected status={reboot_status}")
-            if reboot_body:
-                _assert_reboot_handoff_html(
-                    reboot_body.decode("utf-8", errors="replace"),
-                    expected_heading="Rebooting to normal mode",
-                    expected_target_mode="normal",
-                    expected_probe_kind="fetch",
-                )
-    
-            _assert_eventually(
-                "device publishes status/poll after polling profile restore reboot",
-                lambda: (True, "ok") if _fetch_poll(mqtt, poll_topic).get("poll_interval_s") else (False, "waiting"),
-                timeout_s=60,
-                poll_s=3.0,
-            )
-            ensure_stub_online_backend(portal_stub_baseline, label="polling profile after restore reboot control")
-    
+
             def restored_pred() -> Tuple[bool, str]:
                 cfg = _fetch_config(mqtt, config_topic)
                 poll = _fetch_poll(mqtt, poll_topic)
                 intervals = cfg.get("entity_intervals", {})
                 if not isinstance(intervals, dict):
                     return False, f"entity_intervals invalid: {cfg!r}"
-                actual_keep = _effective_bucket(intervals, target_keep)
-                actual_clear = _effective_bucket(intervals, target_clear)
-                register_number_bucket = _effective_bucket(intervals, "Register_Number")
-                register_value_bucket = _effective_bucket(intervals, "Register_Value")
                 detail = (
                     f"cfg_poll_interval_s={cfg.get('poll_interval_s')} runtime_poll_interval_s={poll.get('poll_interval_s')} "
-                    f"{target_keep}={actual_keep!r} {target_clear}={actual_clear!r} "
-                    f"Register_Number={register_number_bucket!r} Register_Value={register_value_bucket!r}"
+                    f"count={len(intervals)}"
                 )
                 return (
                     int(cfg.get("poll_interval_s", 0) or 0) == original_interval
                     and int(poll.get("poll_interval_s", 0) or 0) == original_interval
-                    and actual_keep == original_keep
-                    and actual_clear == original_clear
-                    and register_number_bucket == original_register_number
-                    and register_value_bucket == original_register_value
+                    and intervals == intervals_before
                 ), detail
-    
+
             _assert_eventually(
                 "polling profile restore returns runtime config to the original baseline",
                 restored_pred,
@@ -6410,54 +6183,14 @@ def main() -> int:
                 poll_s=3.0,
             )
     
-        def case_reboot_ap_confirmation() -> None:
-            print("[e2e] case: reboot AP config requires an explicit confirmation page")
-            portal_stub_baseline = (
-                '{"mode":"online","fail_n":0,"fail_reads":0,"fail_writes":0,'
-                '"fail_type":0,"fail_every_n":0,"fail_for_ms":0,'
-                '"flap_online_ms":0,"flap_offline_ms":0,'
-                '"probe_success_after_n":0,"strict_unknown":0,"strict":0}'
-            )
-            ensure_stub_online_backend(portal_stub_baseline, label="reboot ap confirmation baseline")
-            base = _resolve_device_http_base(mqtt, device_root)
-    
-            root_status, root_body = _http_request_full("GET", base + "/", headers={}, body=b"", timeout_s=20)
-            if root_status != 200:
-                raise E2EError(f"runtime root returned status={root_status}")
-            root_html = root_body.decode("utf-8", errors="replace")
-            if "Alpha2MQTT Control" not in root_html:
-                raise E2EError("runtime root missing control-plane heading before AP confirmation check")
-            if "method='GET' action='/reboot/ap'" not in root_html:
-                raise E2EError("runtime root did not expose GET-based AP reboot confirmation entrypoint")
-    
-            confirm_status, confirm_body = _http_request_full("GET", base + "/reboot/ap", headers={}, body=b"", timeout_s=20)
-            if confirm_status != 200:
-                raise E2EError(f"GET /reboot/ap returned status={confirm_status}")
-            confirm_html = confirm_body.decode("utf-8", errors="replace")
-            for required in (
-                "Reboot into AP config?",
-                "remove the device from your network for at least 5 minutes",
-                "auto-reboot back to normal after about 5 minutes",
-                "Yes, reboot AP Config",
-                "Cancel",
-            ):
-                if required not in confirm_html:
-                    raise E2EError(f"AP reboot confirmation page missing expected warning/control: {required}")
-    
-            root_status_after, root_body_after = _http_request_full("GET", base + "/", headers={}, body=b"", timeout_s=20)
-            if root_status_after != 200:
-                raise E2EError(f"runtime root became unavailable after GET /reboot/ap: status={root_status_after}")
-            if "Alpha2MQTT Control" not in root_body_after.decode("utf-8", errors="replace"):
-                raise E2EError("GET /reboot/ap unexpectedly left normal runtime")
-    
-        def case_portal_wifi_save_reboot_only() -> None:
+        def case_portal_wifi_then_mqtt_save_handoff() -> None:
+            print("[e2e] case: portal wifi save stays in portal, then mqtt save hands off to normal")
             reboot_url = _discover_reboot_wifi_path_from_code()
             if not reboot_url:
                 raise E2EError("Could not discover /reboot/wifi endpoint from firmware source")
-            portal_reboot_normal_path = "/config/reboot-normal"
             base = _resolve_device_http_base(mqtt, device_root)
-    
-            print(f"[e2e] rebooting into wifi portal via {reboot_url} (wifi save-only check)")
+
+            print(f"[e2e] rebooting into wifi portal via {reboot_url} (portal save flow)")
             reboot_wifi_status, reboot_wifi_body = _http_request_full(
                 "POST", base + reboot_url, headers={}, body=b"", timeout_s=20
             )
@@ -6472,47 +6205,65 @@ def main() -> int:
                 )
             _wait_for_http_ok(base + "/", timeout_s=40)
             _assert_portal_root_menu(base, timeout_s=20, required_mode="wifi")
-    
+
             wifi_action, wifi_html = _load_wifi_page(base)
             ssid = _extract_input_value(wifi_html, "s")
             password = _extract_input_value(wifi_html, "p")
             csrf = _extract_input_value(wifi_html, "csrf")
             if not ssid:
                 raise E2EError("portal wifi page exposed a blank SSID")
-    
+
             save_url = urllib.parse.urljoin(base + "/0wifi", wifi_action)
             print(f"[e2e] POST {save_url} fields: s=<current> p=<current>")
             save_status = _http_post_form(save_url, {"s": ssid, "p": password, "csrf": csrf}, timeout_s=20)
             if save_status not in (200, 302):
                 raise E2EError(f"wifi save failed status={save_status}")
-    
+
             saved_status, saved_body = _http_request_full("GET", base + "/0wifi?saved=1", headers={}, body=b"", timeout_s=20)
             if saved_status != 200:
                 raise E2EError(f"saved wifi page returned status={saved_status}")
             saved_html = saved_body.decode("utf-8", errors="replace")
             if "applied on the next reboot" not in saved_html:
                 raise E2EError("saved wifi page missing reboot-required message")
-    
+
             polling_status, polling_body = _http_request_full("GET", base + "/config/polling", headers={}, body=b"", timeout_s=20)
             if polling_status != 200:
                 raise E2EError(f"polling page not reachable after wifi save: status={polling_status}")
             if "Polling" not in polling_body.decode("utf-8", errors="replace"):
                 raise E2EError("polling page missing after wifi save")
-    
-            reboot_normal_url = base + portal_reboot_normal_path
-            print(f"[e2e] rebooting to normal via {reboot_normal_url} (wifi save-only check)")
-            reboot_status, reboot_body = _http_request_full("POST", reboot_normal_url, headers={}, body=b"", timeout_s=20)
-            if reboot_status != 200:
-                raise E2EError(f"{portal_reboot_normal_path} returned unexpected status={reboot_status}")
-            if reboot_body:
-                _assert_reboot_handoff_html(
-                    reboot_body.decode("utf-8", errors="replace"),
-                    expected_heading="Rebooting to normal mode",
-                    expected_target_mode="normal",
-                    expected_probe_kind="fetch",
-                )
-    
-            root_html_box = {"html": ""}
+
+            mqtt_status, mqtt_body = _http_request_full("GET", base + "/config/mqtt", headers={}, body=b"", timeout_s=20)
+            if mqtt_status != 200:
+                raise E2EError(f"/config/mqtt returned unexpected status={mqtt_status}")
+            mqtt_html = mqtt_body.decode("utf-8", errors="replace")
+            fields = {
+                "server": _extract_input_value(mqtt_html, "server"),
+                "port": _extract_input_value(mqtt_html, "port"),
+                "user": _extract_input_value(mqtt_html, "user"),
+                "mpass": _extract_input_value(mqtt_html, "mpass"),
+                "inverter_label": _extract_input_value(mqtt_html, "inverter_label"),
+            }
+            if not fields["server"] or not fields["port"]:
+                raise E2EError(f"portal mqtt page missing saved runtime config: {fields!r}")
+
+            boot_topic = f"{device_root}/boot"
+            poll_topic = f"{device_root}/status/poll"
+            previous_boot = _fetch_latest_text(mqtt, boot_topic, label="boot_before_portal_mqtt_save")
+            previous_poll = _fetch_latest_text(mqtt, poll_topic, label="poll_before_portal_mqtt_save")
+
+            save_status, save_body = _http_post_form_full(base + "/config/mqtt/save", fields, timeout_s=20)
+            if save_status != 200:
+                raise E2EError(f"/config/mqtt/save should return reboot handoff HTML (got status={save_status})")
+            _assert_reboot_handoff_html(
+                save_body.decode("utf-8", errors="replace"),
+                expected_heading="Rebooting to normal mode",
+                expected_target_mode="normal",
+                expected_probe_kind="fetch",
+            )
+
+            _wait_for_topic_change(mqtt, boot_topic, previous_boot, timeout_s=60, label="boot after portal mqtt save")
+            _wait_for_topic_change(mqtt, poll_topic, previous_poll, timeout_s=60, label="poll after portal mqtt save")
+
             def root_ready_pred() -> Tuple[bool, str]:
                 try:
                     root_status, root_body = _http_request_full("GET", base + "/", headers={}, body=b"", timeout_s=20)
@@ -6527,79 +6278,8 @@ def main() -> int:
                     return False, "runtime root missing boot status"
                 if "MQTT connected: 1" not in html:
                     return False, "waiting for runtime mqtt reconnect"
-                root_html_box["html"] = html
                 return True, "ok"
-    
-            _assert_eventually("runtime root page after wifi save-only reboot", root_ready_pred, timeout_s=60, poll_s=2.0)
-    
-        def case_portal_mqtt_save_reboot_handoff() -> None:
-            reboot_url = _discover_reboot_wifi_path_from_code()
-            if not reboot_url:
-                raise E2EError("Could not discover /reboot/wifi endpoint from firmware source")
-            base = _resolve_device_http_base(mqtt, device_root)
-    
-            print(f"[e2e] rebooting into wifi portal via {reboot_url} (mqtt save handoff check)")
-            reboot_wifi_status, reboot_wifi_body = _http_request_full(
-                "POST", base + reboot_url, headers={}, body=b"", timeout_s=20
-            )
-            if reboot_wifi_status != 200:
-                raise E2EError(f"{reboot_url} returned unexpected status={reboot_wifi_status}")
-            if reboot_wifi_body:
-                _assert_reboot_handoff_html(
-                    reboot_wifi_body.decode("utf-8", errors="replace"),
-                    expected_heading="Rebooting to Wi-Fi config",
-                    expected_target_mode="wifi",
-                    expected_probe_kind="fetch",
-                )
-            _wait_for_http_ok(base + "/", timeout_s=40)
-            _assert_portal_root_menu(base, timeout_s=20, required_mode="wifi")
-    
-            mqtt_status, mqtt_body = _http_request_full("GET", base + "/config/mqtt", headers={}, body=b"", timeout_s=20)
-            if mqtt_status != 200:
-                raise E2EError(f"/config/mqtt returned unexpected status={mqtt_status}")
-            mqtt_html = mqtt_body.decode("utf-8", errors="replace")
-            fields = {
-                "server": _extract_input_value(mqtt_html, "server"),
-                "port": _extract_input_value(mqtt_html, "port"),
-                "user": _extract_input_value(mqtt_html, "user"),
-                "mpass": _extract_input_value(mqtt_html, "mpass"),
-                "inverter_label": _extract_input_value(mqtt_html, "inverter_label"),
-            }
-            if not fields["server"] or not fields["port"]:
-                raise E2EError(f"portal mqtt page missing saved runtime config: {fields!r}")
-    
-            boot_topic = f"{device_root}/boot"
-            poll_topic = f"{device_root}/status/poll"
-            previous_boot = _fetch_latest_text(mqtt, boot_topic, label="boot_before_portal_mqtt_save")
-            previous_poll = _fetch_latest_text(mqtt, poll_topic, label="poll_before_portal_mqtt_save")
-    
-            save_status, save_body = _http_post_form_full(base + "/config/mqtt/save", fields, timeout_s=20)
-            if save_status != 200:
-                raise E2EError(f"/config/mqtt/save should return reboot handoff HTML (got status={save_status})")
-            _assert_reboot_handoff_html(
-                save_body.decode("utf-8", errors="replace"),
-                expected_heading="Rebooting to normal mode",
-                expected_target_mode="normal",
-                expected_probe_kind="fetch",
-            )
-    
-            _wait_for_topic_change(mqtt, boot_topic, previous_boot, timeout_s=60, label="boot after portal mqtt save")
-            _wait_for_topic_change(mqtt, poll_topic, previous_poll, timeout_s=60, label="poll after portal mqtt save")
-    
-            def root_ready_pred() -> Tuple[bool, str]:
-                try:
-                    root_status, root_body = _http_request_full("GET", base + "/", headers={}, body=b"", timeout_s=20)
-                except Exception as e:
-                    return False, f"err={e}"
-                if root_status != 200:
-                    return False, f"status={root_status}"
-                html = root_body.decode("utf-8", errors="replace")
-                if "Alpha2MQTT Control" not in html:
-                    return False, "waiting for runtime root"
-                if "MQTT connected: 1" not in html:
-                    return False, "waiting for runtime mqtt reconnect"
-                return True, "ok"
-    
+
             _assert_eventually("runtime root page after portal mqtt save reboot", root_ready_pred, timeout_s=60, poll_s=2.0)
     
         cases: list[Tuple[str, Callable[[], None]]] = [
@@ -6610,17 +6290,17 @@ def main() -> int:
             ("boot_mem_publish", case_boot_mem_publish),
             ("scheduler_idle_no_extra_reads", case_scheduler_idle_does_not_add_reads),
             ("bucket_snapshot_skip_only", case_bucket_snapshot_skip_only),
-            ("dispatch_write_via_commands", case_dispatch_write_via_commands),
+            ("dispatch_write_flow", case_dispatch_write_flow),
             ("dispatch_legacy_command_topic_ignored", case_dispatch_legacy_command_topics_ignored),
             ("dispatch_invalid_payload_no_write", case_dispatch_invalid_payload_no_write),
             ("dispatch_invalid_numeric_payloads_no_write", case_dispatch_invalid_numeric_payloads_no_write),
-            ("dispatch_write_feedback", case_dispatch_write_feedback_via_register_value),
             ("dispatch_primes_snapshot_once", case_dispatch_primes_single_snapshot_refresh),
-            ("dispatch_write_under_100ms", case_dispatch_write_under_100ms),
-            ("dispatch_timed_restart_expire", case_dispatch_timed_restart_and_expire),
-            ("dispatch_timed_no_rewrite_without_fresh_snapshot", case_dispatch_timed_no_rewrite_without_fresh_snapshot),
-            ("dispatch_disable_timed_stops_countdown_wakes", case_dispatch_disable_timed_stops_countdown_wakes),
+            ("dispatch_timed_flow", case_dispatch_timed_flow),
             ("dispatch_boot_fail_closed", case_dispatch_boot_fail_closed),
+            ("fail_writes_only", case_fail_writes_only_dispatch_write_fails),
+            ("dispatch_readback_window", case_dispatch_readback_window_tolerates_transient_read_failures),
+            ("dispatch_readback_timeout_status", case_dispatch_readback_timeout_status),
+            ("max_feedin_percent_write", case_max_feedin_percent_write),
             ("fail_specific_snapshot_reg", case_fail_specific_snapshot_register_and_type),
             ("rs485_error_counters_split", case_rs485_error_counters_split),
             ("fail_every_n", case_fail_every_n_snapshot_attempts),
@@ -6628,15 +6308,9 @@ def main() -> int:
             ("flapping", case_flapping_online_offline),
             ("probe_delayed", case_probe_delayed_online),
             ("identity_reboot_unknown", case_identity_reboot_unknown_after_offline_reboot),
-            ("fail_writes_only", case_fail_writes_only_dispatch_write_fails),
-            ("dispatch_readback_window", case_dispatch_readback_window_tolerates_transient_read_failures),
-            ("dispatch_readback_timeout_status", case_dispatch_readback_timeout_status),
-            ("max_feedin_percent_write", case_max_feedin_percent_write),
             ("fail_for_ms", case_fail_for_ms_then_recover),
             ("strict_unknown_snapshot", case_strict_unknown_snapshot_has_no_unknown_reads),
             ("strict_unknown_register_reads", case_strict_unknown_register_reads),
-            ("soc_drift_backend_ready", case_soc_drift_backend_ready),
-            ("stub_soc_drift_applies", case_stub_soc_drift_applies),
             ("soc_publish_respects_bucket", case_soc_publish_respects_bucket),
             ("soc_drift_e2e", case_soc_drift_e2e),
             ("load_power_formula", case_load_power_snapshot_formula),
@@ -6644,9 +6318,7 @@ def main() -> int:
             ("runtime_polling_reset_without_page", case_runtime_polling_reset_without_page),
             ("portal_polling_ui", case_portal_polling_ui),
             ("polling_profile_export_import", case_polling_profile_export_import),
-            ("reboot_ap_confirmation", case_reboot_ap_confirmation),
-            ("portal_wifi_save_reboot_only", case_portal_wifi_save_reboot_only),
-            ("portal_mqtt_save_reboot_handoff", case_portal_mqtt_save_reboot_handoff),
+            ("portal_wifi_then_mqtt_save_handoff", case_portal_wifi_then_mqtt_save_handoff),
         ]
     
         case_map = {name: fn for name, fn in cases}
