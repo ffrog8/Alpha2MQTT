@@ -3322,13 +3322,10 @@ def main() -> int:
                             # treat the status as authoritative.
                             continue
                         return last_status
-                    if not require_queue_advance:
-                        # Non-queued validation failures can race with retained or
-                        # cached status updates from the previous request. Keep
-                        # waiting for the expected terminal status instead of
-                        # treating the first mismatched publish as authoritative.
-                        continue
-                    break
+                    # Dispatch status publishes can lag across requests. Keep waiting
+                    # for the expected terminal status instead of treating the first
+                    # mismatched publish as authoritative for this request.
+                    continue
     
                 current_queued_ms = int(_fetch_poll(mqtt, poll_topic).get("dispatch_request_queued_ms", 0))
                 request_never_queued = current_queued_ms <= baseline_queued_ms

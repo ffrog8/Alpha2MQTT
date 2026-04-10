@@ -102,10 +102,10 @@ def _proc_cmdline(pid: int) -> str:
         raw = b""
     text = raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
     if text:
-        return text[:200]
+        return text
     comm_path = Path("/proc") / str(pid) / "comm"
     try:
-        return comm_path.read_text(encoding="utf-8", errors="replace").strip()[:200]
+        return comm_path.read_text(encoding="utf-8", errors="replace").strip()
     except OSError:
         return "unknown"
 
