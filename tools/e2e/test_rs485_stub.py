@@ -5097,6 +5097,7 @@ def main() -> int:
         if not reboot_url:
             raise E2EError("Could not discover /reboot/wifi endpoint from firmware source")
         base = _resolve_device_http_base(mqtt, device_root)
+        portal_reboot_normal_path = "/config/reboot-normal"
 
         print(f"[e2e] rebooting into wifi portal via {reboot_url} (rs485 baud portal check)")
         reboot_wifi_status, reboot_wifi_body = _http_request_full(
