@@ -89,6 +89,9 @@ struct StatusPollSnapshot {
 	uint32_t rs485ProbeLastAttemptMs;
 	uint32_t rs485ProbeBackoffMs;
 	uint32_t rs485ConnectionEpoch;
+	uint32_t rs485BaudConfigured;
+	uint32_t rs485BaudActual;
+	const char *rs485BaudSync;
 	const char *rs485Backend;
 	bool essSnapshotLastOk;
 	uint32_t essSnapshotAttempts;

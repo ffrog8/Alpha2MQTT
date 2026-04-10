@@ -123,6 +123,8 @@ TEST_CASE("portal config: custom menu html points to mqtt and polling pages")
 	REQUIRE(html != nullptr);
 	CHECK(strstr(html, "/config/mqtt") != nullptr);
 	CHECK(strstr(html, "MQTT Setup") != nullptr);
+	CHECK(strstr(html, "/config/rs485") != nullptr);
+	CHECK(strstr(html, "RS485") != nullptr);
 	CHECK(strstr(html, "/config/polling") != nullptr);
 	CHECK(strstr(html, "Polling") != nullptr);
 }
@@ -134,7 +136,22 @@ TEST_CASE("portal config: sta custom menu html includes wifi, mqtt, and polling 
 	CHECK(strstr(html, "/0wifi") != nullptr);
 	CHECK(strstr(html, "WiFi Setup") != nullptr);
 	CHECK(strstr(html, "/config/mqtt") != nullptr);
+	CHECK(strstr(html, "/config/rs485") != nullptr);
 	CHECK(strstr(html, "/config/polling") != nullptr);
+}
+
+TEST_CASE("portal config: rs485 labels expose auto plus supported numeric baud values")
+{
+	const char *label = nullptr;
+	CHECK(portalRs485BaudLabel(0, &label));
+	CHECK(std::string(label) == "Auto (follow live)");
+	CHECK(portalRs485BaudLabel(9600, &label));
+	CHECK(std::string(label) == "9600");
+	CHECK(portalRs485BaudLabel(115200, &label));
+	CHECK(std::string(label) == "115200");
+	CHECK(portalRs485BaudLabel(19200, &label));
+	CHECK(std::string(label) == "19200");
+	CHECK_FALSE(portalRs485BaudLabel(256000, &label));
 }
 
 TEST_CASE("portal config: reboot-to-normal html includes runtime redirect probe")

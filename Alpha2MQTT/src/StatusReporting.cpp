@@ -343,9 +343,11 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 	out[0] = '\0';
 	char rs485Backend[32];
 	char rs485StubMode[32];
+	char rs485BaudSync[24];
 	char dispatchLastSkipReason[64];
 	if (!appendEscapedJsonString(rs485Backend, sizeof(rs485Backend), snapshot.rs485Backend) ||
 	    !appendEscapedJsonString(rs485StubMode, sizeof(rs485StubMode), snapshot.rs485StubMode) ||
+	    !appendEscapedJsonString(rs485BaudSync, sizeof(rs485BaudSync), snapshot.rs485BaudSync) ||
 	    !appendEscapedJsonString(dispatchLastSkipReason, sizeof(dispatchLastSkipReason), snapshot.dispatchLastSkipReason)) {
 		return false;
 	}
@@ -491,7 +493,10 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		    "\"last_err_code\":%d,"
 		    "\"rs485_probe_last_attempt_ms\":%lu,"
 		    "\"rs485_probe_backoff_ms\":%lu,"
-		    "\"rs485_connection_epoch\":%lu",
+		    "\"rs485_connection_epoch\":%lu,"
+		    "\"rs485_baud_configured\":%lu,"
+		    "\"rs485_baud_actual\":%lu,"
+		    "\"rs485_baud_sync\":\"%s\"",
 		    static_cast<unsigned long>(snapshot.pollOkCount),
 		    static_cast<unsigned long>(snapshot.pollErrCount),
 		    static_cast<unsigned long>(snapshot.rs485ErrorCount),
@@ -503,7 +508,10 @@ buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSiz
 		    snapshot.lastErrCode,
 		    static_cast<unsigned long>(snapshot.rs485ProbeLastAttemptMs),
 		    static_cast<unsigned long>(snapshot.rs485ProbeBackoffMs),
-		    static_cast<unsigned long>(snapshot.rs485ConnectionEpoch))) {
+		    static_cast<unsigned long>(snapshot.rs485ConnectionEpoch),
+		    static_cast<unsigned long>(snapshot.rs485BaudConfigured),
+		    static_cast<unsigned long>(snapshot.rs485BaudActual),
+		    rs485BaudSync)) {
 		return false;
 	}
 #if defined(DEBUG_OVER_SERIAL)
@@ -546,9 +554,11 @@ buildStatusPollJsonCompact(const StatusPollSnapshot &snapshot, char *out, size_t
 	out[0] = '\0';
 	char rs485Backend[32];
 	char rs485StubMode[32];
+	char rs485BaudSync[24];
 	char dispatchLastSkipReason[64];
 	if (!appendEscapedJsonString(rs485Backend, sizeof(rs485Backend), snapshot.rs485Backend) ||
 	    !appendEscapedJsonString(rs485StubMode, sizeof(rs485StubMode), snapshot.rs485StubMode) ||
+	    !appendEscapedJsonString(rs485BaudSync, sizeof(rs485BaudSync), snapshot.rs485BaudSync) ||
 	    !appendEscapedJsonString(dispatchLastSkipReason, sizeof(dispatchLastSkipReason), snapshot.dispatchLastSkipReason)) {
 		return false;
 	}
@@ -638,10 +648,16 @@ buildStatusPollJsonCompact(const StatusPollSnapshot &snapshot, char *out, size_t
 		    used,
 		    ",\"rs485_probe_last_attempt_ms\":%lu,"
 		    "\"rs485_probe_backoff_ms\":%lu,"
-		    "\"rs485_connection_epoch\":%lu}",
+		    "\"rs485_connection_epoch\":%lu,"
+		    "\"rs485_baud_configured\":%lu,"
+		    "\"rs485_baud_actual\":%lu,"
+		    "\"rs485_baud_sync\":\"%s\"}",
 		    static_cast<unsigned long>(snapshot.rs485ProbeLastAttemptMs),
 		    static_cast<unsigned long>(snapshot.rs485ProbeBackoffMs),
-		    static_cast<unsigned long>(snapshot.rs485ConnectionEpoch))) {
+		    static_cast<unsigned long>(snapshot.rs485ConnectionEpoch),
+		    static_cast<unsigned long>(snapshot.rs485BaudConfigured),
+		    static_cast<unsigned long>(snapshot.rs485BaudActual),
+		    rs485BaudSync)) {
 		return false;
 	}
 	return true;
