@@ -720,7 +720,6 @@ static void serviceRs485BaudReconcile(void);
 static bool readLiveRs485Baud(uint32_t &baudOut,
                               modbusRequestAndResponseStatusValues *resultOut,
                               const char **detailOut);
-static void seedMissingConfiguredRs485BaudAfterProbe(void);
 #if RS485_STUB
 static void rs485ApplyStubConnectivityMode(Rs485StubMode mode);
 struct Rs485StubControlRequest;
@@ -1920,7 +1919,6 @@ rs485ProbeTick(void)
 			rs485ConnectState = Rs485ConnectState::Connected;
 			rs485AttemptsInCycle = 0;
 			rs485CycleBackoffMs = kRs485ProbeAttemptDelayMs;
-			seedMissingConfiguredRs485BaudAfterProbe();
 			noteRs485ConnectedEpoch();
 
 			// Now that inverter identity is known, discovery/config can be published under the real HA unique id.
@@ -2546,43 +2544,6 @@ persistConfiguredRs485Baud(uint32_t baud)
 	const bool ok = preferences.putUInt(kPreferenceRs485Baud, baud) == sizeof(uint32_t);
 	preferences.end();
 	return ok;
-}
-
-static bool
-persist_defaults_if_missing_rs485_baud(uint32_t baud)
-{
-	if (!rs485BaudValueSupported(baud)) {
-		return false;
-	}
-	Preferences preferences;
-	preferences.begin(DEVICE_NAME, false);
-	const bool hasKey = preferences.isKey(kPreferenceRs485Baud);
-	const uint32_t storedBaud = preferences.getUInt(kPreferenceRs485Baud, 0);
-	const bool ok = rs485BaudStoredValueUsable(hasKey, storedBaud) ||
-	                preferences.putUInt(kPreferenceRs485Baud, baud) == sizeof(uint32_t);
-	preferences.end();
-	return ok;
-}
-
-static void
-seedMissingConfiguredRs485BaudAfterProbe(void)
-{
-	if (rs485BaudTracker.hasConfiguredBaud || _registerHandler == nullptr || _modBus == nullptr) {
-		return;
-	}
-	uint32_t liveBaud = 0;
-	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
-	const char *detail = "";
-	if (!readLiveRs485Baud(liveBaud, &result, &detail)) {
-		if (result != modbusRequestAndResponseStatusValues::preProcessing) {
-			recordRs485Error(result);
-			noteRs485Error(result, detail);
-		}
-		return;
-	}
-	if (persist_defaults_if_missing_rs485_baud(liveBaud)) {
-		rs485BaudTrackerMarkSeeded(rs485BaudTracker, liveBaud);
-	}
 }
 
 static bool
