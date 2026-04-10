@@ -710,6 +710,7 @@ static uint32_t rs485ProbeLastAttemptMs = 0;
 static Rs485RuntimeReconnectTracker rs485RuntimeReconnect{};
 static Rs485BaudTracker rs485BaudTracker{};
 static uint32_t rs485BaudNextActionAtMs = 0;
+static bool rs485BaudSeedPersistAttempted = false;
 
 static bool rs485TryReadIdentityOnce(void);
 static void rs485ProbeTick(void);
@@ -2544,6 +2545,20 @@ persistConfiguredRs485Baud(uint32_t baud)
 }
 
 static bool
+persist_defaults_if_missing_rs485_baud(uint32_t baud)
+{
+	if (!rs485BaudValueSupported(baud)) {
+		return false;
+	}
+	Preferences preferences;
+	preferences.begin(DEVICE_NAME, false);
+	const bool hasKey = preferences.isKey(kPreferenceRs485Baud);
+	const bool ok = hasKey || preferences.putUInt(kPreferenceRs485Baud, baud) == sizeof(uint32_t);
+	preferences.end();
+	return ok;
+}
+
+static bool
 loadConfiguredRs485Baud(uint32_t &baudOut, bool &hasConfiguredOut)
 {
 	Preferences preferences;
@@ -2633,6 +2648,13 @@ serviceRs485BaudReconcile(void)
 	    !opData.essRs485Connected) {
 		return;
 	}
+	const bool shouldObserveBaud = !rs485BaudTracker.hasConfiguredBaud || rs485BaudTracker.pendingConfirmation ||
+	                               rs485BaudTracker.actualBaud == 0 ||
+	                               rs485BaudTrackerNeedsWriteAttempt(rs485BaudTracker,
+	                                                                rs485RuntimeReconnect.connectionEpoch);
+	if (!shouldObserveBaud) {
+		return;
+	}
 	const uint32_t now = millis();
 	if (static_cast<int32_t>(now - rs485BaudNextActionAtMs) < 0) {
 		return;
@@ -2651,12 +2673,13 @@ serviceRs485BaudReconcile(void)
 	}
 
 	rs485BaudTrackerMarkObserved(rs485BaudTracker, liveBaud);
-	rs485BaudNextActionAtMs = 0;
+	rs485BaudNextActionAtMs = now + kRs485BaudRetryMs;
 
 	if (!rs485BaudTracker.hasConfiguredBaud) {
-		if (persistConfiguredRs485Baud(liveBaud)) {
+		if (!rs485BaudSeedPersistAttempted && persist_defaults_if_missing_rs485_baud(liveBaud)) {
 			rs485BaudTrackerMarkSeeded(rs485BaudTracker, liveBaud);
 		}
+		rs485BaudSeedPersistAttempted = true;
 		return;
 	}
 
@@ -2670,11 +2693,6 @@ serviceRs485BaudReconcile(void)
 	}
 
 	if (!rs485BaudTrackerNeedsWriteAttempt(rs485BaudTracker, rs485RuntimeReconnect.connectionEpoch)) {
-		return;
-	}
-
-	if (rs485BaudTracker.configuredBaud == liveBaud) {
-		rs485BaudTracker.syncState = Rs485BaudSyncState::Synced;
 		return;
 	}
 
