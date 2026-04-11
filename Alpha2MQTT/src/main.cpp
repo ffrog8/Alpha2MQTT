@@ -703,9 +703,13 @@ struct {
 static bool essSnapshotValid = false;
 
 static const unsigned long kKnownBaudRates[] = { 9600, 115200, 19200, 57600, 38400, 14400, 4800 };
+static const unsigned long kRs485RecoveryWriteBauds[] = { 115200, 19200, 9600 };
 static constexpr uint32_t kRs485ProbeAttemptDelayMs = 1000;
 static constexpr uint32_t kRs485ProbeMaxBackoffMs = 15000;
 static constexpr uint32_t kRs485BaudRetryMs = 5000;
+static constexpr uint8_t kRs485RecoveryWritePasses = 3;
+static constexpr uint8_t kRs485RecoveryWritesPerBaud = 3;
+static constexpr uint32_t kRs485RecoveryWriteDelayMs = 10;
 
 enum class Rs485ConnectState : uint8_t {
 	NotStarted = 0,
@@ -717,6 +721,8 @@ enum class Rs485ConnectState : uint8_t {
 static Rs485ConnectState rs485ConnectState = Rs485ConnectState::NotStarted;
 static int rs485BaudIndex = -1;
 static uint8_t rs485AttemptsInCycle = 0;
+static uint8_t rs485IdentityReadFailureCount = 0;
+static bool rs485AutoBaudRecoveryAttempted = false;
 static uint32_t rs485CycleBackoffMs = kRs485ProbeAttemptDelayMs;
 static unsigned long rs485NextAttemptAtMs = 0;
 static unsigned long rs485LockedBaud = 0;
@@ -735,6 +741,10 @@ static void serviceRs485BaudReconcile(void);
 static bool readLiveRs485Baud(uint32_t &baudOut,
                               modbusRequestAndResponseStatusValues *resultOut,
                               const char **detailOut);
+static bool writeConfiguredRs485Baud(uint32_t targetBaud,
+                                     modbusRequestAndResponseStatusValues *resultOut,
+                                     const char **detailOut);
+static bool attemptAutoDefaultRs485BaudRecoverySweep(void);
 #if RS485_STUB
 static void rs485ApplyStubConnectivityMode(Rs485StubMode mode);
 struct Rs485StubControlRequest;
@@ -1423,6 +1433,7 @@ resetRs485ProbeState(unsigned long now)
 {
 	rs485BaudIndex = -1;
 	rs485AttemptsInCycle = 0;
+	rs485IdentityReadFailureCount = 0;
 	rs485CycleBackoffMs = kRs485ProbeAttemptDelayMs;
 	rs485NextAttemptAtMs = now;
 	rs485LockedBaud = 0;
@@ -1931,6 +1942,7 @@ rs485TryReadIdentityOnce(void)
 	if (!applyLiveInverterIdentity(response->dataValueFormatted)) {
 		return false;
 	}
+	rs485IdentityReadFailureCount = 0;
 
 	// Battery type is helpful for diagnostics, but it is not required to establish inverter identity.
 	*response = modbusRequestAndResponse{};
@@ -2024,6 +2036,18 @@ rs485ProbeTick(void)
 			resendAllData = true;
 			return;
 		}
+		rs485IdentityReadFailureCount++;
+		if (rs485ShouldRunAutoBaudRecoverySweep(rs485BaudTracker,
+		                                       rs485RuntimeReconnect.connectionEpoch,
+		                                       rs485IdentityReadFailureCount,
+		                                       rs485AutoBaudRecoveryAttempted)) {
+			rs485AutoBaudRecoveryAttempted = true;
+			if (attemptAutoDefaultRs485BaudRecoverySweep()) {
+				beginRs485RuntimeRediscovery("identity_default_baud_recovery");
+				return;
+			}
+			rs485IdentityReadFailureCount = 0;
+		}
 
 		rs485NextAttemptAtMs = now + rs485CycleBackoffMs;
 		rs485CycleBackoffMs = rs485NextBackoffMs(rs485CycleBackoffMs, kRs485ProbeMaxBackoffMs);
@@ -2066,6 +2090,7 @@ rs485ProbeTick(void)
 
 	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
 		rs485LockedBaud = baud;
+		rs485IdentityReadFailureCount = 0;
 		// Always re-read the live serial after a successful probe. Runtime identity is live-only,
 		// so reconnects must detect an inverter replacement directly from hardware.
 		rs485ConnectState = Rs485ConnectState::ReadingIdentity;
@@ -2736,6 +2761,26 @@ writeConfiguredRs485Baud(uint32_t targetBaud, modbusRequestAndResponseStatusValu
 		*detailOut = response->statusMqttMessage;
 	}
 	return result == modbusRequestAndResponseStatusValues::writeDataRegisterSuccess;
+}
+
+static bool
+attemptAutoDefaultRs485BaudRecoverySweep(void)
+{
+	if (_modBus == nullptr || _registerHandler == nullptr) {
+		return false;
+	}
+	for (uint8_t pass = 0; pass < kRs485RecoveryWritePasses; ++pass) {
+		for (unsigned long baud : kRs485RecoveryWriteBauds) {
+			_modBus->setBaudRate(baud);
+			for (uint8_t attempt = 0; attempt < kRs485RecoveryWritesPerBaud; ++attempt) {
+				if (writeConfiguredRs485Baud(DEFAULT_BAUD_RATE, nullptr, nullptr)) {
+					return true;
+				}
+				delay(kRs485RecoveryWriteDelayMs);
+			}
+		}
+	}
+	return false;
 }
 
 static void

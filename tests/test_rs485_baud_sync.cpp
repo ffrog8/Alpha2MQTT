@@ -93,3 +93,17 @@ TEST_CASE("rs485 baud sync: matching live baud clears pending confirmation as sy
 	CHECK(tracker.syncState == Rs485BaudSyncState::Synced);
 	CHECK(tracker.lastWriteAttemptEpoch == 9);
 }
+
+TEST_CASE("rs485 baud sync: auto mode recovery sweep runs only before the first connected epoch")
+{
+	Rs485BaudTracker tracker{};
+
+	CHECK_FALSE(rs485ShouldRunAutoBaudRecoverySweep(tracker, 0, 3, false));
+	CHECK(rs485ShouldRunAutoBaudRecoverySweep(tracker, 0, 4, false));
+	CHECK_FALSE(rs485ShouldRunAutoBaudRecoverySweep(tracker, 1, 4, false));
+	CHECK_FALSE(rs485ShouldRunAutoBaudRecoverySweep(tracker, 0, 4, true));
+
+	tracker.hasConfiguredBaud = true;
+	tracker.configuredBaud = 115200;
+	CHECK_FALSE(rs485ShouldRunAutoBaudRecoverySweep(tracker, 0, 4, false));
+}

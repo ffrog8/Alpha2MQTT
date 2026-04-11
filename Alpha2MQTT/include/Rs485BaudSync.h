@@ -144,3 +144,13 @@ rs485BaudTrackerMarkConfirmationResult(Rs485BaudTracker &tracker, uint32_t conne
 	tracker.pendingConfirmation = false;
 	tracker.syncState = synced ? Rs485BaudSyncState::Synced : Rs485BaudSyncState::Failed;
 }
+
+static inline bool
+rs485ShouldRunAutoBaudRecoverySweep(const Rs485BaudTracker &tracker,
+                                    uint32_t connectionEpoch,
+                                    uint8_t identityReadFailures,
+                                    bool recoveryAttempted)
+{
+	return !tracker.hasConfiguredBaud && connectionEpoch == 0 && identityReadFailures >= 4 &&
+	       !recoveryAttempted;
+}
