@@ -140,7 +140,7 @@ static bool pendingDispatchRequestSet = false;
 static char *pendingPollingConfigPayload = nullptr;
 constexpr size_t kPendingDeferredControlPayloadSize = 512;
 constexpr size_t kPendingDispatchPayloadSize = 256;
-constexpr size_t kStatusJsonScratchSize = 1024;
+constexpr size_t kStatusJsonScratchSize = MAX_MQTT_PAYLOAD_SIZE;
 // Shared deferred-control payload buffer for small MQTT commands. MQTT pumping is
 // blocked while any deferred command is pending, so stub/entity commands never
 // overlap in this storage.
@@ -167,6 +167,16 @@ struct BootMemPublishState {
 	uint32_t heapPreRs485 = 0;
 	uint32_t heapPostRs485 = 0;
 	uint8_t validMask = 0;
+};
+
+struct BootNetDiagState {
+	uint32_t wifiConnectMs = 0;
+	uint32_t httpStartedMs = 0;
+	uint32_t mqttConnectMs = 0;
+	uint32_t wifiBeginCalls = 0;
+	uint32_t wifiDisconnectsBoot = 0;
+	uint32_t wifiLastDisconnectReasonBoot = 0;
+	bool published = false;
 };
 
 enum PortalStatus : uint8_t {
@@ -271,6 +281,7 @@ bool mqttConfigComplete = false;
 bool mqttRuntimeEnabled = false;
 bool bootEventPublished = false;
 bool bootMemEventPublished = false;
+static BootNetDiagState bootNetDiagState;
 bool inverterReady = false;
 static char g_rediscoveryPreviousSerial[sizeof(deviceSerialNumber)] = "";
 static char g_rediscoveryPreviousHaUniqueId[sizeof(haUniqueId)] = "";
@@ -291,6 +302,10 @@ const uint32_t kMqttCommandWarmupMs = 3000;
 uint32_t wifiReconnectCount = 0;
 uint32_t mqttReconnectCount = 0;
 uint32_t lastMqttConnectMs = 0;
+#if defined(DEBUG_OVER_SERIAL)
+static uint32_t bootWifiReadyTelemetryMs = 0;
+static bool bootWifiReadyTelemetryPending = false;
+#endif
 uint32_t pollOkCount = 0;
 uint32_t pollErrCount = 0;
 uint32_t lastPollMs = 0;
@@ -899,6 +914,7 @@ void updateStatusLed(void);
 void buildDeviceName(void);
 void publishBootEventOncePerBoot(void);
 void publishBootMemEventOncePerBoot(void);
+void publishBootNetEventOncePerBoot(void);
 void setMqttIdentifiersFromSerial(const char *serial);
 void queueStaleInverterDiscoveryClear(const char *deviceId);
 void queueStaleControllerDiscoveryClear(const char *deviceId);
@@ -1450,6 +1466,10 @@ beginRs485RuntimeRediscovery(const char *reason)
 	resetRs485ProbeState(millis());
 	rs485ConnectState = Rs485ConnectState::ProbingBaud;
 	resendAllData = true;
+	// Publish the cleared identity and probing state immediately. Waiting for the next
+	// scheduled status pass allows a fast reprobe to reconnect first, which leaves MQTT
+	// observers stuck on the stale live identity during the loss window.
+	sendStatus(false);
 }
 
 void
@@ -1551,31 +1571,103 @@ publishBootMemEventOncePerBoot(void)
 	}
 }
 
-	#if defined(DEBUG_OVER_SERIAL)
 void
-logHeap(const char *label)
+publishBootNetEventOncePerBoot(void)
 {
-	Serial.print("Heap ");
-	Serial.print(label);
-	Serial.print(": free=");
-	Serial.print(ESP.getFreeHeap());
+	if (bootNetDiagState.published || !_mqtt.connected() || bootNetDiagState.mqttConnectMs == 0) {
+		return;
+	}
+
+	char bootNetTopic[160];
+	char payload[192];
+	StatusBootNetSnapshot snapshot{};
+	snapshot.wifiConnectMs = bootNetDiagState.wifiConnectMs;
+	snapshot.httpStartedMs = bootNetDiagState.httpStartedMs;
+	snapshot.mqttConnectMs = bootNetDiagState.mqttConnectMs;
+	snapshot.wifiBeginCalls = bootNetDiagState.wifiBeginCalls;
+	snapshot.wifiDisconnectsBoot = bootNetDiagState.wifiDisconnectsBoot;
+	snapshot.wifiLastDisconnectReasonBoot = bootNetDiagState.wifiLastDisconnectReasonBoot;
+
+	if (!buildStatusBootNetJson(snapshot, payload, sizeof(payload))) {
+		return;
+	}
+
+	snprintf(bootNetTopic, sizeof(bootNetTopic), "%s/boot/net", deviceName);
+	if (publishTrackedTextPayload(bootNetTopic, payload, MQTT_RETAIN)) {
+		bootNetDiagState.published = true;
+	}
+}
+
+	#if defined(DEBUG_OVER_SERIAL)
+static void
+buildHeapTag(const char *label, char *out, size_t outSize)
+{
+	if (out == nullptr || outSize == 0) {
+		return;
+	}
+	if (label == nullptr) {
+		out[0] = '\0';
+		return;
+	}
+
+	size_t writeIdx = 0;
+	bool lastUnderscore = false;
+	for (size_t i = 0; label[i] != '\0' && writeIdx + 1 < outSize; ++i) {
+		const char ch = label[i];
+		if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) {
+			out[writeIdx++] = ch;
+			lastUnderscore = false;
+			continue;
+		}
+		if (ch >= 'A' && ch <= 'Z') {
+			out[writeIdx++] = static_cast<char>(ch - 'A' + 'a');
+			lastUnderscore = false;
+			continue;
+		}
+		if (!lastUnderscore) {
+			out[writeIdx++] = '_';
+			lastUnderscore = true;
+		}
+	}
+	if (writeIdx > 0 && out[writeIdx - 1] == '_') {
+		--writeIdx;
+	}
+	out[writeIdx] = '\0';
+}
+
+static void
+logHeapAt(const char *label, unsigned long uptimeMs)
+{
+	const size_t freeHeap = ESP.getFreeHeap();
+	size_t maxBlock = 0;
+	unsigned int fragPct = 0;
 #if defined(MP_ESP8266)
-	Serial.print(" max=");
-	Serial.print(ESP.getMaxFreeBlockSize());
-	Serial.print(" frag=");
-	Serial.print(ESP.getHeapFragmentation());
+	maxBlock = ESP.getMaxFreeBlockSize();
+	fragPct = ESP.getHeapFragmentation();
 #endif
-	Serial.println();
+
+	char tag[48];
+	buildHeapTag(label, tag, sizeof(tag));
+
+	char line[176];
+	snprintf(
+		line,
+		sizeof(line),
+		"%lu Heap %s: free=%u max=%u frag=%u tag=%s at_ms=%lu",
+		uptimeMs,
+		label,
+		static_cast<unsigned int>(freeHeap),
+		static_cast<unsigned int>(maxBlock),
+		fragPct,
+		tag,
+		uptimeMs);
+	Serial.println(line);
 }
 
 void
-logHeapFreeOnly(const char *label)
+logHeap(const char *label)
 {
-	Serial.print("Heap ");
-	Serial.print(label);
-	Serial.print(": free=");
-	Serial.print(ESP.getFreeHeap());
-	Serial.println();
+	logHeapAt(label, millis());
 }
 #endif
 
@@ -1879,9 +1971,9 @@ rs485ApplyStubConnectivityMode(Rs485StubMode mode)
 
 	// Online-like stub modes are intended to exercise snapshot and publish behavior directly.
 	// Do not make them depend on the separate baud-probe state machine or issue Modbus reads
-	// from the MQTT callback path. Also avoid forcing the full resend/bootstrap path here:
-	// the immediate status refresh is enough for control acknowledgement, and the first normal
-	// scheduler pass should avoid stacking a second full status burst onto the same transition.
+	// from the MQTT callback path. Instead, mark the runtime for the normal resend path so the
+	// next loop turn can publish one fresh full status/snapshot pass without waiting for the
+	// later scheduled cadence that E2E setup previously had to sit through.
 	if (!inverterSerialKnown()) {
 		primeStubRuntimeInverterIdentity("STUBSN000000000");
 	}
@@ -1894,7 +1986,8 @@ rs485ApplyStubConnectivityMode(Rs485StubMode mode)
 	opData.essRs485Connected = true;
 	essSnapshotValid = false;
 	essSnapshotLastOk = false;
-	rs485StubSkipNextScheduledStatusPublish = true;
+	rs485StubSkipNextScheduledStatusPublish = false;
+	resendAllData = true;
 }
 #endif
 
@@ -1949,7 +2042,7 @@ rs485ProbeTick(void)
 #ifdef DEBUG_OVER_SERIAL
 	snprintf(_debugOutput, sizeof(_debugOutput), "About To Try: %lu", baud);
 	Serial.println(_debugOutput);
-	logHeapFreeOnly("before RS485 probe");
+	logHeap("before RS485 probe");
 #endif
 	recordBootMemStage(BootMemStage::Boot4);
 
@@ -1968,7 +2061,7 @@ rs485ProbeTick(void)
 #endif
 
 #ifdef DEBUG_OVER_SERIAL
-	logHeapFreeOnly("after RS485 probe");
+	logHeap("after RS485 probe");
 #endif
 
 	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
@@ -2158,6 +2251,9 @@ setupHttpControlPlane(void)
 	httpServerRef().on("/reboot/wifi", HTTP_POST, handleRebootWifi);
 	httpServerRef().begin();
 	httpControlPlaneEnabled = true;
+	if (bootNetDiagState.httpStartedMs == 0) {
+		bootNetDiagState.httpStartedMs = millis();
+	}
 #ifdef DEBUG_OVER_SERIAL
 	Serial.println("HTTP control plane started on port 80.");
 #endif
@@ -2777,6 +2873,9 @@ beginWifiStationWithStoredCredentials(void)
 {
 	// Always connect using the firmware-owned credentials rather than any SDK-
 	// persisted station config.
+	if (bootNetDiagState.mqttConnectMs == 0) {
+		bootNetDiagState.wifiBeginCalls++;
+	}
 	WiFi.persistent(false);
 	clearSdkWifiCredentials();
 	WiFi.mode(WIFI_STA);
@@ -7130,14 +7229,14 @@ handlePortalPollingClear(WiFiManager &wifiManager)
  */
 void setup()
 {
-	Serial.begin(9600);
+	Serial.begin(115200);
 #if defined(DEBUG_OVER_SERIAL) || defined(DEBUG_LEVEL2) || defined(DEBUG_OUTPUT_TX_RX)
 	// Boot prints below are unconditional, so keep the serial port initialized even when
 	// higher debug levels are off. This remains a diagnostics-only channel.
 #ifdef DEBUG_OVER_SERIAL
-	logHeapFreeOnly("very-early");
+	logHeap("very-early");
 	diagDelay(100);
-	logHeapFreeOnly("boot");
+	logHeap("boot");
 #endif
 #endif // DEBUG_OVER_SERIAL || DEBUG_LEVEL2 || DEBUG_OUTPUT_TX_RX
 
@@ -7203,6 +7302,10 @@ void setup()
 		strlcpy(wifiLastDisconnectLabel,
 		        wifiDisconnectReasonLabel(wifiLastDisconnectReason),
 		        sizeof(wifiLastDisconnectLabel));
+		if (bootNetDiagState.mqttConnectMs == 0) {
+			bootNetDiagState.wifiDisconnectsBoot++;
+			bootNetDiagState.wifiLastDisconnectReasonBoot = static_cast<uint32_t>(event.reason);
+		}
 #ifdef DEBUG_OVER_SERIAL
 		if (currentBootMode == BootMode::Normal) {
 			Serial.printf("WiFi disconnect reason=%d (%s)\r\n",
@@ -7261,7 +7364,7 @@ void setup()
 #ifdef DEBUG_OVER_SERIAL
 	Serial.printf("Stored boot intent='%s' -> %s\r\n", storedIntent, bootIntentToString(currentBootIntent));
 	Serial.printf("Stored boot mode='%s' -> %s\r\n", storedMode, bootModeToString(currentBootMode));
-	logHeapFreeOnly("after-pref-read");
+	logHeap("after-pref-read");
 #endif
 
 	appConfig.wifiSSID = wifiSsid;
@@ -7357,13 +7460,17 @@ void setup()
 	if (bootPlan.wifiSta) {
 		// Configure WIFI
 #ifdef DEBUG_OVER_SERIAL
-		logHeapFreeOnly("pre-wifi");
+		logHeap("pre-wifi");
 #endif
 		recordBootMemPublishCheckpoint(BootMemPublishCheckpoint::PreWifi);
 		setupWifi(true);
 		lastWifiConnected = true;
 #ifdef DEBUG_OVER_SERIAL
-		logHeapFreeOnly("after WiFi");
+		const unsigned long wifiReadyMs = millis();
+		bootWifiReadyTelemetryMs = wifiReadyMs;
+		bootWifiReadyTelemetryPending = true;
+		logHeapAt("after WiFi", wifiReadyMs);
+		Serial.flush();
 #endif
 		recordBootMemPublishCheckpoint(BootMemPublishCheckpoint::PostWifi);
 		(void)ensureNormalRuntimeBuffers();
@@ -7405,7 +7512,7 @@ void setup()
 			if (_mqttPayload != NULL) {
 				emptyPayload();
 #ifdef DEBUG_OVER_SERIAL
-					logHeapFreeOnly("after MQTT payload");
+					logHeap("after MQTT payload");
 #endif
 					recordBootMemPublishCheckpoint(BootMemPublishCheckpoint::PostMqtt);
 					recordBootMemStage(BootMemStage::Boot2);
@@ -7430,12 +7537,13 @@ void setup()
 			// Connect to MQTT before any RS485 probing so boot intent is observable even if RS485 stalls.
 			mqttReconnect();
 			publishBootEventOncePerBoot();
+			publishBootNetEventOncePerBoot();
 		}
 
 		if (bootPlan.inverter) {
 		// Set up the serial for communicating with the MAX
 #if defined(DEBUG_OVER_SERIAL)
-		logHeapFreeOnly("before RS485 init");
+		logHeap("before RS485 init");
 #endif
 		recordBootMemPublishCheckpoint(BootMemPublishCheckpoint::PreRs485);
 		_modBus = new RS485Handler;
@@ -7465,7 +7573,7 @@ void setup()
 			}
 #endif
 #if defined(DEBUG_OVER_SERIAL)
-			logHeapFreeOnly("after RS485 init");
+			logHeap("after RS485 init");
 #endif
 			recordBootMemPublishCheckpoint(BootMemPublishCheckpoint::PostRs485);
 			recordBootMemStage(BootMemStage::Boot3);
@@ -7498,7 +7606,7 @@ configHandlerSta(void)
 
 #ifdef DEBUG_OVER_SERIAL
 	portalLog("STA portal: connecting to saved WiFi (ssid=%s)", appConfig.wifiSSID.c_str());
-	logHeapFreeOnly("sta-portal-entry");
+	logHeap("sta-portal-entry");
 #endif
 
 	if (appConfig.wifiSSID == "") {
@@ -7736,7 +7844,7 @@ configHandler(void)
 	updateOLED(false, "Web", "config", "active");
 
 #ifdef DEBUG_OVER_SERIAL
-	logHeapFreeOnly("ap-portal-entry");
+	logHeap("ap-portal-entry");
 #endif
 
 #ifdef MP_XIAO_ESP32C6
@@ -9736,6 +9844,9 @@ setupWifi(bool initialConnect)
 	}
 
 	clearWifiFailureTracking();
+	if (bootNetDiagState.wifiConnectMs == 0) {
+		bootNetDiagState.wifiConnectMs = millis();
+	}
 
 	// Output some debug information
 #ifdef DEBUG_OVER_SERIAL
@@ -10405,7 +10516,7 @@ mqttReconnect(void)
 
 #if defined(MP_ESP8266)
 #ifdef DEBUG_OVER_SERIAL
-		logHeapFreeOnly("before WiFi guard");
+		logHeap("before WiFi guard");
 #endif
 		guardPendingAsyncWifiScanBeforeMqttReconnect();
 		if (!shouldStartWifiScan(currentBootMode)) {
@@ -10414,7 +10525,7 @@ mqttReconnect(void)
 #endif
 		}
 #ifdef DEBUG_OVER_SERIAL
-		logHeapFreeOnly("after WiFi guard");
+		logHeap("after WiFi guard");
 #endif
 #endif
 
@@ -10450,12 +10561,19 @@ mqttReconnect(void)
 			if (mqttConnected) {
 #ifdef DEBUG_OVER_SERIAL
 			Serial.println("Connected MQTT");
+			logHeap("after MQTT connect");
+			Serial.flush();
 #endif
+			const uint32_t connectedMs = millis();
+			lastMqttConnectMs = connectedMs;
+			if (bootNetDiagState.mqttConnectMs == 0) {
+				bootNetDiagState.mqttConnectMs = connectedMs;
+			}
 			// Publish boot intent early; RS485 init can stall before periodic status messages.
 			publishBootEventOncePerBoot();
 			publishBootMemEventOncePerBoot();
+			publishBootNetEventOncePerBoot();
 			mqttReconnectCount++;
-			lastMqttConnectMs = millis();
 			lastMqttConnected = true;
 			resendAllData = true;
 			if (pendingWifiDisconnectEvent) {
@@ -10468,6 +10586,15 @@ mqttReconnect(void)
 			}
 
 			subscribed = subscribeMqttReconnectTopics(&inverterSubscriptionsAdded);
+
+#ifdef DEBUG_OVER_SERIAL
+			if (bootWifiReadyTelemetryPending) {
+				logHeapAt("after WiFi", bootWifiReadyTelemetryMs);
+				bootWifiReadyTelemetryPending = false;
+			}
+			logHeapAt("after MQTT connect", lastMqttConnectMs);
+			Serial.flush();
+#endif
 
 			// Subscribe or resubscribe to topics.
 			if (subscribed) {
@@ -14904,16 +15031,17 @@ applyParsedRs485StubControl(const Rs485StubControlRequest &request)
 		rs485StubStatusAckPending = false;
 		publishStatusNow();
 	} else {
-		// Online-like stub transitions still get a lightweight immediate control acknowledgement.
-		// Keep the scheduler cooldown and skip the next full 10 s status pass so the immediate
-		// poll/stub/core acknowledgement does not stack with a second publish burst on the same
-		// transition.
+		// Online-like stub transitions still get a lightweight immediate control acknowledgement,
+		// but E2E and config/set callers should not have to wait for the later scheduled status
+		// cadence. Let the next loop turn run the existing resend/immediate-status path instead
+		// of arming a cooldown that suppresses the fresh full snapshot publish.
 		rs485StubStatusAckPending = true;
-		rs485StubSkipNextScheduledStatusPublish = true;
-		rs485StubControlSchedulerCooldownUntilMs = millis() + 5000U;
+		rs485StubSkipNextScheduledStatusPublish = false;
+		rs485StubControlSchedulerCooldownUntilMs = 0;
 		rs485StubLastOnlineControlMs = millis();
+		resendAllData = true;
 #ifdef DEBUG_OVER_SERIAL
-		Serial.println(F("RS485 stub control online cooldown armed"));
+		Serial.println(F("RS485 stub control online immediate resend armed"));
 #endif
 	}
 }

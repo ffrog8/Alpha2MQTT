@@ -168,6 +168,7 @@ The captive portal has a separate real-device verification script because it dep
 Prerequisites:
 - serial access to the target ESP8266 device
 - the `arduino-cli-build` helper container running and able to access the serial device
+- an ESP8266 serial monitor configured for `115200` if you want to watch the firmware heap telemetry directly during portal and E2E work
 - a Pi reachable over SSH with wired LAN plus a working WiFi interface for joining the ESP AP
 - local-only `.secrets` entries for `PI_HOSTNAME`, `PI_USER`, `PI_SSH_PWD`, `WIFI_SSID`, and `WIFI_PWD`
 - MQTT settings available through `tools/e2e/e2e.local.json`, `tools/e2e/e2e.local.env`, or `.secrets`
@@ -179,6 +180,17 @@ timeout 3600 /home/coder/git/Alpha2MQTT/scripts/e2e_captive_portal.sh
 ```
 
 This test should be run periodically and whenever WiFi, captive portal, boot-mode, or onboarding changes are made.
+
+### RS485 Stub E2E Verification
+The main RS485 stub suite writes a wall-clock main log plus a raw serial sidecar under `tools/e2e/logs/`. The ESP8266 serial path runs at `115200` for the firmware `Heap ...` telemetry during reboots and runtime transitions.
+
+Run it with:
+
+```bash
+timeout 3600 /home/coder/git/Alpha2MQTT/scripts/e2e.sh
+```
+
+The script refreshes `e2e_latest.log` and `e2e_latest.serial.log` symlinks for the current run and prunes E2E log files older than 10 days.
 
 If you enable more telemetry than the selected polling cadence can comfortably sustain, the firmware stays bounded rather than trying to catch up forever. Some values may go stale for a while, and the controller publishes diagnostics so that this is visible instead of silent.
 
@@ -201,6 +213,8 @@ When boot mode is `normal`, the firmware exposes a lightweight HTTP page for req
 The device publishes lightweight retained/status topics for observability:
 
 - `DEVICE_NAME/HA_UNIQUE_ID/boot` (retained): `{"boot_intent":"...","reset_reason":"...","ts_ms":...}`
+- `DEVICE_NAME/HA_UNIQUE_ID/boot/mem` (retained): one-shot boot heap checkpoints for pre/post WiFi, MQTT, and RS485 init.
+- `DEVICE_NAME/HA_UNIQUE_ID/boot/net` (retained): one-shot boot network timings and retry diagnostics: `wifi_connect_ms`, `http_started_ms`, `mqtt_connect_ms`, `wifi_begin_calls`, `wifi_disconnects_boot`, `wifi_last_disconnect_reason_boot`.
 - `DEVICE_NAME/HA_UNIQUE_ID/status` (retained, ~10s): core fields `presence`, `a2mStatus`, `rs485Status`, `gridStatus`, `boot_intent`.
 - `DEVICE_NAME/HA_UNIQUE_ID/status/net` (retained, ~10s): uptime, heap, WiFi RSSI/SSID/IP, WiFi/MQTT state + reconnect counters.
 - `DEVICE_NAME/HA_UNIQUE_ID/status/poll` (retained, ~10s): poll ok/err counts, last poll duration, last ok/err timestamps, last error code, and polling-pressure diagnostics such as backlog and budget exhaustion.

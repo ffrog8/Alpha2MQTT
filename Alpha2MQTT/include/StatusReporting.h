@@ -191,6 +191,15 @@ struct StatusBootMemSnapshot {
 	uint32_t heapPostRs485;
 };
 
+struct StatusBootNetSnapshot {
+	uint32_t wifiConnectMs;
+	uint32_t httpStartedMs;
+	uint32_t mqttConnectMs;
+	uint32_t wifiBeginCalls;
+	uint32_t wifiDisconnectsBoot;
+	uint32_t wifiLastDisconnectReasonBoot;
+};
+
 bool buildStatusCoreJson(const StatusCoreSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusNetJson(const StatusNetSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSize);
@@ -198,3 +207,4 @@ bool buildStatusPollJsonCompact(const StatusPollSnapshot &snapshot, char *out, s
 bool buildStatusStubJson(const StatusStubSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusManualReadJson(const StatusManualReadSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusBootMemJson(const StatusBootMemSnapshot &snapshot, char *out, size_t outSize);
+bool buildStatusBootNetJson(const StatusBootNetSnapshot &snapshot, char *out, size_t outSize);

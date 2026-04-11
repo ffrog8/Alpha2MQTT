@@ -3,6 +3,8 @@
     "verbose": false,
     "trace_http": false,
     "trace_mqtt": false,
+    "serial": "required",
+    "serial_port": "/dev/ttyUSB0",
     "from_case": "",
     "cases": []
   },

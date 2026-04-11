@@ -4,6 +4,7 @@
 
 #include "doctest/doctest.h"
 
+#include "Definitions.h"
 #include "StatusReporting.h"
 
 TEST_CASE("event code names are stable")
@@ -372,6 +373,9 @@ TEST_CASE("status poll compact JSON includes snapshot/dispatch and stub schedule
 
 	char buffer[1536];
 	CHECK(buildStatusPollJsonCompact(snapshot, buffer, sizeof(buffer)));
+	char mqttSizedBuffer[MAX_MQTT_PAYLOAD_SIZE];
+	CHECK(buildStatusPollJsonCompact(snapshot, mqttSizedBuffer, sizeof(mqttSizedBuffer)));
+	CHECK(std::strlen(mqttSizedBuffer) < sizeof(mqttSizedBuffer));
 	std::string payload(buffer);
 
 	CHECK(payload.find("\"inverter_ready\":true") != std::string::npos);
@@ -677,4 +681,29 @@ TEST_CASE("status boot mem JSON builder includes all boot heap checkpoints")
 
 	char tooSmall[64];
 	CHECK_FALSE(buildStatusBootMemJson(snapshot, tooSmall, sizeof(tooSmall)));
+}
+
+TEST_CASE("status boot net JSON builder includes boot network diagnostics")
+{
+	StatusBootNetSnapshot snapshot{};
+	snapshot.wifiConnectMs = 42183;
+	snapshot.httpStartedMs = 42190;
+	snapshot.mqttConnectMs = 42740;
+	snapshot.wifiBeginCalls = 2;
+	snapshot.wifiDisconnectsBoot = 1;
+	snapshot.wifiLastDisconnectReasonBoot = 8;
+
+	char buffer[256];
+	CHECK(buildStatusBootNetJson(snapshot, buffer, sizeof(buffer)));
+
+	std::string payload(buffer);
+	CHECK(payload.find("\"wifi_connect_ms\":42183") != std::string::npos);
+	CHECK(payload.find("\"http_started_ms\":42190") != std::string::npos);
+	CHECK(payload.find("\"mqtt_connect_ms\":42740") != std::string::npos);
+	CHECK(payload.find("\"wifi_begin_calls\":2") != std::string::npos);
+	CHECK(payload.find("\"wifi_disconnects_boot\":1") != std::string::npos);
+	CHECK(payload.find("\"wifi_last_disconnect_reason_boot\":8") != std::string::npos);
+
+	char tooSmall[64];
+	CHECK_FALSE(buildStatusBootNetJson(snapshot, tooSmall, sizeof(tooSmall)));
 }
