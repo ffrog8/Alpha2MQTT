@@ -162,6 +162,8 @@ In practice:
 
 The WiFi/config portal also supports direct polling-config import via the `bucket_map_full` form field on `POST /config/polling/save`. The value is a semicolon-delimited assignment list like `Grid_Power=ten_sec;Battery_Temp=one_min;`. This merges onto the current config and persists the result; omitted entities keep their current bucket. If you want to explicitly remove an entity from polling and HA discovery, assign it `disabled`, for example `Battery_Temp=disabled;`.
 
+The WiFi/config portal also exposes an `RS485` page for persisted baud selection. `Auto` follows the live inverter baud once a real RS485 connection is established. If a unit is left in `Auto` but gets trapped before the first successful identity read after a bad explicit baud change, the firmware now performs one bounded rescue sweep: it tries to write `9600` at `115200`, `19200`, and `9600`, three times each, for up to three passes, then falls back to normal auto-probing.
+
 ### Captive Portal Verification
 The captive portal has a separate real-device verification script because it depends on lab infrastructure that the main RS485 stub E2E suite does not use. The script starts from a true virgin state by fully erasing flash over serial, flashing the latest real firmware, completing onboarding through the AP portal from a remote Pi, and then verifying that the normal-mode WiFi portal can save polling bucket changes.
 
@@ -217,7 +219,7 @@ The device publishes lightweight retained/status topics for observability:
 - `DEVICE_NAME/HA_UNIQUE_ID/boot/net` (retained): one-shot boot network timings and retry diagnostics: `wifi_connect_ms`, `http_started_ms`, `mqtt_connect_ms`, `wifi_begin_calls`, `wifi_disconnects_boot`, `wifi_last_disconnect_reason_boot`.
 - `DEVICE_NAME/HA_UNIQUE_ID/status` (retained, ~10s): core fields `presence`, `a2mStatus`, `rs485Status`, `gridStatus`, `boot_intent`.
 - `DEVICE_NAME/HA_UNIQUE_ID/status/net` (retained, ~10s): uptime, heap, WiFi RSSI/SSID/IP, WiFi/MQTT state + reconnect counters.
-- `DEVICE_NAME/HA_UNIQUE_ID/status/poll` (retained, ~10s): poll ok/err counts, last poll duration, last ok/err timestamps, last error code, and polling-pressure diagnostics such as backlog and budget exhaustion.
+- `DEVICE_NAME/HA_UNIQUE_ID/status/poll` (retained, ~10s): poll ok/err counts, last poll duration, last ok/err timestamps, last error code, polling-pressure diagnostics such as backlog and budget exhaustion, plus RS485 baud observability fields `rs485_baud_configured`, `rs485_baud_actual`, and `rs485_baud_sync`.
 - `DEVICE_NAME/HA_UNIQUE_ID/event` (non-retained): rate-limited fault events like `RS485_TIMEOUT`, `MODBUS_FRAME`, or `POLL_OVERRUN`.
 
 Before live inverter identity is known, the masked HA identity remains `A2M-UNKNOWN` and inverter-scoped discovery/state topics are suppressed.
