@@ -4,6 +4,7 @@
 
 #include "doctest/doctest.h"
 
+#include "Definitions.h"
 #include "StatusReporting.h"
 
 TEST_CASE("event code names are stable")
@@ -372,6 +373,9 @@ TEST_CASE("status poll compact JSON includes snapshot/dispatch and stub schedule
 
 	char buffer[1536];
 	CHECK(buildStatusPollJsonCompact(snapshot, buffer, sizeof(buffer)));
+	char mqttSizedBuffer[MAX_MQTT_PAYLOAD_SIZE];
+	CHECK(buildStatusPollJsonCompact(snapshot, mqttSizedBuffer, sizeof(mqttSizedBuffer)));
+	CHECK(std::strlen(mqttSizedBuffer) < sizeof(mqttSizedBuffer));
 	std::string payload(buffer);
 
 	CHECK(payload.find("\"inverter_ready\":true") != std::string::npos);

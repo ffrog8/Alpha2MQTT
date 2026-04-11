@@ -140,7 +140,7 @@ static bool pendingDispatchRequestSet = false;
 static char *pendingPollingConfigPayload = nullptr;
 constexpr size_t kPendingDeferredControlPayloadSize = 512;
 constexpr size_t kPendingDispatchPayloadSize = 256;
-constexpr size_t kStatusJsonScratchSize = 1024;
+constexpr size_t kStatusJsonScratchSize = MAX_MQTT_PAYLOAD_SIZE;
 // Shared deferred-control payload buffer for small MQTT commands. MQTT pumping is
 // blocked while any deferred command is pending, so stub/entity commands never
 // overlap in this storage.

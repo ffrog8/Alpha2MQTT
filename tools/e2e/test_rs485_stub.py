@@ -125,6 +125,7 @@ CASE_ORDER: tuple[str, ...] = (
     "load_power_formula",
     "polling_config",
     "runtime_polling_reset_without_page",
+    "portal_rs485_baud_reconcile",
     "portal_polling_ui",
     "polling_profile_export_import",
     "portal_wifi_then_mqtt_save_handoff",
@@ -2673,7 +2674,7 @@ def main() -> int:
     ap.add_argument("--serial", choices=("required", "off"), default=default_serial_mode, help="Serial monitor mode for the E2E runner.")
     ap.add_argument("--serial-port", default=default_serial_port, help="Serial device path for the E2E runner.")
     args = ap.parse_args()
-    optional_case_names = ("portal_rs485_baud_reconcile",)
+    optional_case_names: tuple[str, ...] = ()
     if args.list_cases:
         for name in CASE_ORDER:
             print(name)
@@ -2742,6 +2743,7 @@ def main() -> int:
         poll_topic = f"{device_root}{status_poll_suffix}"
         stub_topic = f"{device_root}{status_stub_suffix}"
         status_core_topic = f"{device_root}/status"
+        status_net_topic = f"{device_root}/status/net"
         config_topic = f"{device_root}/config"
         control_topic = f"{device_root}{control_suffix}"
 
@@ -3689,17 +3691,17 @@ def main() -> int:
             with _timed_phase("ensure_clean_suite_baseline"):
                 # The lab device persists fault toggles and polling overrides across runs. Reset them
                 # here so suite startup does not depend on whatever the previous manual/E2E session left behind.
-                # Gate only on live poll readiness. Retained status/stub and config snapshots can lag behind
-                # a manual serial flash or a just-restored runtime and are not authoritative enough to block
-                # the entire suite.
+                # Gate suite startup on live runtime liveness, not on an offline-phase poll snapshot.
+                # After the RS485 baud reconcile merge, the device can legitimately sit in offline/probe
+                # mode after boot while still publishing fresh status/net. The strong online helper below
+                # is the step that should require a fresh good status/poll.
                 try:
                     http_base = _resolve_device_http_base(mqtt, device_root)
                     _ensure_runtime_http_from_portal(http_base)
                 except Exception:
                     pass
-                _drop_cached_topics(mqtt, poll_topic, stub_topic, status_core_topic, config_topic)
-                _fetch_live_json(mqtt, poll_topic, "suite baseline sync poll", timeout_s=20)
-                _fetch_live_json(mqtt, status_core_topic, "suite baseline sync core", timeout_s=20)
+                _drop_cached_topics(mqtt, poll_topic, stub_topic, status_core_topic, status_net_topic, config_topic)
+                _fetch_live_json(mqtt, status_net_topic, "suite baseline sync net", timeout_s=20)
                 ensure_stub_online_backend(
                     '{"mode":"online","soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0}',
                     label="suite baseline",
@@ -4211,12 +4213,15 @@ def main() -> int:
                 "heap_pre_rs485": int(boot_mem.get("heap_pre_rs485", 0)),
                 "heap_post_rs485": int(boot_mem.get("heap_post_rs485", 0)),
             }
+            # The expanded status/MQTT payload budget for RS485 baud diagnostics costs about 1-1.5 KB of
+            # heap through the Wi-Fi/MQTT boot path. Keep explicit floors here so future changes still
+            # have to preserve a healthy boot margin on the ESP8266.
             minimums = {
-                "heap_pre_wifi": 18500,
-                "heap_post_wifi": 17000,
-                "heap_post_mqtt": 12500,
-                "heap_pre_rs485": 10000,
-                "heap_post_rs485": 8000,
+                "heap_pre_wifi": 17500,
+                "heap_post_wifi": 16000,
+                "heap_post_mqtt": 10000,
+                "heap_pre_rs485": 8000,
+                "heap_post_rs485": 7800,
             }
             for key, minimum in minimums.items():
                 actual = checkpoints[key]
@@ -5834,9 +5839,8 @@ def main() -> int:
             )
 
         def case_portal_rs485_baud_reconcile() -> None:
-            # This case is intentionally opt-in rather than part of CASE_ORDER. It
-            # exercises a real persisted RS485 config mutation path, including the
-            # ability to clear back to auto/follow-live mode after testing.
+            # Exercises the persisted RS485 baud portal flow, including explicit
+            # target reconcile and restore back to the prior target/auto-follow state.
             reboot_url = _discover_reboot_wifi_path_from_code()
             if not reboot_url:
                 raise E2EError("Could not discover /reboot/wifi endpoint from firmware source")
@@ -5990,6 +5994,7 @@ def main() -> int:
                     expected_probe_kind="fetch",
                 )
             _assert_eventually("runtime root page after rs485 restore reboot", runtime_root_ready, timeout_s=60, poll_s=2.0)
+            set_mode_and_wait(f'{{"mode":"online","modbus_baud":{restore_baud}}}', ("online",))
 
             def restored_target_pred() -> Tuple[bool, str]:
                 cur_poll = _fetch_poll(mqtt, poll_topic)
@@ -6027,6 +6032,7 @@ def main() -> int:
                     expected_probe_kind="fetch",
                 )
             _assert_eventually("runtime root page after rs485 auto-clear reboot", runtime_root_ready, timeout_s=60, poll_s=2.0)
+            set_mode_and_wait(f'{{"mode":"online","modbus_baud":{restore_baud}}}', ("online",))
 
             def restored_auto_pred() -> Tuple[bool, str]:
                 cur_poll = _fetch_poll(mqtt, poll_topic)
@@ -6721,16 +6727,15 @@ def main() -> int:
             ("load_power_formula", case_load_power_snapshot_formula),
             ("polling_config", case_polling_config_persistence),
             ("runtime_polling_reset_without_page", case_runtime_polling_reset_without_page),
+            ("portal_rs485_baud_reconcile", case_portal_rs485_baud_reconcile),
             ("portal_polling_ui", case_portal_polling_ui),
             ("polling_profile_export_import", case_polling_profile_export_import),
             ("portal_wifi_then_mqtt_save_handoff", case_portal_wifi_then_mqtt_save_handoff),
         ]
 
-        optional_cases: list[Tuple[str, Callable[[], None]]] = [
-            ("portal_rs485_baud_reconcile", case_portal_rs485_baud_reconcile),
-        ]
+        optional_cases: list[Tuple[str, Callable[[], None]]] = []
 
-        case_map = {name: fn for name, fn in cases + optional_cases}
+        case_map = {name: fn for name, fn in cases}
         ordered_names = [name for name, _ in cases]
         if from_case:
             ordered_names = ordered_names[ordered_names.index(from_case):]
