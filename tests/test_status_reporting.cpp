@@ -656,6 +656,82 @@ TEST_CASE("status manual read JSON builder includes deterministic correlation fi
 	CHECK(payload.find("\"value\":\"Unknown (\\\"AL\\\")\\\\path\"") != std::string::npos);
 }
 
+TEST_CASE("status raw read JSON builder includes raw bytes and request metadata")
+{
+	const uint8_t raw[] = {0, 0, 3, 244};
+	StatusRawReadSnapshot snapshot{};
+	snapshot.seq = 7;
+	snapshot.tsMs = 2222;
+	snapshot.requestedReg = 21055;
+	snapshot.requestedBytes = 4;
+	snapshot.functionCode = 3;
+	snapshot.status = "readDataRegisterSuccess";
+	snapshot.rawSize = sizeof(raw);
+	snapshot.raw = raw;
+
+	char buffer[256];
+	CHECK(buildStatusRawReadJson(snapshot, buffer, sizeof(buffer)));
+
+	std::string payload(buffer);
+	CHECK(payload.find("\"seq\":7") != std::string::npos);
+	CHECK(payload.find("\"ts_ms\":2222") != std::string::npos);
+	CHECK(payload.find("\"requested_reg\":21055") != std::string::npos);
+	CHECK(payload.find("\"requested_bytes\":4") != std::string::npos);
+	CHECK(payload.find("\"function_code\":3") != std::string::npos);
+	CHECK(payload.find("\"status\":\"readDataRegisterSuccess\"") != std::string::npos);
+	CHECK(payload.find("\"raw_size\":4") != std::string::npos);
+	CHECK(payload.find("\"raw\":[0,0,3,244]") != std::string::npos);
+	CHECK(payload.find("slave_error_code") == std::string::npos);
+}
+
+TEST_CASE("status raw read JSON builder includes slave error code when present")
+{
+	const uint8_t raw[] = {2};
+	StatusRawReadSnapshot snapshot{};
+	snapshot.seq = 9;
+	snapshot.tsMs = 9876;
+	snapshot.requestedReg = 1077;
+	snapshot.requestedBytes = 2;
+	snapshot.functionCode = 3;
+	snapshot.status = "slaveError";
+	snapshot.rawSize = sizeof(raw);
+	snapshot.raw = raw;
+	snapshot.hasSlaveErrorCode = true;
+	snapshot.slaveErrorCode = 2;
+
+	char buffer[256];
+	CHECK(buildStatusRawReadJson(snapshot, buffer, sizeof(buffer)));
+
+	std::string payload(buffer);
+	CHECK(payload.find("\"status\":\"slaveError\"") != std::string::npos);
+	CHECK(payload.find("\"raw_size\":1") != std::string::npos);
+	CHECK(payload.find("\"raw\":[2]") != std::string::npos);
+	CHECK(payload.find("\"slave_error_code\":2") != std::string::npos);
+}
+
+TEST_CASE("status raw read JSON builder handles worst-case raw payload sizing")
+{
+	uint8_t raw[58];
+	for (size_t i = 0; i < sizeof(raw); ++i) {
+		raw[i] = 255;
+	}
+	StatusRawReadSnapshot snapshot{};
+	snapshot.seq = 4294967295UL;
+	snapshot.tsMs = 4294967295UL;
+	snapshot.requestedReg = 65535;
+	snapshot.requestedBytes = 58;
+	snapshot.functionCode = 3;
+	snapshot.status = "readDataRegisterSuccess";
+	snapshot.rawSize = sizeof(raw);
+	snapshot.raw = raw;
+
+	char tooSmall[256];
+	CHECK_FALSE(buildStatusRawReadJson(snapshot, tooSmall, sizeof(tooSmall)));
+
+	char buffer[768];
+	CHECK(buildStatusRawReadJson(snapshot, buffer, sizeof(buffer)));
+}
+
 TEST_CASE("status boot mem JSON builder includes all boot heap checkpoints")
 {
 	StatusBootMemSnapshot snapshot{};

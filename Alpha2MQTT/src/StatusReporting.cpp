@@ -838,6 +838,68 @@ buildStatusManualReadJson(const StatusManualReadSnapshot &snapshot, char *out, s
 }
 
 bool
+buildStatusRawReadJson(const StatusRawReadSnapshot &snapshot, char *out, size_t outSize)
+{
+	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+	if (snapshot.rawSize > 0 && snapshot.raw == nullptr) {
+		return false;
+	}
+	char escapedStatus[64];
+	if (!appendEscapedJsonString(escapedStatus, sizeof(escapedStatus), snapshot.status)) {
+		return false;
+	}
+	out[0] = '\0';
+	size_t used = 0;
+	if (!appendJsonf(out,
+	                 outSize,
+	                 used,
+	                 "{"
+	                 "\"seq\":%lu,"
+	                 "\"ts_ms\":%lu,"
+	                 "\"requested_reg\":%ld,"
+	                 "\"requested_bytes\":%u,"
+	                 "\"function_code\":%u,"
+	                 "\"status\":\"%s\","
+	                 "\"raw_size\":%u,"
+	                 "\"raw\":[",
+	                 static_cast<unsigned long>(snapshot.seq),
+	                 static_cast<unsigned long>(snapshot.tsMs),
+	                 static_cast<long>(snapshot.requestedReg),
+	                 static_cast<unsigned>(snapshot.requestedBytes),
+	                 static_cast<unsigned>(snapshot.functionCode),
+	                 escapedStatus,
+	                 static_cast<unsigned>(snapshot.rawSize))) {
+		return false;
+	}
+	for (uint8_t i = 0; i < snapshot.rawSize; ++i) {
+		if (!appendJsonf(out,
+		                 outSize,
+		                 used,
+		                 (i == 0) ? "%u" : ",%u",
+		                 static_cast<unsigned>(snapshot.raw[i]))) {
+			return false;
+		}
+	}
+	if (!appendJsonf(out, outSize, used, "]")) {
+		return false;
+	}
+	if (snapshot.hasSlaveErrorCode &&
+	    !appendJsonf(out,
+	                 outSize,
+	                 used,
+	                 ",\"slave_error_code\":%u",
+	                 static_cast<unsigned>(snapshot.slaveErrorCode))) {
+		return false;
+	}
+	if (!appendJsonf(out, outSize, used, "}")) {
+		return false;
+	}
+	return true;
+}
+
+bool
 buildStatusBootMemJson(const StatusBootMemSnapshot &snapshot, char *out, size_t outSize)
 {
 	if (out == nullptr || outSize == 0) {

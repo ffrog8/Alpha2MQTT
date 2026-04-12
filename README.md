@@ -214,15 +214,31 @@ When boot mode is `normal`, the firmware exposes a lightweight HTTP page for req
 ### MQTT status, boot, and events
 The device publishes lightweight retained/status topics for observability:
 
-- `DEVICE_NAME/HA_UNIQUE_ID/boot` (retained): `{"boot_intent":"...","reset_reason":"...","ts_ms":...}`
-- `DEVICE_NAME/HA_UNIQUE_ID/boot/mem` (retained): one-shot boot heap checkpoints for pre/post WiFi, MQTT, and RS485 init.
-- `DEVICE_NAME/HA_UNIQUE_ID/boot/net` (retained): one-shot boot network timings and retry diagnostics: `wifi_connect_ms`, `http_started_ms`, `mqtt_connect_ms`, `wifi_begin_calls`, `wifi_disconnects_boot`, `wifi_last_disconnect_reason_boot`.
-- `DEVICE_NAME/HA_UNIQUE_ID/status` (retained, ~10s): core fields `presence`, `a2mStatus`, `rs485Status`, `gridStatus`, `boot_intent`.
-- `DEVICE_NAME/HA_UNIQUE_ID/status/net` (retained, ~10s): uptime, heap, WiFi RSSI/SSID/IP, WiFi/MQTT state + reconnect counters.
-- `DEVICE_NAME/HA_UNIQUE_ID/status/poll` (retained, ~10s): poll ok/err counts, last poll duration, last ok/err timestamps, last error code, polling-pressure diagnostics such as backlog and budget exhaustion, plus RS485 baud observability fields `rs485_baud_configured`, `rs485_baud_actual`, and `rs485_baud_sync`.
-- `DEVICE_NAME/HA_UNIQUE_ID/event` (non-retained): rate-limited fault events like `RS485_TIMEOUT`, `MODBUS_FRAME`, or `POLL_OVERRUN`.
+- `DEVICE_NAME/boot` (retained): `{"boot_intent":"...","reset_reason":"...","ts_ms":...}`
+- `DEVICE_NAME/boot/mem` (retained): one-shot boot heap checkpoints for pre/post WiFi, MQTT, and RS485 init.
+- `DEVICE_NAME/boot/net` (retained): one-shot boot network timings and retry diagnostics: `wifi_connect_ms`, `http_started_ms`, `mqtt_connect_ms`, `wifi_begin_calls`, `wifi_disconnects_boot`, `wifi_last_disconnect_reason_boot`.
+- `DEVICE_NAME/status` (retained, ~10s): core fields `presence`, `a2mStatus`, `rs485Status`, `gridStatus`, `boot_intent`.
+- `DEVICE_NAME/status/net` (retained, ~10s): uptime, heap, WiFi RSSI/SSID/IP, WiFi/MQTT state + reconnect counters.
+- `DEVICE_NAME/status/poll` (retained, ~10s): poll ok/err counts, last poll duration, last ok/err timestamps, last error code, polling-pressure diagnostics such as backlog and budget exhaustion, plus RS485 baud observability fields `rs485_baud_configured`, `rs485_baud_actual`, and `rs485_baud_sync`.
+- `DEVICE_NAME/event` (non-retained): rate-limited fault events like `RS485_TIMEOUT`, `MODBUS_FRAME`, or `POLL_OVERRUN`.
 
 Before live inverter identity is known, the masked HA identity remains `A2M-UNKNOWN` and inverter-scoped discovery/state topics are suppressed.
+
+### Debug raw register reads
+For device-root diagnostics, the firmware exposes a read-only raw Modbus read surface. This is a debug transport, not a Home Assistant entity topic.
+
+- Request topic (non-retained): `DEVICE_NAME/debug/raw_read/set`
+- Response topic (retained): `DEVICE_NAME/status/raw_read`
+- Preferred payload: `{"register":21055,"bytes":4}`
+- Backward-compatible aliases: `{"registerAddress":"0x523F","dataBytes":4}`
+
+Validation rules:
+
+- `bytes` must be even.
+- `bytes` must be at least `2`.
+- `bytes` must be at most `58`.
+
+The response includes `seq`, `ts_ms`, `requested_reg`, `requested_bytes`, `function_code`, `status`, `raw_size`, and `raw`. When the inverter returns a Modbus slave error and an exception code is available, the payload also includes `slave_error_code`.
 
 ### What you will see
 - Once your Alpha2MQTT device is working, in Home Assistant go to Settings->Devices & Services->Integrations->MQTT->devices

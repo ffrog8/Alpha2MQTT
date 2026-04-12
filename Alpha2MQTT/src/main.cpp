@@ -134,6 +134,7 @@ static bool pendingPollingConfigSet = false;
 static bool pendingPollingConfigPublish = false;
 static bool pollingConfigLoadedFromStorage = false;
 static bool pendingRs485StubControlSet = false;
+static bool pendingRawReadSet = false;
 static bool pendingEntityCommandSet = false;
 static mqttEntityId pendingEntityCommandId = mqttEntityId::entityRegNum;
 static bool pendingDispatchRequestSet = false;
@@ -141,6 +142,8 @@ static char *pendingPollingConfigPayload = nullptr;
 constexpr size_t kPendingDeferredControlPayloadSize = 512;
 constexpr size_t kPendingDispatchPayloadSize = 256;
 constexpr size_t kStatusJsonScratchSize = MAX_MQTT_PAYLOAD_SIZE;
+constexpr uint16_t kRawReadResponseOverheadBytes = 6;
+constexpr uint16_t kRawReadMaxBytes = MAX_FRAME_SIZE - kRawReadResponseOverheadBytes;
 // Shared deferred-control payload buffer for small MQTT commands. MQTT pumping is
 // blocked while any deferred command is pending, so stub/entity commands never
 // overlap in this storage.
@@ -150,6 +153,7 @@ static char *pendingDispatchPayload = nullptr;
 // Keep one shared scratch buffer instead of reserving multiple independent publish buffers.
 static char *g_statusJsonScratch = nullptr;
 static uint32_t manualRegisterReadSeq = 0;
+static uint32_t rawRegisterReadSeq = 0;
 constexpr uint8_t kDeferredMqttDrainMaxIterations = 16;
 
 enum class BootMemPublishCheckpoint : uint8_t {
@@ -14283,6 +14287,43 @@ publishManualRegisterReadStatus(int32_t requestedReg, const modbusRequestAndResp
 }
 
 static void
+publishRawRegisterReadStatus(int32_t requestedReg,
+                             uint16_t requestedBytes,
+                             const modbusRequestAndResponse &response,
+                             const char *statusOverride = nullptr)
+{
+	if (!ensureStatusJsonScratch()) {
+		return;
+	}
+	char rawReadTopic[160];
+	StatusRawReadSnapshot snapshot{};
+	snapshot.seq = ++rawRegisterReadSeq;
+	snapshot.tsMs = millis();
+	snapshot.requestedReg = requestedReg;
+	snapshot.requestedBytes = requestedBytes;
+	snapshot.functionCode = MODBUS_FN_READDATAREGISTER;
+	snapshot.status = (statusOverride != nullptr) ? statusOverride : response.statusMqttMessage;
+	snapshot.rawSize = response.dataSize;
+	snapshot.raw = response.data;
+	if (snapshot.status != nullptr &&
+	    strcmp(snapshot.status, MODBUS_REQUEST_AND_RESPONSE_ERROR_MQTT_DESC) == 0 &&
+	    response.dataSize > 0) {
+		snapshot.hasSlaveErrorCode = true;
+		snapshot.slaveErrorCode =
+			(response.dataSize >= 2)
+				? static_cast<uint16_t>((static_cast<uint16_t>(response.data[0]) << 8) | response.data[1])
+				: static_cast<uint16_t>(response.data[0]);
+	}
+	snprintf(rawReadTopic, sizeof(rawReadTopic), "%s/raw_read", statusTopic);
+	if (buildStatusRawReadJson(snapshot, g_statusJsonScratch, kStatusJsonScratchSize)) {
+		if (_mqtt.publish(rawReadTopic, g_statusJsonScratch, true)) {
+			noteMqttActivityPulse();
+		}
+		maybeYield();
+	}
+}
+
+static void
 publishManualRegisterReadState(int32_t requestedReg)
 {
 #ifdef DEBUG_OVER_SERIAL
@@ -14782,6 +14823,218 @@ servicePendingRs485StubControlInLoop(void)
 	return true;
 }
 
+struct RawReadRequest {
+	int32_t requestedReg = -1;
+	int32_t requestedBytes = 0;
+	bool hasRegister = false;
+	bool hasBytes = false;
+};
+
+static bool
+isPayloadTokenChar(char ch)
+{
+	return (ch >= '0' && ch <= '9') ||
+	       (ch >= 'A' && ch <= 'Z') ||
+	       (ch >= 'a' && ch <= 'z') ||
+	       ch == '_';
+}
+
+static bool
+isRawReadFieldTerminator(char ch)
+{
+	return ch == '\0' || ch == ',' || ch == '}' || ch == ']' ||
+	       std::isspace(static_cast<unsigned char>(ch));
+}
+
+static bool
+findPayloadFieldValue(const char *payload, const char *key, const char **valueStartOut, bool &quotedOut)
+{
+	if (payload == nullptr || key == nullptr || valueStartOut == nullptr) {
+		return false;
+	}
+
+	const size_t keyLen = strlen(key);
+	const char *search = payload;
+	while (const char *pos = strstr(search, key)) {
+		const char prev = (pos == payload) ? '\0' : pos[-1];
+		const char next = pos[keyLen];
+		if ((pos == payload || !isPayloadTokenChar(prev)) &&
+		    (next == '\0' || !isPayloadTokenChar(next))) {
+			pos += keyLen;
+			if (*pos == '"') {
+				pos++;
+			}
+			while (*pos != '\0' &&
+			       (*pos == ':' || *pos == '=' ||
+			        std::isspace(static_cast<unsigned char>(*pos)))) {
+				pos++;
+			}
+			if (*pos == '\0') {
+				return false;
+			}
+			quotedOut = (*pos == '"');
+			if (quotedOut) {
+				pos++;
+			}
+			if (*pos == '\0') {
+				return false;
+			}
+			*valueStartOut = pos;
+			return true;
+		}
+		search = pos + keyLen;
+	}
+	return false;
+}
+
+static bool
+parseRawReadDecimalField(const char *payload, const char *key, int32_t &out)
+{
+	const char *valueStart = nullptr;
+	bool quoted = false;
+	if (!findPayloadFieldValue(payload, key, &valueStart, quoted)) {
+		return false;
+	}
+
+	char *endPtr = nullptr;
+	errno = 0;
+	const long parsed = strtol(valueStart, &endPtr, 10);
+	if (errno != 0 || endPtr == valueStart || parsed < INT32_MIN || parsed > INT32_MAX) {
+		return false;
+	}
+	if (quoted) {
+		if (*endPtr != '"') {
+			return false;
+		}
+		endPtr++;
+	}
+	if (!isRawReadFieldTerminator(*endPtr)) {
+		return false;
+	}
+	out = static_cast<int32_t>(parsed);
+	return true;
+}
+
+static bool
+parseRawReadHexField(const char *payload, const char *key, uint16_t &out)
+{
+	const char *valueStart = nullptr;
+	bool quoted = false;
+	if (!findPayloadFieldValue(payload, key, &valueStart, quoted)) {
+		return false;
+	}
+	if (valueStart[0] == '0' && (valueStart[1] == 'x' || valueStart[1] == 'X')) {
+		valueStart += 2;
+	}
+	if (!std::isxdigit(static_cast<unsigned char>(*valueStart))) {
+		return false;
+	}
+
+	char *endPtr = nullptr;
+	errno = 0;
+	const unsigned long parsed = strtoul(valueStart, &endPtr, 16);
+	if (errno != 0 || endPtr == valueStart || parsed > UINT16_MAX) {
+		return false;
+	}
+	if (quoted) {
+		if (*endPtr != '"') {
+			return false;
+		}
+		endPtr++;
+	}
+	if (!isRawReadFieldTerminator(*endPtr)) {
+		return false;
+	}
+	out = static_cast<uint16_t>(parsed);
+	return true;
+}
+
+static bool
+parseRawReadRequestPayload(const char *payload, RawReadRequest &request)
+{
+	request = RawReadRequest{};
+	int32_t intValue = 0;
+	uint16_t hexValue = 0;
+
+	if (parseRawReadDecimalField(payload, "register", intValue)) {
+		request.requestedReg = intValue;
+		request.hasRegister = true;
+	} else if (parseRawReadHexField(payload, "registerAddress", hexValue)) {
+		request.requestedReg = hexValue;
+		request.hasRegister = true;
+	}
+
+	if (parseRawReadDecimalField(payload, "bytes", intValue)) {
+		request.requestedBytes = intValue;
+		request.hasBytes = true;
+	} else if (parseRawReadDecimalField(payload, "dataBytes", intValue)) {
+		request.requestedBytes = intValue;
+		request.hasBytes = true;
+	}
+
+	if (!request.hasRegister || !request.hasBytes) {
+		return false;
+	}
+	if (request.requestedReg < 0 || request.requestedReg > UINT16_MAX) {
+		return false;
+	}
+	if (request.requestedBytes < 2 || request.requestedBytes > kRawReadMaxBytes) {
+		return false;
+	}
+	if ((request.requestedBytes & 1) != 0) {
+		return false;
+	}
+	return true;
+}
+
+static void __attribute__((noinline))
+processPendingRawRead(void)
+{
+	if (!pendingRawReadSet) {
+		return;
+	}
+	if (pendingDeferredControlPayload == nullptr) {
+		pendingRawReadSet = false;
+		return;
+	}
+
+	struct PendingRawReadGuard {
+		~PendingRawReadGuard()
+		{
+			pendingRawReadSet = false;
+			pendingDeferredControlPayload[0] = '\0';
+		}
+	} guard;
+
+	RawReadRequest request{};
+	const bool valid = parseRawReadRequestPayload(pendingDeferredControlPayload, request);
+	const uint16_t requestedBytes = (request.requestedBytes >= 0 && request.requestedBytes <= UINT16_MAX)
+		                               ? static_cast<uint16_t>(request.requestedBytes)
+		                               : 0;
+	if (!valid) {
+		modbusRequestAndResponse invalidResponse{};
+		publishRawRegisterReadStatus(request.requestedReg,
+		                             requestedBytes,
+		                             invalidResponse,
+		                             MODBUS_REQUEST_AND_RESPONSE_INVALID_MQTT_PAYLOAD_MQTT_DESC);
+		return;
+	}
+
+	modbusRequestAndResponse *response = runtimeModbusReadScratch();
+	if (_registerHandler == nullptr || response == nullptr) {
+		modbusRequestAndResponse emptyResponse{};
+		publishRawRegisterReadStatus(request.requestedReg, requestedBytes, emptyResponse);
+		return;
+	}
+
+	*response = modbusRequestAndResponse{};
+	const uint16_t registerCount = static_cast<uint16_t>(requestedBytes / 2U);
+	(void)_registerHandler->readRawRegisterBlock(static_cast<uint16_t>(request.requestedReg),
+	                                             registerCount,
+	                                             response);
+	publishRawRegisterReadStatus(request.requestedReg, requestedBytes, *response);
+}
+
 static void __attribute__((noinline))
 serviceDeferredMqttWork(void)
 {
@@ -14802,6 +15055,10 @@ serviceDeferredMqttWork(void)
 			// Process deferred stub-control publishes from loop() on a dedicated smaller frame.
 			return;
 		}
+		if (pendingRawReadSet) {
+			processPendingRawRead();
+			didWork = true;
+		}
 		if (pendingEntityCommandSet) {
 			processPendingEntityCommand();
 			didWork = true;
@@ -14814,8 +15071,8 @@ serviceDeferredMqttWork(void)
 			serviceAtomicDispatchRequest();
 			didWork = true;
 		}
-		if (pendingPollingConfigSet || pendingRs485StubControlSet || pendingEntityCommandSet ||
-		    pendingDispatchRequestSet) {
+		if (pendingPollingConfigSet || pendingRs485StubControlSet || pendingRawReadSet ||
+		    pendingEntityCommandSet || pendingDispatchRequestSet) {
 			continue;
 		}
 
@@ -15171,6 +15428,25 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 		return;
 	}
 
+	if (topicEqualsDeviceSuffix(topic, "/debug/raw_read/set")) {
+		if (!ensureDeferredControlPayload() ||
+		    !copyLengthDelimitedString(reinterpret_cast<const char *>(message),
+		                              length,
+		                              pendingDeferredControlPayload,
+		                              kPendingDeferredControlPayloadSize)) {
+#ifdef DEBUG_OVER_SERIAL
+			sprintf(_debugOutput, "mqttCallback: bad raw read length: %d", length);
+			Serial.println(_debugOutput);
+#endif
+#ifdef DEBUG_CALLBACKS
+			badCallbacks++;
+#endif // DEBUG_CALLBACKS
+			return;
+		}
+		pendingRawReadSet = true;
+		return;
+	}
+
 #if RS485_STUB
 	if (topicEqualsDeviceSuffix(topic, "/debug/rs485_stub/set")) {
 		Rs485StubControlRequest *request = ensureRs485StubControlRequestScratch();
@@ -15507,6 +15783,20 @@ subscribeMqttReconnectTopics(bool *inverterSubscriptionsAdded)
 	snprintf(subscription,
 	         sizeof(subscription),
 	         "%s/config/set",
+	         deviceName);
+	subscribed = subscribeMqttReconnectTopic(subscribed, subscription);
+#ifdef DEBUG_OVER_SERIAL
+	snprintf(_debugOutput,
+	         sizeof(_debugOutput),
+	         "Subscribed to \"%s\" : %d",
+	         subscription,
+	         subscribed);
+	Serial.println(_debugOutput);
+#endif
+
+	snprintf(subscription,
+	         sizeof(subscription),
+	         "%s/debug/raw_read/set",
 	         deviceName);
 	subscribed = subscribeMqttReconnectTopic(subscribed, subscription);
 #ifdef DEBUG_OVER_SERIAL

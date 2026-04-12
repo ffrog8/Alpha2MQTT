@@ -46,11 +46,15 @@ and the stub-only status topic (stub firmware only):
   <device_root>/status/stub
 and the manual register-read correlation topic:
   <device_root>/status/manual_read
+and the raw debug-read topics:
+  <device_root>/debug/raw_read/set
+  <device_root>/status/raw_read
 and asserts on keys emitted by the firmware:
   rs485_backend, rs485_stub_mode, rs485_stub_fail_remaining,
   ess_snapshot_attempts, ess_snapshot_last_ok,
   dispatch_last_run_ms, dispatch_last_skip_reason,
-  seq, requested_reg, observed_reg, value.
+  seq, requested_reg, observed_reg, value,
+  requested_bytes, function_code, status, raw_size, raw.
 
 Usage
   python3 tools/e2e/test_rs485_stub.py
@@ -120,6 +124,7 @@ CASE_ORDER: tuple[str, ...] = (
     "fail_for_ms",
     "strict_unknown_snapshot",
     "strict_unknown_register_reads",
+    "raw_debug_read",
     "soc_publish_respects_bucket",
     "soc_drift_e2e",
     "load_power_formula",
@@ -795,6 +800,22 @@ def _discover_status_stub_suffix_from_code() -> str:
     if has_stub:
         return "/status/stub"
     raise E2EError("Could not derive status stub topic suffix from firmware main.cpp (is stub status publishing enabled?)")
+
+def _discover_raw_read_control_suffix_from_code() -> str:
+    data = _firmware_main_cpp().read_text(encoding="utf-8", errors="replace")
+    m = re.search(r"\"%s(/debug/raw_read/set)\"", data)
+    if not m:
+        if "/debug/raw_read/set" in data:
+            return "/debug/raw_read/set"
+        raise E2EError("Could not discover raw-read control topic suffix from firmware main.cpp")
+    return m.group(1)
+
+def _discover_status_raw_read_suffix_from_code() -> str:
+    data = _firmware_main_cpp().read_text(encoding="utf-8", errors="replace")
+    has_raw = re.search(r'snprintf\(\s*rawReadTopic\b.*"%s/raw_read"\s*,\s*statusTopic\s*\)', data) is not None
+    if has_raw:
+        return "/status/raw_read"
+    raise E2EError("Could not derive raw-read status topic suffix from firmware main.cpp")
 
 def _discover_register_value(name: str) -> int:
     """
@@ -2187,6 +2208,9 @@ def _fetch_matching_or_latest_json(
 def _fetch_manual_read(mqtt: MqttClient, topic: str) -> dict[str, Any]:
     return _fetch_latest_json(mqtt, topic, label="manual_read")
 
+def _fetch_raw_read(mqtt: MqttClient, topic: str) -> dict[str, Any]:
+    return _fetch_latest_json(mqtt, topic, label="raw_read")
+
 def _fetch_latest_text(mqtt: MqttClient, topic: str, label: str) -> str:
     def inner() -> str:
         mqtt.subscribe(topic, force=True)
@@ -2322,6 +2346,45 @@ def _wait_for_manual_read(
         return parsed
     raise E2EError(f"Timeout waiting for {label} JSON on {manual_topic}. Last observed: {last_observed}")
 
+def _wait_for_raw_read(
+    mqtt: MqttClient,
+    raw_topic: str,
+    *,
+    expected_reg: int,
+    previous_marker: str,
+    timeout_s: int,
+    label: str,
+) -> dict[str, Any]:
+    mqtt.subscribe(raw_topic, force=True)
+    deadline = _monotonic() + timeout_s
+    last_observed = ""
+    while _monotonic() < deadline:
+        try:
+            got_topic, payload = mqtt.wait_for_publish(timeout_s=8.0)
+        except E2EError as e:
+            if "Timeout waiting for MQTT publish" in str(e):
+                continue
+            raise
+        last_observed = f"topic={got_topic} payload={payload!r}"
+        if got_topic != raw_topic:
+            continue
+        try:
+            parsed = _parse_json(payload)
+        except Exception as e:
+            raise E2EError(f"{label} payload was not valid JSON on {raw_topic}: {payload!r} ({e})")
+        requested_reg = parsed.get("requested_reg")
+        try:
+            requested_reg_int = int(requested_reg)
+        except Exception:
+            continue
+        if requested_reg_int != expected_reg:
+            continue
+        marker = json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+        if marker == previous_marker:
+            continue
+        return parsed
+    raise E2EError(f"Timeout waiting for {label} JSON on {raw_topic}. Last observed: {last_observed}")
+
 def _set_register_number_and_wait_state(
     mqtt: MqttClient,
     command_topic: str,
@@ -2401,6 +2464,41 @@ def _select_register_and_wait_manual_read(
     raise E2EError(
         f"Register_Number did not publish status/manual_read for register {reg}; last_err={last_err}"
     )
+
+def _publish_raw_read_and_wait(
+    mqtt: MqttClient,
+    command_topic: str,
+    raw_topic: str,
+    payload_obj: Any,
+    *,
+    expected_reg: int,
+    label: str,
+    timeout_s: int = 30,
+) -> dict[str, Any]:
+    try:
+        previous = _fetch_raw_read(mqtt, raw_topic)
+        previous_marker = json.dumps(previous, sort_keys=True, separators=(",", ":"))
+    except E2EError:
+        previous_marker = ""
+
+    payload_text = payload_obj if isinstance(payload_obj, str) else json.dumps(payload_obj, separators=(",", ":"))
+    deadline = _monotonic() + timeout_s
+    last_err = "no attempts"
+    while _monotonic() < deadline:
+        mqtt.publish(command_topic, payload_text, retain=False)
+        try:
+            return _wait_for_raw_read(
+                mqtt,
+                raw_topic,
+                expected_reg=expected_reg,
+                previous_marker=previous_marker,
+                timeout_s=8,
+                label=label,
+            )
+        except E2EError as e:
+            last_err = str(e)
+        time.sleep(1.0)
+    raise E2EError(f"raw_read did not publish status/raw_read for register {expected_reg}; last_err={last_err}")
 
 def _device_is_latest_stub(
     mqtt: MqttClient,
@@ -2734,25 +2832,31 @@ def main() -> int:
         _announce("connected to MQTT")
 
         control_suffix = _discover_control_suffix_from_code()
+        raw_read_control_suffix = _discover_raw_read_control_suffix_from_code()
         status_poll_suffix = _discover_status_poll_suffix_from_code()
         status_stub_suffix = _discover_status_stub_suffix_from_code()
+        status_raw_read_suffix = _discover_status_raw_read_suffix_from_code()
         _announce("discovering device topic root")
         device_root = _discover_device_topic(mqtt, status_poll_suffix)
         _announce(f"discovered device_root={device_root}")
 
         poll_topic = f"{device_root}{status_poll_suffix}"
         stub_topic = f"{device_root}{status_stub_suffix}"
+        raw_read_topic = f"{device_root}{status_raw_read_suffix}"
         status_core_topic = f"{device_root}/status"
         status_net_topic = f"{device_root}/status/net"
         config_topic = f"{device_root}/config"
         control_topic = f"{device_root}{control_suffix}"
+        raw_read_control_topic = f"{device_root}{raw_read_control_suffix}"
 
         print(f"[e2e] device_root={device_root}")
         print(f"[e2e] poll_topic={poll_topic}")
         print(f"[e2e] stub_topic={stub_topic}")
+        print(f"[e2e] raw_read_topic={raw_read_topic}")
         print(f"[e2e] status_core_topic={status_core_topic}")
         print(f"[e2e] config_topic={config_topic}")
         print(f"[e2e] control_topic={control_topic}")
+        print(f"[e2e] raw_read_control_topic={raw_read_control_topic}")
 
         firmware_path = Path(os.environ.get("FIRMWARE_BIN") or _latest_stub_firmware_path())
         expected_ts = _firmware_build_ts_ms_from_filename(firmware_path)
@@ -3905,6 +4009,12 @@ def main() -> int:
     
         def _manual_read_topic() -> str:
             return f"{device_root}/status/manual_read"
+
+        def _raw_read_topic() -> str:
+            return raw_read_topic
+
+        def _raw_read_command_topic() -> str:
+            return raw_read_control_topic
     
         def case_two_device_discovery() -> None:
             print("[e2e] case: two-device discovery model")
@@ -5040,7 +5150,140 @@ def main() -> int:
                 timeout_s=30,
             )
             return
-    
+
+        def case_raw_debug_read() -> None:
+            print("[e2e] case: debug raw_read MQTT surface")
+            print("[e2e] raw debug read: rebooting to clean baseline")
+            _reboot_normal_and_wait("raw_debug_read")
+            print("[e2e] raw debug read: reacquiring inverter identity")
+            ha_unique = _ensure_online_inverter_identity(
+                "raw debug read baseline",
+                require_fresh_identity=True,
+            )
+            manual_topic = _manual_read_topic()
+            raw_topic = _raw_read_topic()
+            raw_command_topic = _raw_read_command_topic()
+            baseline_payload = '{"mode":"online"}'
+
+            reg_handled = _discover_register_value("REG_INVERTER_HOME_R_INVERTER_TEMP")
+            reg_unknown = 0x523F
+
+            wait_stub_control_applied(
+                baseline_payload,
+                label="raw debug read loose baseline",
+                expect_mode="online",
+                expect_strict_unknown=False,
+                timeout_s=30,
+            )
+
+            manual = _select_register_and_wait_manual_read(
+                mqtt,
+                _command_topic(ha_unique, "Register_Number"),
+                manual_topic,
+                _state_topic(ha_unique, "Register_Number"),
+                reg_handled,
+                label="raw_debug_manual",
+            )
+            try:
+                manual_value = float(str(manual.get("value", "")).strip())
+            except Exception as e:
+                raise E2EError(f"manual read value for register {reg_handled} was not numeric: {manual!r} ({e})")
+
+            preferred = _publish_raw_read_and_wait(
+                mqtt,
+                raw_command_topic,
+                raw_topic,
+                {"register": reg_handled, "bytes": 2},
+                expected_reg=reg_handled,
+                label="raw_debug_preferred",
+            )
+            raw_bytes = preferred.get("raw")
+            if not isinstance(raw_bytes, list) or len(raw_bytes) != 2:
+                raise E2EError(f"preferred raw_read payload missing 2 raw bytes: {preferred!r}")
+            raw_word = (int(raw_bytes[0]) << 8) | int(raw_bytes[1])
+            if (
+                int(preferred.get("requested_bytes", 0)) != 2
+                or int(preferred.get("function_code", 0)) != 3
+                or str(preferred.get("status", "")) != "readDataRegisterSuccess"
+                or int(preferred.get("raw_size", 0)) != 2
+                or abs((raw_word / 10.0) - manual_value) > 0.01
+            ):
+                raise E2EError(
+                    "preferred raw_read did not match manual-read semantics: "
+                    f"payload={preferred!r} manual_value={manual_value}"
+                )
+
+            alias_payload = {"registerAddress": "0x523F", "dataBytes": 4}
+            alias = _publish_raw_read_and_wait(
+                mqtt,
+                raw_command_topic,
+                raw_topic,
+                alias_payload,
+                expected_reg=reg_unknown,
+                label="raw_debug_alias_loose",
+            )
+            alias_raw = alias.get("raw")
+            if (
+                int(alias.get("requested_bytes", 0)) != 4
+                or int(alias.get("function_code", 0)) != 3
+                or str(alias.get("status", "")) != "readDataRegisterSuccess"
+                or int(alias.get("raw_size", 0)) != 4
+                or not isinstance(alias_raw, list)
+                or len(alias_raw) != 4
+            ):
+                raise E2EError(f"legacy alias raw_read did not return 4 raw bytes in loose mode: {alias!r}")
+
+            strict_payload = '{"mode":"online","strict_unknown":1}'
+            wait_stub_control_applied(
+                strict_payload,
+                label="raw debug read strict mode",
+                expect_mode="online",
+                expect_strict_unknown=True,
+                timeout_s=30,
+            )
+            strict = _publish_raw_read_and_wait(
+                mqtt,
+                raw_command_topic,
+                raw_topic,
+                alias_payload,
+                expected_reg=reg_unknown,
+                label="raw_debug_alias_strict",
+            )
+            if (
+                int(strict.get("requested_bytes", 0)) != 4
+                or int(strict.get("function_code", 0)) != 3
+                or str(strict.get("status", "")) != "slaveError"
+                or int(strict.get("raw_size", 0)) != 0
+                or strict.get("raw") != []
+            ):
+                raise E2EError(f"strict raw_read should surface slaveError without firmware-side invalid-register masking: {strict!r}")
+
+            invalid = _publish_raw_read_and_wait(
+                mqtt,
+                raw_command_topic,
+                raw_topic,
+                {"register": reg_unknown, "bytes": 3},
+                expected_reg=reg_unknown,
+                label="raw_debug_invalid",
+            )
+            if (
+                int(invalid.get("requested_bytes", 0)) != 3
+                or int(invalid.get("function_code", 0)) != 3
+                or str(invalid.get("status", "")) != "invalidMQTTPayload"
+                or int(invalid.get("raw_size", 0)) != 0
+                or invalid.get("raw") != []
+            ):
+                raise E2EError(f"invalid raw_read payload did not surface invalidMQTTPayload: {invalid!r}")
+
+            wait_stub_control_applied(
+                baseline_payload,
+                label="raw debug read cleanup",
+                expect_mode="online",
+                expect_strict_unknown=False,
+                timeout_s=30,
+            )
+            return
+
         def case_fail_specific_snapshot_register_and_type() -> None:
             print("[e2e] case: fail specific snapshot register + fail type reporting")
             reg_soc = _discover_register_value("REG_BATTERY_HOME_R_SOC")
@@ -6722,6 +6965,7 @@ def main() -> int:
             ("fail_for_ms", case_fail_for_ms_then_recover),
             ("strict_unknown_snapshot", case_strict_unknown_snapshot_has_no_unknown_reads),
             ("strict_unknown_register_reads", case_strict_unknown_register_reads),
+            ("raw_debug_read", case_raw_debug_read),
             ("soc_publish_respects_bucket", case_soc_publish_respects_bucket),
             ("soc_drift_e2e", case_soc_drift_e2e),
             ("load_power_formula", case_load_power_snapshot_formula),
@@ -6753,6 +6997,7 @@ def main() -> int:
             for label, topic, fetcher in (
                 ("poll", poll_topic, lambda: _fetch_poll(mqtt, poll_topic)),
                 ("stub", stub_topic, lambda: _fetch_stub(mqtt, stub_topic)),
+                ("raw_read", raw_read_topic, lambda: _fetch_raw_read(mqtt, raw_read_topic)),
                 ("core", status_core_topic, lambda: _fetch_status_core(mqtt, status_core_topic)),
                 ("config", config_topic, lambda: _fetch_config(mqtt, config_topic)),
             ):
