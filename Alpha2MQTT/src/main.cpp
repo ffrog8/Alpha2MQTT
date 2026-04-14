@@ -14309,10 +14309,7 @@ publishRawRegisterReadStatus(int32_t requestedReg,
 	    strcmp(snapshot.status, MODBUS_REQUEST_AND_RESPONSE_ERROR_MQTT_DESC) == 0 &&
 	    response.dataSize > 0) {
 		snapshot.hasSlaveErrorCode = true;
-		snapshot.slaveErrorCode =
-			(response.dataSize >= 2)
-				? static_cast<uint16_t>((static_cast<uint16_t>(response.data[0]) << 8) | response.data[1])
-				: static_cast<uint16_t>(response.data[0]);
+		snapshot.slaveErrorCode = static_cast<uint16_t>(response.data[0]);
 	}
 	snprintf(rawReadTopic, sizeof(rawReadTopic), "%s/raw_read", statusTopic);
 	if (buildStatusRawReadJson(snapshot, g_statusJsonScratch, kStatusJsonScratchSize)) {
