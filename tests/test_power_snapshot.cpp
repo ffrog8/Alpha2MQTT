@@ -44,6 +44,90 @@ TEST_CASE("power snapshot helpers populate ESS snapshot metadata with pass ident
 	CHECK(meta.valid);
 }
 
+TEST_CASE("power snapshot build minute buckets aggregate current 1m 5m and 15m windows")
+{
+	PowerSnapshotBuildMinuteBucket buckets[kPowerSnapshotBuildMinuteBucketCount];
+	resetPowerSnapshotBuildMinuteBuckets(buckets, kPowerSnapshotBuildMinuteBucketCount);
+
+	recordPowerSnapshotBuildMinuteSample(buckets,
+	                                     kPowerSnapshotBuildMinuteBucketCount,
+	                                     10 * kPowerSnapshotBuildBucketMinuteMs + 1000,
+	                                     120);
+	recordPowerSnapshotBuildMinuteSample(buckets,
+	                                     kPowerSnapshotBuildMinuteBucketCount,
+	                                     10 * kPowerSnapshotBuildBucketMinuteMs + 5000,
+	                                     180);
+	recordPowerSnapshotBuildMinuteSample(buckets,
+	                                     kPowerSnapshotBuildMinuteBucketCount,
+	                                     8 * kPowerSnapshotBuildBucketMinuteMs + 1000,
+	                                     300);
+	recordPowerSnapshotBuildMinuteSample(buckets,
+	                                     kPowerSnapshotBuildMinuteBucketCount,
+	                                     0 * kPowerSnapshotBuildBucketMinuteMs + 1000,
+	                                     700);
+
+	const uint32_t nowMs = 10 * kPowerSnapshotBuildBucketMinuteMs + 59000;
+	const PowerSnapshotBuildWindowStats oneMinute =
+		aggregatePowerSnapshotBuildWindow(buckets, kPowerSnapshotBuildMinuteBucketCount, nowMs, 1);
+	const PowerSnapshotBuildWindowStats fiveMinutes =
+		aggregatePowerSnapshotBuildWindow(buckets, kPowerSnapshotBuildMinuteBucketCount, nowMs, 5);
+	const PowerSnapshotBuildWindowStats fifteenMinutes =
+		aggregatePowerSnapshotBuildWindow(buckets, kPowerSnapshotBuildMinuteBucketCount, nowMs, 15);
+
+	CHECK(oneMinute.hasData);
+	CHECK(oneMinute.minMs == 120);
+	CHECK(oneMinute.maxMs == 180);
+	CHECK(oneMinute.avgMs == 150);
+	CHECK(oneMinute.count == 2);
+
+	CHECK(fiveMinutes.hasData);
+	CHECK(fiveMinutes.minMs == 120);
+	CHECK(fiveMinutes.maxMs == 300);
+	CHECK(fiveMinutes.avgMs == 200);
+	CHECK(fiveMinutes.count == 3);
+
+	CHECK(fifteenMinutes.hasData);
+	CHECK(fifteenMinutes.minMs == 120);
+	CHECK(fifteenMinutes.maxMs == 700);
+	CHECK(fifteenMinutes.avgMs == 325);
+	CHECK(fifteenMinutes.count == 4);
+}
+
+TEST_CASE("power snapshot build minute buckets overwrite stale slot data cleanly")
+{
+	PowerSnapshotBuildMinuteBucket buckets[kPowerSnapshotBuildMinuteBucketCount];
+	resetPowerSnapshotBuildMinuteBuckets(buckets, kPowerSnapshotBuildMinuteBucketCount);
+
+	recordPowerSnapshotBuildMinuteSample(buckets,
+	                                     kPowerSnapshotBuildMinuteBucketCount,
+	                                     1 * kPowerSnapshotBuildBucketMinuteMs + 1000,
+	                                     140);
+	recordPowerSnapshotBuildMinuteSample(buckets,
+	                                     kPowerSnapshotBuildMinuteBucketCount,
+	                                     16 * kPowerSnapshotBuildBucketMinuteMs + 1000,
+	                                     220);
+
+	const PowerSnapshotBuildWindowStats currentWindow =
+		aggregatePowerSnapshotBuildWindow(buckets,
+		                                  kPowerSnapshotBuildMinuteBucketCount,
+		                                  16 * kPowerSnapshotBuildBucketMinuteMs + 2000,
+		                                  15);
+
+	CHECK(currentWindow.hasData);
+	CHECK(currentWindow.minMs == 220);
+	CHECK(currentWindow.maxMs == 220);
+	CHECK(currentWindow.avgMs == 220);
+	CHECK(currentWindow.count == 1);
+
+	const PowerSnapshotBuildWindowStats staleWindow =
+		aggregatePowerSnapshotBuildWindow(buckets,
+		                                  kPowerSnapshotBuildMinuteBucketCount,
+		                                  32 * kPowerSnapshotBuildBucketMinuteMs + 1000,
+		                                  15);
+	CHECK_FALSE(staleWindow.hasData);
+	CHECK(staleWindow.count == 0);
+}
+
 TEST_CASE("power snapshot helpers coalesce dispatch requests only during snapshot build")
 {
 	CHECK(shouldQueueDispatchRequest(true, false, true));

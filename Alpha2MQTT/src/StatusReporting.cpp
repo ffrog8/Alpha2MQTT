@@ -804,6 +804,29 @@ appendJsonf(char *dest, size_t destSize, size_t &used, const char *fmt, ...)
 	return true;
 }
 
+static bool
+appendPowerSnapshotBuildWindowJson(char *dest,
+                                   size_t destSize,
+                                   size_t &used,
+                                   const char *key,
+                                   const StatusPowerSnapshotBuildWindowSnapshot &window)
+{
+	if (key == nullptr) {
+		return false;
+	}
+	if (!window.hasData) {
+		return appendJsonf(dest, destSize, used, "\"%s\":null", key);
+	}
+	return appendJsonf(dest,
+	                   destSize,
+	                   used,
+	                   "\"%s\":{\"min\":%u,\"max\":%u,\"avg\":%u}",
+	                   key,
+	                   static_cast<unsigned>(window.minMs),
+	                   static_cast<unsigned>(window.maxMs),
+	                   static_cast<unsigned>(window.avgMs));
+}
+
 } // namespace
 
 bool
@@ -954,6 +977,40 @@ buildStatusBootNetJson(const StatusBootNetSnapshot &snapshot, char *out, size_t 
 		static_cast<unsigned long>(snapshot.wifiDisconnectsBoot),
 		static_cast<unsigned long>(snapshot.wifiLastDisconnectReasonBoot));
 	if (written < 0 || static_cast<size_t>(written) >= outSize) {
+		return false;
+	}
+	return true;
+}
+
+bool
+buildStatusPowerSnapshotBuildJson(const StatusPowerSnapshotBuildSnapshot &snapshot,
+                                  char *out,
+                                  size_t outSize)
+{
+	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+	out[0] = '\0';
+	size_t used = 0;
+	if (!appendJsonf(out, outSize, used, "{")) {
+		return false;
+	}
+	if (!appendPowerSnapshotBuildWindowJson(out, outSize, used, "m1", snapshot.oneMinute)) {
+		return false;
+	}
+	if (!appendJsonf(out, outSize, used, ",")) {
+		return false;
+	}
+	if (!appendPowerSnapshotBuildWindowJson(out, outSize, used, "m5", snapshot.fiveMinutes)) {
+		return false;
+	}
+	if (!appendJsonf(out, outSize, used, ",")) {
+		return false;
+	}
+	if (!appendPowerSnapshotBuildWindowJson(out, outSize, used, "m15", snapshot.fifteenMinutes)) {
+		return false;
+	}
+	if (!appendJsonf(out, outSize, used, "}")) {
 		return false;
 	}
 	return true;

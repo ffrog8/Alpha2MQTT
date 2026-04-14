@@ -213,6 +213,19 @@ struct StatusBootNetSnapshot {
 	uint32_t wifiLastDisconnectReasonBoot;
 };
 
+struct StatusPowerSnapshotBuildWindowSnapshot {
+	bool hasData;
+	uint16_t minMs;
+	uint16_t maxMs;
+	uint16_t avgMs;
+};
+
+struct StatusPowerSnapshotBuildSnapshot {
+	StatusPowerSnapshotBuildWindowSnapshot oneMinute;
+	StatusPowerSnapshotBuildWindowSnapshot fiveMinutes;
+	StatusPowerSnapshotBuildWindowSnapshot fifteenMinutes;
+};
+
 bool buildStatusCoreJson(const StatusCoreSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusNetJson(const StatusNetSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSize);
@@ -222,3 +235,6 @@ bool buildStatusManualReadJson(const StatusManualReadSnapshot &snapshot, char *o
 bool buildStatusRawReadJson(const StatusRawReadSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusBootMemJson(const StatusBootMemSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusBootNetJson(const StatusBootNetSnapshot &snapshot, char *out, size_t outSize);
+bool buildStatusPowerSnapshotBuildJson(const StatusPowerSnapshotBuildSnapshot &snapshot,
+                                       char *out,
+                                       size_t outSize);

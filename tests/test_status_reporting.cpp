@@ -783,3 +783,50 @@ TEST_CASE("status boot net JSON builder includes boot network diagnostics")
 	char tooSmall[64];
 	CHECK_FALSE(buildStatusBootNetJson(snapshot, tooSmall, sizeof(tooSmall)));
 }
+
+TEST_CASE("status power snapshot build JSON builder includes 1m 5m and 15m windows")
+{
+	StatusPowerSnapshotBuildSnapshot snapshot{};
+	snapshot.oneMinute.hasData = true;
+	snapshot.oneMinute.minMs = 604;
+	snapshot.oneMinute.maxMs = 711;
+	snapshot.oneMinute.avgMs = 648;
+	snapshot.fiveMinutes.hasData = true;
+	snapshot.fiveMinutes.minMs = 598;
+	snapshot.fiveMinutes.maxMs = 728;
+	snapshot.fiveMinutes.avgMs = 653;
+	snapshot.fifteenMinutes.hasData = true;
+	snapshot.fifteenMinutes.minMs = 592;
+	snapshot.fifteenMinutes.maxMs = 741;
+	snapshot.fifteenMinutes.avgMs = 656;
+
+	char buffer[256];
+	CHECK(buildStatusPowerSnapshotBuildJson(snapshot, buffer, sizeof(buffer)));
+
+	std::string payload(buffer);
+	CHECK(payload.find("\"m1\":{\"min\":604,\"max\":711,\"avg\":648}") != std::string::npos);
+	CHECK(payload.find("\"m5\":{\"min\":598,\"max\":728,\"avg\":653}") != std::string::npos);
+	CHECK(payload.find("\"m15\":{\"min\":592,\"max\":741,\"avg\":656}") != std::string::npos);
+}
+
+TEST_CASE("status power snapshot build JSON builder emits null windows when empty")
+{
+	StatusPowerSnapshotBuildSnapshot snapshot{};
+	snapshot.oneMinute.hasData = false;
+	snapshot.fiveMinutes.hasData = true;
+	snapshot.fiveMinutes.minMs = 500;
+	snapshot.fiveMinutes.maxMs = 700;
+	snapshot.fiveMinutes.avgMs = 600;
+	snapshot.fifteenMinutes.hasData = false;
+
+	char buffer[128];
+	CHECK(buildStatusPowerSnapshotBuildJson(snapshot, buffer, sizeof(buffer)));
+
+	std::string payload(buffer);
+	CHECK(payload.find("\"m1\":null") != std::string::npos);
+	CHECK(payload.find("\"m5\":{\"min\":500,\"max\":700,\"avg\":600}") != std::string::npos);
+	CHECK(payload.find("\"m15\":null") != std::string::npos);
+
+	char tooSmall[32];
+	CHECK_FALSE(buildStatusPowerSnapshotBuildJson(snapshot, tooSmall, sizeof(tooSmall)));
+}

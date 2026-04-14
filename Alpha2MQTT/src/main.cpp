@@ -328,6 +328,9 @@ uint32_t pvMeterCacheHitCount = 0;
 bool essSnapshotLastOk = false;
 uint32_t dispatchLastRunMs = 0;
 char dispatchLastSkipReason[48] = "";
+static PowerSnapshotBuildMinuteBucket powerSnapshotBuildMinuteBuckets[kPowerSnapshotBuildMinuteBucketCount]{};
+static bool powerSnapshotBuildStatusDirty = true;
+static uint32_t powerSnapshotBuildLastPublishedMinuteId = UINT32_MAX;
 static TimedDispatchRuntimeState timedDispatchState;
 static char *g_dispatchRequestStatus = nullptr;
 static bool dispatchRequestStatusDirty = false;
@@ -824,10 +827,12 @@ static void executeGenericPollTransaction(const MqttEntityActiveBucket &bucketPl
 void sendData(void);
 void sendStatus(bool includeEssSnapshot);
 static void populateStatusPollSnapshot(StatusPollSnapshot &poll, bool includeEssSnapshot);
+static void populateStatusPowerSnapshotBuildSnapshot(StatusPowerSnapshotBuildSnapshot &snapshot);
 #if RS485_STUB
 static bool populateStatusStubSnapshot(StatusStubSnapshot &stub);
 #endif
 static bool publishStatusPollSnapshot(const StatusPollSnapshot &poll);
+static bool publishStatusPowerSnapshotBuildSnapshot(const StatusPowerSnapshotBuildSnapshot &snapshot);
 #if RS485_STUB
 static bool publishStatusStubSnapshot(const StatusStubSnapshot &stub);
 static bool publishStubControlStatusNow(bool includeEssSnapshot);
@@ -3264,32 +3269,60 @@ resetPollingConfigToDefaults(void)
 	if (!ensurePortalBucketsScratch()) {
 		return false;
 	}
+	const size_t entityCount = mqttEntitiesCount();
+	if (entityCount == 0 || entityCount > kMqttEntityDescriptorCount) {
+		return false;
+	}
+	BucketId *buckets = g_portalBucketsScratch;
 
 	// A direct reset should win over any earlier deferred config/set payload.
 	pendingPollingConfigSet = false;
 	clearPendingPollingConfigPayload();
 
-	if (!persistUserPollingConfig(kPollIntervalDefaultSeconds, "")) {
+	if (!resetBucketsToCatalogDefaults(buckets, entityCount)) {
+		return false;
+	}
+	size_t persistedOverrideCount = 0;
+	size_t persistedMapLen = 0;
+	if (!portalEstimatePersistedBucketMap(buckets, entityCount, persistedMapLen, persistedOverrideCount)) {
+		return false;
+	}
+	ScopedCharBuffer canonicalMapBuffer((persistedMapLen == 0 ? 0 : persistedMapLen) + 1);
+	if (!canonicalMapBuffer.ok()) {
+		return false;
+	}
+	if (!portalBuildPersistedBucketMap(buckets,
+	                                   entityCount,
+	                                   canonicalMapBuffer.data,
+	                                   canonicalMapBuffer.size,
+	                                   persistedOverrideCount)) {
+		return false;
+	}
+	if (!mqttEntityApplyBuckets(buckets, entityCount)) {
+		return false;
+	}
+	if (!persistUserPollingConfig(kPollIntervalDefaultSeconds, canonicalMapBuffer.data)) {
 		return false;
 	}
 
 	g_portalPollingCacheValid = false;
 	g_portalPollingCacheEntityCount = 0;
 	g_portalPollingCacheIntervalSeconds = kPollIntervalDefaultSeconds;
-	pollingConfigLoadedFromStorage = false;
-	loadPollingConfig();
-	if (!pollingConfigLoadedFromStorage || pollIntervalSeconds != kPollIntervalDefaultSeconds) {
-		return false;
-	}
-
+	pollIntervalSeconds = kPollIntervalDefaultSeconds;
+	recomputeBucketCounts();
 	updatePollingLastChange();
+	pollingConfigLoadedFromStorage = true;
 	// A runtime reset can move entities back to freqDisabled. Clear the current
 	// retained HA discovery surface first so resend only republishes entities that
 	// remain enabled under the default schedule.
 	queueCurrentHaDiscoveryClears();
 	requestHaDataResend();
 	resendAllData = true;
+	// Publish immediately and also queue a loop-owned retry. The inline publish
+	// keeps the existing behavior when it succeeds; the deferred retry covers the
+	// cases where the retained config is otherwise left stale after a live reset.
 	publishPollingConfig();
+	pendingPollingConfigPublish = true;
 	return true;
 }
 
@@ -11647,6 +11680,40 @@ populateStatusPollSnapshot(StatusPollSnapshot &poll, bool includeEssSnapshot)
 	}
 }
 
+static void __attribute__((noinline))
+populateStatusPowerSnapshotBuildSnapshot(StatusPowerSnapshotBuildSnapshot &snapshot)
+{
+	const uint32_t nowMs = millis();
+	const PowerSnapshotBuildWindowStats oneMinute =
+		aggregatePowerSnapshotBuildWindow(powerSnapshotBuildMinuteBuckets,
+		                                  kPowerSnapshotBuildMinuteBucketCount,
+		                                  nowMs,
+		                                  1);
+	const PowerSnapshotBuildWindowStats fiveMinutes =
+		aggregatePowerSnapshotBuildWindow(powerSnapshotBuildMinuteBuckets,
+		                                  kPowerSnapshotBuildMinuteBucketCount,
+		                                  nowMs,
+		                                  5);
+	const PowerSnapshotBuildWindowStats fifteenMinutes =
+		aggregatePowerSnapshotBuildWindow(powerSnapshotBuildMinuteBuckets,
+		                                  kPowerSnapshotBuildMinuteBucketCount,
+		                                  nowMs,
+		                                  15);
+
+	snapshot.oneMinute.hasData = oneMinute.hasData;
+	snapshot.oneMinute.minMs = oneMinute.minMs;
+	snapshot.oneMinute.maxMs = oneMinute.maxMs;
+	snapshot.oneMinute.avgMs = oneMinute.avgMs;
+	snapshot.fiveMinutes.hasData = fiveMinutes.hasData;
+	snapshot.fiveMinutes.minMs = fiveMinutes.minMs;
+	snapshot.fiveMinutes.maxMs = fiveMinutes.maxMs;
+	snapshot.fiveMinutes.avgMs = fiveMinutes.avgMs;
+	snapshot.fifteenMinutes.hasData = fifteenMinutes.hasData;
+	snapshot.fifteenMinutes.minMs = fifteenMinutes.minMs;
+	snapshot.fifteenMinutes.maxMs = fifteenMinutes.maxMs;
+	snapshot.fifteenMinutes.avgMs = fifteenMinutes.avgMs;
+}
+
 #if RS485_STUB
 static bool __attribute__((noinline))
 populateStatusStubSnapshot(StatusStubSnapshot &stub)
@@ -11714,6 +11781,37 @@ publishStatusPollSnapshot(const StatusPollSnapshot &poll)
 #endif
 	maybeYield();
 	return published;
+}
+
+static bool __attribute__((noinline))
+publishStatusPowerSnapshotBuildSnapshot(const StatusPowerSnapshotBuildSnapshot &snapshot)
+{
+	if (!_mqtt.connected() || !ensureStatusJsonScratch()) {
+		return false;
+	}
+
+	const uint32_t currentMinuteId = powerSnapshotBuildMinuteId(millis());
+	if (currentMinuteId != powerSnapshotBuildLastPublishedMinuteId) {
+		powerSnapshotBuildStatusDirty = true;
+	}
+	if (!powerSnapshotBuildStatusDirty) {
+		return true;
+	}
+
+	char powerSnapshotBuildTopic[192];
+	snprintf(powerSnapshotBuildTopic, sizeof(powerSnapshotBuildTopic), "%s/power_snapshot_build", statusTopic);
+	if (!buildStatusPowerSnapshotBuildJson(snapshot, g_statusJsonScratch, kStatusJsonScratchSize)) {
+		return false;
+	}
+
+	RuntimeDiagScope diagScope(RuntimeDiagPhase::StatusPublish, "power_snapshot_build");
+	if (!publishTrackedTextPayload(powerSnapshotBuildTopic, g_statusJsonScratch, MQTT_RETAIN)) {
+		return false;
+	}
+	powerSnapshotBuildStatusDirty = false;
+	powerSnapshotBuildLastPublishedMinuteId = currentMinuteId;
+	maybeYield();
+	return true;
 }
 
 #if RS485_STUB
@@ -11950,6 +12048,9 @@ sendStatus(bool includeEssSnapshot)
 	}
 
 	publishStatusPollSnapshot(poll);
+	StatusPowerSnapshotBuildSnapshot powerSnapshotBuild{};
+	populateStatusPowerSnapshotBuildSnapshot(powerSnapshotBuild);
+	publishStatusPowerSnapshotBuildSnapshot(powerSnapshotBuild);
 
 #if RS485_STUB
 	if (populateStatusStubSnapshot(stub)) {
@@ -13333,6 +13434,11 @@ refreshEssSnapshot(void)
 		powerSnapshotCompletedMs = millis();
 		essPowerSnapshotValid = (powerSnapshotErrors == 0);
 		essPowerSnapshotLastBuildMs = powerSnapshotCompletedMs - powerSnapshotStartedMs;
+		recordPowerSnapshotBuildMinuteSample(powerSnapshotBuildMinuteBuckets,
+		                                     kPowerSnapshotBuildMinuteBucketCount,
+		                                     powerSnapshotCompletedMs,
+		                                     essPowerSnapshotLastBuildMs);
+		powerSnapshotBuildStatusDirty = true;
 		refreshSnapshotWorkingMode(rs485TimedOut, rs485TransportFailure, gotError);
 		{
 			bool essRs485WasConnected = opData.essRs485Connected;
