@@ -1876,11 +1876,11 @@ isMqttPumpBlocked(void)
 		return true;
 	}
 	// PubSubClient dispatches at most one inbound packet per loop() call.
-	// When a deferred config or entity command is already queued for loop(),
-	// stop pumping MQTT so later packets stay queued on the socket instead of
-	// overwriting the single pending slot from callback context.
-	if (pendingPollingConfigSet || pendingRs485StubControlSet || pendingEntityCommandSet ||
-	    pendingDispatchRequestSet) {
+	// When a deferred config, debug control, or entity command is already queued
+	// for loop(), stop pumping MQTT so later packets stay queued on the socket
+	// instead of overwriting the single pending slot from callback context.
+	if (pendingPollingConfigSet || pendingRs485StubControlSet || pendingRawReadSet ||
+	    pendingEntityCommandSet || pendingDispatchRequestSet) {
 		return true;
 	}
 	if (_modBus != nullptr && _modBus->inTransaction()) {
