@@ -3298,12 +3298,26 @@ resetPollingConfigToDefaults(void)
 	                                   persistedOverrideCount)) {
 		return false;
 	}
+	BucketId *originalBuckets = new (std::nothrow) BucketId[entityCount];
+	if (originalBuckets == nullptr) {
+		return false;
+	}
+	if (!mqttEntityCopyBuckets(originalBuckets, entityCount)) {
+		delete[] originalBuckets;
+		return false;
+	}
 	if (!mqttEntityApplyBuckets(buckets, entityCount)) {
+		delete[] originalBuckets;
 		return false;
 	}
 	if (!persistUserPollingConfig(kPollIntervalDefaultSeconds, canonicalMapBuffer.data)) {
+		// Keep the live runtime aligned with persisted config when the NVS write
+		// fails after the defaults have already been applied in memory.
+		(void)mqttEntityApplyBuckets(originalBuckets, entityCount);
+		delete[] originalBuckets;
 		return false;
 	}
+	delete[] originalBuckets;
 
 	g_portalPollingCacheValid = false;
 	g_portalPollingCacheEntityCount = 0;
