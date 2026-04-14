@@ -18,6 +18,7 @@ add_executable(host_tests
     tests/test_mqtt_entities.cpp
     tests/test_portal_config.cpp
     tests/test_status_reporting.cpp
+    tests/test_raw_read_request.cpp
     tests/test_power_snapshot.cpp
     tests/test_rs485_stub_logic.cpp
     tests/test_rs485_runtime_reconnect.cpp
@@ -42,6 +43,7 @@ add_executable(host_tests
     Alpha2MQTT/src/PollingConfig.cpp
     Alpha2MQTT/src/PortalConfig.cpp
     Alpha2MQTT/src/StatusReporting.cpp
+    Alpha2MQTT/src/RawReadRequest.cpp
     Alpha2MQTT/src/MemoryHealth.cpp
     Alpha2MQTT/src/StatusLedPolicy.cpp
     Alpha2MQTT/src/RebootRequest.cpp

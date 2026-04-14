@@ -181,6 +181,19 @@ struct StatusManualReadSnapshot {
 	const char *value;
 };
 
+struct StatusRawReadSnapshot {
+	uint32_t seq;
+	uint32_t tsMs;
+	int32_t requestedReg;
+	uint16_t requestedBytes;
+	uint8_t functionCode;
+	const char *status;
+	uint8_t rawSize;
+	const uint8_t *raw;
+	bool hasSlaveErrorCode;
+	uint16_t slaveErrorCode;
+};
+
 struct StatusBootMemSnapshot {
 	uint64_t fwBuildTsMs;
 	uint32_t tsMs;
@@ -206,5 +219,6 @@ bool buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t o
 bool buildStatusPollJsonCompact(const StatusPollSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusStubJson(const StatusStubSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusManualReadJson(const StatusManualReadSnapshot &snapshot, char *out, size_t outSize);
+bool buildStatusRawReadJson(const StatusRawReadSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusBootMemJson(const StatusBootMemSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusBootNetJson(const StatusBootNetSnapshot &snapshot, char *out, size_t outSize);

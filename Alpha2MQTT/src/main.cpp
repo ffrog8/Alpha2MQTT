@@ -40,6 +40,7 @@ First, go and customise options at the top of Definitions.h!
 #include "../include/DiscoveryModel.h"
 #include "../include/DispatchTiming.h"
 #include "../include/DispatchRequest.h"
+#include "../include/RawReadRequest.h"
 #include "../include/Rs485ProbeLogic.h"
 #include "../include/Rs485RuntimeReconnect.h"
 #include "../include/SchedulerReadPolicy.h"
@@ -134,6 +135,7 @@ static bool pendingPollingConfigSet = false;
 static bool pendingPollingConfigPublish = false;
 static bool pollingConfigLoadedFromStorage = false;
 static bool pendingRs485StubControlSet = false;
+static bool pendingRawReadSet = false;
 static bool pendingEntityCommandSet = false;
 static mqttEntityId pendingEntityCommandId = mqttEntityId::entityRegNum;
 static bool pendingDispatchRequestSet = false;
@@ -150,6 +152,7 @@ static char *pendingDispatchPayload = nullptr;
 // Keep one shared scratch buffer instead of reserving multiple independent publish buffers.
 static char *g_statusJsonScratch = nullptr;
 static uint32_t manualRegisterReadSeq = 0;
+static uint32_t rawRegisterReadSeq = 0;
 constexpr uint8_t kDeferredMqttDrainMaxIterations = 16;
 
 enum class BootMemPublishCheckpoint : uint8_t {
@@ -1872,11 +1875,11 @@ isMqttPumpBlocked(void)
 		return true;
 	}
 	// PubSubClient dispatches at most one inbound packet per loop() call.
-	// When a deferred config or entity command is already queued for loop(),
-	// stop pumping MQTT so later packets stay queued on the socket instead of
-	// overwriting the single pending slot from callback context.
-	if (pendingPollingConfigSet || pendingRs485StubControlSet || pendingEntityCommandSet ||
-	    pendingDispatchRequestSet) {
+	// When a deferred config, debug control, or entity command is already queued
+	// for loop(), stop pumping MQTT so later packets stay queued on the socket
+	// instead of overwriting the single pending slot from callback context.
+	if (pendingPollingConfigSet || pendingRs485StubControlSet || pendingRawReadSet ||
+	    pendingEntityCommandSet || pendingDispatchRequestSet) {
 		return true;
 	}
 	if (_modBus != nullptr && _modBus->inTransaction()) {
@@ -14283,6 +14286,40 @@ publishManualRegisterReadStatus(int32_t requestedReg, const modbusRequestAndResp
 }
 
 static void
+publishRawRegisterReadStatus(int32_t requestedReg,
+                             uint16_t requestedBytes,
+                             const modbusRequestAndResponse &response,
+                             const char *statusOverride = nullptr)
+{
+	if (!ensureStatusJsonScratch()) {
+		return;
+	}
+	char rawReadTopic[160];
+	StatusRawReadSnapshot snapshot{};
+	snapshot.seq = ++rawRegisterReadSeq;
+	snapshot.tsMs = millis();
+	snapshot.requestedReg = requestedReg;
+	snapshot.requestedBytes = requestedBytes;
+	snapshot.functionCode = MODBUS_FN_READDATAREGISTER;
+	snapshot.status = (statusOverride != nullptr) ? statusOverride : response.statusMqttMessage;
+	snapshot.rawSize = response.dataSize;
+	snapshot.raw = response.data;
+	if (snapshot.status != nullptr &&
+	    strcmp(snapshot.status, MODBUS_REQUEST_AND_RESPONSE_ERROR_MQTT_DESC) == 0 &&
+	    response.dataSize > 0) {
+		snapshot.hasSlaveErrorCode = true;
+		snapshot.slaveErrorCode = static_cast<uint16_t>(response.data[0]);
+	}
+	snprintf(rawReadTopic, sizeof(rawReadTopic), "%s/raw_read", statusTopic);
+	if (buildStatusRawReadJson(snapshot, g_statusJsonScratch, kStatusJsonScratchSize)) {
+		if (_mqtt.publish(rawReadTopic, g_statusJsonScratch, true)) {
+			noteMqttActivityPulse();
+		}
+		maybeYield();
+	}
+}
+
+static void
 publishManualRegisterReadState(int32_t requestedReg)
 {
 #ifdef DEBUG_OVER_SERIAL
@@ -14783,6 +14820,54 @@ servicePendingRs485StubControlInLoop(void)
 }
 
 static void __attribute__((noinline))
+processPendingRawRead(void)
+{
+	if (!pendingRawReadSet) {
+		return;
+	}
+	if (pendingDeferredControlPayload == nullptr) {
+		pendingRawReadSet = false;
+		return;
+	}
+
+	struct PendingRawReadGuard {
+		~PendingRawReadGuard()
+		{
+			pendingRawReadSet = false;
+			pendingDeferredControlPayload[0] = '\0';
+		}
+	} guard;
+
+	RawReadRequest request{};
+	const bool valid = parseRawReadRequestPayload(pendingDeferredControlPayload, request);
+	const uint16_t requestedBytes = (request.requestedBytes >= 0 && request.requestedBytes <= UINT16_MAX)
+		                               ? static_cast<uint16_t>(request.requestedBytes)
+		                               : 0;
+	if (!valid) {
+		modbusRequestAndResponse invalidResponse{};
+		publishRawRegisterReadStatus(request.requestedReg,
+		                             requestedBytes,
+		                             invalidResponse,
+		                             MODBUS_REQUEST_AND_RESPONSE_INVALID_MQTT_PAYLOAD_MQTT_DESC);
+		return;
+	}
+
+	modbusRequestAndResponse *response = runtimeModbusReadScratch();
+	if (_registerHandler == nullptr || response == nullptr) {
+		modbusRequestAndResponse emptyResponse{};
+		publishRawRegisterReadStatus(request.requestedReg, requestedBytes, emptyResponse);
+		return;
+	}
+
+	*response = modbusRequestAndResponse{};
+	const uint16_t registerCount = static_cast<uint16_t>(requestedBytes / 2U);
+	(void)_registerHandler->readRawRegisterBlock(static_cast<uint16_t>(request.requestedReg),
+	                                             registerCount,
+	                                             response);
+	publishRawRegisterReadStatus(request.requestedReg, requestedBytes, *response);
+}
+
+static void __attribute__((noinline))
 serviceDeferredMqttWork(void)
 {
 	for (uint8_t iteration = 0; iteration < kDeferredMqttDrainMaxIterations; ++iteration) {
@@ -14802,6 +14887,10 @@ serviceDeferredMqttWork(void)
 			// Process deferred stub-control publishes from loop() on a dedicated smaller frame.
 			return;
 		}
+		if (pendingRawReadSet) {
+			processPendingRawRead();
+			didWork = true;
+		}
 		if (pendingEntityCommandSet) {
 			processPendingEntityCommand();
 			didWork = true;
@@ -14814,8 +14903,8 @@ serviceDeferredMqttWork(void)
 			serviceAtomicDispatchRequest();
 			didWork = true;
 		}
-		if (pendingPollingConfigSet || pendingRs485StubControlSet || pendingEntityCommandSet ||
-		    pendingDispatchRequestSet) {
+		if (pendingPollingConfigSet || pendingRs485StubControlSet || pendingRawReadSet ||
+		    pendingEntityCommandSet || pendingDispatchRequestSet) {
 			continue;
 		}
 
@@ -15171,6 +15260,25 @@ void mqttCallback(char* topic, byte* message, unsigned int length)
 		return;
 	}
 
+	if (topicEqualsDeviceSuffix(topic, "/debug/raw_read/set")) {
+		if (!ensureDeferredControlPayload() ||
+		    !copyLengthDelimitedString(reinterpret_cast<const char *>(message),
+		                              length,
+		                              pendingDeferredControlPayload,
+		                              kPendingDeferredControlPayloadSize)) {
+#ifdef DEBUG_OVER_SERIAL
+			sprintf(_debugOutput, "mqttCallback: bad raw read length: %d", length);
+			Serial.println(_debugOutput);
+#endif
+#ifdef DEBUG_CALLBACKS
+			badCallbacks++;
+#endif // DEBUG_CALLBACKS
+			return;
+		}
+		pendingRawReadSet = true;
+		return;
+	}
+
 #if RS485_STUB
 	if (topicEqualsDeviceSuffix(topic, "/debug/rs485_stub/set")) {
 		Rs485StubControlRequest *request = ensureRs485StubControlRequestScratch();
@@ -15507,6 +15615,20 @@ subscribeMqttReconnectTopics(bool *inverterSubscriptionsAdded)
 	snprintf(subscription,
 	         sizeof(subscription),
 	         "%s/config/set",
+	         deviceName);
+	subscribed = subscribeMqttReconnectTopic(subscribed, subscription);
+#ifdef DEBUG_OVER_SERIAL
+	snprintf(_debugOutput,
+	         sizeof(_debugOutput),
+	         "Subscribed to \"%s\" : %d",
+	         subscription,
+	         subscribed);
+	Serial.println(_debugOutput);
+#endif
+
+	snprintf(subscription,
+	         sizeof(subscription),
+	         "%s/debug/raw_read/set",
 	         deviceName);
 	subscribed = subscribeMqttReconnectTopic(subscribed, subscription);
 #ifdef DEBUG_OVER_SERIAL
