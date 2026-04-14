@@ -45,6 +45,8 @@ struct PowerSnapshotBuildWindowStats {
 constexpr float kPvVoltageCurrentMultiplier = 0.1f;
 constexpr uint32_t kPowerSnapshotBuildBucketMinuteMs = 60000UL;
 constexpr size_t kPowerSnapshotBuildMinuteBucketCount = 15;
+constexpr uint32_t kPowerSnapshotBuildMinuteWrapPeriod =
+	(static_cast<uint32_t>(UINT32_MAX / kPowerSnapshotBuildBucketMinuteMs) + 1U);
 
 constexpr uint16_t kDispatchBlockStartReg = REG_DISPATCH_RW_DISPATCH_START;
 constexpr uint16_t kDispatchBlockRegisterCount = 9;
@@ -142,7 +144,10 @@ aggregatePowerSnapshotBuildWindow(const PowerSnapshotBuildMinuteBucket *buckets,
 		if (bucket.count == 0 || bucket.minuteId == UINT32_MAX) {
 			continue;
 		}
-		const uint32_t ageMinutes = currentMinute - bucket.minuteId;
+		const uint32_t ageMinutes = (currentMinute >= bucket.minuteId)
+			                            ? (currentMinute - bucket.minuteId)
+			                            : ((kPowerSnapshotBuildMinuteWrapPeriod - bucket.minuteId) +
+			                               currentMinute);
 		if (ageMinutes >= static_cast<uint32_t>(windowMinutes)) {
 			continue;
 		}

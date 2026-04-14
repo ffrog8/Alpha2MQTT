@@ -128,6 +128,43 @@ TEST_CASE("power snapshot build minute buckets overwrite stale slot data cleanly
 	CHECK(staleWindow.count == 0);
 }
 
+TEST_CASE("power snapshot build minute buckets keep recent samples across millis rollover")
+{
+	PowerSnapshotBuildMinuteBucket buckets[kPowerSnapshotBuildMinuteBucketCount];
+	resetPowerSnapshotBuildMinuteBuckets(buckets, kPowerSnapshotBuildMinuteBucketCount);
+
+	recordPowerSnapshotBuildMinuteSample(buckets,
+	                                     kPowerSnapshotBuildMinuteBucketCount,
+	                                     UINT32_MAX - 1000,
+	                                     220);
+	recordPowerSnapshotBuildMinuteSample(buckets,
+	                                     kPowerSnapshotBuildMinuteBucketCount,
+	                                     5000,
+	                                     140);
+	recordPowerSnapshotBuildMinuteSample(buckets,
+	                                     kPowerSnapshotBuildMinuteBucketCount,
+	                                     1 * kPowerSnapshotBuildBucketMinuteMs + 5000,
+	                                     300);
+
+	const uint32_t nowMs = 1 * kPowerSnapshotBuildBucketMinuteMs + 59000;
+	const PowerSnapshotBuildWindowStats oneMinute =
+		aggregatePowerSnapshotBuildWindow(buckets, kPowerSnapshotBuildMinuteBucketCount, nowMs, 1);
+	const PowerSnapshotBuildWindowStats fiveMinutes =
+		aggregatePowerSnapshotBuildWindow(buckets, kPowerSnapshotBuildMinuteBucketCount, nowMs, 5);
+
+	CHECK(oneMinute.hasData);
+	CHECK(oneMinute.minMs == 300);
+	CHECK(oneMinute.maxMs == 300);
+	CHECK(oneMinute.avgMs == 300);
+	CHECK(oneMinute.count == 1);
+
+	CHECK(fiveMinutes.hasData);
+	CHECK(fiveMinutes.minMs == 140);
+	CHECK(fiveMinutes.maxMs == 300);
+	CHECK(fiveMinutes.avgMs == 220);
+	CHECK(fiveMinutes.count == 3);
+}
+
 TEST_CASE("power snapshot helpers coalesce dispatch requests only during snapshot build")
 {
 	CHECK(shouldQueueDispatchRequest(true, false, true));
