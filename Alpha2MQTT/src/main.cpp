@@ -40,6 +40,7 @@ First, go and customise options at the top of Definitions.h!
 #include "../include/DiscoveryModel.h"
 #include "../include/DispatchTiming.h"
 #include "../include/DispatchRequest.h"
+#include "../include/RawReadRequest.h"
 #include "../include/Rs485ProbeLogic.h"
 #include "../include/Rs485RuntimeReconnect.h"
 #include "../include/SchedulerReadPolicy.h"
@@ -142,8 +143,6 @@ static char *pendingPollingConfigPayload = nullptr;
 constexpr size_t kPendingDeferredControlPayloadSize = 512;
 constexpr size_t kPendingDispatchPayloadSize = 256;
 constexpr size_t kStatusJsonScratchSize = MAX_MQTT_PAYLOAD_SIZE;
-constexpr uint16_t kRawReadResponseOverheadBytes = 6;
-constexpr uint16_t kRawReadMaxBytes = MAX_FRAME_SIZE - kRawReadResponseOverheadBytes;
 // Shared deferred-control payload buffer for small MQTT commands. MQTT pumping is
 // blocked while any deferred command is pending, so stub/entity commands never
 // overlap in this storage.
@@ -14817,170 +14816,6 @@ servicePendingRs485StubControlInLoop(void)
 	#endif
 	rs485StubControlProcessedThisLoop = true;
 #endif
-	return true;
-}
-
-struct RawReadRequest {
-	int32_t requestedReg = -1;
-	int32_t requestedBytes = 0;
-	bool hasRegister = false;
-	bool hasBytes = false;
-};
-
-static bool
-isPayloadTokenChar(char ch)
-{
-	return (ch >= '0' && ch <= '9') ||
-	       (ch >= 'A' && ch <= 'Z') ||
-	       (ch >= 'a' && ch <= 'z') ||
-	       ch == '_';
-}
-
-static bool
-isRawReadFieldTerminator(char ch)
-{
-	return ch == '\0' || ch == ',' || ch == '}' || ch == ']' ||
-	       std::isspace(static_cast<unsigned char>(ch));
-}
-
-static bool
-findPayloadFieldValue(const char *payload, const char *key, const char **valueStartOut, bool &quotedOut)
-{
-	if (payload == nullptr || key == nullptr || valueStartOut == nullptr) {
-		return false;
-	}
-
-	const size_t keyLen = strlen(key);
-	const char *search = payload;
-	while (const char *pos = strstr(search, key)) {
-		const char prev = (pos == payload) ? '\0' : pos[-1];
-		const char next = pos[keyLen];
-		if ((pos == payload || !isPayloadTokenChar(prev)) &&
-		    (next == '\0' || !isPayloadTokenChar(next))) {
-			pos += keyLen;
-			if (*pos == '"') {
-				pos++;
-			}
-			while (*pos != '\0' &&
-			       (*pos == ':' || *pos == '=' ||
-			        std::isspace(static_cast<unsigned char>(*pos)))) {
-				pos++;
-			}
-			if (*pos == '\0') {
-				return false;
-			}
-			quotedOut = (*pos == '"');
-			if (quotedOut) {
-				pos++;
-			}
-			if (*pos == '\0') {
-				return false;
-			}
-			*valueStartOut = pos;
-			return true;
-		}
-		search = pos + keyLen;
-	}
-	return false;
-}
-
-static bool
-parseRawReadDecimalField(const char *payload, const char *key, int32_t &out)
-{
-	const char *valueStart = nullptr;
-	bool quoted = false;
-	if (!findPayloadFieldValue(payload, key, &valueStart, quoted)) {
-		return false;
-	}
-
-	char *endPtr = nullptr;
-	errno = 0;
-	const long parsed = strtol(valueStart, &endPtr, 10);
-	if (errno != 0 || endPtr == valueStart || parsed < INT32_MIN || parsed > INT32_MAX) {
-		return false;
-	}
-	if (quoted) {
-		if (*endPtr != '"') {
-			return false;
-		}
-		endPtr++;
-	}
-	if (!isRawReadFieldTerminator(*endPtr)) {
-		return false;
-	}
-	out = static_cast<int32_t>(parsed);
-	return true;
-}
-
-static bool
-parseRawReadHexField(const char *payload, const char *key, uint16_t &out)
-{
-	const char *valueStart = nullptr;
-	bool quoted = false;
-	if (!findPayloadFieldValue(payload, key, &valueStart, quoted)) {
-		return false;
-	}
-	if (valueStart[0] == '0' && (valueStart[1] == 'x' || valueStart[1] == 'X')) {
-		valueStart += 2;
-	}
-	if (!std::isxdigit(static_cast<unsigned char>(*valueStart))) {
-		return false;
-	}
-
-	char *endPtr = nullptr;
-	errno = 0;
-	const unsigned long parsed = strtoul(valueStart, &endPtr, 16);
-	if (errno != 0 || endPtr == valueStart || parsed > UINT16_MAX) {
-		return false;
-	}
-	if (quoted) {
-		if (*endPtr != '"') {
-			return false;
-		}
-		endPtr++;
-	}
-	if (!isRawReadFieldTerminator(*endPtr)) {
-		return false;
-	}
-	out = static_cast<uint16_t>(parsed);
-	return true;
-}
-
-static bool
-parseRawReadRequestPayload(const char *payload, RawReadRequest &request)
-{
-	request = RawReadRequest{};
-	int32_t intValue = 0;
-	uint16_t hexValue = 0;
-
-	if (parseRawReadDecimalField(payload, "register", intValue)) {
-		request.requestedReg = intValue;
-		request.hasRegister = true;
-	} else if (parseRawReadHexField(payload, "registerAddress", hexValue)) {
-		request.requestedReg = hexValue;
-		request.hasRegister = true;
-	}
-
-	if (parseRawReadDecimalField(payload, "bytes", intValue)) {
-		request.requestedBytes = intValue;
-		request.hasBytes = true;
-	} else if (parseRawReadDecimalField(payload, "dataBytes", intValue)) {
-		request.requestedBytes = intValue;
-		request.hasBytes = true;
-	}
-
-	if (!request.hasRegister || !request.hasBytes) {
-		return false;
-	}
-	if (request.requestedReg < 0 || request.requestedReg > UINT16_MAX) {
-		return false;
-	}
-	if (request.requestedBytes < 2 || request.requestedBytes > kRawReadMaxBytes) {
-		return false;
-	}
-	if ((request.requestedBytes & 1) != 0) {
-		return false;
-	}
 	return true;
 }
 

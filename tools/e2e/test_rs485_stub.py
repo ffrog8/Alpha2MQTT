@@ -5213,6 +5213,29 @@ def main() -> int:
                     f"payload={preferred!r} manual_value={manual_value}"
                 )
 
+            spoofed = _publish_raw_read_and_wait(
+                mqtt,
+                raw_command_topic,
+                raw_topic,
+                {"note": "register=2 bytes=8", "register": reg_handled, "bytes": 2},
+                expected_reg=reg_handled,
+                label="raw_debug_spoofed_note",
+            )
+            spoofed_raw = spoofed.get("raw")
+            spoofed_word = ((int(spoofed_raw[0]) << 8) | int(spoofed_raw[1])) if isinstance(spoofed_raw, list) and len(spoofed_raw) == 2 else None
+            if (
+                int(spoofed.get("requested_bytes", 0)) != 2
+                or int(spoofed.get("function_code", 0)) != 3
+                or str(spoofed.get("status", "")) != "readDataRegisterSuccess"
+                or int(spoofed.get("raw_size", 0)) != 2
+                or spoofed_word is None
+                or abs((spoofed_word / 10.0) - manual_value) > 0.01
+            ):
+                raise E2EError(
+                    "raw_read should ignore key-like substrings inside note values: "
+                    f"payload={spoofed!r} manual_value={manual_value}"
+                )
+
             alias_payload = {"registerAddress": "0x523F", "dataBytes": 4}
             alias = _publish_raw_read_and_wait(
                 mqtt,
