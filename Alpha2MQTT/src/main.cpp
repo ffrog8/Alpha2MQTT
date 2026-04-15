@@ -14988,7 +14988,8 @@ processPendingRawRead(void)
 	modbusRequestAndResponse *response = runtimeModbusReadScratch();
 	if (_registerHandler == nullptr || response == nullptr) {
 		modbusRequestAndResponse emptyResponse{};
-		publishRawRegisterReadStatus(request.requestedReg, requestedBytes, emptyResponse);
+		publishRawRegisterReadStatus(
+			request.requestedReg, requestedBytes, emptyResponse, "backendUnavailable");
 		return;
 	}
 
