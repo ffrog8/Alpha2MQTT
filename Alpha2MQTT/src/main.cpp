@@ -828,12 +828,14 @@ static void executeGenericPollTransaction(const MqttEntityActiveBucket &bucketPl
 void sendData(void);
 void sendStatus(bool includeEssSnapshot);
 static void populateStatusPollSnapshot(StatusPollSnapshot &poll, bool includeEssSnapshot);
-static void populateStatusPowerSnapshotBuildSnapshot(StatusPowerSnapshotBuildSnapshot &snapshot);
+static void populateStatusPowerSnapshotBuildSnapshot(StatusPowerSnapshotBuildSnapshot &snapshot,
+                                                    uint32_t nowMs);
 #if RS485_STUB
 static bool populateStatusStubSnapshot(StatusStubSnapshot &stub);
 #endif
 static bool publishStatusPollSnapshot(const StatusPollSnapshot &poll);
-static bool publishStatusPowerSnapshotBuildSnapshot(const StatusPowerSnapshotBuildSnapshot &snapshot);
+static bool publishStatusPowerSnapshotBuildSnapshot(const StatusPowerSnapshotBuildSnapshot &snapshot,
+                                                   uint32_t nowMs);
 #if RS485_STUB
 static bool publishStatusStubSnapshot(const StatusStubSnapshot &stub);
 static bool publishStubControlStatusNow(bool includeEssSnapshot);
@@ -3299,16 +3301,13 @@ resetPollingConfigToDefaults(void)
 	                                   persistedOverrideCount)) {
 		return false;
 	}
-	BucketId *originalBuckets = new (std::nothrow) BucketId[entityCount];
-	if (originalBuckets == nullptr) {
-		return false;
-	}
+	// Keep rollback storage fixed-size in this config path so reset remains
+	// deterministic on fragmented ESP8266 heaps.
+	BucketId originalBuckets[kMqttEntityDescriptorCount]{};
 	if (!mqttEntityCopyBuckets(originalBuckets, entityCount)) {
-		delete[] originalBuckets;
 		return false;
 	}
 	if (!mqttEntityApplyBuckets(buckets, entityCount)) {
-		delete[] originalBuckets;
 		return false;
 	}
 	if (!persistUserPollingConfig(kPollIntervalDefaultSeconds, canonicalMapBuffer.data)) {
@@ -3319,10 +3318,8 @@ resetPollingConfigToDefaults(void)
 		if (!rollbackOk) {
 			pollingConfigLoadedFromStorage = false;
 		}
-		delete[] originalBuckets;
 		return false;
 	}
-	delete[] originalBuckets;
 
 	g_portalPollingCacheValid = false;
 	g_portalPollingCacheEntityCount = 0;
@@ -11703,9 +11700,8 @@ populateStatusPollSnapshot(StatusPollSnapshot &poll, bool includeEssSnapshot)
 }
 
 static void __attribute__((noinline))
-populateStatusPowerSnapshotBuildSnapshot(StatusPowerSnapshotBuildSnapshot &snapshot)
+populateStatusPowerSnapshotBuildSnapshot(StatusPowerSnapshotBuildSnapshot &snapshot, uint32_t nowMs)
 {
-	const uint32_t nowMs = millis();
 	const PowerSnapshotBuildWindowStats oneMinute =
 		aggregatePowerSnapshotBuildWindow(powerSnapshotBuildMinuteBuckets,
 		                                  kPowerSnapshotBuildMinuteBucketCount,
@@ -11809,13 +11805,13 @@ publishStatusPollSnapshot(const StatusPollSnapshot &poll)
 }
 
 static bool __attribute__((noinline))
-publishStatusPowerSnapshotBuildSnapshot(const StatusPowerSnapshotBuildSnapshot &snapshot)
+publishStatusPowerSnapshotBuildSnapshot(const StatusPowerSnapshotBuildSnapshot &snapshot, uint32_t nowMs)
 {
 	if (!_mqtt.connected() || !ensureStatusJsonScratch()) {
 		return false;
 	}
 
-	const uint32_t currentMinuteId = powerSnapshotBuildMinuteId(millis());
+	const uint32_t currentMinuteId = powerSnapshotBuildMinuteId(nowMs);
 	if (currentMinuteId != powerSnapshotBuildLastPublishedMinuteId) {
 		powerSnapshotBuildStatusDirty = true;
 	}
@@ -12074,8 +12070,9 @@ sendStatus(bool includeEssSnapshot)
 
 	publishStatusPollSnapshot(poll);
 	StatusPowerSnapshotBuildSnapshot powerSnapshotBuild{};
-	populateStatusPowerSnapshotBuildSnapshot(powerSnapshotBuild);
-	publishStatusPowerSnapshotBuildSnapshot(powerSnapshotBuild);
+	const uint32_t powerSnapshotBuildNowMs = millis();
+	populateStatusPowerSnapshotBuildSnapshot(powerSnapshotBuild, powerSnapshotBuildNowMs);
+	publishStatusPowerSnapshotBuildSnapshot(powerSnapshotBuild, powerSnapshotBuildNowMs);
 
 #if RS485_STUB
 	if (populateStatusStubSnapshot(stub)) {
