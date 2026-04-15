@@ -176,6 +176,22 @@ capturePowerSnapshotSubreadRuntime(PowerSnapshotDiagSubreadRuntime &target,
 	target.ok = modbusStatusIsSuccess(result);
 }
 
+inline void
+capturePowerSnapshotCachedSubreadRuntime(PowerSnapshotDiagSubreadRuntime *target,
+                                         const SourceGroupReadMeta &meta)
+{
+	if (target == nullptr) {
+		return;
+	}
+	capturePowerSnapshotSubreadRuntime(*target,
+	                                   static_cast<uint32_t>(meta.readCompletedMs - meta.readStartedMs),
+	                                   0,
+	                                   0,
+	                                   1,
+	                                   0,
+	                                   modbusRequestAndResponseStatusValues::readDataRegisterSuccess);
+}
+
 inline uint8_t
 computePowerSnapshotDiagReasonMask(const PowerSnapshotDiagSubreadRuntime *subreads,
                                    size_t subreadCount,

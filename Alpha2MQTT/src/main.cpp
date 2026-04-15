@@ -13031,6 +13031,7 @@ fetchPvStringBlockSnapshot(PvStringBlockSnapshot &out,
 		schedulerPassCache.pvBlockCacheHitCount++;
 		pvBlockCacheHitCount++;
 		out = schedulerPassCache.pvBlock;
+		capturePowerSnapshotCachedSubreadRuntime(diagOut, schedulerPassCache.pvBlock.meta);
 		if (resultOut != nullptr) {
 			*resultOut = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
 		}
@@ -13089,6 +13090,7 @@ fetchPvMeterTotalSnapshot(PvMeterTotalSnapshot &out,
 		schedulerPassCache.pvMeterCacheHitCount++;
 		pvMeterCacheHitCount++;
 		out = schedulerPassCache.pvMeter;
+		capturePowerSnapshotCachedSubreadRuntime(diagOut, schedulerPassCache.pvMeter.meta);
 		if (resultOut != nullptr) {
 			*resultOut = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
 		}

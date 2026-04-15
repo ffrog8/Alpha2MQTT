@@ -94,6 +94,25 @@ TEST_CASE("power snapshot diagnostics capture transaction timing and result labe
 	CHECK(std::strcmp(subread.resultLabel, MODBUS_REQUEST_AND_RESPONSE_READ_DATA_REGISTER_SUCCESS_MQTT_DESC) == 0);
 }
 
+TEST_CASE("power snapshot diagnostics synthesize successful cached subread timing")
+{
+	SourceGroupReadMeta meta{};
+	meta.readStartedMs = 1200;
+	meta.readCompletedMs = 1237;
+	meta.valid = true;
+	PowerSnapshotDiagSubreadRuntime subread{};
+
+	capturePowerSnapshotCachedSubreadRuntime(&subread, meta);
+
+	CHECK(subread.totalQ10 == 4);
+	CHECK(subread.waitQ10 == 0);
+	CHECK(subread.quietQ10 == 0);
+	CHECK(subread.attempts == 1);
+	CHECK(subread.retries == 0);
+	CHECK(subread.ok);
+	CHECK(subread.result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess);
+}
+
 TEST_CASE("power snapshot diagnostics classify interesting events from reason masks")
 {
 	PowerSnapshotDiagSubreadRuntime subreads[kPowerSnapshotDiagSubreadCount]{};
