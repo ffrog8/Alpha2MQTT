@@ -4325,15 +4325,16 @@ def main() -> int:
                 "heap_pre_rs485": int(boot_mem.get("heap_pre_rs485", 0)),
                 "heap_post_rs485": int(boot_mem.get("heap_post_rs485", 0)),
             }
-            # The retained boot diagnostics and power-snapshot build topic add a small but persistent
-            # boot-path heap tax. Keep explicit floors here so future changes still have to preserve
-            # a healthy boot margin on the ESP8266 without pinning the suite to an older budget.
+            # The retained boot diagnostics, raw-read status, and power-snapshot diagnostic topics
+            # all consume persistent ESP8266 runtime memory. Keep explicit floors here so future
+            # changes still preserve a healthy boot margin without pinning the suite to the older,
+            # pre-diagnostics budget.
             minimums = {
-                "heap_pre_wifi": 16500,
-                "heap_post_wifi": 15200,
-                "heap_post_mqtt": 9400,
-                "heap_pre_rs485": 6900,
-                "heap_post_rs485": 6650,
+                "heap_pre_wifi": 16000,
+                "heap_post_wifi": 14600,
+                "heap_post_mqtt": 8800,
+                "heap_pre_rs485": 6250,
+                "heap_post_rs485": 6000,
             }
             for key, minimum in minimums.items():
                 actual = checkpoints[key]

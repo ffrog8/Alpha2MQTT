@@ -15,6 +15,14 @@ Handles Modbus requests and responses in a tidy class separate from main program
 
 #include "Definitions.h"
 
+struct Rs485TransactionDiag {
+	uint16_t waitQ10 = 0;
+	uint16_t quietQ10 = 0;
+	uint8_t attempts = 0;
+	uint8_t retries = 0;
+	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
+};
+
 #if RS485_STUB
 #include "RS485HandlerStub.h"
 #else
@@ -72,9 +80,9 @@ class RS485Handler
 
 		char* _debugOutput;
 		void flushRS485();
-		void checkRS485IsQuiet();
-		modbusRequestAndResponseStatusValues listenResponse(modbusRequestAndResponse* resp);
-		bool checkForData();
+		void checkRS485IsQuiet(uint32_t *quietMsAccum = nullptr);
+		modbusRequestAndResponseStatusValues listenResponse(modbusRequestAndResponse* resp, uint32_t *waitMsAccum = nullptr);
+		bool checkForData(uint32_t *waitMsAccum = nullptr);
 		void (*_serviceHook)() = nullptr;
 #ifdef DEBUG_OUTPUT_TX_RX
 		void outputFrameToSerial(bool transmit, uint8_t frame[], byte actualFrameSize);
@@ -82,6 +90,7 @@ class RS485Handler
 		bool _inTransaction = false;
 		unsigned long baudRate;
 		bool _rs485IsOnline;
+		Rs485TransactionDiag _lastTransactionDiag{};
 		char uartInfoString[OLED_CHARACTER_WIDTH];
 
 	protected:
@@ -100,6 +109,7 @@ class RS485Handler
 		void setBaudRate(unsigned long baudRate);
 		bool isRs485Online();
 		bool inTransaction() const { return _inTransaction; }
+		const Rs485TransactionDiag &lastTransactionDiag() const { return _lastTransactionDiag; }
 		char *uartInfo();
 };
 

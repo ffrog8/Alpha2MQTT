@@ -25,35 +25,7 @@ struct EssSnapshotMeta {
 	bool valid = false;
 };
 
-struct PowerSnapshotBuildMinuteBucket {
-	uint32_t minuteId = UINT32_MAX;
-	uint8_t generation = 0;
-	uint16_t minMs = 0;
-	uint16_t maxMs = 0;
-	uint32_t sumMs = 0;
-	uint16_t count = 0;
-};
-
-struct PowerSnapshotBuildMinuteTracker {
-	uint32_t lastMinuteId = UINT32_MAX;
-	uint8_t generation = 0;
-};
-
-struct PowerSnapshotBuildWindowStats {
-	bool hasData = false;
-	uint16_t minMs = 0;
-	uint16_t maxMs = 0;
-	uint16_t avgMs = 0;
-	uint32_t sumMs = 0;
-	uint16_t count = 0;
-};
-
 constexpr float kPvVoltageCurrentMultiplier = 0.1f;
-constexpr uint32_t kPowerSnapshotBuildBucketMinuteMs = 60000UL;
-constexpr size_t kPowerSnapshotBuildMinuteBucketCount = 15;
-constexpr uint32_t kPowerSnapshotBuildMinuteWrapPeriod =
-	(static_cast<uint32_t>(UINT32_MAX / kPowerSnapshotBuildBucketMinuteMs) + 1U);
-
 constexpr uint16_t kDispatchBlockStartReg = REG_DISPATCH_RW_DISPATCH_START;
 constexpr uint16_t kDispatchBlockRegisterCount = 9;
 
@@ -61,6 +33,61 @@ constexpr uint16_t kPvStringBlockStartReg = REG_INVERTER_HOME_R_PV1_VOLTAGE;
 constexpr uint16_t kPvStringBlockRegisterCount =
 	static_cast<uint16_t>(REG_INVERTER_HOME_R_PV6_POWER_1 + 1 - REG_INVERTER_HOME_R_PV1_VOLTAGE + 1);
 constexpr size_t kPvStringCount = 6;
+constexpr size_t kPowerSnapshotDiagSubreadCount = 4;
+constexpr uint16_t kPowerSnapshotDiagTotalSlowThresholdQ10 = 50;
+constexpr uint16_t kPowerSnapshotDiagSubreadSlowThresholdQ10 = 20;
+constexpr int32_t kPowerSnapshotDiagLowLoadThresholdW = 50;
+
+enum class PowerSnapshotDiagSubreadId : uint8_t {
+	Battery = 0,
+	Grid = 1,
+	PvMeter = 2,
+	PvBlock = 3
+};
+
+enum PowerSnapshotDiagReasonBits : uint8_t {
+	PowerSnapshotDiagReasonNone = 0,
+	PowerSnapshotDiagReasonSlowTotal = 1U << 0,
+	PowerSnapshotDiagReasonRetry = 1U << 1,
+	PowerSnapshotDiagReasonFailure = 1U << 2,
+	PowerSnapshotDiagReasonLowLoad = 1U << 3
+};
+
+struct PowerSnapshotDiagSubreadRuntime {
+	uint16_t totalQ10 = 0;
+	uint16_t waitQ10 = 0;
+	uint16_t quietQ10 = 0;
+	uint8_t attempts = 0;
+	uint8_t retries = 0;
+	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
+	const char *resultLabel = MODBUS_REQUEST_AND_RESPONSE_PREPROCESSING_MQTT_DESC;
+	bool ok = false;
+};
+
+struct PowerSnapshotDiagEventRuntime {
+	bool valid = false;
+	uint32_t tsMs = 0;
+	uint8_t reasonMask = PowerSnapshotDiagReasonNone;
+	uint16_t totalQ10 = 0;
+	int32_t loadW = INT32_MAX;
+	uint32_t dispatchRequestQueuedMs = 0;
+	uint32_t dispatchLastRunMs = 0;
+	PowerSnapshotDiagSubreadRuntime subreads[kPowerSnapshotDiagSubreadCount]{};
+};
+
+struct PowerSnapshotDiagSubreadCounters {
+	uint32_t slowCount = 0;
+	uint32_t retryCount = 0;
+	uint32_t timeoutCount = 0;
+	uint32_t invalidFrameCount = 0;
+	uint16_t maxTotalQ10 = 0;
+};
+
+struct PowerSnapshotDiagCountsRuntime {
+	uint32_t interestingEventCount = 0;
+	uint32_t loadLowEventCount = 0;
+	PowerSnapshotDiagSubreadCounters subreads[kPowerSnapshotDiagSubreadCount]{};
+};
 
 inline bool
 sourceGroupCacheReusableForPass(const SourceGroupReadMeta &meta, uint32_t passId)
@@ -68,155 +95,143 @@ sourceGroupCacheReusableForPass(const SourceGroupReadMeta &meta, uint32_t passId
 	return meta.valid && meta.passId == passId;
 }
 
-inline uint32_t
-powerSnapshotBuildMinuteId(uint32_t nowMs)
+inline uint16_t
+quantizeMillisToQ10(uint32_t ms)
 {
-	return nowMs / kPowerSnapshotBuildBucketMinuteMs;
+	constexpr uint32_t kMaxRoundedMs = static_cast<uint32_t>(UINT16_MAX) * 10U - 5U;
+	if (ms > kMaxRoundedMs) {
+		return UINT16_MAX;
+	}
+	const uint32_t rounded = (ms + 5U) / 10U;
+	return (rounded > static_cast<uint32_t>(UINT16_MAX)) ? UINT16_MAX : static_cast<uint16_t>(rounded);
+}
+
+inline const char *
+modbusStatusMqttLabel(modbusRequestAndResponseStatusValues result)
+{
+	switch (result) {
+	case modbusRequestAndResponseStatusValues::preProcessing:
+		return MODBUS_REQUEST_AND_RESPONSE_PREPROCESSING_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::notHandledRegister:
+		return MODBUS_REQUEST_AND_RESPONSE_NOT_HANDLED_REGISTER_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::invalidFrame:
+		return MODBUS_REQUEST_AND_RESPONSE_INVALID_FRAME_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::responseTooShort:
+		return MODBUS_REQUEST_AND_RESPONSE_RESPONSE_TOO_SHORT_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::noResponse:
+		return MODBUS_REQUEST_AND_RESPONSE_NO_RESPONSE_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::noMQTTPayload:
+		return MODBUS_REQUEST_AND_RESPONSE_NO_MQTT_PAYLOAD_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::invalidMQTTPayload:
+		return MODBUS_REQUEST_AND_RESPONSE_INVALID_MQTT_PAYLOAD_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::writeSingleRegisterSuccess:
+		return MODBUS_REQUEST_AND_RESPONSE_WRITE_SINGLE_REGISTER_SUCCESS_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::writeDataRegisterSuccess:
+		return MODBUS_REQUEST_AND_RESPONSE_WRITE_DATA_REGISTER_SUCCESS_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::readDataRegisterSuccess:
+		return MODBUS_REQUEST_AND_RESPONSE_READ_DATA_REGISTER_SUCCESS_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::slaveError:
+		return MODBUS_REQUEST_AND_RESPONSE_ERROR_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::setDischargeSuccess:
+		return MODBUS_REQUEST_AND_RESPONSE_SET_DISCHARGE_SUCCESS_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::setChargeSuccess:
+		return MODBUS_REQUEST_AND_RESPONSE_SET_CHARGE_SUCCESS_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::setNormalSuccess:
+		return MODBUS_REQUEST_AND_RESPONSE_SET_NORMAL_SUCCESS_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::payloadExceededCapacity:
+		return MODBUS_REQUEST_AND_RESPONSE_PAYLOAD_EXCEEDED_CAPACITY_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::addedToPayload:
+		return MODBUS_REQUEST_AND_RESPONSE_ADDED_TO_PAYLOAD_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::readDataInvalidValue:
+		return MODBUS_REQUEST_AND_RESPONSE_READ_DATA_INVALID_VALUE_MQTT_DESC;
+	default:
+		return MODBUS_REQUEST_AND_RESPONSE_PREPROCESSING_MQTT_DESC;
+	}
+}
+
+inline bool
+modbusStatusIsSuccess(modbusRequestAndResponseStatusValues result)
+{
+	return result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess ||
+	       result == modbusRequestAndResponseStatusValues::writeDataRegisterSuccess ||
+	       result == modbusRequestAndResponseStatusValues::writeSingleRegisterSuccess;
 }
 
 inline void
-clearPowerSnapshotBuildMinuteBucket(PowerSnapshotBuildMinuteBucket &bucket)
+capturePowerSnapshotSubreadRuntime(PowerSnapshotDiagSubreadRuntime &target,
+                                   uint32_t totalMs,
+                                   uint16_t waitQ10,
+                                   uint16_t quietQ10,
+                                   uint8_t attempts,
+                                   uint8_t retries,
+                                   modbusRequestAndResponseStatusValues result)
 {
-	bucket.minuteId = UINT32_MAX;
-	bucket.generation = 0;
-	bucket.minMs = 0;
-	bucket.maxMs = 0;
-	bucket.sumMs = 0;
-	bucket.count = 0;
+	target.totalQ10 = quantizeMillisToQ10(totalMs);
+	target.waitQ10 = waitQ10;
+	target.quietQ10 = quietQ10;
+	target.attempts = attempts;
+	target.retries = retries;
+	target.result = result;
+	target.resultLabel = modbusStatusMqttLabel(result);
+	target.ok = modbusStatusIsSuccess(result);
+}
+
+inline uint8_t
+computePowerSnapshotDiagReasonMask(const PowerSnapshotDiagSubreadRuntime *subreads,
+                                   size_t subreadCount,
+                                   uint16_t totalQ10,
+                                   int32_t loadW)
+{
+	uint8_t reasonMask = PowerSnapshotDiagReasonNone;
+	if (totalQ10 >= kPowerSnapshotDiagTotalSlowThresholdQ10) {
+		reasonMask |= PowerSnapshotDiagReasonSlowTotal;
+	}
+	for (size_t i = 0; i < subreadCount; ++i) {
+		const PowerSnapshotDiagSubreadRuntime &subread = subreads[i];
+		if (subread.retries > 0) {
+			reasonMask |= PowerSnapshotDiagReasonRetry;
+		}
+		if (!subread.ok) {
+			reasonMask |= PowerSnapshotDiagReasonFailure;
+		}
+	}
+	if (loadW != INT32_MAX && loadW <= kPowerSnapshotDiagLowLoadThresholdW) {
+		reasonMask |= PowerSnapshotDiagReasonLowLoad;
+	}
+	return reasonMask;
 }
 
 inline void
-resetPowerSnapshotBuildMinuteTracker(PowerSnapshotBuildMinuteTracker &tracker)
+recordPowerSnapshotDiagCounts(PowerSnapshotDiagCountsRuntime &counts,
+                              const PowerSnapshotDiagSubreadRuntime *subreads,
+                              size_t subreadCount,
+                              uint8_t reasonMask)
 {
-	tracker.lastMinuteId = UINT32_MAX;
-	tracker.generation = 0;
-}
-
-inline void
-resetPowerSnapshotBuildMinuteBuckets(PowerSnapshotBuildMinuteBucket *buckets, size_t bucketCount)
-{
-	if (buckets == nullptr) {
-		return;
+	if (reasonMask != PowerSnapshotDiagReasonNone) {
+		counts.interestingEventCount++;
 	}
-	for (size_t i = 0; i < bucketCount; ++i) {
-		clearPowerSnapshotBuildMinuteBucket(buckets[i]);
+	if ((reasonMask & PowerSnapshotDiagReasonLowLoad) != 0) {
+		counts.loadLowEventCount++;
 	}
-}
-
-inline uint32_t
-observePowerSnapshotBuildMinuteId(PowerSnapshotBuildMinuteTracker &tracker, uint32_t nowMs, uint8_t &generation)
-{
-	const uint32_t minuteId = powerSnapshotBuildMinuteId(nowMs);
-	if (tracker.lastMinuteId != UINT32_MAX && minuteId < tracker.lastMinuteId) {
-		tracker.generation = static_cast<uint8_t>(tracker.generation + 1U);
-	}
-	tracker.lastMinuteId = minuteId;
-	generation = tracker.generation;
-	return minuteId;
-}
-
-inline void
-recordPowerSnapshotBuildMinuteSample(PowerSnapshotBuildMinuteBucket *buckets,
-                                     size_t bucketCount,
-                                     PowerSnapshotBuildMinuteTracker &tracker,
-                                     uint32_t nowMs,
-                                     uint32_t buildMs)
-{
-	if (buckets == nullptr || bucketCount == 0) {
-		return;
-	}
-	uint8_t generation = 0;
-	const uint32_t minuteId = observePowerSnapshotBuildMinuteId(tracker, nowMs, generation);
-	PowerSnapshotBuildMinuteBucket &bucket = buckets[minuteId % bucketCount];
-	if (bucket.minuteId != minuteId || bucket.generation != generation) {
-		clearPowerSnapshotBuildMinuteBucket(bucket);
-		bucket.minuteId = minuteId;
-		bucket.generation = generation;
-	}
-
-	const uint16_t clampedBuildMs =
-		(buildMs > static_cast<uint32_t>(UINT16_MAX)) ? UINT16_MAX : static_cast<uint16_t>(buildMs);
-	if (bucket.count == 0) {
-		bucket.minMs = clampedBuildMs;
-		bucket.maxMs = clampedBuildMs;
-		bucket.sumMs = clampedBuildMs;
-		bucket.count = 1;
-		return;
-	}
-
-	if (clampedBuildMs < bucket.minMs) {
-		bucket.minMs = clampedBuildMs;
-	}
-	if (clampedBuildMs > bucket.maxMs) {
-		bucket.maxMs = clampedBuildMs;
-	}
-	bucket.sumMs += clampedBuildMs;
-	if (bucket.count < UINT16_MAX) {
-		bucket.count++;
-	}
-}
-
-inline PowerSnapshotBuildWindowStats
-aggregatePowerSnapshotBuildWindow(const PowerSnapshotBuildMinuteBucket *buckets,
-                                  size_t bucketCount,
-                                  PowerSnapshotBuildMinuteTracker &tracker,
-                                  uint32_t nowMs,
-                                  uint8_t windowMinutes)
-{
-	PowerSnapshotBuildWindowStats stats{};
-	if (buckets == nullptr || bucketCount == 0 || windowMinutes == 0) {
-		return stats;
-	}
-
-	uint8_t currentGeneration = 0;
-	const uint32_t currentMinute = observePowerSnapshotBuildMinuteId(tracker, nowMs, currentGeneration);
-	for (size_t i = 0; i < bucketCount; ++i) {
-		const PowerSnapshotBuildMinuteBucket &bucket = buckets[i];
-		if (bucket.count == 0 || bucket.minuteId == UINT32_MAX) {
-			continue;
+	for (size_t i = 0; i < subreadCount && i < kPowerSnapshotDiagSubreadCount; ++i) {
+		PowerSnapshotDiagSubreadCounters &counter = counts.subreads[i];
+		const PowerSnapshotDiagSubreadRuntime &subread = subreads[i];
+		if (subread.totalQ10 > counter.maxTotalQ10) {
+			counter.maxTotalQ10 = subread.totalQ10;
 		}
-		const uint8_t generationDistance = static_cast<uint8_t>(currentGeneration - bucket.generation);
-		if (generationDistance > 1U) {
-			continue;
+		if (subread.totalQ10 >= kPowerSnapshotDiagSubreadSlowThresholdQ10) {
+			counter.slowCount++;
 		}
-		uint32_t ageMinutes = 0;
-		if (generationDistance == 0U) {
-			if (bucket.minuteId > currentMinute) {
-				continue;
-			}
-			ageMinutes = currentMinute - bucket.minuteId;
-		} else {
-			ageMinutes = (kPowerSnapshotBuildMinuteWrapPeriod - bucket.minuteId) + currentMinute;
+		if (subread.retries > 0) {
+			counter.retryCount++;
 		}
-		if (ageMinutes >= static_cast<uint32_t>(windowMinutes)) {
-			continue;
+		if (subread.result == modbusRequestAndResponseStatusValues::noResponse) {
+			counter.timeoutCount++;
 		}
-		if (!stats.hasData) {
-			stats.hasData = true;
-			stats.minMs = bucket.minMs;
-			stats.maxMs = bucket.maxMs;
-		} else {
-			if (bucket.minMs < stats.minMs) {
-				stats.minMs = bucket.minMs;
-			}
-			if (bucket.maxMs > stats.maxMs) {
-				stats.maxMs = bucket.maxMs;
-			}
-		}
-		stats.sumMs += bucket.sumMs;
-		if (static_cast<uint32_t>(stats.count) + static_cast<uint32_t>(bucket.count) > UINT16_MAX) {
-			stats.count = UINT16_MAX;
-		} else {
-			stats.count = static_cast<uint16_t>(stats.count + bucket.count);
+		if (subread.result == modbusRequestAndResponseStatusValues::invalidFrame) {
+			counter.invalidFrameCount++;
 		}
 	}
-
-	if (!stats.hasData || stats.count == 0) {
-		return stats;
-	}
-	const uint32_t avgMs = stats.sumMs / stats.count;
-	stats.avgMs = (avgMs > static_cast<uint32_t>(UINT16_MAX)) ? UINT16_MAX : static_cast<uint16_t>(avgMs);
-	return stats;
 }
 
 inline bool

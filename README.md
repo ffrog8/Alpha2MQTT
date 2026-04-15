@@ -220,6 +220,8 @@ The device publishes lightweight retained/status topics for observability:
 - `DEVICE_NAME/status` (retained, ~10s): core fields `presence`, `a2mStatus`, `rs485Status`, `gridStatus`, `boot_intent`.
 - `DEVICE_NAME/status/net` (retained, ~10s): uptime, heap, WiFi RSSI/SSID/IP, WiFi/MQTT state + reconnect counters.
 - `DEVICE_NAME/status/poll` (retained, ~10s): poll ok/err counts, last poll duration, last ok/err timestamps, last error code, polling-pressure diagnostics such as backlog and budget exhaustion, plus RS485 baud observability fields `rs485_baud_configured`, `rs485_baud_actual`, and `rs485_baud_sync`.
+- `DEVICE_NAME/status/power_snapshot_diag_last` (retained, on interesting events): the last retained power-snapshot diagnostic event, including reason flags, total snapshot build time, dispatch timing context, and per-subread timing/result fields for `battery`, `grid`, `pv_meter`, and `pv_block`.
+- `DEVICE_NAME/status/power_snapshot_diag_counts` (retained, on interesting events): cumulative per-subread diagnostic counters since boot, including slow/retry/timeout/invalid-frame counts and `max_total_q10`.
 - `DEVICE_NAME/event` (non-retained): rate-limited fault events like `RS485_TIMEOUT`, `MODBUS_FRAME`, or `POLL_OVERRUN`.
 
 Before live inverter identity is known, the masked HA identity remains `A2M-UNKNOWN` and inverter-scoped discovery/state topics are suppressed.

@@ -217,17 +217,44 @@ struct StatusBootNetSnapshot {
 	uint32_t wifiLastDisconnectReasonBoot;
 };
 
-struct StatusPowerSnapshotBuildWindowSnapshot {
-	bool hasData;
-	uint16_t minMs;
-	uint16_t maxMs;
-	uint16_t avgMs;
+struct StatusPowerSnapshotDiagSubreadSnapshot {
+	uint16_t totalQ10;
+	uint16_t waitQ10;
+	uint16_t quietQ10;
+	uint8_t attempts;
+	uint8_t retries;
+	const char *result;
 };
 
-struct StatusPowerSnapshotBuildSnapshot {
-	StatusPowerSnapshotBuildWindowSnapshot oneMinute;
-	StatusPowerSnapshotBuildWindowSnapshot fiveMinutes;
-	StatusPowerSnapshotBuildWindowSnapshot fifteenMinutes;
+struct StatusPowerSnapshotDiagLastSnapshot {
+	bool valid;
+	const char *reason;
+	uint32_t tsMs;
+	uint16_t totalQ10;
+	int32_t loadW;
+	uint32_t dispatchRequestQueuedMs;
+	uint32_t dispatchLastRunMs;
+	StatusPowerSnapshotDiagSubreadSnapshot battery;
+	StatusPowerSnapshotDiagSubreadSnapshot grid;
+	StatusPowerSnapshotDiagSubreadSnapshot pvMeter;
+	StatusPowerSnapshotDiagSubreadSnapshot pvBlock;
+};
+
+struct StatusPowerSnapshotDiagCounterSubreadSnapshot {
+	uint32_t slowCount;
+	uint32_t retryCount;
+	uint32_t timeoutCount;
+	uint32_t invalidFrameCount;
+	uint16_t maxTotalQ10;
+};
+
+struct StatusPowerSnapshotDiagCountsSnapshot {
+	uint32_t interestingEventCount;
+	uint32_t loadLowEventCount;
+	StatusPowerSnapshotDiagCounterSubreadSnapshot battery;
+	StatusPowerSnapshotDiagCounterSubreadSnapshot grid;
+	StatusPowerSnapshotDiagCounterSubreadSnapshot pvMeter;
+	StatusPowerSnapshotDiagCounterSubreadSnapshot pvBlock;
 };
 
 bool buildStatusCoreJson(const StatusCoreSnapshot &snapshot, char *out, size_t outSize);
@@ -239,6 +266,9 @@ bool buildStatusManualReadJson(const StatusManualReadSnapshot &snapshot, char *o
 bool buildStatusRawReadJson(const StatusRawReadSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusBootMemJson(const StatusBootMemSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusBootNetJson(const StatusBootNetSnapshot &snapshot, char *out, size_t outSize);
-bool buildStatusPowerSnapshotBuildJson(const StatusPowerSnapshotBuildSnapshot &snapshot,
-                                       char *out,
-                                       size_t outSize);
+bool buildStatusPowerSnapshotDiagLastJson(const StatusPowerSnapshotDiagLastSnapshot &snapshot,
+                                          char *out,
+                                          size_t outSize);
+bool buildStatusPowerSnapshotDiagCountsJson(const StatusPowerSnapshotDiagCountsSnapshot &snapshot,
+                                            char *out,
+                                            size_t outSize);
