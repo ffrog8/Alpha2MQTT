@@ -3311,9 +3311,13 @@ resetPollingConfigToDefaults(void)
 		return false;
 	}
 	if (!persistUserPollingConfig(kPollIntervalDefaultSeconds, canonicalMapBuffer.data)) {
-		// Keep the live runtime aligned with persisted config when the NVS write
-		// fails after the defaults have already been applied in memory.
-		(void)mqttEntityApplyBuckets(originalBuckets, entityCount);
+		// A failed rollback leaves runtime buckets diverged from the still-valid
+		// persisted schedule. Clear runtime trust so later reconnect and portal
+		// paths reload from storage instead of reusing stale buckets.
+		const bool rollbackOk = mqttEntityApplyBuckets(originalBuckets, entityCount);
+		if (!rollbackOk) {
+			pollingConfigLoadedFromStorage = false;
+		}
 		delete[] originalBuckets;
 		return false;
 	}
@@ -9763,7 +9767,10 @@ handlePollingConfigSet(char *payload)
 	    !persistUserPollingConfig(ctx.stagedPollInterval,
 	                             ctx.bucketAssignmentsChanged ? persistedMap.data : nullptr)) {
 		if (ctx.bucketsApplied) {
-			mqttEntityApplyBuckets(ctx.originalBuckets, entityCount);
+			const bool rollbackOk = mqttEntityApplyBuckets(ctx.originalBuckets, entityCount);
+			if (!rollbackOk) {
+				pollingConfigLoadedFromStorage = false;
+			}
 		}
 		persistLoadOk = 0;
 		persistLoadErr = 1;
