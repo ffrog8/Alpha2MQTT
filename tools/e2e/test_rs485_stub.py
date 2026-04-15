@@ -2787,7 +2787,7 @@ def main() -> int:
     for name in selected_cases:
         if name not in CASE_ORDER and name not in optional_case_names:
             raise E2EError(f"Unknown case in selection: {name!r}")
-    if from_case and from_case not in CASE_ORDER:
+    if from_case and from_case not in CASE_ORDER and from_case not in optional_case_names:
         raise E2EError(f"Unknown from-case: {from_case!r}")
 
     policy_no_flash = bool(args.no_flash or default_no_flash)
@@ -7325,7 +7325,11 @@ def main() -> int:
         case_map = {name: fn for name, fn in cases + optional_cases}
         ordered_names = [name for name, _ in cases]
         if from_case:
-            ordered_names = ordered_names[ordered_names.index(from_case):]
+            if from_case in ordered_names:
+                ordered_names = ordered_names[ordered_names.index(from_case):]
+            else:
+                ordered_names = [name for name, _ in optional_cases]
+                ordered_names = ordered_names[ordered_names.index(from_case):]
         if selected_cases:
             selected_set = set(selected_cases)
             optional_names = [name for name, _ in optional_cases if name in selected_set]
