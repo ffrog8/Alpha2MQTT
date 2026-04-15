@@ -152,11 +152,14 @@ TEST_CASE("power snapshot diagnostics accumulate counters per subread")
 	                                   0,
 	                                   modbusRequestAndResponseStatusValues::readDataRegisterSuccess);
 
-	recordPowerSnapshotDiagCounts(counts,
-	                              subreads,
-	                              kPowerSnapshotDiagSubreadCount,
-	                              PowerSnapshotDiagReasonRetry | PowerSnapshotDiagReasonFailure |
-		                              PowerSnapshotDiagReasonLowLoad);
+	const bool changed = recordPowerSnapshotDiagCounts(counts,
+	                                                  subreads,
+	                                                  kPowerSnapshotDiagSubreadCount,
+	                                                  PowerSnapshotDiagReasonRetry |
+		                                                  PowerSnapshotDiagReasonFailure |
+		                                                  PowerSnapshotDiagReasonLowLoad);
+
+	CHECK(changed);
 
 	CHECK(counts.interestingEventCount == 1);
 	CHECK(counts.loadLowEventCount == 1);
@@ -188,6 +191,61 @@ TEST_CASE("power snapshot diagnostics accumulate counters per subread")
 	CHECK(pvBlock.timeoutCount == 0);
 	CHECK(pvBlock.invalidFrameCount == 0);
 	CHECK(pvBlock.maxTotalQ10 == 14);
+}
+
+TEST_CASE("power snapshot diagnostics skip counter dirtying when nothing changes")
+{
+	PowerSnapshotDiagCountsRuntime counts{};
+	PowerSnapshotDiagSubreadRuntime subreads[kPowerSnapshotDiagSubreadCount]{};
+	counts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Battery)].maxTotalQ10 = 4;
+	counts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Grid)].maxTotalQ10 = 3;
+	counts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::PvMeter)].maxTotalQ10 = 2;
+	counts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::PvBlock)].maxTotalQ10 = 1;
+	capturePowerSnapshotSubreadRuntime(subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Battery)],
+	                                   40,
+	                                   1,
+	                                   1,
+	                                   1,
+	                                   0,
+	                                   modbusRequestAndResponseStatusValues::readDataRegisterSuccess);
+	capturePowerSnapshotSubreadRuntime(subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Grid)],
+	                                   30,
+	                                   1,
+	                                   1,
+	                                   1,
+	                                   0,
+	                                   modbusRequestAndResponseStatusValues::readDataRegisterSuccess);
+	capturePowerSnapshotSubreadRuntime(subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::PvMeter)],
+	                                   20,
+	                                   1,
+	                                   1,
+	                                   1,
+	                                   0,
+	                                   modbusRequestAndResponseStatusValues::readDataRegisterSuccess);
+	capturePowerSnapshotSubreadRuntime(subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::PvBlock)],
+	                                   10,
+	                                   1,
+	                                   1,
+	                                   1,
+	                                   0,
+	                                   modbusRequestAndResponseStatusValues::readDataRegisterSuccess);
+
+	const bool changed =
+		recordPowerSnapshotDiagCounts(counts, subreads, kPowerSnapshotDiagSubreadCount, PowerSnapshotDiagReasonNone);
+
+	CHECK_FALSE(changed);
+	CHECK(counts.interestingEventCount == 0);
+	CHECK(counts.loadLowEventCount == 0);
+	CHECK(counts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Battery)].maxTotalQ10 == 4);
+	CHECK(counts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Grid)].maxTotalQ10 == 3);
+	CHECK(counts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::PvMeter)].maxTotalQ10 == 2);
+	CHECK(counts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::PvBlock)].maxTotalQ10 == 1);
+	for (const auto &counter : counts.subreads) {
+		CHECK(counter.slowCount == 0);
+		CHECK(counter.retryCount == 0);
+		CHECK(counter.timeoutCount == 0);
+		CHECK(counter.invalidFrameCount == 0);
+	}
 }
 
 TEST_CASE("power snapshot helpers coalesce dispatch requests only during snapshot build")

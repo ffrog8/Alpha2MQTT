@@ -13653,11 +13653,12 @@ refreshEssSnapshot(void)
 			                                                              kPowerSnapshotDiagSubreadCount,
 			                                                              totalQ10,
 			                                                              loadW);
-			recordPowerSnapshotDiagCounts(powerSnapshotDiagCounts,
-			                              powerSnapshotDiagSubreads,
-			                              kPowerSnapshotDiagSubreadCount,
-			                              reasonMask);
-			powerSnapshotDiagCountsDirty = true;
+			powerSnapshotDiagCountsDirty =
+				recordPowerSnapshotDiagCounts(powerSnapshotDiagCounts,
+				                              powerSnapshotDiagSubreads,
+				                              kPowerSnapshotDiagSubreadCount,
+				                              reasonMask) ||
+				powerSnapshotDiagCountsDirty;
 			if (reasonMask != PowerSnapshotDiagReasonNone) {
 				powerSnapshotDiagLast.valid = true;
 				powerSnapshotDiagLast.tsMs = powerSnapshotCompletedMs;

@@ -201,37 +201,46 @@ computePowerSnapshotDiagReasonMask(const PowerSnapshotDiagSubreadRuntime *subrea
 	return reasonMask;
 }
 
-inline void
+inline bool
 recordPowerSnapshotDiagCounts(PowerSnapshotDiagCountsRuntime &counts,
                               const PowerSnapshotDiagSubreadRuntime *subreads,
                               size_t subreadCount,
                               uint8_t reasonMask)
 {
+	bool changed = false;
 	if (reasonMask != PowerSnapshotDiagReasonNone) {
 		counts.interestingEventCount++;
+		changed = true;
 	}
 	if ((reasonMask & PowerSnapshotDiagReasonLowLoad) != 0) {
 		counts.loadLowEventCount++;
+		changed = true;
 	}
 	for (size_t i = 0; i < subreadCount && i < kPowerSnapshotDiagSubreadCount; ++i) {
 		PowerSnapshotDiagSubreadCounters &counter = counts.subreads[i];
 		const PowerSnapshotDiagSubreadRuntime &subread = subreads[i];
 		if (subread.totalQ10 > counter.maxTotalQ10) {
 			counter.maxTotalQ10 = subread.totalQ10;
+			changed = true;
 		}
 		if (subread.totalQ10 >= kPowerSnapshotDiagSubreadSlowThresholdQ10) {
 			counter.slowCount++;
+			changed = true;
 		}
 		if (subread.retries > 0) {
 			counter.retryCount++;
+			changed = true;
 		}
 		if (subread.result == modbusRequestAndResponseStatusValues::noResponse) {
 			counter.timeoutCount++;
+			changed = true;
 		}
 		if (subread.result == modbusRequestAndResponseStatusValues::invalidFrame) {
 			counter.invalidFrameCount++;
+			changed = true;
 		}
 	}
+	return changed;
 }
 
 inline bool
