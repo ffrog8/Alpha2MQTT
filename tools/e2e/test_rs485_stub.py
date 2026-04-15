@@ -7333,7 +7333,11 @@ def main() -> int:
         if selected_cases:
             selected_set = set(selected_cases)
             optional_names = [name for name, _ in optional_cases if name in selected_set]
-            ordered_names = [name for name in ordered_names if name in selected_set] + optional_names
+            selected_ordered = [name for name in ordered_names if name in selected_set]
+            ordered_names = list(selected_ordered)
+            for name in optional_names:
+                if name not in ordered_names:
+                    ordered_names.append(name)
         if not ordered_names:
             raise E2EError("No cases selected to run")
     
