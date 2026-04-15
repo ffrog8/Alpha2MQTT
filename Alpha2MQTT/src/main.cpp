@@ -329,6 +329,7 @@ bool essSnapshotLastOk = false;
 uint32_t dispatchLastRunMs = 0;
 char dispatchLastSkipReason[48] = "";
 static PowerSnapshotBuildMinuteBucket powerSnapshotBuildMinuteBuckets[kPowerSnapshotBuildMinuteBucketCount]{};
+static PowerSnapshotBuildMinuteTracker powerSnapshotBuildMinuteTracker{};
 static bool powerSnapshotBuildStatusDirty = true;
 static uint32_t powerSnapshotBuildLastPublishedMinuteId = UINT32_MAX;
 static TimedDispatchRuntimeState timedDispatchState;
@@ -11708,16 +11709,19 @@ populateStatusPowerSnapshotBuildSnapshot(StatusPowerSnapshotBuildSnapshot &snaps
 	const PowerSnapshotBuildWindowStats oneMinute =
 		aggregatePowerSnapshotBuildWindow(powerSnapshotBuildMinuteBuckets,
 		                                  kPowerSnapshotBuildMinuteBucketCount,
+		                                  powerSnapshotBuildMinuteTracker,
 		                                  nowMs,
 		                                  1);
 	const PowerSnapshotBuildWindowStats fiveMinutes =
 		aggregatePowerSnapshotBuildWindow(powerSnapshotBuildMinuteBuckets,
 		                                  kPowerSnapshotBuildMinuteBucketCount,
+		                                  powerSnapshotBuildMinuteTracker,
 		                                  nowMs,
 		                                  5);
 	const PowerSnapshotBuildWindowStats fifteenMinutes =
 		aggregatePowerSnapshotBuildWindow(powerSnapshotBuildMinuteBuckets,
 		                                  kPowerSnapshotBuildMinuteBucketCount,
+		                                  powerSnapshotBuildMinuteTracker,
 		                                  nowMs,
 		                                  15);
 
@@ -13457,6 +13461,7 @@ refreshEssSnapshot(void)
 		essPowerSnapshotLastBuildMs = powerSnapshotCompletedMs - powerSnapshotStartedMs;
 		recordPowerSnapshotBuildMinuteSample(powerSnapshotBuildMinuteBuckets,
 		                                     kPowerSnapshotBuildMinuteBucketCount,
+		                                     powerSnapshotBuildMinuteTracker,
 		                                     powerSnapshotCompletedMs,
 		                                     essPowerSnapshotLastBuildMs);
 		powerSnapshotBuildStatusDirty = true;

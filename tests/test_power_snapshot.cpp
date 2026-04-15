@@ -47,32 +47,38 @@ TEST_CASE("power snapshot helpers populate ESS snapshot metadata with pass ident
 TEST_CASE("power snapshot build minute buckets aggregate current 1m 5m and 15m windows")
 {
 	PowerSnapshotBuildMinuteBucket buckets[kPowerSnapshotBuildMinuteBucketCount];
+	PowerSnapshotBuildMinuteTracker tracker{};
 	resetPowerSnapshotBuildMinuteBuckets(buckets, kPowerSnapshotBuildMinuteBucketCount);
+	resetPowerSnapshotBuildMinuteTracker(tracker);
 
 	recordPowerSnapshotBuildMinuteSample(buckets,
 	                                     kPowerSnapshotBuildMinuteBucketCount,
-	                                     10 * kPowerSnapshotBuildBucketMinuteMs + 1000,
-	                                     120);
+	                                     tracker,
+	                                     0 * kPowerSnapshotBuildBucketMinuteMs + 1000,
+	                                     700);
 	recordPowerSnapshotBuildMinuteSample(buckets,
 	                                     kPowerSnapshotBuildMinuteBucketCount,
-	                                     10 * kPowerSnapshotBuildBucketMinuteMs + 5000,
-	                                     180);
-	recordPowerSnapshotBuildMinuteSample(buckets,
-	                                     kPowerSnapshotBuildMinuteBucketCount,
+	                                     tracker,
 	                                     8 * kPowerSnapshotBuildBucketMinuteMs + 1000,
 	                                     300);
 	recordPowerSnapshotBuildMinuteSample(buckets,
 	                                     kPowerSnapshotBuildMinuteBucketCount,
-	                                     0 * kPowerSnapshotBuildBucketMinuteMs + 1000,
-	                                     700);
+	                                     tracker,
+	                                     10 * kPowerSnapshotBuildBucketMinuteMs + 1000,
+	                                     120);
+	recordPowerSnapshotBuildMinuteSample(buckets,
+	                                     kPowerSnapshotBuildMinuteBucketCount,
+	                                     tracker,
+	                                     10 * kPowerSnapshotBuildBucketMinuteMs + 5000,
+	                                     180);
 
 	const uint32_t nowMs = 10 * kPowerSnapshotBuildBucketMinuteMs + 59000;
 	const PowerSnapshotBuildWindowStats oneMinute =
-		aggregatePowerSnapshotBuildWindow(buckets, kPowerSnapshotBuildMinuteBucketCount, nowMs, 1);
+		aggregatePowerSnapshotBuildWindow(buckets, kPowerSnapshotBuildMinuteBucketCount, tracker, nowMs, 1);
 	const PowerSnapshotBuildWindowStats fiveMinutes =
-		aggregatePowerSnapshotBuildWindow(buckets, kPowerSnapshotBuildMinuteBucketCount, nowMs, 5);
+		aggregatePowerSnapshotBuildWindow(buckets, kPowerSnapshotBuildMinuteBucketCount, tracker, nowMs, 5);
 	const PowerSnapshotBuildWindowStats fifteenMinutes =
-		aggregatePowerSnapshotBuildWindow(buckets, kPowerSnapshotBuildMinuteBucketCount, nowMs, 15);
+		aggregatePowerSnapshotBuildWindow(buckets, kPowerSnapshotBuildMinuteBucketCount, tracker, nowMs, 15);
 
 	CHECK(oneMinute.hasData);
 	CHECK(oneMinute.minMs == 120);
@@ -96,20 +102,25 @@ TEST_CASE("power snapshot build minute buckets aggregate current 1m 5m and 15m w
 TEST_CASE("power snapshot build minute buckets overwrite stale slot data cleanly")
 {
 	PowerSnapshotBuildMinuteBucket buckets[kPowerSnapshotBuildMinuteBucketCount];
+	PowerSnapshotBuildMinuteTracker tracker{};
 	resetPowerSnapshotBuildMinuteBuckets(buckets, kPowerSnapshotBuildMinuteBucketCount);
+	resetPowerSnapshotBuildMinuteTracker(tracker);
 
 	recordPowerSnapshotBuildMinuteSample(buckets,
 	                                     kPowerSnapshotBuildMinuteBucketCount,
+	                                     tracker,
 	                                     1 * kPowerSnapshotBuildBucketMinuteMs + 1000,
 	                                     140);
 	recordPowerSnapshotBuildMinuteSample(buckets,
 	                                     kPowerSnapshotBuildMinuteBucketCount,
+	                                     tracker,
 	                                     16 * kPowerSnapshotBuildBucketMinuteMs + 1000,
 	                                     220);
 
 	const PowerSnapshotBuildWindowStats currentWindow =
 		aggregatePowerSnapshotBuildWindow(buckets,
 		                                  kPowerSnapshotBuildMinuteBucketCount,
+		                                  tracker,
 		                                  16 * kPowerSnapshotBuildBucketMinuteMs + 2000,
 		                                  15);
 
@@ -122,6 +133,7 @@ TEST_CASE("power snapshot build minute buckets overwrite stale slot data cleanly
 	const PowerSnapshotBuildWindowStats staleWindow =
 		aggregatePowerSnapshotBuildWindow(buckets,
 		                                  kPowerSnapshotBuildMinuteBucketCount,
+		                                  tracker,
 		                                  32 * kPowerSnapshotBuildBucketMinuteMs + 1000,
 		                                  15);
 	CHECK_FALSE(staleWindow.hasData);
@@ -131,26 +143,31 @@ TEST_CASE("power snapshot build minute buckets overwrite stale slot data cleanly
 TEST_CASE("power snapshot build minute buckets keep recent samples across millis rollover")
 {
 	PowerSnapshotBuildMinuteBucket buckets[kPowerSnapshotBuildMinuteBucketCount];
+	PowerSnapshotBuildMinuteTracker tracker{};
 	resetPowerSnapshotBuildMinuteBuckets(buckets, kPowerSnapshotBuildMinuteBucketCount);
+	resetPowerSnapshotBuildMinuteTracker(tracker);
 
 	recordPowerSnapshotBuildMinuteSample(buckets,
 	                                     kPowerSnapshotBuildMinuteBucketCount,
+	                                     tracker,
 	                                     UINT32_MAX - 1000,
 	                                     220);
 	recordPowerSnapshotBuildMinuteSample(buckets,
 	                                     kPowerSnapshotBuildMinuteBucketCount,
+	                                     tracker,
 	                                     5000,
 	                                     140);
 	recordPowerSnapshotBuildMinuteSample(buckets,
 	                                     kPowerSnapshotBuildMinuteBucketCount,
+	                                     tracker,
 	                                     1 * kPowerSnapshotBuildBucketMinuteMs + 5000,
 	                                     300);
 
 	const uint32_t nowMs = 1 * kPowerSnapshotBuildBucketMinuteMs + 59000;
 	const PowerSnapshotBuildWindowStats oneMinute =
-		aggregatePowerSnapshotBuildWindow(buckets, kPowerSnapshotBuildMinuteBucketCount, nowMs, 1);
+		aggregatePowerSnapshotBuildWindow(buckets, kPowerSnapshotBuildMinuteBucketCount, tracker, nowMs, 1);
 	const PowerSnapshotBuildWindowStats fiveMinutes =
-		aggregatePowerSnapshotBuildWindow(buckets, kPowerSnapshotBuildMinuteBucketCount, nowMs, 5);
+		aggregatePowerSnapshotBuildWindow(buckets, kPowerSnapshotBuildMinuteBucketCount, tracker, nowMs, 5);
 
 	CHECK(oneMinute.hasData);
 	CHECK(oneMinute.minMs == 300);
@@ -163,6 +180,36 @@ TEST_CASE("power snapshot build minute buckets keep recent samples across millis
 	CHECK(fiveMinutes.maxMs == 300);
 	CHECK(fiveMinutes.avgMs == 220);
 	CHECK(fiveMinutes.count == 3);
+}
+
+TEST_CASE("power snapshot build minute buckets ignore stale generations after wrap")
+{
+	PowerSnapshotBuildMinuteBucket buckets[kPowerSnapshotBuildMinuteBucketCount];
+	PowerSnapshotBuildMinuteTracker tracker{};
+	resetPowerSnapshotBuildMinuteBuckets(buckets, kPowerSnapshotBuildMinuteBucketCount);
+	resetPowerSnapshotBuildMinuteTracker(tracker);
+
+	PowerSnapshotBuildMinuteBucket &bucket = buckets[150 % kPowerSnapshotBuildMinuteBucketCount];
+	bucket.minuteId = 150;
+	bucket.generation = 0;
+	bucket.minMs = 180;
+	bucket.maxMs = 180;
+	bucket.sumMs = 180;
+	bucket.count = 1;
+
+	tracker.lastMinuteId = 150;
+	tracker.generation = 1;
+
+	const uint32_t nowMs = 150 * kPowerSnapshotBuildBucketMinuteMs + 1000;
+	const PowerSnapshotBuildWindowStats oneMinute =
+		aggregatePowerSnapshotBuildWindow(buckets, kPowerSnapshotBuildMinuteBucketCount, tracker, nowMs, 1);
+	const PowerSnapshotBuildWindowStats fifteenMinutes =
+		aggregatePowerSnapshotBuildWindow(buckets, kPowerSnapshotBuildMinuteBucketCount, tracker, nowMs, 15);
+
+	CHECK_FALSE(oneMinute.hasData);
+	CHECK(oneMinute.count == 0);
+	CHECK_FALSE(fifteenMinutes.hasData);
+	CHECK(fifteenMinutes.count == 0);
 }
 
 TEST_CASE("power snapshot helpers coalesce dispatch requests only during snapshot build")

@@ -27,10 +27,16 @@ struct EssSnapshotMeta {
 
 struct PowerSnapshotBuildMinuteBucket {
 	uint32_t minuteId = UINT32_MAX;
+	uint8_t generation = 0;
 	uint16_t minMs = 0;
 	uint16_t maxMs = 0;
 	uint32_t sumMs = 0;
 	uint16_t count = 0;
+};
+
+struct PowerSnapshotBuildMinuteTracker {
+	uint32_t lastMinuteId = UINT32_MAX;
+	uint8_t generation = 0;
 };
 
 struct PowerSnapshotBuildWindowStats {
@@ -72,10 +78,18 @@ inline void
 clearPowerSnapshotBuildMinuteBucket(PowerSnapshotBuildMinuteBucket &bucket)
 {
 	bucket.minuteId = UINT32_MAX;
+	bucket.generation = 0;
 	bucket.minMs = 0;
 	bucket.maxMs = 0;
 	bucket.sumMs = 0;
 	bucket.count = 0;
+}
+
+inline void
+resetPowerSnapshotBuildMinuteTracker(PowerSnapshotBuildMinuteTracker &tracker)
+{
+	tracker.lastMinuteId = UINT32_MAX;
+	tracker.generation = 0;
 }
 
 inline void
@@ -89,20 +103,35 @@ resetPowerSnapshotBuildMinuteBuckets(PowerSnapshotBuildMinuteBucket *buckets, si
 	}
 }
 
+inline uint32_t
+observePowerSnapshotBuildMinuteId(PowerSnapshotBuildMinuteTracker &tracker, uint32_t nowMs, uint8_t &generation)
+{
+	const uint32_t minuteId = powerSnapshotBuildMinuteId(nowMs);
+	if (tracker.lastMinuteId != UINT32_MAX && minuteId < tracker.lastMinuteId) {
+		tracker.generation = static_cast<uint8_t>(tracker.generation + 1U);
+	}
+	tracker.lastMinuteId = minuteId;
+	generation = tracker.generation;
+	return minuteId;
+}
+
 inline void
 recordPowerSnapshotBuildMinuteSample(PowerSnapshotBuildMinuteBucket *buckets,
                                      size_t bucketCount,
+                                     PowerSnapshotBuildMinuteTracker &tracker,
                                      uint32_t nowMs,
                                      uint32_t buildMs)
 {
 	if (buckets == nullptr || bucketCount == 0) {
 		return;
 	}
-	const uint32_t minuteId = powerSnapshotBuildMinuteId(nowMs);
+	uint8_t generation = 0;
+	const uint32_t minuteId = observePowerSnapshotBuildMinuteId(tracker, nowMs, generation);
 	PowerSnapshotBuildMinuteBucket &bucket = buckets[minuteId % bucketCount];
-	if (bucket.minuteId != minuteId) {
+	if (bucket.minuteId != minuteId || bucket.generation != generation) {
 		clearPowerSnapshotBuildMinuteBucket(bucket);
 		bucket.minuteId = minuteId;
+		bucket.generation = generation;
 	}
 
 	const uint16_t clampedBuildMs =
@@ -130,6 +159,7 @@ recordPowerSnapshotBuildMinuteSample(PowerSnapshotBuildMinuteBucket *buckets,
 inline PowerSnapshotBuildWindowStats
 aggregatePowerSnapshotBuildWindow(const PowerSnapshotBuildMinuteBucket *buckets,
                                   size_t bucketCount,
+                                  PowerSnapshotBuildMinuteTracker &tracker,
                                   uint32_t nowMs,
                                   uint8_t windowMinutes)
 {
@@ -138,16 +168,26 @@ aggregatePowerSnapshotBuildWindow(const PowerSnapshotBuildMinuteBucket *buckets,
 		return stats;
 	}
 
-	const uint32_t currentMinute = powerSnapshotBuildMinuteId(nowMs);
+	uint8_t currentGeneration = 0;
+	const uint32_t currentMinute = observePowerSnapshotBuildMinuteId(tracker, nowMs, currentGeneration);
 	for (size_t i = 0; i < bucketCount; ++i) {
 		const PowerSnapshotBuildMinuteBucket &bucket = buckets[i];
 		if (bucket.count == 0 || bucket.minuteId == UINT32_MAX) {
 			continue;
 		}
-		const uint32_t ageMinutes = (currentMinute >= bucket.minuteId)
-			                            ? (currentMinute - bucket.minuteId)
-			                            : ((kPowerSnapshotBuildMinuteWrapPeriod - bucket.minuteId) +
-			                               currentMinute);
+		const uint8_t generationDistance = static_cast<uint8_t>(currentGeneration - bucket.generation);
+		if (generationDistance > 1U) {
+			continue;
+		}
+		uint32_t ageMinutes = 0;
+		if (generationDistance == 0U) {
+			if (bucket.minuteId > currentMinute) {
+				continue;
+			}
+			ageMinutes = currentMinute - bucket.minuteId;
+		} else {
+			ageMinutes = (kPowerSnapshotBuildMinuteWrapPeriod - bucket.minuteId) + currentMinute;
+		}
 		if (ageMinutes >= static_cast<uint32_t>(windowMinutes)) {
 			continue;
 		}
