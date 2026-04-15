@@ -213,6 +213,25 @@ eventCodeName(MqttEventCode code)
 	}
 }
 
+uint8_t
+clampStatusRawReadSize(uint16_t requestedBytes, uint16_t rawSize, size_t rawCapacity)
+{
+	uint16_t clamped = rawSize;
+	if (rawCapacity < clamped) {
+		clamped = static_cast<uint16_t>(rawCapacity);
+	}
+	// Raw-read requests declare the largest payload callers expect back. Clamp
+	// to both the response buffer capacity and that request bound so malformed
+	// frames cannot drive the JSON builder past valid response bytes.
+	if (requestedBytes > 0 && clamped > requestedBytes) {
+		clamped = requestedBytes;
+	}
+	if (clamped > UINT8_MAX) {
+		clamped = UINT8_MAX;
+	}
+	return static_cast<uint8_t>(clamped);
+}
+
 EventLimiter::EventLimiter()
 {
 	memset(_lastPublishMs, 0, sizeof(_lastPublishMs));

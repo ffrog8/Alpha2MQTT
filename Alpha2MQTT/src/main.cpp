@@ -14422,11 +14422,12 @@ publishRawRegisterReadStatus(int32_t requestedReg,
 	snapshot.requestedBytes = requestedBytes;
 	snapshot.functionCode = MODBUS_FN_READDATAREGISTER;
 	snapshot.status = (statusOverride != nullptr) ? statusOverride : response.statusMqttMessage;
-	snapshot.rawSize = response.dataSize;
+	snapshot.rawSize =
+		clampStatusRawReadSize(requestedBytes, response.dataSize, sizeof(response.data));
 	snapshot.raw = response.data;
 	if (snapshot.status != nullptr &&
 	    strcmp(snapshot.status, MODBUS_REQUEST_AND_RESPONSE_ERROR_MQTT_DESC) == 0 &&
-	    response.dataSize > 0) {
+	    snapshot.rawSize > 0) {
 		snapshot.hasSlaveErrorCode = true;
 		snapshot.slaveErrorCode = static_cast<uint16_t>(response.data[0]);
 	}

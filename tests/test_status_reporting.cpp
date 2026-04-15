@@ -709,6 +709,14 @@ TEST_CASE("status raw read JSON builder includes slave error code when present")
 	CHECK(payload.find("\"slave_error_code\":2") != std::string::npos);
 }
 
+TEST_CASE("status raw read size clamp honors request and buffer bounds")
+{
+	CHECK(clampStatusRawReadSize(4, 255, 64) == 4);
+	CHECK(clampStatusRawReadSize(58, 64, 64) == 58);
+	CHECK(clampStatusRawReadSize(0, 80, 64) == 64);
+	CHECK(clampStatusRawReadSize(4, 2, 64) == 2);
+}
+
 TEST_CASE("status raw read JSON builder handles worst-case raw payload sizing")
 {
 	uint8_t raw[58];

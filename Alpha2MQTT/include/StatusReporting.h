@@ -194,6 +194,10 @@ struct StatusRawReadSnapshot {
 	uint16_t slaveErrorCode;
 };
 
+uint8_t clampStatusRawReadSize(uint16_t requestedBytes,
+                               uint16_t rawSize,
+                               size_t rawCapacity);
+
 struct StatusBootMemSnapshot {
 	uint64_t fwBuildTsMs;
 	uint32_t tsMs;

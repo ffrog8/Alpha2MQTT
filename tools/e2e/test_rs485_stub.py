@@ -7322,7 +7322,7 @@ def main() -> int:
             ("portal_wifi_then_mqtt_save_handoff", case_portal_wifi_then_mqtt_save_handoff),
         ]
 
-        case_map = {name: fn for name, fn in cases}
+        case_map = {name: fn for name, fn in cases + optional_cases}
         ordered_names = [name for name, _ in cases]
         if from_case:
             ordered_names = ordered_names[ordered_names.index(from_case):]
