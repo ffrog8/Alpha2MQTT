@@ -656,6 +656,90 @@ TEST_CASE("status manual read JSON builder includes deterministic correlation fi
 	CHECK(payload.find("\"value\":\"Unknown (\\\"AL\\\")\\\\path\"") != std::string::npos);
 }
 
+TEST_CASE("status raw read JSON builder includes raw bytes and request metadata")
+{
+	const uint8_t raw[] = {0, 0, 3, 244};
+	StatusRawReadSnapshot snapshot{};
+	snapshot.seq = 7;
+	snapshot.tsMs = 2222;
+	snapshot.requestedReg = 21055;
+	snapshot.requestedBytes = 4;
+	snapshot.functionCode = 3;
+	snapshot.status = "readDataRegisterSuccess";
+	snapshot.rawSize = sizeof(raw);
+	snapshot.raw = raw;
+
+	char buffer[256];
+	CHECK(buildStatusRawReadJson(snapshot, buffer, sizeof(buffer)));
+
+	std::string payload(buffer);
+	CHECK(payload.find("\"seq\":7") != std::string::npos);
+	CHECK(payload.find("\"ts_ms\":2222") != std::string::npos);
+	CHECK(payload.find("\"requested_reg\":21055") != std::string::npos);
+	CHECK(payload.find("\"requested_bytes\":4") != std::string::npos);
+	CHECK(payload.find("\"function_code\":3") != std::string::npos);
+	CHECK(payload.find("\"status\":\"readDataRegisterSuccess\"") != std::string::npos);
+	CHECK(payload.find("\"raw_size\":4") != std::string::npos);
+	CHECK(payload.find("\"raw\":[0,0,3,244]") != std::string::npos);
+	CHECK(payload.find("slave_error_code") == std::string::npos);
+}
+
+TEST_CASE("status raw read JSON builder includes slave error code when present")
+{
+	const uint8_t raw[] = {2};
+	StatusRawReadSnapshot snapshot{};
+	snapshot.seq = 9;
+	snapshot.tsMs = 9876;
+	snapshot.requestedReg = 1077;
+	snapshot.requestedBytes = 2;
+	snapshot.functionCode = 3;
+	snapshot.status = "slaveError";
+	snapshot.rawSize = sizeof(raw);
+	snapshot.raw = raw;
+	snapshot.hasSlaveErrorCode = true;
+	snapshot.slaveErrorCode = 2;
+
+	char buffer[256];
+	CHECK(buildStatusRawReadJson(snapshot, buffer, sizeof(buffer)));
+
+	std::string payload(buffer);
+	CHECK(payload.find("\"status\":\"slaveError\"") != std::string::npos);
+	CHECK(payload.find("\"raw_size\":1") != std::string::npos);
+	CHECK(payload.find("\"raw\":[2]") != std::string::npos);
+	CHECK(payload.find("\"slave_error_code\":2") != std::string::npos);
+}
+
+TEST_CASE("status raw read size clamp honors request and buffer bounds")
+{
+	CHECK(clampStatusRawReadSize(4, 255, 64) == 4);
+	CHECK(clampStatusRawReadSize(58, 64, 64) == 58);
+	CHECK(clampStatusRawReadSize(0, 80, 64) == 64);
+	CHECK(clampStatusRawReadSize(4, 2, 64) == 2);
+}
+
+TEST_CASE("status raw read JSON builder handles worst-case raw payload sizing")
+{
+	uint8_t raw[58];
+	for (size_t i = 0; i < sizeof(raw); ++i) {
+		raw[i] = 255;
+	}
+	StatusRawReadSnapshot snapshot{};
+	snapshot.seq = 4294967295UL;
+	snapshot.tsMs = 4294967295UL;
+	snapshot.requestedReg = 65535;
+	snapshot.requestedBytes = 58;
+	snapshot.functionCode = 3;
+	snapshot.status = "readDataRegisterSuccess";
+	snapshot.rawSize = sizeof(raw);
+	snapshot.raw = raw;
+
+	char tooSmall[256];
+	CHECK_FALSE(buildStatusRawReadJson(snapshot, tooSmall, sizeof(tooSmall)));
+
+	char buffer[768];
+	CHECK(buildStatusRawReadJson(snapshot, buffer, sizeof(buffer)));
+}
+
 TEST_CASE("status boot mem JSON builder includes all boot heap checkpoints")
 {
 	StatusBootMemSnapshot snapshot{};
@@ -706,4 +790,51 @@ TEST_CASE("status boot net JSON builder includes boot network diagnostics")
 
 	char tooSmall[64];
 	CHECK_FALSE(buildStatusBootNetJson(snapshot, tooSmall, sizeof(tooSmall)));
+}
+
+TEST_CASE("status power snapshot build JSON builder includes 1m 5m and 15m windows")
+{
+	StatusPowerSnapshotBuildSnapshot snapshot{};
+	snapshot.oneMinute.hasData = true;
+	snapshot.oneMinute.minMs = 604;
+	snapshot.oneMinute.maxMs = 711;
+	snapshot.oneMinute.avgMs = 648;
+	snapshot.fiveMinutes.hasData = true;
+	snapshot.fiveMinutes.minMs = 598;
+	snapshot.fiveMinutes.maxMs = 728;
+	snapshot.fiveMinutes.avgMs = 653;
+	snapshot.fifteenMinutes.hasData = true;
+	snapshot.fifteenMinutes.minMs = 592;
+	snapshot.fifteenMinutes.maxMs = 741;
+	snapshot.fifteenMinutes.avgMs = 656;
+
+	char buffer[256];
+	CHECK(buildStatusPowerSnapshotBuildJson(snapshot, buffer, sizeof(buffer)));
+
+	std::string payload(buffer);
+	CHECK(payload.find("\"m1\":{\"min\":604,\"max\":711,\"avg\":648}") != std::string::npos);
+	CHECK(payload.find("\"m5\":{\"min\":598,\"max\":728,\"avg\":653}") != std::string::npos);
+	CHECK(payload.find("\"m15\":{\"min\":592,\"max\":741,\"avg\":656}") != std::string::npos);
+}
+
+TEST_CASE("status power snapshot build JSON builder emits null windows when empty")
+{
+	StatusPowerSnapshotBuildSnapshot snapshot{};
+	snapshot.oneMinute.hasData = false;
+	snapshot.fiveMinutes.hasData = true;
+	snapshot.fiveMinutes.minMs = 500;
+	snapshot.fiveMinutes.maxMs = 700;
+	snapshot.fiveMinutes.avgMs = 600;
+	snapshot.fifteenMinutes.hasData = false;
+
+	char buffer[128];
+	CHECK(buildStatusPowerSnapshotBuildJson(snapshot, buffer, sizeof(buffer)));
+
+	std::string payload(buffer);
+	CHECK(payload.find("\"m1\":null") != std::string::npos);
+	CHECK(payload.find("\"m5\":{\"min\":500,\"max\":700,\"avg\":600}") != std::string::npos);
+	CHECK(payload.find("\"m15\":null") != std::string::npos);
+
+	char tooSmall[32];
+	CHECK_FALSE(buildStatusPowerSnapshotBuildJson(snapshot, tooSmall, sizeof(tooSmall)));
 }

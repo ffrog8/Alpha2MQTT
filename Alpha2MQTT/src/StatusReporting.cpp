@@ -213,6 +213,25 @@ eventCodeName(MqttEventCode code)
 	}
 }
 
+uint8_t
+clampStatusRawReadSize(uint16_t requestedBytes, uint16_t rawSize, size_t rawCapacity)
+{
+	uint16_t clamped = rawSize;
+	if (rawCapacity < clamped) {
+		clamped = static_cast<uint16_t>(rawCapacity);
+	}
+	// Raw-read requests declare the largest payload callers expect back. Clamp
+	// to both the response buffer capacity and that request bound so malformed
+	// frames cannot drive the JSON builder past valid response bytes.
+	if (requestedBytes > 0 && clamped > requestedBytes) {
+		clamped = requestedBytes;
+	}
+	if (clamped > UINT8_MAX) {
+		clamped = UINT8_MAX;
+	}
+	return static_cast<uint8_t>(clamped);
+}
+
 EventLimiter::EventLimiter()
 {
 	memset(_lastPublishMs, 0, sizeof(_lastPublishMs));
@@ -804,6 +823,29 @@ appendJsonf(char *dest, size_t destSize, size_t &used, const char *fmt, ...)
 	return true;
 }
 
+static bool
+appendPowerSnapshotBuildWindowJson(char *dest,
+                                   size_t destSize,
+                                   size_t &used,
+                                   const char *key,
+                                   const StatusPowerSnapshotBuildWindowSnapshot &window)
+{
+	if (key == nullptr) {
+		return false;
+	}
+	if (!window.hasData) {
+		return appendJsonf(dest, destSize, used, "\"%s\":null", key);
+	}
+	return appendJsonf(dest,
+	                   destSize,
+	                   used,
+	                   "\"%s\":{\"min\":%u,\"max\":%u,\"avg\":%u}",
+	                   key,
+	                   static_cast<unsigned>(window.minMs),
+	                   static_cast<unsigned>(window.maxMs),
+	                   static_cast<unsigned>(window.avgMs));
+}
+
 } // namespace
 
 bool
@@ -832,6 +874,68 @@ buildStatusManualReadJson(const StatusManualReadSnapshot &snapshot, char *out, s
 		static_cast<unsigned>(snapshot.observedReg),
 		escapedValue);
 	if (written < 0 || static_cast<size_t>(written) >= outSize) {
+		return false;
+	}
+	return true;
+}
+
+bool
+buildStatusRawReadJson(const StatusRawReadSnapshot &snapshot, char *out, size_t outSize)
+{
+	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+	if (snapshot.rawSize > 0 && snapshot.raw == nullptr) {
+		return false;
+	}
+	char escapedStatus[64];
+	if (!appendEscapedJsonString(escapedStatus, sizeof(escapedStatus), snapshot.status)) {
+		return false;
+	}
+	out[0] = '\0';
+	size_t used = 0;
+	if (!appendJsonf(out,
+	                 outSize,
+	                 used,
+	                 "{"
+	                 "\"seq\":%lu,"
+	                 "\"ts_ms\":%lu,"
+	                 "\"requested_reg\":%ld,"
+	                 "\"requested_bytes\":%u,"
+	                 "\"function_code\":%u,"
+	                 "\"status\":\"%s\","
+	                 "\"raw_size\":%u,"
+	                 "\"raw\":[",
+	                 static_cast<unsigned long>(snapshot.seq),
+	                 static_cast<unsigned long>(snapshot.tsMs),
+	                 static_cast<long>(snapshot.requestedReg),
+	                 static_cast<unsigned>(snapshot.requestedBytes),
+	                 static_cast<unsigned>(snapshot.functionCode),
+	                 escapedStatus,
+	                 static_cast<unsigned>(snapshot.rawSize))) {
+		return false;
+	}
+	for (uint8_t i = 0; i < snapshot.rawSize; ++i) {
+		if (!appendJsonf(out,
+		                 outSize,
+		                 used,
+		                 (i == 0) ? "%u" : ",%u",
+		                 static_cast<unsigned>(snapshot.raw[i]))) {
+			return false;
+		}
+	}
+	if (!appendJsonf(out, outSize, used, "]")) {
+		return false;
+	}
+	if (snapshot.hasSlaveErrorCode &&
+	    !appendJsonf(out,
+	                 outSize,
+	                 used,
+	                 ",\"slave_error_code\":%u",
+	                 static_cast<unsigned>(snapshot.slaveErrorCode))) {
+		return false;
+	}
+	if (!appendJsonf(out, outSize, used, "}")) {
 		return false;
 	}
 	return true;
@@ -892,6 +996,40 @@ buildStatusBootNetJson(const StatusBootNetSnapshot &snapshot, char *out, size_t 
 		static_cast<unsigned long>(snapshot.wifiDisconnectsBoot),
 		static_cast<unsigned long>(snapshot.wifiLastDisconnectReasonBoot));
 	if (written < 0 || static_cast<size_t>(written) >= outSize) {
+		return false;
+	}
+	return true;
+}
+
+bool
+buildStatusPowerSnapshotBuildJson(const StatusPowerSnapshotBuildSnapshot &snapshot,
+                                  char *out,
+                                  size_t outSize)
+{
+	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+	out[0] = '\0';
+	size_t used = 0;
+	if (!appendJsonf(out, outSize, used, "{")) {
+		return false;
+	}
+	if (!appendPowerSnapshotBuildWindowJson(out, outSize, used, "m1", snapshot.oneMinute)) {
+		return false;
+	}
+	if (!appendJsonf(out, outSize, used, ",")) {
+		return false;
+	}
+	if (!appendPowerSnapshotBuildWindowJson(out, outSize, used, "m5", snapshot.fiveMinutes)) {
+		return false;
+	}
+	if (!appendJsonf(out, outSize, used, ",")) {
+		return false;
+	}
+	if (!appendPowerSnapshotBuildWindowJson(out, outSize, used, "m15", snapshot.fifteenMinutes)) {
+		return false;
+	}
+	if (!appendJsonf(out, outSize, used, "}")) {
 		return false;
 	}
 	return true;
