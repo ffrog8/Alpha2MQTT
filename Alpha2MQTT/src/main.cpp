@@ -14287,6 +14287,9 @@ sendData()
 		// Refresh slow-bucket entity states gradually after reconnect/boot without
 		// reviving the old all-buckets catch-up spike on ESP8266.
 		resetBootstrapPublishState(true);
+		rearmPowerSnapshotDiagRetainedPublishes(powerSnapshotDiagLast.valid,
+		                                        powerSnapshotDiagLastDirty,
+		                                        powerSnapshotDiagCountsDirty);
 	}
 
 	bool dueTenSeconds = checkTimer(&lastRunTenSeconds, STATUS_INTERVAL_TEN_SECONDS);

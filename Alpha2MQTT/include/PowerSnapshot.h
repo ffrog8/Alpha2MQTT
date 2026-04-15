@@ -250,6 +250,15 @@ snapshotPublishAllowedForPass(const EssSnapshotMeta &meta, uint32_t passId)
 }
 
 inline void
+rearmPowerSnapshotDiagRetainedPublishes(bool hasLastEvent, bool &lastDirty, bool &countsDirty)
+{
+	countsDirty = true;
+	if (hasLastEvent) {
+		lastDirty = true;
+	}
+}
+
+inline void
 populateEssSnapshotMeta(EssSnapshotMeta &meta,
                         uint32_t passId,
                         uint32_t builtStartedMs,

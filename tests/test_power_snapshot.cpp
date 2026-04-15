@@ -46,6 +46,22 @@ TEST_CASE("power snapshot helpers populate ESS snapshot metadata with pass ident
 	CHECK(meta.valid);
 }
 
+TEST_CASE("power snapshot diagnostics rearm retained publishes on reconnect")
+{
+	bool lastDirty = false;
+	bool countsDirty = false;
+
+	rearmPowerSnapshotDiagRetainedPublishes(false, lastDirty, countsDirty);
+	CHECK_FALSE(lastDirty);
+	CHECK(countsDirty);
+
+	lastDirty = false;
+	countsDirty = false;
+	rearmPowerSnapshotDiagRetainedPublishes(true, lastDirty, countsDirty);
+	CHECK(lastDirty);
+	CHECK(countsDirty);
+}
+
 TEST_CASE("power snapshot diagnostics quantize elapsed millis in q10 units")
 {
 	CHECK(quantizeMillisToQ10(0) == 0);
