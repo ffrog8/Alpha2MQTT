@@ -13423,6 +13423,7 @@ refreshEssSnapshot(void)
 			}
 		} snapshotBuildGuard;
 		powerSnapshotStartedMs = millis();
+		int powerTupleReadErrors = 0;
 		{
 			bool sampleTimedOut = false;
 			bool sampleTransportFailure = false;
@@ -13430,6 +13431,7 @@ refreshEssSnapshot(void)
 			readPowerTupleRuntimeSample(powerSamples[0], sampleTimedOut, sampleTransportFailure, sampleErrors);
 			rs485TimedOut = rs485TimedOut || sampleTimedOut;
 			rs485TransportFailure = rs485TransportFailure || sampleTransportFailure;
+			powerTupleReadErrors += sampleErrors;
 		}
 		powerConfirm.samples = 1;
 		powerConfirm.accepted = powerSamples[0].tuple.valid;
@@ -13448,6 +13450,7 @@ refreshEssSnapshot(void)
 				                           sampleErrors);
 				rs485TimedOut = rs485TimedOut || sampleTimedOut;
 				rs485TransportFailure = rs485TransportFailure || sampleTransportFailure;
+				powerTupleReadErrors += sampleErrors;
 				powerConfirm.samples = sampleIdx + 1;
 			}
 
@@ -13466,6 +13469,9 @@ refreshEssSnapshot(void)
 		powerSnapshotCompletedMs = millis();
 		essPowerSnapshotLastBuildMs = powerSnapshotCompletedMs - powerSnapshotStartedMs;
 		essPowerSnapshotValid = powerConfirm.accepted;
+		if (!essPowerSnapshotValid && powerTupleReadErrors > 0) {
+			gotError += powerTupleReadErrors;
+		}
 		if (essPowerSnapshotValid) {
 			applyAcceptedPowerTuple(powerSamples[powerConfirm.selectedIndex - 1U]);
 			if (!powerConfirm.triggered) {
