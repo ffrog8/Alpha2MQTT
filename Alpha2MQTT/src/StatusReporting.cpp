@@ -824,26 +824,53 @@ appendJsonf(char *dest, size_t destSize, size_t &used, const char *fmt, ...)
 }
 
 static bool
-appendPowerSnapshotBuildWindowJson(char *dest,
+appendPowerSnapshotDiagSubreadJson(char *dest,
                                    size_t destSize,
                                    size_t &used,
                                    const char *key,
-                                   const StatusPowerSnapshotBuildWindowSnapshot &window)
+                                   const StatusPowerSnapshotDiagSubreadSnapshot &subread)
 {
 	if (key == nullptr) {
 		return false;
 	}
-	if (!window.hasData) {
-		return appendJsonf(dest, destSize, used, "\"%s\":null", key);
+	char escapedResult[64];
+	if (!appendEscapedJsonString(escapedResult, sizeof(escapedResult), subread.result != nullptr ? subread.result : "")) {
+		return false;
 	}
 	return appendJsonf(dest,
 	                   destSize,
 	                   used,
-	                   "\"%s\":{\"min\":%u,\"max\":%u,\"avg\":%u}",
+	                   "\"%s\":{\"total_q10\":%u,\"wait_q10\":%u,\"quiet_q10\":%u,\"attempts\":%u,\"retries\":%u,"
+	                   "\"result\":\"%s\"}",
 	                   key,
-	                   static_cast<unsigned>(window.minMs),
-	                   static_cast<unsigned>(window.maxMs),
-	                   static_cast<unsigned>(window.avgMs));
+	                   static_cast<unsigned>(subread.totalQ10),
+	                   static_cast<unsigned>(subread.waitQ10),
+	                   static_cast<unsigned>(subread.quietQ10),
+	                   static_cast<unsigned>(subread.attempts),
+	                   static_cast<unsigned>(subread.retries),
+	                   escapedResult);
+}
+
+static bool
+appendPowerSnapshotDiagCounterJson(char *dest,
+                                   size_t destSize,
+                                   size_t &used,
+                                   const char *key,
+                                   const StatusPowerSnapshotDiagCounterSubreadSnapshot &counter)
+{
+	if (key == nullptr) {
+		return false;
+	}
+	return appendJsonf(dest,
+	                   destSize,
+	                   used,
+	                   "\"%s\":{\"slow\":%lu,\"retry\":%lu,\"timeout\":%lu,\"invalid_frame\":%lu,\"max_total_q10\":%u}",
+	                   key,
+	                   static_cast<unsigned long>(counter.slowCount),
+	                   static_cast<unsigned long>(counter.retryCount),
+	                   static_cast<unsigned long>(counter.timeoutCount),
+	                   static_cast<unsigned long>(counter.invalidFrameCount),
+	                   static_cast<unsigned>(counter.maxTotalQ10));
 }
 
 } // namespace
@@ -1002,31 +1029,108 @@ buildStatusBootNetJson(const StatusBootNetSnapshot &snapshot, char *out, size_t 
 }
 
 bool
-buildStatusPowerSnapshotBuildJson(const StatusPowerSnapshotBuildSnapshot &snapshot,
-                                  char *out,
-                                  size_t outSize)
+buildStatusPowerSnapshotDiagLastJson(const StatusPowerSnapshotDiagLastSnapshot &snapshot,
+                                     char *out,
+                                     size_t outSize)
+{
+	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+	if (!snapshot.valid) {
+		const int written = A2M_SNPRINTF(out, outSize, A2M_FMT("{\"valid\":false}"));
+		return written >= 0 && static_cast<size_t>(written) < outSize;
+	}
+	char escapedReason[96];
+	if (!appendEscapedJsonString(escapedReason, sizeof(escapedReason), snapshot.reason != nullptr ? snapshot.reason : "")) {
+		return false;
+	}
+	out[0] = '\0';
+	size_t used = 0;
+	if (!appendJsonf(out,
+	                 outSize,
+	                 used,
+	                 "{"
+	                 "\"valid\":true,"
+	                 "\"reason\":\"%s\","
+	                 "\"ts_ms\":%lu,"
+	                 "\"total_q10\":%u,"
+	                 "\"load_w\":%ld,"
+	                 "\"dispatch_request_queued_ms\":%lu,"
+	                 "\"dispatch_last_run_ms\":%lu,",
+	                 escapedReason,
+	                 static_cast<unsigned long>(snapshot.tsMs),
+	                 static_cast<unsigned>(snapshot.totalQ10),
+	                 static_cast<long>(snapshot.loadW),
+	                 static_cast<unsigned long>(snapshot.dispatchRequestQueuedMs),
+	                 static_cast<unsigned long>(snapshot.dispatchLastRunMs))) {
+		return false;
+	}
+	if (!appendPowerSnapshotDiagSubreadJson(out, outSize, used, "battery", snapshot.battery)) {
+		return false;
+	}
+	if (!appendJsonf(out, outSize, used, ",")) {
+		return false;
+	}
+	if (!appendPowerSnapshotDiagSubreadJson(out, outSize, used, "grid", snapshot.grid)) {
+		return false;
+	}
+	if (!appendJsonf(out, outSize, used, ",")) {
+		return false;
+	}
+	if (!appendPowerSnapshotDiagSubreadJson(out, outSize, used, "pv_meter", snapshot.pvMeter)) {
+		return false;
+	}
+	if (!appendJsonf(out, outSize, used, ",")) {
+		return false;
+	}
+	if (!appendPowerSnapshotDiagSubreadJson(out, outSize, used, "pv_block", snapshot.pvBlock)) {
+		return false;
+	}
+	if (!appendJsonf(out, outSize, used, "}")) {
+		return false;
+	}
+	return true;
+}
+
+bool
+buildStatusPowerSnapshotDiagCountsJson(const StatusPowerSnapshotDiagCountsSnapshot &snapshot,
+                                       char *out,
+                                       size_t outSize)
 {
 	if (out == nullptr || outSize == 0) {
 		return false;
 	}
 	out[0] = '\0';
 	size_t used = 0;
-	if (!appendJsonf(out, outSize, used, "{")) {
+	if (!appendJsonf(out,
+	                 outSize,
+	                 used,
+	                 "{"
+	                 "\"interesting_events\":%lu,"
+	                 "\"load_low_events\":%lu,",
+	                 static_cast<unsigned long>(snapshot.interestingEventCount),
+	                 static_cast<unsigned long>(snapshot.loadLowEventCount))) {
 		return false;
 	}
-	if (!appendPowerSnapshotBuildWindowJson(out, outSize, used, "m1", snapshot.oneMinute)) {
+	if (!appendPowerSnapshotDiagCounterJson(out, outSize, used, "battery", snapshot.battery)) {
 		return false;
 	}
 	if (!appendJsonf(out, outSize, used, ",")) {
 		return false;
 	}
-	if (!appendPowerSnapshotBuildWindowJson(out, outSize, used, "m5", snapshot.fiveMinutes)) {
+	if (!appendPowerSnapshotDiagCounterJson(out, outSize, used, "grid", snapshot.grid)) {
 		return false;
 	}
 	if (!appendJsonf(out, outSize, used, ",")) {
 		return false;
 	}
-	if (!appendPowerSnapshotBuildWindowJson(out, outSize, used, "m15", snapshot.fifteenMinutes)) {
+	if (!appendPowerSnapshotDiagCounterJson(out, outSize, used, "pv_meter", snapshot.pvMeter)) {
+		return false;
+	}
+	if (!appendJsonf(out, outSize, used, ",")) {
+		return false;
+	}
+	if (!appendPowerSnapshotDiagCounterJson(out, outSize, used, "pv_block", snapshot.pvBlock)) {
 		return false;
 	}
 	if (!appendJsonf(out, outSize, used, "}")) {

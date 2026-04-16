@@ -76,6 +76,7 @@ class RS485Handler
 		uint32_t _probeAttempts = 0;
 		int16_t _socStepX10PerSnapshot = 0;
 		bool _inTransaction = false;
+		Rs485TransactionDiag _lastTransactionDiag{};
 
 		uint32_t _readCount = 0;
 		uint32_t _writeCount = 0;
@@ -475,6 +476,7 @@ class RS485Handler
 		uint16_t stubLastWriteRegCount() const { return _lastWriteRegCount; }
 		uint32_t stubLastWriteMs() const { return _lastWriteMs; }
 		bool inTransaction() const { return _inTransaction; }
+		const Rs485TransactionDiag &lastTransactionDiag() const { return _lastTransactionDiag; }
 
 		~RS485Handler() = default;
 
@@ -494,6 +496,8 @@ class RS485Handler
 				explicit TxnGuard(bool &f) : flag(f) { flag = true; }
 				~TxnGuard() { flag = false; }
 			} txnGuard(_inTransaction);
+			_lastTransactionDiag = Rs485TransactionDiag{};
+			_lastTransactionDiag.attempts = 1;
 
 			const uint8_t fn = frame[1];
 			resp->functionCode = fn;
@@ -617,10 +621,12 @@ class RS485Handler
 				if (_cfg.failType == Rs485StubFailType::SlaveError) {
 					strcpy(resp->statusMqttMessage, MODBUS_REQUEST_AND_RESPONSE_ERROR_MQTT_DESC);
 					strcpy(resp->displayMessage, MODBUS_REQUEST_AND_RESPONSE_ERROR_DISPLAY_DESC);
+					_lastTransactionDiag.result = modbusRequestAndResponseStatusValues::slaveError;
 					return modbusRequestAndResponseStatusValues::slaveError;
 				}
 				strcpy(resp->statusMqttMessage, MODBUS_REQUEST_AND_RESPONSE_NO_RESPONSE_MQTT_DESC);
 				strcpy(resp->displayMessage, MODBUS_REQUEST_AND_RESPONSE_NO_RESPONSE_DISPLAY_DESC);
+				_lastTransactionDiag.result = modbusRequestAndResponseStatusValues::noResponse;
 				return modbusRequestAndResponseStatusValues::noResponse;
 			}
 
@@ -695,6 +701,7 @@ class RS485Handler
 
 				strcpy(resp->statusMqttMessage, MODBUS_REQUEST_AND_RESPONSE_READ_DATA_REGISTER_SUCCESS_MQTT_DESC);
 				strcpy(resp->displayMessage, MODBUS_REQUEST_AND_RESPONSE_READ_DATA_REGISTER_SUCCESS_DISPLAY_DESC);
+				_lastTransactionDiag.result = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
 				return modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
 			}
 
@@ -739,6 +746,7 @@ class RS485Handler
 				resp->dataSize = 0;
 				strcpy(resp->statusMqttMessage, MODBUS_REQUEST_AND_RESPONSE_WRITE_DATA_REGISTER_SUCCESS_MQTT_DESC);
 				strcpy(resp->displayMessage, MODBUS_REQUEST_AND_RESPONSE_WRITE_DATA_REGISTER_SUCCESS_DISPLAY_DESC);
+				_lastTransactionDiag.result = modbusRequestAndResponseStatusValues::writeDataRegisterSuccess;
 				return modbusRequestAndResponseStatusValues::writeDataRegisterSuccess;
 			}
 
@@ -756,11 +764,13 @@ class RS485Handler
 				resp->dataSize = 0;
 				strcpy(resp->statusMqttMessage, MODBUS_REQUEST_AND_RESPONSE_WRITE_SINGLE_REGISTER_SUCCESS_MQTT_DESC);
 				strcpy(resp->displayMessage, MODBUS_REQUEST_AND_RESPONSE_WRITE_SINGLE_REGISTER_SUCCESS_DISPLAY_DESC);
+				_lastTransactionDiag.result = modbusRequestAndResponseStatusValues::writeSingleRegisterSuccess;
 				return modbusRequestAndResponseStatusValues::writeSingleRegisterSuccess;
 			}
 
 			strcpy(resp->statusMqttMessage, MODBUS_REQUEST_AND_RESPONSE_INVALID_FRAME_MQTT_DESC);
 			strcpy(resp->displayMessage, MODBUS_REQUEST_AND_RESPONSE_INVALID_FRAME_DISPLAY_DESC);
+			_lastTransactionDiag.result = modbusRequestAndResponseStatusValues::invalidFrame;
 			return modbusRequestAndResponseStatusValues::invalidFrame;
 		}
 

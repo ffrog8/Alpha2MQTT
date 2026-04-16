@@ -792,49 +792,110 @@ TEST_CASE("status boot net JSON builder includes boot network diagnostics")
 	CHECK_FALSE(buildStatusBootNetJson(snapshot, tooSmall, sizeof(tooSmall)));
 }
 
-TEST_CASE("status power snapshot build JSON builder includes 1m 5m and 15m windows")
+TEST_CASE("status power snapshot diag last JSON builder includes event context and subreads")
 {
-	StatusPowerSnapshotBuildSnapshot snapshot{};
-	snapshot.oneMinute.hasData = true;
-	snapshot.oneMinute.minMs = 604;
-	snapshot.oneMinute.maxMs = 711;
-	snapshot.oneMinute.avgMs = 648;
-	snapshot.fiveMinutes.hasData = true;
-	snapshot.fiveMinutes.minMs = 598;
-	snapshot.fiveMinutes.maxMs = 728;
-	snapshot.fiveMinutes.avgMs = 653;
-	snapshot.fifteenMinutes.hasData = true;
-	snapshot.fifteenMinutes.minMs = 592;
-	snapshot.fifteenMinutes.maxMs = 741;
-	snapshot.fifteenMinutes.avgMs = 656;
+	StatusPowerSnapshotDiagLastSnapshot snapshot{};
+	snapshot.valid = true;
+	snapshot.reason = "retry,low_load";
+	snapshot.tsMs = 42183;
+	snapshot.totalQ10 = 105;
+	snapshot.loadW = -12;
+	snapshot.dispatchRequestQueuedMs = 9100;
+	snapshot.dispatchLastRunMs = 9203;
+	snapshot.battery.totalQ10 = 24;
+	snapshot.battery.waitQ10 = 12;
+	snapshot.battery.quietQ10 = 4;
+	snapshot.battery.attempts = 2;
+	snapshot.battery.retries = 1;
+	snapshot.battery.result = "readDataRegisterSuccess";
+	snapshot.grid.totalQ10 = 8;
+	snapshot.grid.waitQ10 = 6;
+	snapshot.grid.quietQ10 = 2;
+	snapshot.grid.attempts = 1;
+	snapshot.grid.retries = 0;
+	snapshot.grid.result = "noResponse";
+	snapshot.pvMeter.totalQ10 = 21;
+	snapshot.pvMeter.waitQ10 = 8;
+	snapshot.pvMeter.quietQ10 = 3;
+	snapshot.pvMeter.attempts = 1;
+	snapshot.pvMeter.retries = 0;
+	snapshot.pvMeter.result = "invalidFrame";
+	snapshot.pvBlock.totalQ10 = 14;
+	snapshot.pvBlock.waitQ10 = 7;
+	snapshot.pvBlock.quietQ10 = 2;
+	snapshot.pvBlock.attempts = 1;
+	snapshot.pvBlock.retries = 0;
+	snapshot.pvBlock.result = "readDataRegisterSuccess";
 
-	char buffer[256];
-	CHECK(buildStatusPowerSnapshotBuildJson(snapshot, buffer, sizeof(buffer)));
+	char buffer[1024];
+	CHECK(buildStatusPowerSnapshotDiagLastJson(snapshot, buffer, sizeof(buffer)));
 
 	std::string payload(buffer);
-	CHECK(payload.find("\"m1\":{\"min\":604,\"max\":711,\"avg\":648}") != std::string::npos);
-	CHECK(payload.find("\"m5\":{\"min\":598,\"max\":728,\"avg\":653}") != std::string::npos);
-	CHECK(payload.find("\"m15\":{\"min\":592,\"max\":741,\"avg\":656}") != std::string::npos);
+	CHECK(payload.find("\"valid\":true") != std::string::npos);
+	CHECK(payload.find("\"reason\":\"retry,low_load\"") != std::string::npos);
+	CHECK(payload.find("\"ts_ms\":42183") != std::string::npos);
+	CHECK(payload.find("\"total_q10\":105") != std::string::npos);
+	CHECK(payload.find("\"load_w\":-12") != std::string::npos);
+	CHECK(payload.find("\"dispatch_request_queued_ms\":9100") != std::string::npos);
+	CHECK(payload.find("\"dispatch_last_run_ms\":9203") != std::string::npos);
+	CHECK(payload.find("\"battery\":{\"total_q10\":24,\"wait_q10\":12,\"quiet_q10\":4,\"attempts\":2,\"retries\":1,\"result\":\"readDataRegisterSuccess\"}") != std::string::npos);
+	CHECK(payload.find("\"grid\":{\"total_q10\":8,\"wait_q10\":6,\"quiet_q10\":2,\"attempts\":1,\"retries\":0,\"result\":\"noResponse\"}") != std::string::npos);
+	CHECK(payload.find("\"pv_meter\":{\"total_q10\":21,\"wait_q10\":8,\"quiet_q10\":3,\"attempts\":1,\"retries\":0,\"result\":\"invalidFrame\"}") != std::string::npos);
+	CHECK(payload.find("\"pv_block\":{\"total_q10\":14,\"wait_q10\":7,\"quiet_q10\":2,\"attempts\":1,\"retries\":0,\"result\":\"readDataRegisterSuccess\"}") != std::string::npos);
 }
 
-TEST_CASE("status power snapshot build JSON builder emits null windows when empty")
+TEST_CASE("status power snapshot diag last JSON builder emits minimal empty payload")
 {
-	StatusPowerSnapshotBuildSnapshot snapshot{};
-	snapshot.oneMinute.hasData = false;
-	snapshot.fiveMinutes.hasData = true;
-	snapshot.fiveMinutes.minMs = 500;
-	snapshot.fiveMinutes.maxMs = 700;
-	snapshot.fiveMinutes.avgMs = 600;
-	snapshot.fifteenMinutes.hasData = false;
+	StatusPowerSnapshotDiagLastSnapshot snapshot{};
+	snapshot.valid = false;
 
 	char buffer[128];
-	CHECK(buildStatusPowerSnapshotBuildJson(snapshot, buffer, sizeof(buffer)));
+	CHECK(buildStatusPowerSnapshotDiagLastJson(snapshot, buffer, sizeof(buffer)));
 
 	std::string payload(buffer);
-	CHECK(payload.find("\"m1\":null") != std::string::npos);
-	CHECK(payload.find("\"m5\":{\"min\":500,\"max\":700,\"avg\":600}") != std::string::npos);
-	CHECK(payload.find("\"m15\":null") != std::string::npos);
+	CHECK(payload == "{\"valid\":false}");
+
+	char tooSmall[8];
+	CHECK_FALSE(buildStatusPowerSnapshotDiagLastJson(snapshot, tooSmall, sizeof(tooSmall)));
+}
+
+TEST_CASE("status power snapshot diag counts JSON builder includes per-subread counters")
+{
+	StatusPowerSnapshotDiagCountsSnapshot snapshot{};
+	snapshot.interestingEventCount = 5;
+	snapshot.loadLowEventCount = 2;
+	snapshot.battery.slowCount = 1;
+	snapshot.battery.retryCount = 3;
+	snapshot.battery.timeoutCount = 0;
+	snapshot.battery.invalidFrameCount = 0;
+	snapshot.battery.maxTotalQ10 = 24;
+	snapshot.grid.slowCount = 0;
+	snapshot.grid.retryCount = 1;
+	snapshot.grid.timeoutCount = 4;
+	snapshot.grid.invalidFrameCount = 0;
+	snapshot.grid.maxTotalQ10 = 11;
+	snapshot.pvMeter.slowCount = 2;
+	snapshot.pvMeter.retryCount = 0;
+	snapshot.pvMeter.timeoutCount = 0;
+	snapshot.pvMeter.invalidFrameCount = 6;
+	snapshot.pvMeter.maxTotalQ10 = 31;
+	snapshot.pvBlock.slowCount = 0;
+	snapshot.pvBlock.retryCount = 0;
+	snapshot.pvBlock.timeoutCount = 0;
+	snapshot.pvBlock.invalidFrameCount = 0;
+	snapshot.pvBlock.maxTotalQ10 = 16;
+
+	char buffer[384];
+	CHECK(buildStatusPowerSnapshotDiagCountsJson(snapshot, buffer, sizeof(buffer)));
+
+	std::string payload(buffer);
+	CHECK(payload.find("\"interesting_events\":5") != std::string::npos);
+	CHECK(payload.find("\"load_low_events\":2") != std::string::npos);
+	CHECK(payload.find("\"battery\":{\"slow\":1,\"retry\":3,\"timeout\":0,\"invalid_frame\":0,\"max_total_q10\":24}") != std::string::npos);
+	CHECK(payload.find("\"grid\":{\"slow\":0,\"retry\":1,\"timeout\":4,\"invalid_frame\":0,\"max_total_q10\":11}") != std::string::npos);
+	CHECK(payload.find("\"pv_meter\":{\"slow\":2,\"retry\":0,\"timeout\":0,\"invalid_frame\":6,\"max_total_q10\":31}") != std::string::npos);
+	CHECK(payload.find("\"pv_block\":{\"slow\":0,\"retry\":0,\"timeout\":0,\"invalid_frame\":0,\"max_total_q10\":16}") != std::string::npos);
 
 	char tooSmall[32];
-	CHECK_FALSE(buildStatusPowerSnapshotBuildJson(snapshot, tooSmall, sizeof(tooSmall)));
+	CHECK_FALSE(buildStatusPowerSnapshotDiagCountsJson(snapshot, tooSmall, sizeof(tooSmall)));
 }

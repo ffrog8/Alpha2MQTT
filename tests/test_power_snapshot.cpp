@@ -1,5 +1,7 @@
 #include <doctest/doctest.h>
 
+#include <cstring>
+
 #include "PowerSnapshot.h"
 
 TEST_CASE("power snapshot helpers reuse source-group cache only in the same pass")
@@ -44,172 +46,241 @@ TEST_CASE("power snapshot helpers populate ESS snapshot metadata with pass ident
 	CHECK(meta.valid);
 }
 
-TEST_CASE("power snapshot build minute buckets aggregate current 1m 5m and 15m windows")
+TEST_CASE("power snapshot diagnostics rearm retained publishes on reconnect")
 {
-	PowerSnapshotBuildMinuteBucket buckets[kPowerSnapshotBuildMinuteBucketCount];
-	PowerSnapshotBuildMinuteTracker tracker{};
-	resetPowerSnapshotBuildMinuteBuckets(buckets, kPowerSnapshotBuildMinuteBucketCount);
-	resetPowerSnapshotBuildMinuteTracker(tracker);
+	bool lastDirty = false;
+	bool countsDirty = false;
 
-	recordPowerSnapshotBuildMinuteSample(buckets,
-	                                     kPowerSnapshotBuildMinuteBucketCount,
-	                                     tracker,
-	                                     0 * kPowerSnapshotBuildBucketMinuteMs + 1000,
-	                                     700);
-	recordPowerSnapshotBuildMinuteSample(buckets,
-	                                     kPowerSnapshotBuildMinuteBucketCount,
-	                                     tracker,
-	                                     8 * kPowerSnapshotBuildBucketMinuteMs + 1000,
-	                                     300);
-	recordPowerSnapshotBuildMinuteSample(buckets,
-	                                     kPowerSnapshotBuildMinuteBucketCount,
-	                                     tracker,
-	                                     10 * kPowerSnapshotBuildBucketMinuteMs + 1000,
-	                                     120);
-	recordPowerSnapshotBuildMinuteSample(buckets,
-	                                     kPowerSnapshotBuildMinuteBucketCount,
-	                                     tracker,
-	                                     10 * kPowerSnapshotBuildBucketMinuteMs + 5000,
-	                                     180);
+	rearmPowerSnapshotDiagRetainedPublishes(false, lastDirty, countsDirty);
+	CHECK_FALSE(lastDirty);
+	CHECK(countsDirty);
 
-	const uint32_t nowMs = 10 * kPowerSnapshotBuildBucketMinuteMs + 59000;
-	const PowerSnapshotBuildWindowStats oneMinute =
-		aggregatePowerSnapshotBuildWindow(buckets, kPowerSnapshotBuildMinuteBucketCount, tracker, nowMs, 1);
-	const PowerSnapshotBuildWindowStats fiveMinutes =
-		aggregatePowerSnapshotBuildWindow(buckets, kPowerSnapshotBuildMinuteBucketCount, tracker, nowMs, 5);
-	const PowerSnapshotBuildWindowStats fifteenMinutes =
-		aggregatePowerSnapshotBuildWindow(buckets, kPowerSnapshotBuildMinuteBucketCount, tracker, nowMs, 15);
-
-	CHECK(oneMinute.hasData);
-	CHECK(oneMinute.minMs == 120);
-	CHECK(oneMinute.maxMs == 180);
-	CHECK(oneMinute.avgMs == 150);
-	CHECK(oneMinute.count == 2);
-
-	CHECK(fiveMinutes.hasData);
-	CHECK(fiveMinutes.minMs == 120);
-	CHECK(fiveMinutes.maxMs == 300);
-	CHECK(fiveMinutes.avgMs == 200);
-	CHECK(fiveMinutes.count == 3);
-
-	CHECK(fifteenMinutes.hasData);
-	CHECK(fifteenMinutes.minMs == 120);
-	CHECK(fifteenMinutes.maxMs == 700);
-	CHECK(fifteenMinutes.avgMs == 325);
-	CHECK(fifteenMinutes.count == 4);
+	lastDirty = false;
+	countsDirty = false;
+	rearmPowerSnapshotDiagRetainedPublishes(true, lastDirty, countsDirty);
+	CHECK(lastDirty);
+	CHECK(countsDirty);
 }
 
-TEST_CASE("power snapshot build minute buckets overwrite stale slot data cleanly")
+TEST_CASE("power snapshot diagnostics quantize elapsed millis in q10 units")
 {
-	PowerSnapshotBuildMinuteBucket buckets[kPowerSnapshotBuildMinuteBucketCount];
-	PowerSnapshotBuildMinuteTracker tracker{};
-	resetPowerSnapshotBuildMinuteBuckets(buckets, kPowerSnapshotBuildMinuteBucketCount);
-	resetPowerSnapshotBuildMinuteTracker(tracker);
-
-	recordPowerSnapshotBuildMinuteSample(buckets,
-	                                     kPowerSnapshotBuildMinuteBucketCount,
-	                                     tracker,
-	                                     1 * kPowerSnapshotBuildBucketMinuteMs + 1000,
-	                                     140);
-	recordPowerSnapshotBuildMinuteSample(buckets,
-	                                     kPowerSnapshotBuildMinuteBucketCount,
-	                                     tracker,
-	                                     16 * kPowerSnapshotBuildBucketMinuteMs + 1000,
-	                                     220);
-
-	const PowerSnapshotBuildWindowStats currentWindow =
-		aggregatePowerSnapshotBuildWindow(buckets,
-		                                  kPowerSnapshotBuildMinuteBucketCount,
-		                                  tracker,
-		                                  16 * kPowerSnapshotBuildBucketMinuteMs + 2000,
-		                                  15);
-
-	CHECK(currentWindow.hasData);
-	CHECK(currentWindow.minMs == 220);
-	CHECK(currentWindow.maxMs == 220);
-	CHECK(currentWindow.avgMs == 220);
-	CHECK(currentWindow.count == 1);
-
-	const PowerSnapshotBuildWindowStats staleWindow =
-		aggregatePowerSnapshotBuildWindow(buckets,
-		                                  kPowerSnapshotBuildMinuteBucketCount,
-		                                  tracker,
-		                                  32 * kPowerSnapshotBuildBucketMinuteMs + 1000,
-		                                  15);
-	CHECK_FALSE(staleWindow.hasData);
-	CHECK(staleWindow.count == 0);
+	CHECK(quantizeMillisToQ10(0) == 0);
+	CHECK(quantizeMillisToQ10(4) == 0);
+	CHECK(quantizeMillisToQ10(5) == 1);
+	CHECK(quantizeMillisToQ10(14) == 1);
+	CHECK(quantizeMillisToQ10(15) == 2);
+	CHECK(quantizeMillisToQ10(UINT32_MAX) == UINT16_MAX);
 }
 
-TEST_CASE("power snapshot build minute buckets keep recent samples across millis rollover")
+TEST_CASE("power snapshot diagnostics capture transaction timing and result labels")
 {
-	PowerSnapshotBuildMinuteBucket buckets[kPowerSnapshotBuildMinuteBucketCount];
-	PowerSnapshotBuildMinuteTracker tracker{};
-	resetPowerSnapshotBuildMinuteBuckets(buckets, kPowerSnapshotBuildMinuteBucketCount);
-	resetPowerSnapshotBuildMinuteTracker(tracker);
+	PowerSnapshotDiagSubreadRuntime subread{};
+	capturePowerSnapshotSubreadRuntime(subread,
+	                                   437,
+	                                   18,
+	                                   9,
+	                                   3,
+	                                   1,
+	                                   modbusRequestAndResponseStatusValues::readDataRegisterSuccess);
 
-	recordPowerSnapshotBuildMinuteSample(buckets,
-	                                     kPowerSnapshotBuildMinuteBucketCount,
-	                                     tracker,
-	                                     UINT32_MAX - 1000,
-	                                     220);
-	recordPowerSnapshotBuildMinuteSample(buckets,
-	                                     kPowerSnapshotBuildMinuteBucketCount,
-	                                     tracker,
-	                                     5000,
-	                                     140);
-	recordPowerSnapshotBuildMinuteSample(buckets,
-	                                     kPowerSnapshotBuildMinuteBucketCount,
-	                                     tracker,
-	                                     1 * kPowerSnapshotBuildBucketMinuteMs + 5000,
-	                                     300);
-
-	const uint32_t nowMs = 1 * kPowerSnapshotBuildBucketMinuteMs + 59000;
-	const PowerSnapshotBuildWindowStats oneMinute =
-		aggregatePowerSnapshotBuildWindow(buckets, kPowerSnapshotBuildMinuteBucketCount, tracker, nowMs, 1);
-	const PowerSnapshotBuildWindowStats fiveMinutes =
-		aggregatePowerSnapshotBuildWindow(buckets, kPowerSnapshotBuildMinuteBucketCount, tracker, nowMs, 5);
-
-	CHECK(oneMinute.hasData);
-	CHECK(oneMinute.minMs == 300);
-	CHECK(oneMinute.maxMs == 300);
-	CHECK(oneMinute.avgMs == 300);
-	CHECK(oneMinute.count == 1);
-
-	CHECK(fiveMinutes.hasData);
-	CHECK(fiveMinutes.minMs == 140);
-	CHECK(fiveMinutes.maxMs == 300);
-	CHECK(fiveMinutes.avgMs == 220);
-	CHECK(fiveMinutes.count == 3);
+	CHECK(subread.totalQ10 == 44);
+	CHECK(subread.waitQ10 == 18);
+	CHECK(subread.quietQ10 == 9);
+	CHECK(subread.attempts == 3);
+	CHECK(subread.retries == 1);
+	CHECK(subread.ok);
+	CHECK(subread.result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess);
+	REQUIRE(subread.resultLabel != nullptr);
+	CHECK(std::strcmp(subread.resultLabel, MODBUS_REQUEST_AND_RESPONSE_READ_DATA_REGISTER_SUCCESS_MQTT_DESC) == 0);
 }
 
-TEST_CASE("power snapshot build minute buckets ignore stale generations after wrap")
+TEST_CASE("power snapshot diagnostics synthesize successful cached subread timing")
 {
-	PowerSnapshotBuildMinuteBucket buckets[kPowerSnapshotBuildMinuteBucketCount];
-	PowerSnapshotBuildMinuteTracker tracker{};
-	resetPowerSnapshotBuildMinuteBuckets(buckets, kPowerSnapshotBuildMinuteBucketCount);
-	resetPowerSnapshotBuildMinuteTracker(tracker);
+	SourceGroupReadMeta meta{};
+	meta.readStartedMs = 1200;
+	meta.readCompletedMs = 1237;
+	meta.valid = true;
+	PowerSnapshotDiagSubreadRuntime subread{};
 
-	PowerSnapshotBuildMinuteBucket &bucket = buckets[150 % kPowerSnapshotBuildMinuteBucketCount];
-	bucket.minuteId = 150;
-	bucket.generation = 0;
-	bucket.minMs = 180;
-	bucket.maxMs = 180;
-	bucket.sumMs = 180;
-	bucket.count = 1;
+	capturePowerSnapshotCachedSubreadRuntime(&subread, meta);
 
-	tracker.lastMinuteId = 150;
-	tracker.generation = 1;
+	CHECK(subread.totalQ10 == 4);
+	CHECK(subread.waitQ10 == 0);
+	CHECK(subread.quietQ10 == 0);
+	CHECK(subread.attempts == 1);
+	CHECK(subread.retries == 0);
+	CHECK(subread.ok);
+	CHECK(subread.result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess);
+}
 
-	const uint32_t nowMs = 150 * kPowerSnapshotBuildBucketMinuteMs + 1000;
-	const PowerSnapshotBuildWindowStats oneMinute =
-		aggregatePowerSnapshotBuildWindow(buckets, kPowerSnapshotBuildMinuteBucketCount, tracker, nowMs, 1);
-	const PowerSnapshotBuildWindowStats fifteenMinutes =
-		aggregatePowerSnapshotBuildWindow(buckets, kPowerSnapshotBuildMinuteBucketCount, tracker, nowMs, 15);
+TEST_CASE("power snapshot diagnostics classify interesting events from reason masks")
+{
+	PowerSnapshotDiagSubreadRuntime subreads[kPowerSnapshotDiagSubreadCount]{};
+	capturePowerSnapshotSubreadRuntime(subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Battery)],
+	                                   120,
+	                                   4,
+	                                   2,
+	                                   1,
+	                                   0,
+	                                   modbusRequestAndResponseStatusValues::readDataRegisterSuccess);
+	capturePowerSnapshotSubreadRuntime(subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Grid)],
+	                                   230,
+	                                   10,
+	                                   3,
+	                                   2,
+	                                   1,
+	                                   modbusRequestAndResponseStatusValues::readDataRegisterSuccess);
+	capturePowerSnapshotSubreadRuntime(subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::PvMeter)],
+	                                   90,
+	                                   5,
+	                                   1,
+	                                   1,
+	                                   0,
+	                                   modbusRequestAndResponseStatusValues::invalidFrame);
+	capturePowerSnapshotSubreadRuntime(subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::PvBlock)],
+	                                   140,
+	                                   8,
+	                                   2,
+	                                   1,
+	                                   0,
+	                                   modbusRequestAndResponseStatusValues::readDataRegisterSuccess);
 
-	CHECK_FALSE(oneMinute.hasData);
-	CHECK(oneMinute.count == 0);
-	CHECK_FALSE(fifteenMinutes.hasData);
-	CHECK(fifteenMinutes.count == 0);
+	const uint8_t reasonMask =
+		computePowerSnapshotDiagReasonMask(subreads, kPowerSnapshotDiagSubreadCount, 51, 50);
+
+	CHECK((reasonMask & PowerSnapshotDiagReasonSlowTotal) != 0);
+	CHECK((reasonMask & PowerSnapshotDiagReasonRetry) != 0);
+	CHECK((reasonMask & PowerSnapshotDiagReasonFailure) != 0);
+	CHECK((reasonMask & PowerSnapshotDiagReasonLowLoad) != 0);
+}
+
+TEST_CASE("power snapshot diagnostics accumulate counters per subread")
+{
+	PowerSnapshotDiagCountsRuntime counts{};
+	PowerSnapshotDiagSubreadRuntime subreads[kPowerSnapshotDiagSubreadCount]{};
+	capturePowerSnapshotSubreadRuntime(subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Battery)],
+	                                   240,
+	                                   12,
+	                                   4,
+	                                   2,
+	                                   1,
+	                                   modbusRequestAndResponseStatusValues::readDataRegisterSuccess);
+	capturePowerSnapshotSubreadRuntime(subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Grid)],
+	                                   80,
+	                                   6,
+	                                   2,
+	                                   1,
+	                                   0,
+	                                   modbusRequestAndResponseStatusValues::noResponse);
+	capturePowerSnapshotSubreadRuntime(subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::PvMeter)],
+	                                   205,
+	                                   8,
+	                                   3,
+	                                   1,
+	                                   0,
+	                                   modbusRequestAndResponseStatusValues::invalidFrame);
+	capturePowerSnapshotSubreadRuntime(subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::PvBlock)],
+	                                   140,
+	                                   7,
+	                                   2,
+	                                   1,
+	                                   0,
+	                                   modbusRequestAndResponseStatusValues::readDataRegisterSuccess);
+
+	const bool changed = recordPowerSnapshotDiagCounts(counts,
+	                                                  subreads,
+	                                                  kPowerSnapshotDiagSubreadCount,
+	                                                  PowerSnapshotDiagReasonRetry |
+		                                                  PowerSnapshotDiagReasonFailure |
+		                                                  PowerSnapshotDiagReasonLowLoad);
+
+	CHECK(changed);
+
+	CHECK(counts.interestingEventCount == 1);
+	CHECK(counts.loadLowEventCount == 1);
+
+	const auto &battery = counts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Battery)];
+	CHECK(battery.slowCount == 1);
+	CHECK(battery.retryCount == 1);
+	CHECK(battery.timeoutCount == 0);
+	CHECK(battery.invalidFrameCount == 0);
+	CHECK(battery.maxTotalQ10 == 24);
+
+	const auto &grid = counts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Grid)];
+	CHECK(grid.slowCount == 0);
+	CHECK(grid.retryCount == 0);
+	CHECK(grid.timeoutCount == 1);
+	CHECK(grid.invalidFrameCount == 0);
+	CHECK(grid.maxTotalQ10 == 8);
+
+	const auto &pvMeter = counts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::PvMeter)];
+	CHECK(pvMeter.slowCount == 1);
+	CHECK(pvMeter.retryCount == 0);
+	CHECK(pvMeter.timeoutCount == 0);
+	CHECK(pvMeter.invalidFrameCount == 1);
+	CHECK(pvMeter.maxTotalQ10 == 21);
+
+	const auto &pvBlock = counts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::PvBlock)];
+	CHECK(pvBlock.slowCount == 0);
+	CHECK(pvBlock.retryCount == 0);
+	CHECK(pvBlock.timeoutCount == 0);
+	CHECK(pvBlock.invalidFrameCount == 0);
+	CHECK(pvBlock.maxTotalQ10 == 14);
+}
+
+TEST_CASE("power snapshot diagnostics skip counter dirtying when nothing changes")
+{
+	PowerSnapshotDiagCountsRuntime counts{};
+	PowerSnapshotDiagSubreadRuntime subreads[kPowerSnapshotDiagSubreadCount]{};
+	counts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Battery)].maxTotalQ10 = 4;
+	counts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Grid)].maxTotalQ10 = 3;
+	counts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::PvMeter)].maxTotalQ10 = 2;
+	counts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::PvBlock)].maxTotalQ10 = 1;
+	capturePowerSnapshotSubreadRuntime(subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Battery)],
+	                                   40,
+	                                   1,
+	                                   1,
+	                                   1,
+	                                   0,
+	                                   modbusRequestAndResponseStatusValues::readDataRegisterSuccess);
+	capturePowerSnapshotSubreadRuntime(subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Grid)],
+	                                   30,
+	                                   1,
+	                                   1,
+	                                   1,
+	                                   0,
+	                                   modbusRequestAndResponseStatusValues::readDataRegisterSuccess);
+	capturePowerSnapshotSubreadRuntime(subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::PvMeter)],
+	                                   20,
+	                                   1,
+	                                   1,
+	                                   1,
+	                                   0,
+	                                   modbusRequestAndResponseStatusValues::readDataRegisterSuccess);
+	capturePowerSnapshotSubreadRuntime(subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::PvBlock)],
+	                                   10,
+	                                   1,
+	                                   1,
+	                                   1,
+	                                   0,
+	                                   modbusRequestAndResponseStatusValues::readDataRegisterSuccess);
+
+	const bool changed =
+		recordPowerSnapshotDiagCounts(counts, subreads, kPowerSnapshotDiagSubreadCount, PowerSnapshotDiagReasonNone);
+
+	CHECK_FALSE(changed);
+	CHECK(counts.interestingEventCount == 0);
+	CHECK(counts.loadLowEventCount == 0);
+	CHECK(counts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Battery)].maxTotalQ10 == 4);
+	CHECK(counts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Grid)].maxTotalQ10 == 3);
+	CHECK(counts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::PvMeter)].maxTotalQ10 == 2);
+	CHECK(counts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::PvBlock)].maxTotalQ10 == 1);
+	for (const auto &counter : counts.subreads) {
+		CHECK(counter.slowCount == 0);
+		CHECK(counter.retryCount == 0);
+		CHECK(counter.timeoutCount == 0);
+		CHECK(counter.invalidFrameCount == 0);
+	}
 }
 
 TEST_CASE("power snapshot helpers coalesce dispatch requests only during snapshot build")

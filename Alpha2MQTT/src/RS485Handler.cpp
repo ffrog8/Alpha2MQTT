@@ -24,6 +24,17 @@ diagDelay(uint32_t ms)
 	delay(ms);
 }
 
+static inline uint16_t
+quantizeMillisToQ10Local(uint32_t ms)
+{
+	constexpr uint32_t kMaxRoundedMs = static_cast<uint32_t>(UINT16_MAX) * 10U - 5U;
+	if (ms > kMaxRoundedMs) {
+		return UINT16_MAX;
+	}
+	const uint32_t rounded = (ms + 5U) / 10U;
+	return (rounded > static_cast<uint32_t>(UINT16_MAX)) ? UINT16_MAX : static_cast<uint16_t>(rounded);
+}
+
 /*
 Default Constructor
 
@@ -167,16 +178,24 @@ modbusRequestAndResponseStatusValues RS485Handler::sendModbus(uint8_t frame[], b
 
 	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
 	int tries = 0;
+	uint8_t attempts = 0;
+	uint8_t retries = 0;
+	uint32_t totalWaitMs = 0;
+	uint32_t totalQuietMs = 0;
 	struct TxnGuard {
 		bool &flag;
 		explicit TxnGuard(bool &f) : flag(f) { flag = true; }
 		~TxnGuard() { flag = false; }
 	} txnGuard(_inTransaction);
+	_lastTransactionDiag = Rs485TransactionDiag{};
 
 	//Calculate the CRC and overwrite the last two bytes.
 	calcCRC(frame, actualFrameSize);
 
 	while (result == modbusRequestAndResponseStatusValues::preProcessing) {
+		if (attempts < UINT8_MAX) {
+			attempts++;
+		}
 		// After some liaison with a user of Alpha2MQTT on a 115200 baud rate, this fixed inconsistent retrieval
 #ifdef REQUIRED_DELAY_DUE_TO_INCONSISTENT_RETRIEVAL
 		diagDelay(REQUIRED_DELAY_DUE_TO_INCONSISTENT_RETRIEVAL);
@@ -190,7 +209,7 @@ modbusRequestAndResponseStatusValues RS485Handler::sendModbus(uint8_t frame[], b
 		// Make sure there are no spurious characters in the in/out buffer.
 		flushRS485();
 
-		checkRS485IsQuiet();
+		checkRS485IsQuiet(&totalQuietMs);
 
 		//Send
 		digitalWrite(SERIAL_COMMUNICATION_CONTROL_PIN, RS485_TX);
@@ -205,7 +224,7 @@ modbusRequestAndResponseStatusValues RS485Handler::sendModbus(uint8_t frame[], b
 		digitalWrite(SERIAL_COMMUNICATION_CONTROL_PIN, RS485_RX);
 	
 		while (result == modbusRequestAndResponseStatusValues::preProcessing) {
-			result = listenResponse(resp);
+			result = listenResponse(resp, &totalWaitMs);
 			if (result == modbusRequestAndResponseStatusValues::writeDataRegisterSuccess ||
 			    result == modbusRequestAndResponseStatusValues::writeSingleRegisterSuccess ||
 			    result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
@@ -227,10 +246,18 @@ modbusRequestAndResponseStatusValues RS485Handler::sendModbus(uint8_t frame[], b
 		    result != modbusRequestAndResponseStatusValues::writeSingleRegisterSuccess &&
 		    result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
 			tries++;
+			if (retries < UINT8_MAX) {
+				retries++;
+			}
 			diagDelay(250);
 			result = modbusRequestAndResponseStatusValues::preProcessing;
 		}
 	}
+	_lastTransactionDiag.waitQ10 = quantizeMillisToQ10Local(totalWaitMs);
+	_lastTransactionDiag.quietQ10 = quantizeMillisToQ10Local(totalQuietMs);
+	_lastTransactionDiag.attempts = attempts;
+	_lastTransactionDiag.retries = retries;
+	_lastTransactionDiag.result = result;
 
 	if (result == modbusRequestAndResponseStatusValues::writeDataRegisterSuccess ||
 	    result == modbusRequestAndResponseStatusValues::writeSingleRegisterSuccess ||
@@ -296,7 +323,8 @@ listenResponse
 Listens for a response and processes what it is given that data frame formats vary based on function codes
 Returns data in a stucture and returns a result to guide onward processing.
 */
-modbusRequestAndResponseStatusValues RS485Handler::listenResponse(modbusRequestAndResponse* resp)
+modbusRequestAndResponseStatusValues RS485Handler::listenResponse(modbusRequestAndResponse* resp,
+                                                                 uint32_t *waitMsAccum)
 {
 	if (!resp)
 	{
@@ -323,7 +351,7 @@ modbusRequestAndResponseStatusValues RS485Handler::listenResponse(modbusRequestA
 
 	while ((inByteNumZeroIndexed <= inExpectedTotalBytesZeroIndexed))
 	{
-		timedOut = !checkForData();
+		timedOut = !checkForData(waitMsAccum);
 		if (timedOut)
 		{
 			break;
@@ -416,7 +444,7 @@ modbusRequestAndResponseStatusValues RS485Handler::listenResponse(modbusRequestA
 #endif
 					// Success Read
 					// Get the next byte here so we know expected length
-					timedOut = !checkForData();
+					timedOut = !checkForData(waitMsAccum);
 					if (timedOut)
 					{
 						breakOut = true;
@@ -655,9 +683,10 @@ checkForData
 
 Returns true if there is some data in the serial buffer, otherwise false
 */
-bool RS485Handler::checkForData()
+bool RS485Handler::checkForData(uint32_t *waitMsAccum)
 {
 	int tries = 0;
+	const uint32_t startedMs = millis();
 
 	
 	while ((!_RS485Serial->available()) && (tries++ < RS485_TRIES))
@@ -666,6 +695,9 @@ bool RS485Handler::checkForData()
 			_serviceHook();
 		}
 		diagDelay(50);
+	}
+	if (waitMsAccum != nullptr) {
+		*waitMsAccum += (millis() - startedMs);
 	}
 
 	if (tries >= RS485_TRIES)
@@ -691,9 +723,10 @@ checkRS485IsQuiet
 
 Make sure RS485 has noone else talking
 */
-void RS485Handler::checkRS485IsQuiet()
+void RS485Handler::checkRS485IsQuiet(uint32_t *quietMsAccum)
 {
 	unsigned long startTime = millis();
+	const uint32_t startedMs = startTime;
 
 	while (millis() < (startTime + QUIET_MILLIS_BEFORE_TX))
 	{
@@ -706,6 +739,9 @@ void RS485Handler::checkRS485IsQuiet()
 			_serviceHook();
 		}
 		diagDelay(2);
+	}
+	if (quietMsAccum != nullptr) {
+		*quietMsAccum += (millis() - startedMs);
 	}
 }
 

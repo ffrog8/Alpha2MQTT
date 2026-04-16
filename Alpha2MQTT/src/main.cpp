@@ -328,10 +328,10 @@ uint32_t pvMeterCacheHitCount = 0;
 bool essSnapshotLastOk = false;
 uint32_t dispatchLastRunMs = 0;
 char dispatchLastSkipReason[48] = "";
-static PowerSnapshotBuildMinuteBucket powerSnapshotBuildMinuteBuckets[kPowerSnapshotBuildMinuteBucketCount]{};
-static PowerSnapshotBuildMinuteTracker powerSnapshotBuildMinuteTracker{};
-static bool powerSnapshotBuildStatusDirty = true;
-static uint32_t powerSnapshotBuildLastPublishedMinuteId = UINT32_MAX;
+static PowerSnapshotDiagEventRuntime powerSnapshotDiagLast{};
+static PowerSnapshotDiagCountsRuntime powerSnapshotDiagCounts{};
+static bool powerSnapshotDiagLastDirty = true;
+static bool powerSnapshotDiagCountsDirty = true;
 static TimedDispatchRuntimeState timedDispatchState;
 static char *g_dispatchRequestStatus = nullptr;
 static bool dispatchRequestStatusDirty = false;
@@ -807,9 +807,15 @@ static void endSchedulerPass(void);
 static bool fetchDispatchBlockSnapshot(DispatchBlockSnapshot &out,
                                        modbusRequestAndResponseStatusValues *resultOut = nullptr);
 static bool fetchPvStringBlockSnapshot(PvStringBlockSnapshot &out,
-                                       modbusRequestAndResponseStatusValues *resultOut = nullptr);
+                                       modbusRequestAndResponseStatusValues *resultOut = nullptr,
+                                       PowerSnapshotDiagSubreadRuntime *diagOut = nullptr);
 static bool fetchPvMeterTotalSnapshot(PvMeterTotalSnapshot &out,
-                                      modbusRequestAndResponseStatusValues *resultOut = nullptr);
+                                      modbusRequestAndResponseStatusValues *resultOut = nullptr,
+                                      PowerSnapshotDiagSubreadRuntime *diagOut = nullptr);
+static void capturePowerSnapshotSubreadFromLastTransaction(PowerSnapshotDiagSubreadRuntime *target,
+                                                           uint32_t startedMs,
+                                                           uint32_t completedMs,
+                                                           modbusRequestAndResponseStatusValues result);
 static bool prepareDispatchBlockResponse(mqttEntityId entityId,
                                          const DispatchBlockSnapshot &snapshot,
                                          modbusRequestAndResponse &prepared);
@@ -828,14 +834,15 @@ static void executeGenericPollTransaction(const MqttEntityActiveBucket &bucketPl
 void sendData(void);
 void sendStatus(bool includeEssSnapshot);
 static void populateStatusPollSnapshot(StatusPollSnapshot &poll, bool includeEssSnapshot);
-static void populateStatusPowerSnapshotBuildSnapshot(StatusPowerSnapshotBuildSnapshot &snapshot,
-                                                    uint32_t nowMs);
+static void populateStatusPowerSnapshotDiagLastSnapshot(StatusPowerSnapshotDiagLastSnapshot &snapshot);
+static void populateStatusPowerSnapshotDiagCountsSnapshot(StatusPowerSnapshotDiagCountsSnapshot &snapshot);
 #if RS485_STUB
 static bool populateStatusStubSnapshot(StatusStubSnapshot &stub);
 #endif
 static bool publishStatusPollSnapshot(const StatusPollSnapshot &poll);
-static bool publishStatusPowerSnapshotBuildSnapshot(const StatusPowerSnapshotBuildSnapshot &snapshot,
-                                                   uint32_t nowMs);
+static bool publishStatusPowerSnapshotDiagLastSnapshot(const StatusPowerSnapshotDiagLastSnapshot &snapshot);
+static bool publishStatusPowerSnapshotDiagCountsSnapshot(const StatusPowerSnapshotDiagCountsSnapshot &snapshot);
+static void clearRetainedPowerSnapshotBuildTopicOnce(void);
 #if RS485_STUB
 static bool publishStatusStubSnapshot(const StatusStubSnapshot &stub);
 static bool publishStubControlStatusNow(bool includeEssSnapshot);
@@ -11699,40 +11706,118 @@ populateStatusPollSnapshot(StatusPollSnapshot &poll, bool includeEssSnapshot)
 	}
 }
 
-static void __attribute__((noinline))
-populateStatusPowerSnapshotBuildSnapshot(StatusPowerSnapshotBuildSnapshot &snapshot, uint32_t nowMs)
+static void
+copyStatusPowerSnapshotDiagSubread(StatusPowerSnapshotDiagSubreadSnapshot &target,
+                                   const PowerSnapshotDiagSubreadRuntime &source)
 {
-	const PowerSnapshotBuildWindowStats oneMinute =
-		aggregatePowerSnapshotBuildWindow(powerSnapshotBuildMinuteBuckets,
-		                                  kPowerSnapshotBuildMinuteBucketCount,
-		                                  powerSnapshotBuildMinuteTracker,
-		                                  nowMs,
-		                                  1);
-	const PowerSnapshotBuildWindowStats fiveMinutes =
-		aggregatePowerSnapshotBuildWindow(powerSnapshotBuildMinuteBuckets,
-		                                  kPowerSnapshotBuildMinuteBucketCount,
-		                                  powerSnapshotBuildMinuteTracker,
-		                                  nowMs,
-		                                  5);
-	const PowerSnapshotBuildWindowStats fifteenMinutes =
-		aggregatePowerSnapshotBuildWindow(powerSnapshotBuildMinuteBuckets,
-		                                  kPowerSnapshotBuildMinuteBucketCount,
-		                                  powerSnapshotBuildMinuteTracker,
-		                                  nowMs,
-		                                  15);
+	target.totalQ10 = source.totalQ10;
+	target.waitQ10 = source.waitQ10;
+	target.quietQ10 = source.quietQ10;
+	target.attempts = source.attempts;
+	target.retries = source.retries;
+	target.result = source.resultLabel;
+}
 
-	snapshot.oneMinute.hasData = oneMinute.hasData;
-	snapshot.oneMinute.minMs = oneMinute.minMs;
-	snapshot.oneMinute.maxMs = oneMinute.maxMs;
-	snapshot.oneMinute.avgMs = oneMinute.avgMs;
-	snapshot.fiveMinutes.hasData = fiveMinutes.hasData;
-	snapshot.fiveMinutes.minMs = fiveMinutes.minMs;
-	snapshot.fiveMinutes.maxMs = fiveMinutes.maxMs;
-	snapshot.fiveMinutes.avgMs = fiveMinutes.avgMs;
-	snapshot.fifteenMinutes.hasData = fifteenMinutes.hasData;
-	snapshot.fifteenMinutes.minMs = fifteenMinutes.minMs;
-	snapshot.fifteenMinutes.maxMs = fifteenMinutes.maxMs;
-	snapshot.fifteenMinutes.avgMs = fifteenMinutes.avgMs;
+static void
+copyStatusPowerSnapshotDiagCounter(StatusPowerSnapshotDiagCounterSubreadSnapshot &target,
+                                   const PowerSnapshotDiagSubreadCounters &source)
+{
+	target.slowCount = source.slowCount;
+	target.retryCount = source.retryCount;
+	target.timeoutCount = source.timeoutCount;
+	target.invalidFrameCount = source.invalidFrameCount;
+	target.maxTotalQ10 = source.maxTotalQ10;
+}
+
+static void
+formatPowerSnapshotDiagReason(uint8_t reasonMask, char *dest, size_t destSize)
+{
+	if (dest == nullptr || destSize == 0) {
+		return;
+	}
+	dest[0] = '\0';
+	if (reasonMask == PowerSnapshotDiagReasonNone) {
+		strlcpy(dest, "none", destSize);
+		return;
+	}
+	bool first = true;
+	auto appendReason = [&](const char *label) {
+		if (!first) {
+			strlcat(dest, ",", destSize);
+		}
+		strlcat(dest, label, destSize);
+		first = false;
+	};
+	if ((reasonMask & PowerSnapshotDiagReasonSlowTotal) != 0) {
+		appendReason("slow_total");
+	}
+	if ((reasonMask & PowerSnapshotDiagReasonRetry) != 0) {
+		appendReason("retry");
+	}
+	if ((reasonMask & PowerSnapshotDiagReasonFailure) != 0) {
+		appendReason("failure");
+	}
+	if ((reasonMask & PowerSnapshotDiagReasonLowLoad) != 0) {
+		appendReason("low_load");
+	}
+}
+
+static void __attribute__((noinline))
+populateStatusPowerSnapshotDiagLastSnapshot(StatusPowerSnapshotDiagLastSnapshot &snapshot)
+{
+	static char reasonBuf[48];
+	snapshot.valid = powerSnapshotDiagLast.valid;
+	if (!snapshot.valid) {
+		snapshot.reason = "";
+		snapshot.tsMs = 0;
+		snapshot.totalQ10 = 0;
+		snapshot.loadW = 0;
+		snapshot.dispatchRequestQueuedMs = 0;
+		snapshot.dispatchLastRunMs = 0;
+		copyStatusPowerSnapshotDiagSubread(snapshot.battery, PowerSnapshotDiagSubreadRuntime{});
+		copyStatusPowerSnapshotDiagSubread(snapshot.grid, PowerSnapshotDiagSubreadRuntime{});
+		copyStatusPowerSnapshotDiagSubread(snapshot.pvMeter, PowerSnapshotDiagSubreadRuntime{});
+		copyStatusPowerSnapshotDiagSubread(snapshot.pvBlock, PowerSnapshotDiagSubreadRuntime{});
+		return;
+	}
+	formatPowerSnapshotDiagReason(powerSnapshotDiagLast.reasonMask, reasonBuf, sizeof(reasonBuf));
+	snapshot.reason = reasonBuf;
+	snapshot.tsMs = powerSnapshotDiagLast.tsMs;
+	snapshot.totalQ10 = powerSnapshotDiagLast.totalQ10;
+	snapshot.loadW = powerSnapshotDiagLast.loadW;
+	snapshot.dispatchRequestQueuedMs = powerSnapshotDiagLast.dispatchRequestQueuedMs;
+	snapshot.dispatchLastRunMs = powerSnapshotDiagLast.dispatchLastRunMs;
+	copyStatusPowerSnapshotDiagSubread(
+		snapshot.battery,
+		powerSnapshotDiagLast.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Battery)]);
+	copyStatusPowerSnapshotDiagSubread(
+		snapshot.grid,
+		powerSnapshotDiagLast.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Grid)]);
+	copyStatusPowerSnapshotDiagSubread(
+		snapshot.pvMeter,
+		powerSnapshotDiagLast.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::PvMeter)]);
+	copyStatusPowerSnapshotDiagSubread(
+		snapshot.pvBlock,
+		powerSnapshotDiagLast.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::PvBlock)]);
+}
+
+static void __attribute__((noinline))
+populateStatusPowerSnapshotDiagCountsSnapshot(StatusPowerSnapshotDiagCountsSnapshot &snapshot)
+{
+	snapshot.interestingEventCount = powerSnapshotDiagCounts.interestingEventCount;
+	snapshot.loadLowEventCount = powerSnapshotDiagCounts.loadLowEventCount;
+	copyStatusPowerSnapshotDiagCounter(
+		snapshot.battery,
+		powerSnapshotDiagCounts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Battery)]);
+	copyStatusPowerSnapshotDiagCounter(
+		snapshot.grid,
+		powerSnapshotDiagCounts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Grid)]);
+	copyStatusPowerSnapshotDiagCounter(
+		snapshot.pvMeter,
+		powerSnapshotDiagCounts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::PvMeter)]);
+	copyStatusPowerSnapshotDiagCounter(
+		snapshot.pvBlock,
+		powerSnapshotDiagCounts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::PvBlock)]);
 }
 
 #if RS485_STUB
@@ -11805,34 +11890,65 @@ publishStatusPollSnapshot(const StatusPollSnapshot &poll)
 }
 
 static bool __attribute__((noinline))
-publishStatusPowerSnapshotBuildSnapshot(const StatusPowerSnapshotBuildSnapshot &snapshot, uint32_t nowMs)
+publishStatusPowerSnapshotDiagLastSnapshot(const StatusPowerSnapshotDiagLastSnapshot &snapshot)
 {
 	if (!_mqtt.connected() || !ensureStatusJsonScratch()) {
 		return false;
 	}
-
-	const uint32_t currentMinuteId = powerSnapshotBuildMinuteId(nowMs);
-	if (currentMinuteId != powerSnapshotBuildLastPublishedMinuteId) {
-		powerSnapshotBuildStatusDirty = true;
-	}
-	if (!powerSnapshotBuildStatusDirty) {
+	if (!powerSnapshotDiagLastDirty) {
 		return true;
 	}
-
-	char powerSnapshotBuildTopic[192];
-	snprintf(powerSnapshotBuildTopic, sizeof(powerSnapshotBuildTopic), "%s/power_snapshot_build", statusTopic);
-	if (!buildStatusPowerSnapshotBuildJson(snapshot, g_statusJsonScratch, kStatusJsonScratchSize)) {
+	char topic[192];
+	snprintf(topic, sizeof(topic), "%s/power_snapshot_diag_last", statusTopic);
+	if (!buildStatusPowerSnapshotDiagLastJson(snapshot, g_statusJsonScratch, kStatusJsonScratchSize)) {
 		return false;
 	}
-
-	RuntimeDiagScope diagScope(RuntimeDiagPhase::StatusPublish, "power_snapshot_build");
-	if (!publishTrackedTextPayload(powerSnapshotBuildTopic, g_statusJsonScratch, MQTT_RETAIN)) {
+	RuntimeDiagScope diagScope(RuntimeDiagPhase::StatusPublish, "power_snapshot_diag_last");
+	if (!publishTrackedTextPayload(topic, g_statusJsonScratch, MQTT_RETAIN)) {
 		return false;
 	}
-	powerSnapshotBuildStatusDirty = false;
-	powerSnapshotBuildLastPublishedMinuteId = currentMinuteId;
+	powerSnapshotDiagLastDirty = false;
 	maybeYield();
 	return true;
+}
+
+static bool __attribute__((noinline))
+publishStatusPowerSnapshotDiagCountsSnapshot(const StatusPowerSnapshotDiagCountsSnapshot &snapshot)
+{
+	if (!_mqtt.connected() || !ensureStatusJsonScratch()) {
+		return false;
+	}
+	if (!powerSnapshotDiagCountsDirty) {
+		return true;
+	}
+	char topic[192];
+	snprintf(topic, sizeof(topic), "%s/power_snapshot_diag_counts", statusTopic);
+	if (!buildStatusPowerSnapshotDiagCountsJson(snapshot, g_statusJsonScratch, kStatusJsonScratchSize)) {
+		return false;
+	}
+	RuntimeDiagScope diagScope(RuntimeDiagPhase::StatusPublish, "power_snapshot_diag_counts");
+	if (!publishTrackedTextPayload(topic, g_statusJsonScratch, MQTT_RETAIN)) {
+		return false;
+	}
+	powerSnapshotDiagCountsDirty = false;
+	maybeYield();
+	return true;
+}
+
+static void
+clearRetainedPowerSnapshotBuildTopicOnce(void)
+{
+	static bool clearedRetainedPowerSnapshotBuild = false;
+	if (clearedRetainedPowerSnapshotBuild || !_mqtt.connected()) {
+		return;
+	}
+	char topic[192];
+	snprintf(topic, sizeof(topic), "%s/power_snapshot_build", statusTopic);
+	if (_mqtt.publish(topic, "", MQTT_RETAIN)) {
+		noteMqttActivityPulse();
+		clearedRetainedPowerSnapshotBuild = true;
+	}
+	maybeYield();
 }
 
 #if RS485_STUB
@@ -12069,10 +12185,13 @@ sendStatus(bool includeEssSnapshot)
 	}
 
 	publishStatusPollSnapshot(poll);
-	StatusPowerSnapshotBuildSnapshot powerSnapshotBuild{};
-	const uint32_t powerSnapshotBuildNowMs = millis();
-	populateStatusPowerSnapshotBuildSnapshot(powerSnapshotBuild, powerSnapshotBuildNowMs);
-	publishStatusPowerSnapshotBuildSnapshot(powerSnapshotBuild, powerSnapshotBuildNowMs);
+	StatusPowerSnapshotDiagLastSnapshot powerSnapshotDiagLastSnapshot{};
+	StatusPowerSnapshotDiagCountsSnapshot powerSnapshotDiagCountsSnapshot{};
+	populateStatusPowerSnapshotDiagLastSnapshot(powerSnapshotDiagLastSnapshot);
+	populateStatusPowerSnapshotDiagCountsSnapshot(powerSnapshotDiagCountsSnapshot);
+	publishStatusPowerSnapshotDiagLastSnapshot(powerSnapshotDiagLastSnapshot);
+	publishStatusPowerSnapshotDiagCountsSnapshot(powerSnapshotDiagCountsSnapshot);
+	clearRetainedPowerSnapshotBuildTopicOnce();
 
 #if RS485_STUB
 	if (populateStatusStubSnapshot(stub)) {
@@ -12904,13 +13023,15 @@ invalidateDispatchBlockSnapshotCache(void)
 
 static bool
 fetchPvStringBlockSnapshot(PvStringBlockSnapshot &out,
-                           modbusRequestAndResponseStatusValues *resultOut)
+                           modbusRequestAndResponseStatusValues *resultOut,
+                           PowerSnapshotDiagSubreadRuntime *diagOut)
 {
 	if (schedulerPassCache.active &&
 	    sourceGroupCacheReusableForPass(schedulerPassCache.pvBlock.meta, schedulerPassCache.passId)) {
 		schedulerPassCache.pvBlockCacheHitCount++;
 		pvBlockCacheHitCount++;
 		out = schedulerPassCache.pvBlock;
+		capturePowerSnapshotCachedSubreadRuntime(diagOut, schedulerPassCache.pvBlock.meta);
 		if (resultOut != nullptr) {
 			*resultOut = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
 		}
@@ -12932,6 +13053,7 @@ fetchPvStringBlockSnapshot(PvStringBlockSnapshot &out,
 			? _registerHandler->readRawRegisterBlock(kPvStringBlockStartReg, kPvStringBlockRegisterCount, response)
 			: modbusRequestAndResponseStatusValues::preProcessing;
 	const uint32_t completedMs = millis();
+	capturePowerSnapshotSubreadFromLastTransaction(diagOut, startedMs, completedMs, result);
 	if (resultOut != nullptr) {
 		*resultOut = result;
 	}
@@ -12960,13 +13082,15 @@ fetchPvStringBlockSnapshot(PvStringBlockSnapshot &out,
 
 static bool
 fetchPvMeterTotalSnapshot(PvMeterTotalSnapshot &out,
-                          modbusRequestAndResponseStatusValues *resultOut)
+                          modbusRequestAndResponseStatusValues *resultOut,
+                          PowerSnapshotDiagSubreadRuntime *diagOut)
 {
 	if (schedulerPassCache.active &&
 	    sourceGroupCacheReusableForPass(schedulerPassCache.pvMeter.meta, schedulerPassCache.passId)) {
 		schedulerPassCache.pvMeterCacheHitCount++;
 		pvMeterCacheHitCount++;
 		out = schedulerPassCache.pvMeter;
+		capturePowerSnapshotCachedSubreadRuntime(diagOut, schedulerPassCache.pvMeter.meta);
 		if (resultOut != nullptr) {
 			*resultOut = modbusRequestAndResponseStatusValues::readDataRegisterSuccess;
 		}
@@ -12988,6 +13112,7 @@ fetchPvMeterTotalSnapshot(PvMeterTotalSnapshot &out,
 			? _registerHandler->readRawRegisterBlock(REG_PV_METER_R_TOTAL_ACTIVE_POWER_1, 2, response)
 			: modbusRequestAndResponseStatusValues::preProcessing;
 	const uint32_t completedMs = millis();
+	capturePowerSnapshotSubreadFromLastTransaction(diagOut, startedMs, completedMs, result);
 	if (resultOut != nullptr) {
 		*resultOut = result;
 	}
@@ -13117,6 +13242,25 @@ recordSnapshotReadFailure(const char *name,
 	gotError++;
 }
 
+static void
+capturePowerSnapshotSubreadFromLastTransaction(PowerSnapshotDiagSubreadRuntime *target,
+                                               uint32_t startedMs,
+                                               uint32_t completedMs,
+                                               modbusRequestAndResponseStatusValues result)
+{
+	if (target == nullptr) {
+		return;
+	}
+	const Rs485TransactionDiag txn = (_modBus != nullptr) ? _modBus->lastTransactionDiag() : Rs485TransactionDiag{};
+	capturePowerSnapshotSubreadRuntime(*target,
+	                                   completedMs - startedMs,
+	                                   txn.waitQ10,
+	                                   txn.quietQ10,
+	                                   txn.attempts,
+	                                   txn.retries,
+	                                   result);
+}
+
 static void __attribute__((noinline))
 refreshSnapshotDispatchFields(bool &rs485TimedOut, bool &rs485TransportFailure, int &gotError)
 {
@@ -13179,10 +13323,22 @@ refreshSnapshotBatterySoc(bool &rs485TimedOut, bool &rs485TransportFailure, int 
 }
 
 static void __attribute__((noinline))
-refreshSnapshotBatteryPower(bool &rs485TimedOut, bool &rs485TransportFailure, int &gotError)
+refreshSnapshotBatteryPower(bool &rs485TimedOut,
+                           bool &rs485TransportFailure,
+                           int &gotError,
+                           PowerSnapshotDiagSubreadRuntime *diagOut)
 {
 	modbusRequestAndResponse *response = runtimeModbusReadScratch();
 	if (response == nullptr) {
+		if (diagOut != nullptr) {
+			capturePowerSnapshotSubreadRuntime(*diagOut,
+			                                   0,
+			                                   0,
+			                                   0,
+			                                   0,
+			                                   0,
+			                                   modbusRequestAndResponseStatusValues::preProcessing);
+		}
 		opData.essBatteryPower = INT16_MAX;
 		recordSnapshotReadFailure("battery_power",
 		                          REG_BATTERY_HOME_R_BATTERY_POWER,
@@ -13194,8 +13350,11 @@ refreshSnapshotBatteryPower(bool &rs485TimedOut, bool &rs485TransportFailure, in
 		return;
 	}
 	*response = modbusRequestAndResponse{};
+	const uint32_t startedMs = millis();
 	const modbusRequestAndResponseStatusValues result =
 		_registerHandler->readHandledRegister(REG_BATTERY_HOME_R_BATTERY_POWER, response);
+	const uint32_t completedMs = millis();
+	capturePowerSnapshotSubreadFromLastTransaction(diagOut, startedMs, completedMs, result);
 	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
 		opData.essBatteryPower = response->signedShortValue;
 		return;
@@ -13212,10 +13371,22 @@ refreshSnapshotBatteryPower(bool &rs485TimedOut, bool &rs485TransportFailure, in
 }
 
 static void __attribute__((noinline))
-refreshSnapshotGridPower(bool &rs485TimedOut, bool &rs485TransportFailure, int &gotError)
+refreshSnapshotGridPower(bool &rs485TimedOut,
+                        bool &rs485TransportFailure,
+                        int &gotError,
+                        PowerSnapshotDiagSubreadRuntime *diagOut)
 {
 	modbusRequestAndResponse *response = runtimeModbusReadScratch();
 	if (response == nullptr) {
+		if (diagOut != nullptr) {
+			capturePowerSnapshotSubreadRuntime(*diagOut,
+			                                   0,
+			                                   0,
+			                                   0,
+			                                   0,
+			                                   0,
+			                                   modbusRequestAndResponseStatusValues::preProcessing);
+		}
 		opData.essGridPower = INT32_MAX;
 		recordSnapshotReadFailure("grid_power",
 		                          REG_GRID_METER_R_TOTAL_ACTIVE_POWER_1,
@@ -13227,8 +13398,11 @@ refreshSnapshotGridPower(bool &rs485TimedOut, bool &rs485TransportFailure, int &
 		return;
 	}
 	*response = modbusRequestAndResponse{};
+	const uint32_t startedMs = millis();
 	const modbusRequestAndResponseStatusValues result =
 		_registerHandler->readHandledRegister(REG_GRID_METER_R_TOTAL_ACTIVE_POWER_1, response);
+	const uint32_t completedMs = millis();
+	capturePowerSnapshotSubreadFromLastTransaction(diagOut, startedMs, completedMs, result);
 	if (result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
 		opData.essGridPower = response->signedIntValue;
 		return;
@@ -13245,14 +13419,18 @@ refreshSnapshotGridPower(bool &rs485TimedOut, bool &rs485TransportFailure, int &
 }
 
 static void __attribute__((noinline))
-refreshSnapshotSolarPower(bool &rs485TimedOut, bool &rs485TransportFailure, int &gotError)
+refreshSnapshotSolarPower(bool &rs485TimedOut,
+                         bool &rs485TransportFailure,
+                         int &gotError,
+                         PowerSnapshotDiagSubreadRuntime *pvMeterDiagOut,
+                         PowerSnapshotDiagSubreadRuntime *pvBlockDiagOut)
 {
 	PvMeterTotalSnapshot pvMeterSnapshot{};
 	PvStringBlockSnapshot pvBlockSnapshot{};
 	modbusRequestAndResponseStatusValues pvMeterResult = modbusRequestAndResponseStatusValues::preProcessing;
 	modbusRequestAndResponseStatusValues pvBlockResult = modbusRequestAndResponseStatusValues::preProcessing;
-	const bool pvMeterOk = fetchPvMeterTotalSnapshot(pvMeterSnapshot, &pvMeterResult);
-	const bool pvBlockOk = fetchPvStringBlockSnapshot(pvBlockSnapshot, &pvBlockResult);
+	const bool pvMeterOk = fetchPvMeterTotalSnapshot(pvMeterSnapshot, &pvMeterResult, pvMeterDiagOut);
+	const bool pvBlockOk = fetchPvStringBlockSnapshot(pvBlockSnapshot, &pvBlockResult, pvBlockDiagOut);
 	if (pvMeterOk && pvBlockOk) {
 		int32_t solarPower = pvMeterSnapshot.totalPower;
 		for (size_t pv = 0; pv < kPvStringCount; ++pv) {
@@ -13319,6 +13497,7 @@ refreshEssSnapshot(void)
 	uint32_t pollStartMs = millis();
 	uint32_t powerSnapshotStartedMs = pollStartMs;
 	uint32_t powerSnapshotCompletedMs = pollStartMs;
+	PowerSnapshotDiagSubreadRuntime powerSnapshotDiagSubreads[kPowerSnapshotDiagSubreadCount]{};
 	bool rs485TimedOut = false;
 	bool rs485TransportFailure = false;
 	struct SnapshotDiagGuard {
@@ -13439,29 +13618,63 @@ refreshEssSnapshot(void)
 		} snapshotBuildGuard;
 		powerSnapshotStartedMs = millis();
 		const int powerErrorsBeforeBattery = gotError;
-		refreshSnapshotBatteryPower(rs485TimedOut, rs485TransportFailure, gotError);
+		refreshSnapshotBatteryPower(rs485TimedOut,
+		                           rs485TransportFailure,
+		                           gotError,
+		                           &powerSnapshotDiagSubreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Battery)]);
 		if (gotError != powerErrorsBeforeBattery) {
 			powerSnapshotErrors++;
 		}
 		const int powerErrorsBeforeGrid = gotError;
-		refreshSnapshotGridPower(rs485TimedOut, rs485TransportFailure, gotError);
+		refreshSnapshotGridPower(rs485TimedOut,
+		                        rs485TransportFailure,
+		                        gotError,
+		                        &powerSnapshotDiagSubreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Grid)]);
 		if (gotError != powerErrorsBeforeGrid) {
 			powerSnapshotErrors++;
 		}
 		const int powerErrorsBeforeSolar = gotError;
-		refreshSnapshotSolarPower(rs485TimedOut, rs485TransportFailure, gotError);
+		refreshSnapshotSolarPower(rs485TimedOut,
+		                         rs485TransportFailure,
+		                         gotError,
+		                         &powerSnapshotDiagSubreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::PvMeter)],
+		                         &powerSnapshotDiagSubreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::PvBlock)]);
 		if (gotError != powerErrorsBeforeSolar) {
 			powerSnapshotErrors++;
 		}
 		powerSnapshotCompletedMs = millis();
 		essPowerSnapshotValid = (powerSnapshotErrors == 0);
 		essPowerSnapshotLastBuildMs = powerSnapshotCompletedMs - powerSnapshotStartedMs;
-		recordPowerSnapshotBuildMinuteSample(powerSnapshotBuildMinuteBuckets,
-		                                     kPowerSnapshotBuildMinuteBucketCount,
-		                                     powerSnapshotBuildMinuteTracker,
-		                                     powerSnapshotCompletedMs,
-		                                     essPowerSnapshotLastBuildMs);
-		powerSnapshotBuildStatusDirty = true;
+		{
+			const int32_t loadW = essPowerSnapshotValid
+				                      ? (opData.essPvPower + opData.essGridPower +
+				                         static_cast<int32_t>(opData.essBatteryPower))
+				                      : INT32_MAX;
+			const uint16_t totalQ10 = quantizeMillisToQ10(essPowerSnapshotLastBuildMs);
+			const uint8_t reasonMask = computePowerSnapshotDiagReasonMask(powerSnapshotDiagSubreads,
+			                                                              kPowerSnapshotDiagSubreadCount,
+			                                                              totalQ10,
+			                                                              loadW);
+			powerSnapshotDiagCountsDirty =
+				recordPowerSnapshotDiagCounts(powerSnapshotDiagCounts,
+				                              powerSnapshotDiagSubreads,
+				                              kPowerSnapshotDiagSubreadCount,
+				                              reasonMask) ||
+				powerSnapshotDiagCountsDirty;
+			if (reasonMask != PowerSnapshotDiagReasonNone) {
+				powerSnapshotDiagLast.valid = true;
+				powerSnapshotDiagLast.tsMs = powerSnapshotCompletedMs;
+				powerSnapshotDiagLast.reasonMask = reasonMask;
+				powerSnapshotDiagLast.totalQ10 = totalQ10;
+				powerSnapshotDiagLast.loadW = loadW;
+				powerSnapshotDiagLast.dispatchRequestQueuedMs = dispatchRequestQueuedMs;
+				powerSnapshotDiagLast.dispatchLastRunMs = dispatchLastRunMs;
+				for (size_t i = 0; i < kPowerSnapshotDiagSubreadCount; ++i) {
+					powerSnapshotDiagLast.subreads[i] = powerSnapshotDiagSubreads[i];
+				}
+				powerSnapshotDiagLastDirty = true;
+			}
+		}
 		refreshSnapshotWorkingMode(rs485TimedOut, rs485TransportFailure, gotError);
 		{
 			bool essRs485WasConnected = opData.essRs485Connected;
@@ -14076,6 +14289,9 @@ sendData()
 		// Refresh slow-bucket entity states gradually after reconnect/boot without
 		// reviving the old all-buckets catch-up spike on ESP8266.
 		resetBootstrapPublishState(true);
+		rearmPowerSnapshotDiagRetainedPublishes(powerSnapshotDiagLast.valid,
+		                                        powerSnapshotDiagLastDirty,
+		                                        powerSnapshotDiagCountsDirty);
 	}
 
 	bool dueTenSeconds = checkTimer(&lastRunTenSeconds, STATUS_INTERVAL_TEN_SECONDS);
