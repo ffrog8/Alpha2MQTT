@@ -4,6 +4,7 @@
 
 #include "doctest/doctest.h"
 
+#include "PowerSnapshot.h"
 #include "StatusReporting.h"
 
 TEST_CASE("event code names are stable")
@@ -677,4 +678,74 @@ TEST_CASE("status boot mem JSON builder includes all boot heap checkpoints")
 
 	char tooSmall[64];
 	CHECK_FALSE(buildStatusBootMemJson(snapshot, tooSmall, sizeof(tooSmall)));
+}
+
+TEST_CASE("power snapshot diag last JSON builder renders compact confirm summary")
+{
+	StatusPowerSnapshotDiagLastSnapshot snapshot{};
+	snapshot.valid = true;
+	snapshot.reasonCode = static_cast<uint8_t>(PowerSnapshotDiagReason::NegativeLoad);
+	snapshot.tsMs = 4242;
+	snapshot.triggerLoadW = -355;
+	snapshot.loadW = 612;
+	snapshot.totalQ10 = 37;
+	snapshot.confirmTriggered = true;
+	snapshot.confirmSamples = 3;
+	snapshot.confirmAccepted = true;
+	snapshot.confirmSelectedIndex = 2;
+	snapshot.subreads[0] = {8, 5, 2, 1, 0, static_cast<uint8_t>(modbusRequestAndResponseStatusValues::readDataRegisterSuccess)};
+	snapshot.subreads[1] = {8, 5, 2, 1, 0, static_cast<uint8_t>(modbusRequestAndResponseStatusValues::readDataRegisterSuccess)};
+	snapshot.subreads[2] = {8, 5, 2, 1, 0, static_cast<uint8_t>(modbusRequestAndResponseStatusValues::readDataRegisterSuccess)};
+	snapshot.subreads[3] = {13, 10, 2, 1, 0, static_cast<uint8_t>(modbusRequestAndResponseStatusValues::readDataRegisterSuccess)};
+
+	char buffer[1024];
+	CHECK(buildStatusPowerSnapshotDiagLastJson(snapshot, buffer, sizeof(buffer)));
+
+	std::string payload(buffer);
+	CHECK(payload.find("\"valid\":true") != std::string::npos);
+	CHECK(payload.find("\"reason\":\"negative_load\"") != std::string::npos);
+	CHECK(payload.find("\"trigger_load_w\":-355") != std::string::npos);
+	CHECK(payload.find("\"load_w\":612") != std::string::npos);
+	CHECK(payload.find("\"confirm\":{\"triggered\":true,\"samples\":3,\"accepted\":true,\"selected\":2,\"reason\":\"resolved\"}") != std::string::npos);
+	CHECK(payload.find("\"battery\":{\"total_q10\":8,\"wait_q10\":5,\"quiet_q10\":2,\"attempts\":1,\"retries\":0,\"result\":\"readDataRegisterSuccess\"}") != std::string::npos);
+	CHECK(payload.find("\"pv_block\":{\"total_q10\":13,\"wait_q10\":10,\"quiet_q10\":2,\"attempts\":1,\"retries\":0,\"result\":\"readDataRegisterSuccess\"}") != std::string::npos);
+}
+
+TEST_CASE("power snapshot diag last JSON builder renders invalid placeholder")
+{
+	StatusPowerSnapshotDiagLastSnapshot snapshot{};
+
+	char buffer[64];
+	CHECK(buildStatusPowerSnapshotDiagLastJson(snapshot, buffer, sizeof(buffer)));
+	CHECK(std::string(buffer) == "{\"valid\":false}");
+}
+
+TEST_CASE("power snapshot diag counts JSON builder includes confirm and subread counters")
+{
+	StatusPowerSnapshotDiagCountsSnapshot snapshot{};
+	snapshot.interestingEvents = 7;
+	snapshot.invalidReadEvents = 1;
+	snapshot.negativeLoadEvents = 3;
+	snapshot.lowLoadEvents = 2;
+	snapshot.slowTotalEvents = 1;
+	snapshot.confirmTriggered = 4;
+	snapshot.confirmResolved = 3;
+	snapshot.confirmSkippedPublish = 1;
+	snapshot.subreads[0] = {2, 0, 0, 0, 8};
+	snapshot.subreads[1] = {1, 1, 0, 1, 28};
+	snapshot.subreads[2] = {0, 0, 1, 0, 8};
+	snapshot.subreads[3] = {0, 0, 0, 2, 33};
+
+	char buffer[1024];
+	CHECK(buildStatusPowerSnapshotDiagCountsJson(snapshot, buffer, sizeof(buffer)));
+
+	std::string payload(buffer);
+	CHECK(payload.find("\"interesting_events\":7") != std::string::npos);
+	CHECK(payload.find("\"invalid_read_events\":1") != std::string::npos);
+	CHECK(payload.find("\"negative_load_events\":3") != std::string::npos);
+	CHECK(payload.find("\"confirm_triggered\":4") != std::string::npos);
+	CHECK(payload.find("\"confirm_resolved\":3") != std::string::npos);
+	CHECK(payload.find("\"confirm_skipped_publish\":1") != std::string::npos);
+	CHECK(payload.find("\"grid\":{\"retry\":1,\"timeout\":1,\"invalid\":0,\"slow\":1,\"max_total_q10\":28}") != std::string::npos);
+	CHECK(payload.find("\"pv_block\":{\"retry\":0,\"timeout\":0,\"invalid\":0,\"slow\":2,\"max_total_q10\":33}") != std::string::npos);
 }

@@ -27,6 +27,16 @@ Handles Modbus requests and responses in a tidy class separate from main program
 #include <HardwareSerial.h>
 #endif
 
+#ifndef A2M_RS485_LAST_TRANSACTION_STATS_DEFINED
+#define A2M_RS485_LAST_TRANSACTION_STATS_DEFINED
+struct Rs485LastTransactionStats {
+	uint16_t quietMs = 0;
+	uint16_t waitMs = 0;
+	uint8_t attempts = 0;
+	uint8_t retries = 0;
+};
+#endif
+
 // SoftwareSerial is used to create a second serial port, which will be deidcated to RS485.
 // The built-in serial port remains available for flashing and debugging.
 
@@ -58,7 +68,9 @@ Handles Modbus requests and responses in a tidy class separate from main program
 #endif // MP_ESP32
 
 // Ensure RS485 is quiet for this many millis before transmitting to help avoid collisions
-#define QUIET_MILLIS_BEFORE_TX 20
+#ifndef QUIET_MILLIS_BEFORE_TX
+#define QUIET_MILLIS_BEFORE_TX 10
+#endif
 
 class RS485Handler
 {
@@ -72,14 +84,15 @@ class RS485Handler
 
 		char* _debugOutput;
 		void flushRS485();
-		void checkRS485IsQuiet();
-		modbusRequestAndResponseStatusValues listenResponse(modbusRequestAndResponse* resp);
-		bool checkForData();
+		uint16_t checkRS485IsQuiet();
+		modbusRequestAndResponseStatusValues listenResponse(modbusRequestAndResponse* resp, uint16_t *waitMsOut);
+		bool checkForData(uint16_t *waitMsOut);
 		void (*_serviceHook)() = nullptr;
 #ifdef DEBUG_OUTPUT_TX_RX
 		void outputFrameToSerial(bool transmit, uint8_t frame[], byte actualFrameSize);
 #endif // DEBUG_OUTPUT_TX_RX
 		bool _inTransaction = false;
+		Rs485LastTransactionStats _lastTransactionStats{};
 		unsigned long baudRate;
 		bool _rs485IsOnline;
 		char uartInfoString[OLED_CHARACTER_WIDTH];
@@ -100,6 +113,7 @@ class RS485Handler
 		void setBaudRate(unsigned long baudRate);
 		bool isRs485Online();
 		bool inTransaction() const { return _inTransaction; }
+		const Rs485LastTransactionStats &lastTransactionStats() const { return _lastTransactionStats; }
 		char *uartInfo();
 };
 

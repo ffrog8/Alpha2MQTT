@@ -120,3 +120,194 @@ isPvStringBlockReadKey(uint16_t readKey)
 	return readKey >= kPvStringBlockStartReg &&
 	       readKey < static_cast<uint16_t>(kPvStringBlockStartReg + kPvStringBlockRegisterCount);
 }
+
+constexpr size_t kPowerSnapshotDiagSubreadCount = 4;
+constexpr uint16_t kPowerSnapshotDiagLowLoadThresholdW = 50;
+constexpr uint16_t kPowerSnapshotDiagSlowTotalThresholdQ10 = 50;
+constexpr uint16_t kPowerSnapshotDiagSubreadSlowThresholdQ10 = 20;
+constexpr uint8_t kPowerSnapshotConfirmMaxSamples = 3;
+
+enum class PowerSnapshotDiagSubread : uint8_t {
+	Battery = 0,
+	Grid = 1,
+	PvMeter = 2,
+	PvBlock = 3,
+};
+
+enum class PowerSnapshotDiagReason : uint8_t {
+	None = 0,
+	InvalidRead = 1,
+	NegativeLoad = 2,
+	LowLoad = 3,
+	SlowTotal = 4,
+};
+
+struct PowerSnapshotSubreadDiag {
+	uint16_t totalQ10 = 0;
+	uint16_t waitQ10 = 0;
+	uint16_t quietQ10 = 0;
+	uint8_t attempts = 0;
+	uint8_t retries = 0;
+	uint8_t resultCode = static_cast<uint8_t>(modbusRequestAndResponseStatusValues::preProcessing);
+};
+
+struct PowerTupleSnapshot {
+	bool valid = false;
+	int16_t batteryW = INT16_MAX;
+	int32_t gridW = INT32_MAX;
+	int32_t pvW = INT32_MAX;
+	int32_t loadW = INT32_MAX;
+	uint16_t totalQ10 = 0;
+	PowerSnapshotSubreadDiag subreads[kPowerSnapshotDiagSubreadCount]{};
+};
+
+struct PowerSnapshotConfirmSummary {
+	bool triggered = false;
+	uint8_t samples = 0;
+	bool accepted = false;
+	uint8_t selectedIndex = 0;
+};
+
+struct PowerSnapshotDiagEventRuntime {
+	bool valid = false;
+	PowerSnapshotDiagReason reason = PowerSnapshotDiagReason::None;
+	uint32_t tsMs = 0;
+	int32_t triggerLoadW = INT32_MAX;
+	int32_t loadW = INT32_MAX;
+	uint16_t totalQ10 = 0;
+	PowerSnapshotConfirmSummary confirm{};
+	PowerSnapshotSubreadDiag subreads[kPowerSnapshotDiagSubreadCount]{};
+};
+
+struct PowerSnapshotSubreadCountRuntime {
+	uint32_t retryCount = 0;
+	uint32_t timeoutCount = 0;
+	uint32_t invalidFrameCount = 0;
+	uint32_t slowCount = 0;
+	uint16_t maxTotalQ10 = 0;
+};
+
+struct PowerSnapshotDiagCountsRuntime {
+	uint32_t interestingEvents = 0;
+	uint32_t invalidReadEvents = 0;
+	uint32_t negativeLoadEvents = 0;
+	uint32_t lowLoadEvents = 0;
+	uint32_t slowTotalEvents = 0;
+	uint32_t confirmTriggered = 0;
+	uint32_t confirmResolved = 0;
+	uint32_t confirmSkippedPublish = 0;
+	PowerSnapshotSubreadCountRuntime subreads[kPowerSnapshotDiagSubreadCount]{};
+};
+
+inline bool
+powerSnapshotLoadNegative(int32_t loadW)
+{
+	return loadW != INT32_MAX && loadW < 0;
+}
+
+inline bool
+powerSnapshotLoadLow(int32_t loadW)
+{
+	return loadW != INT32_MAX && loadW >= 0 && loadW <= kPowerSnapshotDiagLowLoadThresholdW;
+}
+
+inline bool
+powerSnapshotLoadSuspicious(int32_t loadW)
+{
+	return loadW != INT32_MAX && loadW <= kPowerSnapshotDiagLowLoadThresholdW;
+}
+
+inline bool
+powerSnapshotTupleSuspicious(const PowerTupleSnapshot &sample)
+{
+	return !sample.valid || powerSnapshotLoadSuspicious(sample.loadW);
+}
+
+inline PowerSnapshotDiagReason
+powerSnapshotDiagReasonForSample(const PowerTupleSnapshot &sample)
+{
+	if (!sample.valid) {
+		return PowerSnapshotDiagReason::InvalidRead;
+	}
+	if (powerSnapshotLoadNegative(sample.loadW)) {
+		return PowerSnapshotDiagReason::NegativeLoad;
+	}
+	if (powerSnapshotLoadLow(sample.loadW)) {
+		return PowerSnapshotDiagReason::LowLoad;
+	}
+	if (sample.totalQ10 >= kPowerSnapshotDiagSlowTotalThresholdQ10) {
+		return PowerSnapshotDiagReason::SlowTotal;
+	}
+	return PowerSnapshotDiagReason::None;
+}
+
+inline bool
+powerSnapshotShouldDiscardCandidate(const PowerTupleSnapshot &sample, bool keepOnlyNonNegative, bool keepOnlyAboveLow)
+{
+	if (!sample.valid) {
+		return true;
+	}
+	if (keepOnlyNonNegative && powerSnapshotLoadNegative(sample.loadW)) {
+		return true;
+	}
+	if (keepOnlyAboveLow && sample.loadW <= kPowerSnapshotDiagLowLoadThresholdW) {
+		return true;
+	}
+	return false;
+}
+
+inline bool
+selectConfirmedPowerTuple(const PowerTupleSnapshot *samples, uint8_t sampleCount, uint8_t &selectedIndexOut)
+{
+	selectedIndexOut = 0;
+	if (samples == nullptr || sampleCount == 0 || sampleCount > kPowerSnapshotConfirmMaxSamples) {
+		return false;
+	}
+
+	bool hasNonNegative = false;
+	bool hasAboveLow = false;
+	for (uint8_t i = 0; i < sampleCount; ++i) {
+		if (!samples[i].valid) {
+			continue;
+		}
+		hasNonNegative = hasNonNegative || !powerSnapshotLoadNegative(samples[i].loadW);
+		hasAboveLow = hasAboveLow || (samples[i].loadW > kPowerSnapshotDiagLowLoadThresholdW);
+	}
+
+	uint8_t candidates[kPowerSnapshotConfirmMaxSamples] = { 0, 0, 0 };
+	uint8_t candidateCount = 0;
+	for (uint8_t i = 0; i < sampleCount; ++i) {
+		if (powerSnapshotShouldDiscardCandidate(samples[i], hasNonNegative, hasAboveLow)) {
+			continue;
+		}
+		candidates[candidateCount++] = i;
+	}
+
+	if (candidateCount == 0) {
+		return false;
+	}
+	if (candidateCount == 1) {
+		selectedIndexOut = candidates[0];
+		return true;
+	}
+	if (candidateCount == 2) {
+		// Two survivors means the third sample was filtered out. Bias toward the later
+		// sample because the inverter is more likely to have settled after the extra read.
+		selectedIndexOut = candidates[1];
+		return true;
+	}
+
+	const int32_t load0 = samples[candidates[0]].loadW;
+	const int32_t load1 = samples[candidates[1]].loadW;
+	const int32_t load2 = samples[candidates[2]].loadW;
+	if ((load0 <= load1 && load1 <= load2) || (load2 <= load1 && load1 <= load0)) {
+		selectedIndexOut = candidates[1];
+		return true;
+	}
+	if ((load1 <= load0 && load0 <= load2) || (load2 <= load0 && load0 <= load1)) {
+		selectedIndexOut = candidates[0];
+		return true;
+	}
+	selectedIndexOut = candidates[2];
+	return true;
+}

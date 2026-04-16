@@ -2,7 +2,9 @@
 // Responsibilities: Map event codes, rate-limit publishes, and format status payloads.
 // Invariants: No Arduino dependencies or dynamic allocations.
 #include "../include/StatusReporting.h"
+#include "../include/Definitions.h"
 #include "../include/MemoryHealth.h"
+#include "../include/PowerSnapshot.h"
 
 #include <cstdarg>
 #include <cstdio>
@@ -187,6 +189,94 @@ buildRuntimeDiagJson(const StatusPollSnapshot &snapshot, char *out, size_t outSi
 		return false;
 	}
 	return true;
+}
+
+static const char *
+powerSnapshotDiagReasonName(uint8_t reasonCode)
+{
+	switch (static_cast<PowerSnapshotDiagReason>(reasonCode)) {
+	case PowerSnapshotDiagReason::InvalidRead:
+		return "invalid_read";
+	case PowerSnapshotDiagReason::NegativeLoad:
+		return "negative_load";
+	case PowerSnapshotDiagReason::LowLoad:
+		return "low_load";
+	case PowerSnapshotDiagReason::SlowTotal:
+		return "slow_total";
+	case PowerSnapshotDiagReason::None:
+	default:
+		return "none";
+	}
+}
+
+static const char *
+powerSnapshotConfirmReasonLabel(bool triggered, bool accepted)
+{
+	if (!triggered) {
+		return "not_needed";
+	}
+	return accepted ? "resolved" : "unstable";
+}
+
+static const char *
+modbusResultName(uint8_t resultCode)
+{
+	switch (static_cast<modbusRequestAndResponseStatusValues>(resultCode)) {
+	case modbusRequestAndResponseStatusValues::invalidFrame:
+		return MODBUS_REQUEST_AND_RESPONSE_INVALID_FRAME_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::responseTooShort:
+		return MODBUS_REQUEST_AND_RESPONSE_RESPONSE_TOO_SHORT_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::noResponse:
+		return MODBUS_REQUEST_AND_RESPONSE_NO_RESPONSE_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::writeSingleRegisterSuccess:
+		return MODBUS_REQUEST_AND_RESPONSE_WRITE_SINGLE_REGISTER_SUCCESS_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::writeDataRegisterSuccess:
+		return MODBUS_REQUEST_AND_RESPONSE_WRITE_DATA_REGISTER_SUCCESS_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::readDataRegisterSuccess:
+		return MODBUS_REQUEST_AND_RESPONSE_READ_DATA_REGISTER_SUCCESS_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::slaveError:
+		return MODBUS_REQUEST_AND_RESPONSE_ERROR_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::payloadExceededCapacity:
+		return MODBUS_REQUEST_AND_RESPONSE_PAYLOAD_EXCEEDED_CAPACITY_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::addedToPayload:
+		return MODBUS_REQUEST_AND_RESPONSE_ADDED_TO_PAYLOAD_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::readDataInvalidValue:
+		return MODBUS_REQUEST_AND_RESPONSE_READ_DATA_INVALID_VALUE_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::notHandledRegister:
+		return MODBUS_REQUEST_AND_RESPONSE_NOT_HANDLED_REGISTER_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::noMQTTPayload:
+		return MODBUS_REQUEST_AND_RESPONSE_NO_MQTT_PAYLOAD_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::invalidMQTTPayload:
+		return MODBUS_REQUEST_AND_RESPONSE_INVALID_MQTT_PAYLOAD_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::setDischargeSuccess:
+		return MODBUS_REQUEST_AND_RESPONSE_SET_DISCHARGE_SUCCESS_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::setChargeSuccess:
+		return MODBUS_REQUEST_AND_RESPONSE_SET_CHARGE_SUCCESS_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::setNormalSuccess:
+		return MODBUS_REQUEST_AND_RESPONSE_SET_NORMAL_SUCCESS_MQTT_DESC;
+	case modbusRequestAndResponseStatusValues::preProcessing:
+	default:
+		return MODBUS_REQUEST_AND_RESPONSE_PREPROCESSING_MQTT_DESC;
+	}
+}
+
+static bool
+appendPowerSnapshotDiagSubreadJson(const StatusPowerSnapshotDiagSubreadSnapshot &subread,
+                                   char *out,
+                                   size_t outSize,
+                                   size_t &used)
+{
+	return appendJsonf(out,
+	                   outSize,
+	                   used,
+	                   "\"total_q10\":%u,\"wait_q10\":%u,\"quiet_q10\":%u,"
+	                   "\"attempts\":%u,\"retries\":%u,\"result\":\"%s\"",
+	                   static_cast<unsigned>(subread.totalQ10),
+	                   static_cast<unsigned>(subread.waitQ10),
+	                   static_cast<unsigned>(subread.quietQ10),
+	                   static_cast<unsigned>(subread.attempts),
+	                   static_cast<unsigned>(subread.retries),
+	                   modbusResultName(subread.resultCode));
 }
 
 } // namespace
@@ -862,6 +952,117 @@ buildStatusBootMemJson(const StatusBootMemSnapshot &snapshot, char *out, size_t 
 		static_cast<unsigned long>(snapshot.heapPostMqtt),
 		static_cast<unsigned long>(snapshot.heapPreRs485),
 		static_cast<unsigned long>(snapshot.heapPostRs485));
+	if (written < 0 || static_cast<size_t>(written) >= outSize) {
+		return false;
+	}
+	return true;
+}
+
+bool
+buildStatusPowerSnapshotDiagLastJson(const StatusPowerSnapshotDiagLastSnapshot &snapshot,
+                                     char *out,
+                                     size_t outSize)
+{
+	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+	if (!snapshot.valid) {
+		const int written = A2M_SNPRINTF(out, outSize, A2M_FMT("{\"valid\":false}"));
+		return written >= 0 && static_cast<size_t>(written) < outSize;
+	}
+
+	size_t used = 0;
+	if (!appendJsonf(out,
+	                 outSize,
+	                 used,
+	                 "{"
+	                 "\"valid\":true,"
+	                 "\"reason\":\"%s\","
+	                 "\"ts_ms\":%lu,"
+	                 "\"trigger_load_w\":%ld,"
+	                 "\"load_w\":%ld,"
+	                 "\"total_q10\":%u,"
+	                 "\"confirm\":{\"triggered\":%s,\"samples\":%u,\"accepted\":%s,\"selected\":%u,\"reason\":\"%s\"},"
+	                 "\"battery\":{",
+	                 powerSnapshotDiagReasonName(snapshot.reasonCode),
+	                 static_cast<unsigned long>(snapshot.tsMs),
+	                 static_cast<long>(snapshot.triggerLoadW),
+	                 static_cast<long>(snapshot.loadW),
+	                 static_cast<unsigned>(snapshot.totalQ10),
+	                 snapshot.confirmTriggered ? "true" : "false",
+	                 static_cast<unsigned>(snapshot.confirmSamples),
+	                 snapshot.confirmAccepted ? "true" : "false",
+	                 static_cast<unsigned>(snapshot.confirmSelectedIndex),
+	                 powerSnapshotConfirmReasonLabel(snapshot.confirmTriggered, snapshot.confirmAccepted))) {
+		return false;
+	}
+	if (!appendPowerSnapshotDiagSubreadJson(snapshot.subreads[0], out, outSize, used) ||
+	    !appendJsonf(out, outSize, used, "},\"grid\":{") ||
+	    !appendPowerSnapshotDiagSubreadJson(snapshot.subreads[1], out, outSize, used) ||
+	    !appendJsonf(out, outSize, used, "},\"pv_meter\":{") ||
+	    !appendPowerSnapshotDiagSubreadJson(snapshot.subreads[2], out, outSize, used) ||
+	    !appendJsonf(out, outSize, used, "},\"pv_block\":{") ||
+	    !appendPowerSnapshotDiagSubreadJson(snapshot.subreads[3], out, outSize, used) ||
+	    !appendJsonf(out, outSize, used, "}}")) {
+		return false;
+	}
+	return true;
+}
+
+bool
+buildStatusPowerSnapshotDiagCountsJson(const StatusPowerSnapshotDiagCountsSnapshot &snapshot,
+                                       char *out,
+                                       size_t outSize)
+{
+	if (out == nullptr || outSize == 0) {
+		return false;
+	}
+
+	const int written = A2M_SNPRINTF(
+		out,
+		outSize,
+		A2M_FMT("{"
+		        "\"interesting_events\":%lu,"
+		        "\"invalid_read_events\":%lu,"
+		        "\"negative_load_events\":%lu,"
+		        "\"low_load_events\":%lu,"
+		        "\"slow_total_events\":%lu,"
+		        "\"confirm_triggered\":%lu,"
+		        "\"confirm_resolved\":%lu,"
+		        "\"confirm_skipped_publish\":%lu,"
+		        "\"battery\":{\"retry\":%lu,\"timeout\":%lu,\"invalid\":%lu,\"slow\":%lu,\"max_total_q10\":%u},"
+		        "\"grid\":{\"retry\":%lu,\"timeout\":%lu,\"invalid\":%lu,\"slow\":%lu,\"max_total_q10\":%u},"
+		        "\"pv_meter\":{\"retry\":%lu,\"timeout\":%lu,\"invalid\":%lu,\"slow\":%lu,\"max_total_q10\":%u},"
+		        "\"pv_block\":{\"retry\":%lu,\"timeout\":%lu,\"invalid\":%lu,\"slow\":%lu,\"max_total_q10\":%u}"
+		        "}"),
+		static_cast<unsigned long>(snapshot.interestingEvents),
+		static_cast<unsigned long>(snapshot.invalidReadEvents),
+		static_cast<unsigned long>(snapshot.negativeLoadEvents),
+		static_cast<unsigned long>(snapshot.lowLoadEvents),
+		static_cast<unsigned long>(snapshot.slowTotalEvents),
+		static_cast<unsigned long>(snapshot.confirmTriggered),
+		static_cast<unsigned long>(snapshot.confirmResolved),
+		static_cast<unsigned long>(snapshot.confirmSkippedPublish),
+		static_cast<unsigned long>(snapshot.subreads[0].retryCount),
+		static_cast<unsigned long>(snapshot.subreads[0].timeoutCount),
+		static_cast<unsigned long>(snapshot.subreads[0].invalidFrameCount),
+		static_cast<unsigned long>(snapshot.subreads[0].slowCount),
+		static_cast<unsigned>(snapshot.subreads[0].maxTotalQ10),
+		static_cast<unsigned long>(snapshot.subreads[1].retryCount),
+		static_cast<unsigned long>(snapshot.subreads[1].timeoutCount),
+		static_cast<unsigned long>(snapshot.subreads[1].invalidFrameCount),
+		static_cast<unsigned long>(snapshot.subreads[1].slowCount),
+		static_cast<unsigned>(snapshot.subreads[1].maxTotalQ10),
+		static_cast<unsigned long>(snapshot.subreads[2].retryCount),
+		static_cast<unsigned long>(snapshot.subreads[2].timeoutCount),
+		static_cast<unsigned long>(snapshot.subreads[2].invalidFrameCount),
+		static_cast<unsigned long>(snapshot.subreads[2].slowCount),
+		static_cast<unsigned>(snapshot.subreads[2].maxTotalQ10),
+		static_cast<unsigned long>(snapshot.subreads[3].retryCount),
+		static_cast<unsigned long>(snapshot.subreads[3].timeoutCount),
+		static_cast<unsigned long>(snapshot.subreads[3].invalidFrameCount),
+		static_cast<unsigned long>(snapshot.subreads[3].slowCount),
+		static_cast<unsigned>(snapshot.subreads[3].maxTotalQ10));
 	if (written < 0 || static_cast<size_t>(written) >= outSize) {
 		return false;
 	}

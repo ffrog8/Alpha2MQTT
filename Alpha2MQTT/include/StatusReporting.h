@@ -8,6 +8,7 @@
 #include <cstddef>
 
 constexpr size_t kStatusPollBucketCount = 6;
+constexpr size_t kStatusPowerSnapshotSubreadCount = 4;
 
 enum class MqttEventCode : uint8_t {
 	None = 0,
@@ -191,6 +192,51 @@ struct StatusBootMemSnapshot {
 	uint32_t heapPostRs485;
 };
 
+struct StatusPowerSnapshotDiagSubreadSnapshot {
+	uint16_t totalQ10;
+	uint16_t waitQ10;
+	uint16_t quietQ10;
+	uint8_t attempts;
+	uint8_t retries;
+	uint8_t resultCode;
+};
+
+struct StatusPowerSnapshotDiagLastSnapshot {
+	bool valid;
+	uint8_t reasonCode;
+	uint32_t tsMs;
+	int32_t triggerLoadW;
+	int32_t loadW;
+	uint16_t totalQ10;
+	bool confirmTriggered;
+	uint8_t confirmSamples;
+	bool confirmAccepted;
+	uint8_t confirmSelectedIndex;
+	StatusPowerSnapshotDiagSubreadSnapshot
+		subreads[kStatusPowerSnapshotSubreadCount];
+};
+
+struct StatusPowerSnapshotDiagSubreadCountSnapshot {
+	uint32_t retryCount;
+	uint32_t timeoutCount;
+	uint32_t invalidFrameCount;
+	uint32_t slowCount;
+	uint16_t maxTotalQ10;
+};
+
+struct StatusPowerSnapshotDiagCountsSnapshot {
+	uint32_t interestingEvents;
+	uint32_t invalidReadEvents;
+	uint32_t negativeLoadEvents;
+	uint32_t lowLoadEvents;
+	uint32_t slowTotalEvents;
+	uint32_t confirmTriggered;
+	uint32_t confirmResolved;
+	uint32_t confirmSkippedPublish;
+	StatusPowerSnapshotDiagSubreadCountSnapshot
+		subreads[kStatusPowerSnapshotSubreadCount];
+};
+
 bool buildStatusCoreJson(const StatusCoreSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusNetJson(const StatusNetSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusPollJson(const StatusPollSnapshot &snapshot, char *out, size_t outSize);
@@ -198,3 +244,9 @@ bool buildStatusPollJsonCompact(const StatusPollSnapshot &snapshot, char *out, s
 bool buildStatusStubJson(const StatusStubSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusManualReadJson(const StatusManualReadSnapshot &snapshot, char *out, size_t outSize);
 bool buildStatusBootMemJson(const StatusBootMemSnapshot &snapshot, char *out, size_t outSize);
+bool buildStatusPowerSnapshotDiagLastJson(const StatusPowerSnapshotDiagLastSnapshot &snapshot,
+                                          char *out,
+                                          size_t outSize);
+bool buildStatusPowerSnapshotDiagCountsJson(const StatusPowerSnapshotDiagCountsSnapshot &snapshot,
+                                            char *out,
+                                            size_t outSize);

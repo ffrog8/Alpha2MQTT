@@ -36,6 +36,16 @@
 #define RS485_STUB_LATENCY_MS 0
 #endif
 
+#ifndef A2M_RS485_LAST_TRANSACTION_STATS_DEFINED
+#define A2M_RS485_LAST_TRANSACTION_STATS_DEFINED
+struct Rs485LastTransactionStats {
+	uint16_t quietMs = 0;
+	uint16_t waitMs = 0;
+	uint8_t attempts = 0;
+	uint8_t retries = 0;
+};
+#endif
+
 class RS485Handler
 {
 	private:
@@ -92,6 +102,7 @@ class RS485Handler
 		uint16_t _lastWriteStartReg = 0;
 		uint16_t _lastWriteRegCount = 0;
 		uint32_t _lastWriteMs = 0;
+		Rs485LastTransactionStats _lastTransactionStats{};
 
 		static inline uint16_t hi16(uint32_t value) { return static_cast<uint16_t>((value >> 16) & 0xFFFF); }
 		static inline uint16_t lo16(uint32_t value) { return static_cast<uint16_t>(value & 0xFFFF); }
@@ -475,6 +486,7 @@ class RS485Handler
 		uint16_t stubLastWriteRegCount() const { return _lastWriteRegCount; }
 		uint32_t stubLastWriteMs() const { return _lastWriteMs; }
 		bool inTransaction() const { return _inTransaction; }
+		const Rs485LastTransactionStats &lastTransactionStats() const { return _lastTransactionStats; }
 
 		~RS485Handler() = default;
 
@@ -489,6 +501,8 @@ class RS485Handler
 			if (resp == nullptr || frame == nullptr) {
 				return modbusRequestAndResponseStatusValues::invalidFrame;
 			}
+			_lastTransactionStats = Rs485LastTransactionStats{};
+			_lastTransactionStats.attempts = 1;
 			struct TxnGuard {
 				bool &flag;
 				explicit TxnGuard(bool &f) : flag(f) { flag = true; }

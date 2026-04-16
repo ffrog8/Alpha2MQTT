@@ -98,3 +98,74 @@ TEST_CASE("power snapshot helpers expose scaled dispatch and PV values")
 	CHECK(dispatchSocPercentFromRaw(95) == doctest::Approx(38.0f));
 	CHECK(pvVoltageCurrentFromRaw(123) == doctest::Approx(12.3f));
 }
+
+TEST_CASE("power snapshot helpers classify suspicious load conditions")
+{
+	CHECK(powerSnapshotLoadNegative(-1));
+	CHECK_FALSE(powerSnapshotLoadNegative(0));
+	CHECK(powerSnapshotLoadLow(0));
+	CHECK(powerSnapshotLoadLow(50));
+	CHECK_FALSE(powerSnapshotLoadLow(51));
+	CHECK(powerSnapshotLoadSuspicious(-5));
+	CHECK(powerSnapshotLoadSuspicious(25));
+	CHECK_FALSE(powerSnapshotLoadSuspicious(75));
+}
+
+TEST_CASE("power snapshot helpers classify diagnostic reasons from tuple")
+{
+	PowerTupleSnapshot sample{};
+	sample.valid = false;
+	CHECK(powerSnapshotDiagReasonForSample(sample) == PowerSnapshotDiagReason::InvalidRead);
+
+	sample.valid = true;
+	sample.loadW = -12;
+	CHECK(powerSnapshotDiagReasonForSample(sample) == PowerSnapshotDiagReason::NegativeLoad);
+
+	sample.loadW = 18;
+	CHECK(powerSnapshotDiagReasonForSample(sample) == PowerSnapshotDiagReason::LowLoad);
+
+	sample.loadW = 420;
+	sample.totalQ10 = 52;
+	CHECK(powerSnapshotDiagReasonForSample(sample) == PowerSnapshotDiagReason::SlowTotal);
+
+	sample.totalQ10 = 37;
+	CHECK(powerSnapshotDiagReasonForSample(sample) == PowerSnapshotDiagReason::None);
+}
+
+TEST_CASE("power snapshot helpers select the later tuple when two acceptable samples remain")
+{
+	PowerTupleSnapshot samples[3]{};
+	samples[0].valid = true;
+	samples[0].loadW = -200;
+	samples[1].valid = true;
+	samples[1].loadW = 620;
+	samples[2].valid = true;
+	samples[2].loadW = 640;
+
+	uint8_t selected = 0;
+	CHECK(selectConfirmedPowerTuple(samples, 3, selected));
+	CHECK(selected == 2);
+}
+
+TEST_CASE("power snapshot helpers select the median acceptable load from three good tuples")
+{
+	PowerTupleSnapshot samples[3]{};
+	samples[0].valid = true;
+	samples[0].loadW = 940;
+	samples[1].valid = true;
+	samples[1].loadW = 760;
+	samples[2].valid = true;
+	samples[2].loadW = 830;
+
+	uint8_t selected = 0;
+	CHECK(selectConfirmedPowerTuple(samples, 3, selected));
+	CHECK(selected == 2);
+}
+
+TEST_CASE("power snapshot helpers reject selection when every tuple is invalid")
+{
+	PowerTupleSnapshot samples[3]{};
+	uint8_t selected = 0;
+	CHECK_FALSE(selectConfirmedPowerTuple(samples, 3, selected));
+	CHECK(selected == 0);
+}

@@ -167,6 +167,7 @@ modbusRequestAndResponseStatusValues RS485Handler::sendModbus(uint8_t frame[], b
 
 	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
 	int tries = 0;
+	_lastTransactionStats = Rs485LastTransactionStats{};
 	struct TxnGuard {
 		bool &flag;
 		explicit TxnGuard(bool &f) : flag(f) { flag = true; }
@@ -190,7 +191,9 @@ modbusRequestAndResponseStatusValues RS485Handler::sendModbus(uint8_t frame[], b
 		// Make sure there are no spurious characters in the in/out buffer.
 		flushRS485();
 
-		checkRS485IsQuiet();
+		_lastTransactionStats.quietMs = static_cast<uint16_t>(
+			_lastTransactionStats.quietMs + checkRS485IsQuiet());
+		_lastTransactionStats.attempts++;
 
 		//Send
 		digitalWrite(SERIAL_COMMUNICATION_CONTROL_PIN, RS485_TX);
@@ -205,7 +208,9 @@ modbusRequestAndResponseStatusValues RS485Handler::sendModbus(uint8_t frame[], b
 		digitalWrite(SERIAL_COMMUNICATION_CONTROL_PIN, RS485_RX);
 	
 		while (result == modbusRequestAndResponseStatusValues::preProcessing) {
-			result = listenResponse(resp);
+			uint16_t waitMs = 0;
+			result = listenResponse(resp, &waitMs);
+			_lastTransactionStats.waitMs = static_cast<uint16_t>(_lastTransactionStats.waitMs + waitMs);
 			if (result == modbusRequestAndResponseStatusValues::writeDataRegisterSuccess ||
 			    result == modbusRequestAndResponseStatusValues::writeSingleRegisterSuccess ||
 			    result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
@@ -227,6 +232,7 @@ modbusRequestAndResponseStatusValues RS485Handler::sendModbus(uint8_t frame[], b
 		    result != modbusRequestAndResponseStatusValues::writeSingleRegisterSuccess &&
 		    result != modbusRequestAndResponseStatusValues::readDataRegisterSuccess) {
 			tries++;
+			_lastTransactionStats.retries = static_cast<uint8_t>(tries);
 			diagDelay(250);
 			result = modbusRequestAndResponseStatusValues::preProcessing;
 		}
@@ -296,10 +302,13 @@ listenResponse
 Listens for a response and processes what it is given that data frame formats vary based on function codes
 Returns data in a stucture and returns a result to guide onward processing.
 */
-modbusRequestAndResponseStatusValues RS485Handler::listenResponse(modbusRequestAndResponse* resp)
+modbusRequestAndResponseStatusValues RS485Handler::listenResponse(modbusRequestAndResponse* resp, uint16_t *waitMsOut)
 {
 	if (!resp)
 	{
+		if (waitMsOut != nullptr) {
+			*waitMsOut = 0;
+		}
 		return modbusRequestAndResponseStatusValues::invalidFrame;
 	}
 
@@ -320,10 +329,17 @@ modbusRequestAndResponseStatusValues RS485Handler::listenResponse(modbusRequestA
 	// On responses we know we are expecting at least 5 bytes (probably 6 for two byte error code) with a slave error, successes are longer
 	// But that depends on the function code returned, so when we get to the function code we can adjust expected total bytes
 	inExpectedTotalBytesZeroIndexed = MIN_FRAME_SIZE_ZERO_INDEXED;
+	if (waitMsOut != nullptr) {
+		*waitMsOut = 0;
+	}
 
 	while ((inByteNumZeroIndexed <= inExpectedTotalBytesZeroIndexed))
 	{
-		timedOut = !checkForData();
+		uint16_t waitMs = 0;
+		timedOut = !checkForData(&waitMs);
+		if (waitMsOut != nullptr) {
+			*waitMsOut = static_cast<uint16_t>(*waitMsOut + waitMs);
+		}
 		if (timedOut)
 		{
 			break;
@@ -416,7 +432,11 @@ modbusRequestAndResponseStatusValues RS485Handler::listenResponse(modbusRequestA
 #endif
 					// Success Read
 					// Get the next byte here so we know expected length
-					timedOut = !checkForData();
+					uint16_t extraWaitMs = 0;
+					timedOut = !checkForData(&extraWaitMs);
+					if (waitMsOut != nullptr) {
+						*waitMsOut = static_cast<uint16_t>(*waitMsOut + extraWaitMs);
+					}
 					if (timedOut)
 					{
 						breakOut = true;
@@ -655,9 +675,10 @@ checkForData
 
 Returns true if there is some data in the serial buffer, otherwise false
 */
-bool RS485Handler::checkForData()
+bool RS485Handler::checkForData(uint16_t *waitMsOut)
 {
 	int tries = 0;
+	uint16_t waitMs = 0;
 
 	
 	while ((!_RS485Serial->available()) && (tries++ < RS485_TRIES))
@@ -666,6 +687,10 @@ bool RS485Handler::checkForData()
 			_serviceHook();
 		}
 		diagDelay(50);
+		waitMs = static_cast<uint16_t>(waitMs + 50);
+	}
+	if (waitMsOut != nullptr) {
+		*waitMsOut = waitMs;
 	}
 
 	if (tries >= RS485_TRIES)
@@ -691,8 +716,9 @@ checkRS485IsQuiet
 
 Make sure RS485 has noone else talking
 */
-void RS485Handler::checkRS485IsQuiet()
+uint16_t RS485Handler::checkRS485IsQuiet()
 {
+	const unsigned long quietStartedMs = millis();
 	unsigned long startTime = millis();
 
 	while (millis() < (startTime + QUIET_MILLIS_BEFORE_TX))
@@ -707,6 +733,7 @@ void RS485Handler::checkRS485IsQuiet()
 		}
 		diagDelay(2);
 	}
+	return static_cast<uint16_t>(millis() - quietStartedMs);
 }
 
 #endif // RS485_STUB
