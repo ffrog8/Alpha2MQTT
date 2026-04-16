@@ -13452,8 +13452,12 @@ refreshEssSnapshot(void)
 			}
 
 			uint8_t selectedSampleIndex = 0;
+			PowerTupleSnapshot tupleSamples[kPowerSnapshotConfirmMaxSamples];
+			for (uint8_t tupleIdx = 0; tupleIdx < powerConfirm.samples; ++tupleIdx) {
+				tupleSamples[tupleIdx] = powerSamples[tupleIdx].tuple;
+			}
 			const bool accepted =
-				selectConfirmedPowerTuple(&powerSamples[0].tuple, powerConfirm.samples, selectedSampleIndex) &&
+				selectConfirmedPowerTuple(tupleSamples, powerConfirm.samples, selectedSampleIndex) &&
 				!powerSnapshotTupleSuspicious(powerSamples[selectedSampleIndex].tuple);
 			powerConfirm.accepted = accepted;
 			powerConfirm.selectedIndex = accepted ? static_cast<uint8_t>(selectedSampleIndex + 1U) : 0;
