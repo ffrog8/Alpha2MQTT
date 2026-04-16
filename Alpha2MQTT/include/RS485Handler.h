@@ -65,8 +65,11 @@ struct Rs485TransactionDiag {
 #endif // MP_XIAO_ESP32C6
 #endif // MP_ESP32
 
-// Ensure RS485 is quiet for this many millis before transmitting to help avoid collisions
-#define QUIET_MILLIS_BEFORE_TX 20
+// Ensure RS485 is quiet for this many millis before transmitting to help avoid collisions.
+// Keep this overrideable so real-hardware tuning can be exercised without reshaping the call sites.
+#ifndef QUIET_MILLIS_BEFORE_TX
+#define QUIET_MILLIS_BEFORE_TX 10
+#endif
 
 class RS485Handler
 {

@@ -1,7 +1,5 @@
 #include <doctest/doctest.h>
 
-#include <cstring>
-
 #include "PowerSnapshot.h"
 
 TEST_CASE("power snapshot helpers reuse source-group cache only in the same pass")
@@ -88,10 +86,8 @@ TEST_CASE("power snapshot diagnostics capture transaction timing and result labe
 	CHECK(subread.quietQ10 == 9);
 	CHECK(subread.attempts == 3);
 	CHECK(subread.retries == 1);
-	CHECK(subread.ok);
 	CHECK(subread.result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess);
-	REQUIRE(subread.resultLabel != nullptr);
-	CHECK(std::strcmp(subread.resultLabel, MODBUS_REQUEST_AND_RESPONSE_READ_DATA_REGISTER_SUCCESS_MQTT_DESC) == 0);
+	CHECK(modbusStatusIsSuccess(subread.result));
 }
 
 TEST_CASE("power snapshot diagnostics synthesize successful cached subread timing")
@@ -109,8 +105,8 @@ TEST_CASE("power snapshot diagnostics synthesize successful cached subread timin
 	CHECK(subread.quietQ10 == 0);
 	CHECK(subread.attempts == 1);
 	CHECK(subread.retries == 0);
-	CHECK(subread.ok);
 	CHECK(subread.result == modbusRequestAndResponseStatusValues::readDataRegisterSuccess);
+	CHECK(modbusStatusIsSuccess(subread.result));
 }
 
 TEST_CASE("power snapshot diagnostics classify interesting events from reason masks")
@@ -152,6 +148,65 @@ TEST_CASE("power snapshot diagnostics classify interesting events from reason ma
 	CHECK((reasonMask & PowerSnapshotDiagReasonRetry) != 0);
 	CHECK((reasonMask & PowerSnapshotDiagReasonFailure) != 0);
 	CHECK((reasonMask & PowerSnapshotDiagReasonLowLoad) != 0);
+}
+
+TEST_CASE("power snapshot helpers classify suspicious load conditions")
+{
+	PowerTupleSnapshot invalid{};
+	CHECK(powerSnapshotTupleSuspicious(invalid));
+
+	PowerTupleSnapshot low{};
+	low.valid = true;
+	low.loadW = 50;
+	CHECK(powerSnapshotTupleSuspicious(low));
+
+	PowerTupleSnapshot negative{};
+	negative.valid = true;
+	negative.loadW = -1;
+	CHECK(powerSnapshotTupleSuspicious(negative));
+
+	PowerTupleSnapshot clean{};
+	clean.valid = true;
+	clean.loadW = 51;
+	CHECK_FALSE(powerSnapshotTupleSuspicious(clean));
+}
+
+TEST_CASE("power snapshot helpers select the later tuple when two acceptable samples remain")
+{
+	PowerTupleSnapshot samples[3]{};
+	samples[0].valid = true;
+	samples[0].loadW = -20;
+	samples[1].valid = true;
+	samples[1].loadW = 140;
+	samples[2].valid = true;
+	samples[2].loadW = 160;
+
+	uint8_t selected = 0;
+	CHECK(selectConfirmedPowerTuple(samples, 3, selected));
+	CHECK(selected == 2);
+}
+
+TEST_CASE("power snapshot helpers select the median acceptable load from three good tuples")
+{
+	PowerTupleSnapshot samples[3]{};
+	samples[0].valid = true;
+	samples[0].loadW = 210;
+	samples[1].valid = true;
+	samples[1].loadW = 170;
+	samples[2].valid = true;
+	samples[2].loadW = 260;
+
+	uint8_t selected = 0;
+	CHECK(selectConfirmedPowerTuple(samples, 3, selected));
+	CHECK(selected == 0);
+}
+
+TEST_CASE("power snapshot helpers reject selection when every tuple is invalid")
+{
+	PowerTupleSnapshot samples[3]{};
+	uint8_t selected = 99;
+	CHECK_FALSE(selectConfirmedPowerTuple(samples, 3, selected));
+	CHECK(selected == 0);
 }
 
 TEST_CASE("power snapshot diagnostics accumulate counters per subread")
