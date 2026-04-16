@@ -13162,6 +13162,14 @@ applyAcceptedPowerTuple(const PowerTupleRuntimeSample &sample)
 }
 
 static void
+invalidatePowerTupleForPublish()
+{
+	opData.essBatteryPower = INT16_MAX;
+	opData.essGridPower = INT32_MAX;
+	opData.essPvPower = INT32_MAX;
+}
+
+static void
 notePowerSnapshotEvent(PowerSnapshotDiagReason reason,
                        int32_t triggerLoadW,
                        const PowerTupleRuntimeSample &finalSample,
@@ -13459,9 +13467,12 @@ refreshEssSnapshot(void)
 			if (!powerConfirm.triggered) {
 				powerConfirm.selectedIndex = 1;
 			}
-		} else if (schedulerPassCache.active) {
-			schedulerPassCache.pvMeter = PvMeterTotalSnapshot{};
-			schedulerPassCache.pvBlock = PvStringBlockSnapshot{};
+		} else {
+			invalidatePowerTupleForPublish();
+			if (schedulerPassCache.active) {
+				schedulerPassCache.pvMeter = PvMeterTotalSnapshot{};
+				schedulerPassCache.pvBlock = PvStringBlockSnapshot{};
+			}
 		}
 
 		const size_t finalSampleIndex = essPowerSnapshotValid
@@ -16405,6 +16416,11 @@ computeDispatchCommand(uint16_t &essDispatchMode,
 		// use essDispatchActivePower from above
 		break;
 	case opMode::opModePush:		// Honors PushPwr and SOC
+		if (!essPowerSnapshotValid ||
+		    opData.essBatteryPower == INT16_MAX ||
+		    opData.essGridPower == INT32_MAX) {
+			return false;
+		}
 		if (essBatterySocPct > opData.a2mSocTarget) {
 			int32_t newBatteryPower = opData.essBatteryPower + opData.essGridPower + opData.a2mPwrPush;
 			if (newBatteryPower < opData.a2mPwrPush) {
