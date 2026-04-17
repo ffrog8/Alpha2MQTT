@@ -13823,7 +13823,9 @@ refreshEssSnapshot(void)
 				schedulerPassCache.pvMeter = PvMeterTotalSnapshot{};
 				schedulerPassCache.pvBlock = PvStringBlockSnapshot{};
 			}
-			gotError += (powerTupleReadErrors > 0) ? powerTupleReadErrors : 1;
+			if (powerTupleReadErrors > 0) {
+				gotError += powerTupleReadErrors;
+			}
 		}
 		const size_t finalSampleIndex = essPowerSnapshotValid
 			                                ? static_cast<size_t>(powerConfirm.selectedIndex - 1U)

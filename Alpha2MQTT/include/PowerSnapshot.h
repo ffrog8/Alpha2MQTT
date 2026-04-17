@@ -100,6 +100,16 @@ struct PowerSnapshotDiagSubreadCounters {
 	uint16_t maxTotalQ10 = 0;
 };
 
+inline bool
+incrementPowerSnapshotDiagCounter(uint16_t &counter)
+{
+	if (counter == UINT16_MAX) {
+		return false;
+	}
+	counter++;
+	return true;
+}
+
 struct PowerSnapshotDiagCountsRuntime {
 	uint32_t interestingEventCount = 0;
 	uint32_t loadLowEventCount = 0;
@@ -353,20 +363,16 @@ recordPowerSnapshotDiagCounts(PowerSnapshotDiagCountsRuntime &counts,
 			changed = true;
 		}
 		if (subread.totalQ10 >= kPowerSnapshotDiagSubreadSlowThresholdQ10) {
-			counter.slowCount++;
-			changed = true;
+			changed = incrementPowerSnapshotDiagCounter(counter.slowCount) || changed;
 		}
 		if (subread.retries > 0) {
-			counter.retryCount++;
-			changed = true;
+			changed = incrementPowerSnapshotDiagCounter(counter.retryCount) || changed;
 		}
 		if (subread.result == modbusRequestAndResponseStatusValues::noResponse) {
-			counter.timeoutCount++;
-			changed = true;
+			changed = incrementPowerSnapshotDiagCounter(counter.timeoutCount) || changed;
 		}
 		if (subread.result == modbusRequestAndResponseStatusValues::invalidFrame) {
-			counter.invalidFrameCount++;
-			changed = true;
+			changed = incrementPowerSnapshotDiagCounter(counter.invalidFrameCount) || changed;
 		}
 	}
 	return changed;

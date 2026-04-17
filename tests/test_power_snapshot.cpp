@@ -283,6 +283,37 @@ TEST_CASE("power snapshot diagnostics accumulate counters per subread")
 	CHECK(pvBlock.maxTotalQ10 == 14);
 }
 
+TEST_CASE("power snapshot diagnostic counters saturate instead of wrapping")
+{
+	PowerSnapshotDiagCountsRuntime counts{};
+	auto &battery = counts.subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Battery)];
+	battery.slowCount = 65535;
+	battery.retryCount = 65535;
+	battery.timeoutCount = 65535;
+	battery.invalidFrameCount = 65535;
+
+	PowerSnapshotDiagSubreadRuntime subreads[kPowerSnapshotDiagSubreadCount]{};
+	capturePowerSnapshotSubreadRuntime(subreads[static_cast<size_t>(PowerSnapshotDiagSubreadId::Battery)],
+	                                   240,
+	                                   12,
+	                                   4,
+	                                   2,
+	                                   1,
+	                                   modbusRequestAndResponseStatusValues::invalidFrame);
+
+	const bool changed = recordPowerSnapshotDiagCounts(counts,
+	                                                  subreads,
+	                                                  kPowerSnapshotDiagSubreadCount,
+	                                                  PowerSnapshotDiagReasonRetry |
+		                                                  PowerSnapshotDiagReasonFailure);
+
+	CHECK(changed);
+	CHECK(battery.slowCount == 65535);
+	CHECK(battery.retryCount == 65535);
+	CHECK(battery.timeoutCount == 65535);
+	CHECK(battery.invalidFrameCount == 65535);
+}
+
 TEST_CASE("power snapshot diagnostics skip counter dirtying when nothing changes")
 {
 	PowerSnapshotDiagCountsRuntime counts{};
