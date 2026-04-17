@@ -37,6 +37,7 @@ constexpr size_t kPowerSnapshotDiagSubreadCount = 4;
 constexpr uint16_t kPowerSnapshotDiagTotalSlowThresholdQ10 = 50;
 constexpr uint16_t kPowerSnapshotDiagSubreadSlowThresholdQ10 = 20;
 constexpr int32_t kPowerSnapshotDiagLowLoadThresholdW = 50;
+constexpr uint8_t kPowerSnapshotConfirmMaxSamples = 3;
 
 enum class PowerSnapshotDiagSubreadId : uint8_t {
 	Battery = 0,
@@ -60,8 +61,23 @@ struct PowerSnapshotDiagSubreadRuntime {
 	uint8_t attempts = 0;
 	uint8_t retries = 0;
 	modbusRequestAndResponseStatusValues result = modbusRequestAndResponseStatusValues::preProcessing;
-	const char *resultLabel = MODBUS_REQUEST_AND_RESPONSE_PREPROCESSING_MQTT_DESC;
-	bool ok = false;
+};
+
+struct PowerTupleSnapshot {
+	bool valid = false;
+	int16_t batteryW = INT16_MAX;
+	int32_t gridW = INT32_MAX;
+	int32_t pvW = INT32_MAX;
+	int32_t loadW = INT32_MAX;
+	uint16_t totalQ10 = 0;
+	PowerSnapshotDiagSubreadRuntime subreads[kPowerSnapshotDiagSubreadCount]{};
+};
+
+struct PowerSnapshotConfirmSummary {
+	bool triggered = false;
+	uint8_t samples = 0;
+	bool accepted = false;
+	uint8_t selectedIndex = 0; // 1-based for retained MQTT readability; 0 means no accepted tuple.
 };
 
 struct PowerSnapshotDiagEventRuntime {
@@ -72,22 +88,131 @@ struct PowerSnapshotDiagEventRuntime {
 	int32_t loadW = INT32_MAX;
 	uint32_t dispatchRequestQueuedMs = 0;
 	uint32_t dispatchLastRunMs = 0;
+	PowerSnapshotConfirmSummary confirm{};
 	PowerSnapshotDiagSubreadRuntime subreads[kPowerSnapshotDiagSubreadCount]{};
 };
 
 struct PowerSnapshotDiagSubreadCounters {
-	uint32_t slowCount = 0;
-	uint32_t retryCount = 0;
-	uint32_t timeoutCount = 0;
-	uint32_t invalidFrameCount = 0;
+	uint16_t slowCount = 0;
+	uint16_t retryCount = 0;
+	uint16_t timeoutCount = 0;
+	uint16_t invalidFrameCount = 0;
 	uint16_t maxTotalQ10 = 0;
 };
+
+inline bool
+incrementPowerSnapshotDiagCounter(uint16_t &counter)
+{
+	if (counter == UINT16_MAX) {
+		return false;
+	}
+	counter++;
+	return true;
+}
 
 struct PowerSnapshotDiagCountsRuntime {
 	uint32_t interestingEventCount = 0;
 	uint32_t loadLowEventCount = 0;
+	uint32_t confirmTriggered = 0;
+	uint32_t confirmResolved = 0;
+	uint32_t confirmSkippedPublish = 0;
 	PowerSnapshotDiagSubreadCounters subreads[kPowerSnapshotDiagSubreadCount]{};
 };
+
+inline bool
+powerSnapshotLoadNegative(int32_t loadW)
+{
+	return loadW != INT32_MAX && loadW < 0;
+}
+
+inline bool
+powerSnapshotLoadLow(int32_t loadW)
+{
+	return loadW != INT32_MAX && loadW >= 0 && loadW <= kPowerSnapshotDiagLowLoadThresholdW;
+}
+
+inline bool
+powerSnapshotLoadSuspicious(int32_t loadW)
+{
+	return loadW != INT32_MAX && loadW <= kPowerSnapshotDiagLowLoadThresholdW;
+}
+
+inline bool
+powerSnapshotTupleSuspicious(const PowerTupleSnapshot &sample)
+{
+	return !sample.valid || powerSnapshotLoadSuspicious(sample.loadW);
+}
+
+inline bool
+powerSnapshotShouldDiscardCandidate(const PowerTupleSnapshot &sample, bool keepOnlyNonNegative, bool keepOnlyAboveLow)
+{
+	if (!sample.valid) {
+		return true;
+	}
+	if (keepOnlyNonNegative && powerSnapshotLoadNegative(sample.loadW)) {
+		return true;
+	}
+	if (keepOnlyAboveLow && sample.loadW <= kPowerSnapshotDiagLowLoadThresholdW) {
+		return true;
+	}
+	return false;
+}
+
+inline bool
+selectConfirmedPowerTuple(const PowerTupleSnapshot *samples, uint8_t sampleCount, uint8_t &selectedIndexOut)
+{
+	selectedIndexOut = 0;
+	if (samples == nullptr || sampleCount == 0 || sampleCount > kPowerSnapshotConfirmMaxSamples) {
+		return false;
+	}
+
+	bool hasNonNegative = false;
+	bool hasAboveLow = false;
+	for (uint8_t i = 0; i < sampleCount; ++i) {
+		if (!samples[i].valid) {
+			continue;
+		}
+		hasNonNegative = hasNonNegative || !powerSnapshotLoadNegative(samples[i].loadW);
+		hasAboveLow = hasAboveLow || (samples[i].loadW > kPowerSnapshotDiagLowLoadThresholdW);
+	}
+
+	uint8_t candidates[kPowerSnapshotConfirmMaxSamples] = {0, 0, 0};
+	uint8_t candidateCount = 0;
+	for (uint8_t i = 0; i < sampleCount; ++i) {
+		if (powerSnapshotShouldDiscardCandidate(samples[i], hasNonNegative, hasAboveLow)) {
+			continue;
+		}
+		candidates[candidateCount++] = i;
+	}
+
+	if (candidateCount == 0) {
+		return false;
+	}
+	if (candidateCount == 1) {
+		selectedIndexOut = candidates[0];
+		return true;
+	}
+	if (candidateCount == 2) {
+		// When two tuples survive filtering, bias toward the later one because the
+		// inverter is more likely to have settled after the extra read.
+		selectedIndexOut = candidates[1];
+		return true;
+	}
+
+	const int32_t load0 = samples[candidates[0]].loadW;
+	const int32_t load1 = samples[candidates[1]].loadW;
+	const int32_t load2 = samples[candidates[2]].loadW;
+	if ((load0 <= load1 && load1 <= load2) || (load2 <= load1 && load1 <= load0)) {
+		selectedIndexOut = candidates[1];
+		return true;
+	}
+	if ((load1 <= load0 && load0 <= load2) || (load2 <= load0 && load0 <= load1)) {
+		selectedIndexOut = candidates[0];
+		return true;
+	}
+	selectedIndexOut = candidates[2];
+	return true;
+}
 
 inline bool
 sourceGroupCacheReusableForPass(const SourceGroupReadMeta &meta, uint32_t passId)
@@ -172,8 +297,6 @@ capturePowerSnapshotSubreadRuntime(PowerSnapshotDiagSubreadRuntime &target,
 	target.attempts = attempts;
 	target.retries = retries;
 	target.result = result;
-	target.resultLabel = modbusStatusMqttLabel(result);
-	target.ok = modbusStatusIsSuccess(result);
 }
 
 inline void
@@ -207,7 +330,7 @@ computePowerSnapshotDiagReasonMask(const PowerSnapshotDiagSubreadRuntime *subrea
 		if (subread.retries > 0) {
 			reasonMask |= PowerSnapshotDiagReasonRetry;
 		}
-		if (!subread.ok) {
+		if (!modbusStatusIsSuccess(subread.result)) {
 			reasonMask |= PowerSnapshotDiagReasonFailure;
 		}
 	}
@@ -240,20 +363,16 @@ recordPowerSnapshotDiagCounts(PowerSnapshotDiagCountsRuntime &counts,
 			changed = true;
 		}
 		if (subread.totalQ10 >= kPowerSnapshotDiagSubreadSlowThresholdQ10) {
-			counter.slowCount++;
-			changed = true;
+			changed = incrementPowerSnapshotDiagCounter(counter.slowCount) || changed;
 		}
 		if (subread.retries > 0) {
-			counter.retryCount++;
-			changed = true;
+			changed = incrementPowerSnapshotDiagCounter(counter.retryCount) || changed;
 		}
 		if (subread.result == modbusRequestAndResponseStatusValues::noResponse) {
-			counter.timeoutCount++;
-			changed = true;
+			changed = incrementPowerSnapshotDiagCounter(counter.timeoutCount) || changed;
 		}
 		if (subread.result == modbusRequestAndResponseStatusValues::invalidFrame) {
-			counter.invalidFrameCount++;
-			changed = true;
+			changed = incrementPowerSnapshotDiagCounter(counter.invalidFrameCount) || changed;
 		}
 	}
 	return changed;

@@ -802,6 +802,10 @@ TEST_CASE("status power snapshot diag last JSON builder includes event context a
 	snapshot.loadW = -12;
 	snapshot.dispatchRequestQueuedMs = 9100;
 	snapshot.dispatchLastRunMs = 9203;
+	snapshot.confirmTriggered = true;
+	snapshot.confirmSamples = 3;
+	snapshot.confirmAccepted = true;
+	snapshot.confirmSelectedIndex = 2;
 	snapshot.battery.totalQ10 = 24;
 	snapshot.battery.waitQ10 = 12;
 	snapshot.battery.quietQ10 = 4;
@@ -838,6 +842,7 @@ TEST_CASE("status power snapshot diag last JSON builder includes event context a
 	CHECK(payload.find("\"load_w\":-12") != std::string::npos);
 	CHECK(payload.find("\"dispatch_request_queued_ms\":9100") != std::string::npos);
 	CHECK(payload.find("\"dispatch_last_run_ms\":9203") != std::string::npos);
+	CHECK(payload.find("\"confirm\":{\"triggered\":true,\"samples\":3,\"accepted\":true,\"selected\":2,\"reason\":\"resolved\"}") != std::string::npos);
 	CHECK(payload.find("\"battery\":{\"total_q10\":24,\"wait_q10\":12,\"quiet_q10\":4,\"attempts\":2,\"retries\":1,\"result\":\"readDataRegisterSuccess\"}") != std::string::npos);
 	CHECK(payload.find("\"grid\":{\"total_q10\":8,\"wait_q10\":6,\"quiet_q10\":2,\"attempts\":1,\"retries\":0,\"result\":\"noResponse\"}") != std::string::npos);
 	CHECK(payload.find("\"pv_meter\":{\"total_q10\":21,\"wait_q10\":8,\"quiet_q10\":3,\"attempts\":1,\"retries\":0,\"result\":\"invalidFrame\"}") != std::string::npos);
@@ -864,6 +869,9 @@ TEST_CASE("status power snapshot diag counts JSON builder includes per-subread c
 	StatusPowerSnapshotDiagCountsSnapshot snapshot{};
 	snapshot.interestingEventCount = 5;
 	snapshot.loadLowEventCount = 2;
+	snapshot.confirmTriggered = 4;
+	snapshot.confirmResolved = 3;
+	snapshot.confirmSkippedPublish = 1;
 	snapshot.battery.slowCount = 1;
 	snapshot.battery.retryCount = 3;
 	snapshot.battery.timeoutCount = 0;
@@ -885,12 +893,15 @@ TEST_CASE("status power snapshot diag counts JSON builder includes per-subread c
 	snapshot.pvBlock.invalidFrameCount = 0;
 	snapshot.pvBlock.maxTotalQ10 = 16;
 
-	char buffer[384];
+	char buffer[512];
 	CHECK(buildStatusPowerSnapshotDiagCountsJson(snapshot, buffer, sizeof(buffer)));
 
 	std::string payload(buffer);
 	CHECK(payload.find("\"interesting_events\":5") != std::string::npos);
 	CHECK(payload.find("\"load_low_events\":2") != std::string::npos);
+	CHECK(payload.find("\"confirm_triggered\":4") != std::string::npos);
+	CHECK(payload.find("\"confirm_resolved\":3") != std::string::npos);
+	CHECK(payload.find("\"confirm_skipped_publish\":1") != std::string::npos);
 	CHECK(payload.find("\"battery\":{\"slow\":1,\"retry\":3,\"timeout\":0,\"invalid_frame\":0,\"max_total_q10\":24}") != std::string::npos);
 	CHECK(payload.find("\"grid\":{\"slow\":0,\"retry\":1,\"timeout\":4,\"invalid_frame\":0,\"max_total_q10\":11}") != std::string::npos);
 	CHECK(payload.find("\"pv_meter\":{\"slow\":2,\"retry\":0,\"timeout\":0,\"invalid_frame\":6,\"max_total_q10\":31}") != std::string::npos);

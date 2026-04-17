@@ -3024,6 +3024,35 @@ def main() -> int:
             for key, value in parsed.items():
                 normalized[key] = value
             return json.dumps(normalized, separators=(",", ":"))
+
+        def _normalized_online_snapshot_ready_payload(mode_payload: str) -> str:
+            normalized_payload = _normalized_stub_mode_payload(mode_payload)
+            try:
+                parsed = json.loads(normalized_payload)
+            except Exception:
+                return normalized_payload
+            if not isinstance(parsed, dict) or parsed.get("mode") != "online":
+                return normalized_payload
+
+            def _as_int(value: object, default: int) -> int:
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    return default
+
+            battery_power_w = _as_int(parsed.get("battery_power_w", 120), 120)
+            grid_power_w = _as_int(parsed.get("grid_power_w", 30), 30)
+            pv_ct_power_w = _as_int(parsed.get("pv_ct_power_w", 0), 0)
+            if battery_power_w + grid_power_w + pv_ct_power_w <= 50:
+                # The firmware now confirms suspicious low/negative load tuples by
+                # rereading up to 3 full snapshots and will reject this baseline if
+                # the helper leaves the stub at zero load. Keep the backend-ready
+                # control path on a small positive tuple so baseline readiness still
+                # means "fresh good poll" instead of "rejected low-load sample".
+                parsed["battery_power_w"] = 120
+                parsed["grid_power_w"] = 30
+                parsed["pv_ct_power_w"] = 0
+            return json.dumps(parsed, separators=(",", ":"))
     
         def _payload_strict_unknown(mode_payload: str) -> Optional[bool]:
             try:
@@ -3214,7 +3243,7 @@ def main() -> int:
                 label=label,
                 require_fresh_poll=require_fresh_poll,
             ):
-                mode_payload = _normalized_stub_mode_payload(mode_payload)
+                mode_payload = _normalized_online_snapshot_ready_payload(mode_payload)
                 wait_stub_control_applied(
                     mode_payload,
                     label=f"{label} control",
@@ -5546,12 +5575,22 @@ def main() -> int:
             ha_unique = _ensure_online_inverter_identity("fail writes only baseline")
             reg_dispatch_start = _discover_register_value("REG_DISPATCH_RW_DISPATCH_START")
             dispatch_start_stop = _discover_define_value("DISPATCH_START_STOP")
-            set_mode_and_wait(
-                f'{{"mode":"online","reg":{reg_dispatch_start},"fail_writes":1,"fail_reads":0,"fail_type":1,'
-                '"soc_pct":50,"battery_power_w":0,"grid_power_w":0,"pv_ct_power_w":0,"dispatch_start":0,"dispatch_mode":0,"dispatch_soc":0}}',
-                ("online",),
+            ensure_stub_online_backend(
+                json.dumps({
+                    "mode": "online",
+                    "reg": reg_dispatch_start,
+                    "fail_writes": 1,
+                    "fail_reads": 0,
+                    "fail_type": 1,
+                    "soc_pct": 50,
+                    "battery_power_w": 120,
+                    "grid_power_w": 30,
+                    "pv_ct_power_w": 0,
+                }),
+                label="fail writes only write-fail baseline",
+                require_fresh_poll=True,
             )
-    
+
             def write_fail_armed_pred() -> Tuple[bool, str]:
                 cur_stub = _fetch_latest_json(mqtt, stub_topic, "stub")
                 fail_writes = bool(cur_stub.get("fail_writes", False))
@@ -5845,6 +5884,7 @@ def main() -> int:
         def _soc_drift_payload() -> str:
             return (
                 '{"mode":"online","soc_pct":50,"soc_step_x10_per_snapshot":10,'
+                '"battery_power_w":120,"grid_power_w":30,"pv_ct_power_w":0,'
                 '"fail_n":0,"fail_reads":0,"fail_writes":0,"fail_type":0,'
                 '"fail_every_n":0,"fail_for_ms":0,'
                 '"flap_online_ms":0,"flap_offline_ms":0,'

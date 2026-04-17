@@ -1056,13 +1056,29 @@ buildStatusPowerSnapshotDiagLastJson(const StatusPowerSnapshotDiagLastSnapshot &
 	                 "\"total_q10\":%u,"
 	                 "\"load_w\":%ld,"
 	                 "\"dispatch_request_queued_ms\":%lu,"
-	                 "\"dispatch_last_run_ms\":%lu,",
+	                 "\"dispatch_last_run_ms\":%lu",
 	                 escapedReason,
 	                 static_cast<unsigned long>(snapshot.tsMs),
 	                 static_cast<unsigned>(snapshot.totalQ10),
 	                 static_cast<long>(snapshot.loadW),
 	                 static_cast<unsigned long>(snapshot.dispatchRequestQueuedMs),
 	                 static_cast<unsigned long>(snapshot.dispatchLastRunMs))) {
+		return false;
+	}
+	if (snapshot.confirmTriggered) {
+		const char *confirmReason = snapshot.confirmAccepted ? "resolved" : "unstable";
+		if (!appendJsonf(out,
+		                 outSize,
+		                 used,
+		                 ",\"confirm\":{\"triggered\":true,\"samples\":%u,\"accepted\":%s,\"selected\":%u,\"reason\":\"%s\"}",
+		                 static_cast<unsigned>(snapshot.confirmSamples),
+		                 snapshot.confirmAccepted ? "true" : "false",
+		                 static_cast<unsigned>(snapshot.confirmSelectedIndex),
+		                 confirmReason)) {
+			return false;
+		}
+	}
+	if (!appendJsonf(out, outSize, used, ",")) {
 		return false;
 	}
 	if (!appendPowerSnapshotDiagSubreadJson(out, outSize, used, "battery", snapshot.battery)) {
@@ -1107,9 +1123,15 @@ buildStatusPowerSnapshotDiagCountsJson(const StatusPowerSnapshotDiagCountsSnapsh
 	                 used,
 	                 "{"
 	                 "\"interesting_events\":%lu,"
-	                 "\"load_low_events\":%lu,",
+	                 "\"load_low_events\":%lu,"
+	                 "\"confirm_triggered\":%lu,"
+	                 "\"confirm_resolved\":%lu,"
+	                 "\"confirm_skipped_publish\":%lu,",
 	                 static_cast<unsigned long>(snapshot.interestingEventCount),
-	                 static_cast<unsigned long>(snapshot.loadLowEventCount))) {
+	                 static_cast<unsigned long>(snapshot.loadLowEventCount),
+	                 static_cast<unsigned long>(snapshot.confirmTriggered),
+	                 static_cast<unsigned long>(snapshot.confirmResolved),
+	                 static_cast<unsigned long>(snapshot.confirmSkippedPublish))) {
 		return false;
 	}
 	if (!appendPowerSnapshotDiagCounterJson(out, outSize, used, "battery", snapshot.battery)) {

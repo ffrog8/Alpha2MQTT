@@ -234,6 +234,10 @@ struct StatusPowerSnapshotDiagLastSnapshot {
 	int32_t loadW;
 	uint32_t dispatchRequestQueuedMs;
 	uint32_t dispatchLastRunMs;
+	bool confirmTriggered;
+	uint8_t confirmSamples;
+	bool confirmAccepted;
+	uint8_t confirmSelectedIndex;
 	StatusPowerSnapshotDiagSubreadSnapshot battery;
 	StatusPowerSnapshotDiagSubreadSnapshot grid;
 	StatusPowerSnapshotDiagSubreadSnapshot pvMeter;
@@ -251,6 +255,9 @@ struct StatusPowerSnapshotDiagCounterSubreadSnapshot {
 struct StatusPowerSnapshotDiagCountsSnapshot {
 	uint32_t interestingEventCount;
 	uint32_t loadLowEventCount;
+	uint32_t confirmTriggered;
+	uint32_t confirmResolved;
+	uint32_t confirmSkippedPublish;
 	StatusPowerSnapshotDiagCounterSubreadSnapshot battery;
 	StatusPowerSnapshotDiagCounterSubreadSnapshot grid;
 	StatusPowerSnapshotDiagCounterSubreadSnapshot pvMeter;

@@ -51,8 +51,8 @@ class RS485Handler
 			uint32_t dispatchTime = 0;
 
 			uint16_t batterySocX10 = 650; // 65.0% => 650 with BATTERY_SOC_MULTIPLIER=0.1
-			int16_t batteryPowerW = 0;
-			int32_t gridPowerW = 0;
+			int16_t batteryPowerW = 120;
+			int32_t gridPowerW = 30;
 
 			// PV meter and per-string PV (used by REG_CUSTOM_TOTAL_SOLAR_POWER).
 			int32_t pvCtPowerW = 0;
